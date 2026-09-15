@@ -1,0 +1,17 @@
+[package]
+name = "host-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "NexusForge 宿主核心：模块注册表 / 事件总线 / 配置中心 / 生命周期管理"
+
+[dependencies]
+jsonschema = "0.26"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+uuid.workspace = true

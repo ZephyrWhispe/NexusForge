@@ -59,3 +59,12 @@ $RECYCLE.BIN/
 # Build artifacts / temp
 *.tmp
 ~$*
+
+# Node / Vite
+node_modules/
+dist/
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/schemas/

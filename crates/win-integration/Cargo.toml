@@ -1,0 +1,17 @@
+[package]
+name = "win-integration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Windows 原生能力适配层：全仓库唯一允许依赖 windows crate 的位置（DESIGN O2）"
+
+[dependencies]
+host-core = { path = "../host-core" }
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    # 系统强调色：DwmGetColorizationColor
+    "Win32_Graphics_Dwm",
+    "Win32_Foundation",
+]
