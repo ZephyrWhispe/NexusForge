@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NexusForge — UI Demo</title>
+<style>
+/* ============ Fluent 风格令牌 ============ */
+:root[data-theme="dark"]{
+  --mica:linear-gradient(135deg,#1c1f26 0%,#20242e 55%,#1b2028 100%);
+  --bg:#1c1f26; --bg-2:#21252e; --bg-3:#272b36;
+  --surface:rgba(255,255,255,.045); --surface-hover:rgba(255,255,255,.08);
+  --border:rgba(255,255,255,.075); --border-strong:rgba(255,255,255,.13);
+  --text:#f2f3f6; --text-2:rgba(242,243,246,.62); --text-3:rgba(242,243,246,.4);
+  --accent:#4cc2ff; --accent-solid:#0078d4; --accent-soft:rgba(76,194,255,.14);
+  --ok:#6ccb5f; --warn:#fcc02d; --err:#ff99a4;
+  --shadow:0 16px 48px rgba(0,0,0,.45);
+}
+:root[data-theme="light"]{
+  --mica:linear-gradient(135deg,#eef2f7 0%,#e8edf5 60%,#e3ebf6 100%);
+  --bg:#eef2f7; --bg-2:#f6f8fb; --bg-3:#ffffff;
+  --surface:rgba(255,255,255,.65); --surface-hover:rgba(0,0,0,.045);
+  --border:rgba(0,0,0,.075); --border-strong:rgba(0,0,0,.14);
+  --text:#1a1d23; --text-2:rgba(26,29,35,.62); --text-3:rgba(26,29,35,.4);
+  --accent:#0078d4; --accent-solid:#005fb8; --accent-soft:rgba(0,120,212,.1);
+  --ok:#0f7b0f; --warn:#9d5d00; --err:#c42b1c;
+  --shadow:0 16px 48px rgba(0,0,0,.18);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  font-family:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",sans-serif;
+  font-size:14px; color:var(--text); background:var(--bg); overflow:hidden;
+  background-image:var(--mica);
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+input{font:inherit;color:inherit}
+::-webkit-scrollbar{width:10px}
+::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:5px;border:2px solid transparent;background-clip:content-box}
+
+/* ============ 窗口骨架 ============ */
+.app{height:100vh;display:grid;grid-template-rows:40px 44px 1fr 28px;}
+.titlebar{display:flex;align-items:center;gap:10px;padding:0 14px;user-select:none}
+.titlebar .logo{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--accent-solid),#5d2f91);display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff}
+.titlebar .name{font-weight:600;letter-spacing:.2px}
+.titlebar .name small{color:var(--text-3);font-weight:400;margin-left:8px}
+.titlebar .win-controls{margin-left:auto;display:flex;gap:2px}
+.titlebar .win-controls button{width:44px;height:30px;border-radius:6px;display:grid;place-items:center;color:var(--text-2)}
+.titlebar .win-controls button:hover{background:var(--surface-hover)}
+
+/* 全局工具栏 */
+.toolbar{display:flex;align-items:center;gap:8px;padding:0 12px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.tb-btn{display:flex;align-items:center;gap:7px;height:30px;padding:0 11px;border-radius:6px;color:var(--text-2);transition:background .12s}
+.tb-btn:hover{background:var(--surface-hover);color:var(--text)}
+.tb-btn kbd{font-family:inherit;font-size:11px;color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:1px 5px}
+.toolbar .spacer{flex:1}
+.searchbox{display:flex;align-items:center;gap:8px;width:280px;height:30px;padding:0 10px;border-radius:6px;background:var(--surface);border:1px solid var(--border);border-bottom-color:var(--border-strong)}
+.searchbox input{flex:1;background:none;border:none;outline:none;color:var(--text)}
+.searchbox input::placeholder{color:var(--text-3)}
+
+/* 主体：导航 + 工作区 */
+.main{display:grid;grid-template-columns:228px 1fr;min-height:0}
+.nav{border-right:1px solid var(--border);padding:10px 8px;overflow-y:auto}
+.nav .group{font-size:11px;color:var(--text-3);padding:10px 10px 6px;letter-spacing:.4px}
+.nav-item{position:relative;display:flex;align-items:center;gap:10px;width:100%;height:34px;padding:0 10px;border-radius:6px;color:var(--text-2);text-align:left;transition:background .12s,color .12s}
+.nav-item:hover{background:var(--surface-hover)}
+.nav-item.active{background:var(--surface);color:var(--text);font-weight:600}
+.nav-item.active::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:2px;background:var(--accent)}
+.nav-item svg{flex:none}
+.nav-item .tag{margin-left:auto;font-size:10px;color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:0 5px;line-height:16px}
+.nav-item .dot{margin-left:auto;width:7px;height:7px;border-radius:50%;background:var(--ok)}
+
+.work{display:flex;min-width:0}
+.subnav{width:190px;border-right:1px solid var(--border);padding:12px 8px;overflow-y:auto}
+.subnav h3{font-size:13px;padding:2px 10px 10px}
+.subnav .filter{display:flex;align-items:center;justify-content:space-between;width:100%;height:32px;padding:0 10px;border-radius:6px;color:var(--text-2)}
+.subnav .filter:hover{background:var(--surface-hover)}
+.subnav .filter.on{background:var(--accent-soft);color:var(--text);font-weight:600}
+.subnav .filter .n{font-size:11px;color:var(--text-3)}
+
+.content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.content-head{display:flex;align-items:center;gap:12px;padding:14px 20px 10px}
+.content-head h2{font-size:19px;font-weight:600}
+.content-head .meta{color:var(--text-3);font-size:12px}
+.content-head .actions{margin-left:auto;display:flex;gap:8px}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 14px;border-radius:6px;border:1px solid var(--border-strong);background:var(--surface);transition:background .12s}
+.btn:hover{background:var(--surface-hover)}
+.btn.primary{background:var(--accent-solid);border-color:transparent;color:#fff}
+.btn.primary:hover{filter:brightness(1.12)}
+
+/* 剪切板列表 */
+.list{flex:1;overflow-y:auto;padding:4px 20px 20px}
+.entry{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-radius:8px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;animation:rise .18s ease both}
+.entry:hover{background:var(--surface)}
+.entry .thumb{flex:none;width:84px;height:52px;border-radius:6px;object-fit:cover;border:1px solid var(--border)}
+.entry .body{flex:1;min-width:0}
+.entry .row1{display:flex;align-items:center;gap:8px;margin-bottom:3px}
+.entry .src{font-size:12px;color:var(--text-2)}
+.entry .time{font-size:11px;color:var(--text-3);margin-left:auto}
+.chip{font-size:10px;padding:1px 7px;border-radius:9px;border:1px solid var(--border);color:var(--text-2)}
+.chip.secret{color:var(--warn);border-color:var(--warn)}
+.chip.pin{color:var(--accent);border-color:var(--accent)}
+.entry .preview{color:var(--text-2);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.entry .preview.mono{font-family:"Cascadia Code",Consolas,monospace;font-size:12px}
+.entry .ops{flex:none;display:flex;gap:2px;opacity:0;transition:opacity .12s}
+.entry:hover .ops{opacity:1}
+.entry .ops button{width:30px;height:30px;border-radius:6px;display:grid;place-items:center;color:var(--text-2)}
+.entry .ops button:hover{background:var(--surface-hover);color:var(--text)}
+@keyframes rise{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+
+/* 空状态 / 通用模块视图 */
+.empty{flex:1;display:grid;place-items:center;text-align:center;color:var(--text-3)}
+.empty .box{max-width:380px}
+.empty .ico{width:56px;height:56px;margin:0 auto 14px;border-radius:14px;background:var(--surface);display:grid;place-items:center;color:var(--text-2)}
+.empty h3{color:var(--text);font-weight:600;margin-bottom:6px}
+.empty p{font-size:13px;line-height:1.6}
+.empty kbd{font-family:inherit;font-size:12px;border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text-2)}
+
+/* 设置中心 */
+.settings{flex:1;overflow-y:auto;padding:8px 24px 30px;max-width:760px}
+.set-group{margin-bottom:22px;animation:rise .2s ease both}
+.set-group h3{font-size:13px;color:var(--text-2);padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:4px}
+.set-row{display:flex;align-items:center;gap:16px;padding:13px 4px;border-bottom:1px solid var(--border)}
+.set-row .info{flex:1}
+.set-row .info b{display:block;font-weight:600}
+.set-row .info span{font-size:12px;color:var(--text-3)}
+.toggle{flex:none;width:42px;height:22px;border-radius:11px;background:var(--surface);border:1px solid var(--border-strong);position:relative;transition:background .15s}
+.toggle::after{content:"";position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--text-2);transition:all .15s}
+.toggle.on{background:var(--accent-solid);border-color:transparent}
+.toggle.on::after{left:23px;background:#fff}
+.stepper{flex:none;display:flex;align-items:center;gap:0;border:1px solid var(--border-strong);border-radius:6px;overflow:hidden}
+.stepper button{width:32px;height:30px}
+.stepper button:hover{background:var(--surface-hover)}
+.stepper .v{width:56px;text-align:center;font-variant-numeric:tabular-nums;border-left:1px solid var(--border);border-right:1px solid var(--border);height:30px;line-height:30px}
+
+/* 状态栏 */
+.statusbar{display:flex;align-items:center;gap:16px;padding:0 14px;border-top:1px solid var(--border);font-size:11.5px;color:var(--text-3);user-select:none}
+.statusbar .st{display:flex;align-items:center;gap:6px}
+.statusbar .dot{width:7px;height:7px;border-radius:50%}
+.statusbar .hot{margin-left:auto;color:var(--text-2)}
+
+/* ============ 快速面板（覆盖层） ============ */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);backdrop-filter:blur(2px);display:none;z-index:50}
+.overlay.show{display:block}
+.quickpanel{position:absolute;left:50%;top:18%;transform:translateX(-50%);width:560px;border-radius:12px;background:var(--bg-2);border:1px solid var(--border-strong);box-shadow:var(--shadow);overflow:hidden;animation:pop .16s cubic-bezier(.2,.9,.3,1.2) both}
+@keyframes pop{from{opacity:0;transform:translateX(-50%) scale(.94)}to{opacity:1;transform:translateX(-50%) scale(1)}}
+.quickpanel .qp-head{display:flex;align-items:center;gap:10px;padding:14px 16px 8px}
+.quickpanel .qp-head .q{font-weight:600}
+.quickpanel .qp-head kbd{margin-left:auto;font-size:11px;color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:2px 6px}
+.qp-list{padding:6px 8px 10px}
+.qp-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px}
+.qp-item.sel{background:var(--accent-soft)}
+.qp-item .num{flex:none;width:22px;height:22px;border-radius:5px;border:1px solid var(--border-strong);display:grid;place-items:center;font-size:11px;color:var(--text-2)}
+.qp-item.sel .num{background:var(--accent-solid);border-color:transparent;color:#fff}
+.qp-item .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}
+
+/* 启动器 */
+.launcher{position:absolute;left:50%;top:22%;transform:translateX(-50%);width:620px;border-radius:12px;background:var(--bg-2);border:1px solid var(--border-strong);box-shadow:var(--shadow);overflow:hidden;animation:pop .16s cubic-bezier(.2,.9,.3,1.2) both}
+.launcher .searchline{display:flex;align-items:center;gap:12px;padding:16px 18px}
+.launcher .searchline input{flex:1;background:none;border:none;outline:none;font-size:16px}
+.launcher .searchline input::placeholder{color:var(--text-3)}
+
+/* Toast */
+.toasts{position:fixed;right:16px;bottom:40px;display:flex;flex-direction:column;gap:10px;z-index:60}
+.toast{display:flex;gap:10px;align-items:center;width:320px;padding:12px 14px;border-radius:10px;background:var(--bg-2);border:1px solid var(--border-strong);box-shadow:var(--shadow);animation:slidein .22s ease both}
+.toast.err .t-ico{color:var(--err)} .toast.ok .t-ico{color:var(--ok)}
+.toast b{display:block;font-size:13px} .toast span{font-size:12px;color:var(--text-3)}
+.toast button{margin-left:auto;font-size:12px;color:var(--accent)}
+@keyframes slidein{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
+
+/* 截图覆盖层演示 */
+.screenshot-demo{position:fixed;inset:0;z-index:70;display:none;cursor:crosshair;background:rgba(0,0,0,.45)}
+.screenshot-demo.show{display:block;animation:fade .15s ease both}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+.selrect{position:absolute;border:1.5px solid var(--accent);background:rgba(76,194,255,.08);box-shadow:0 0 0 100000px rgba(0,0,0,.35)}
+.selhint{position:absolute;top:24px;left:50%;transform:translateX(-50%);padding:8px 16px;border-radius:8px;background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text-2);font-size:13px}
+
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- 标题栏 -->
+  <div class="titlebar">
+    <div class="logo">N</div>
+    <div class="name">NexusForge <small>UI Demo · 阶段一原型</small></div>
+    <div class="win-controls">
+      <button title="主题" onclick="toggleTheme()" id="themeBtn">◐</button>
+      <button>─</button><button>▢</button><button>✕</button>
+    </div>
+  </div>
+
+  <!-- 全局工具栏 -->
+  <div class="toolbar">
+    <button class="tb-btn" onclick="openQuick()">◧ 剪切板快速面板 <kbd>Ctrl+Shift+V</kbd></button>
+    <button class="tb-btn" onclick="openLauncher()">⌘ 启动器 <kbd>Alt+Space</kbd></button>
+    <button class="tb-btn" onclick="openShot()">✂ 截图 <kbd>Ctrl+Shift+S</kbd></button>
+    <div class="spacer"></div>
+    <div class="searchbox">⌕<input id="globalSearch" placeholder="搜索剪切板历史（FTS）…" oninput="renderList()"></div>
+  </div>
+
+  <!-- 主体 -->
+  <div class="main">
+    <!-- 模块导航 -->
+    <nav class="nav" id="nav"></nav>
+
+    <div class="work">
+      <!-- 二级导航（剪切板模块） -->
+      <aside class="subnav" id="subnav"></aside>
+
+      <!-- 内容区 -->
+      <section class="content" id="content"></section>
+    </div>
+  </div>
+
+  <!-- 状态栏 -->
+  <div class="statusbar">
+    <span class="st"><span class="dot" style="background:var(--ok)"></span>clipboard</span>
+    <span class="st"><span class="dot" style="background:var(--ok)"></span>screenshot</span>
+    <span class="st"><span class="dot" style="background:var(--ok)"></span>ocr</span>
+    <span class="st"><span class="dot" style="background:var(--warn)"></span>proxy（未启用）</span>
+    <span class="st">SQLite WAL · 5,214 条</span>
+    <span class="hot">Enter 粘贴 · Del 删除 · Ctrl+P 置顶</span>
+  </div>
+</div>
+
+<!-- 剪切板快速面板 -->
+<div class="overlay" id="qpOverlay" onclick="if(event.target===this)closeOverlays()">
+  <div class="quickpanel">
+    <div class="qp-head"><span class="q">剪切板</span><span style="color:var(--text-3);font-size:12px">数字键直选 · 回车粘贴</span><kbd>Esc 关闭</kbd></div>
+    <div class="qp-list" id="qpList"></div>
+  </div>
+</div>
+
+<!-- 启动器 -->
+<div class="overlay" id="laOverlay" onclick="if(event.target===this)closeOverlays()">
+  <div class="launcher">
+    <div class="searchline">⌕<input id="laInput" placeholder="搜索应用、动作、设置…" oninput="renderLauncher()"></div>
+    <div class="qp-list" id="laList"></div>
+  </div>
+</div>
+
+<!-- 截图选区演示 -->
+<div class="screenshot-demo" id="shotDemo" onmousedown="shotStart(event)" onmousemove="shotMove(event)" onmouseup="shotEnd(event)">
+  <div class="selhint">拖拽选择区域 — Esc 取消（演示）</div>
+  <div class="selrect" id="selRect" style="display:none"></div>
+</div>
+
+<!-- Toast -->
+<div class="toasts" id="toasts"></div>
+
+<script>
+/* ================= 数据（与 02-clipboard-core.md 数据模型对齐的 Mock） ================= */
+const MODULES=[
+ {id:"clipboard", name:"剪切板中枢", p:"P0", icon:"M8 3h8v3H8zM6 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1", demo:true},
+ {id:"screenshot",name:"截图与录屏", p:"P0", icon:"M4 8h3l2-3h6l2 3h3v10H4zM12 16a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"},
+ {id:"ocr",       name:"OCR 与翻译", p:"P0", icon:"M4 6V4h3M17 4h3v3M20 18v2h-3M7 20H4v-3M8 9h8M8 12h8M8 15h5", demo:true},
+ {id:"proxy",     name:"代理与 VPN", p:"P1", icon:"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c-3 3-3 15 0 18M12 3c3 3 3 15 0 18"},
+ {id:"vault",     name:"安全与凭据", p:"P1", icon:"M6 10V8a6 6 0 0 1 12 0v2M5 10h14v10H5zM12 14v3"},
+ {id:"file",      name:"文件与存储", p:"P1", icon:"M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"},
+ {id:"desktop",   name:"桌面效率", p:"P1", icon:"M4 5h16v11H4zM9 20h6M12 16v4"},
+ {id:"kvm",       name:"键鼠共享", p:"P1", icon:"M3 7h18v10H3zM7 11h.01M11 11h.01M15 11h.01M8 14h8"},
+ {id:"editor",    name:"文本与 PDF", p:"P2", icon:"M5 4h10l4 4v12H5zM14 4v5h5M8 13h8M8 16h5"},
+ {id:"notes",     name:"笔记与知识", p:"P2", icon:"M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"},
+ {id:"term",      name:"终端与运维", p:"P2", icon:"M4 5h16v14H4zM7 10l3 2-3 2M12 14h5"},
+ {id:"sys",       name:"系统管理", p:"P2", icon:"M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"},
+ {id:"automation",name:"自动化与拓展",p:"P2", icon:"M13 2 4 14h6l-1 8 9-12h-6z"},
+];
+const ICON=p=>`<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="${p}"/></svg>`;
+
+const GROUPS=[["all","全部"],["text","文本"],["code","代码"],["url","链接"],["secret","敏感"],["files","文件"]];
+let state={module:"clipboard", group:"all", pinnedOnly:false};
+
+const ENTRIES=[
+ {type:"text", group:"text", src:"Trae Code", time:"14:32", text:"设计原则：能用 Windows API 就不用跨平台抽象，能调系统能力就不重复造轮子。", pinned:true},
+ {type:"code", group:"code", src:"VS Code", time:"14:28", text:"let handle = tokio::spawn(async move { match spawn_blocking(m.start()).await { … } });", mono:true},
+ {type:"secret",group:"secret",src:"1Password", time:"14:21", text:"[敏感内容 · API Key]  已加密存储", secret:true},
+ {type:"url", group:"url", src:"Edge", time:"14:02", text:"https://learn.microsoft.com/windows/apps/develop/"},
+ {type:"image",group:"text", src:"截图工具", time:"13:47", text:"[图片 2560×1440 · PNG · 1.8MB]", img:"https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=clean%20minimal%20dark%20desktop%20software%20dashboard%20screenshot%20with%20subtle%20blue%20accent%20charts%20and%20panels%2C%20fluent%20design%2C%20no%20text&image_size=landscape_4_3"},
+ {type:"code", group:"code", src:"Terminal", time:"13:30", text:"cargo build --release --workspace 2>&1 | tail -20", mono:true},
+ {type:"text", group:"text", src:"微信", time:"13:12", text:"下午三点评审会改到四点，会议室 B302，请带上第一阶段的验收数据。"},
+ {type:"secret",group:"secret",src:"浏览器", time:"12:58", text:"[敏感内容 · 银行卡]  已加密存储 · 90 秒后自动清除", secret:true},
+ {type:"url", group:"url", src:"Edge", time:"12:40", text:"https://github.com/microsoft/fluentui/tree/master/packages/react-components"},
+ {type:"files",group:"files",src:"Explorer", time:"11:55", text:"[文件 ×3] DESIGN.md · IMPLEMENTATION.md · 01-host-core.md"},
+ {type:"text", group:"text", src:"Notion", time:"11:20", text:"阶段一验收：启动 < 1.5s；复制到历史延迟 P95 < 100ms；FTS 5000 条 < 50ms。"},
+ {type:"code", group:"code", src:"Trae Code", time:"10:44", text:"CREATE VIRTUAL TABLE clip_fts USING fts5(content, content='clip_entries', content_rowid='rowid');", mono:true},
+ {type:"text", group:"text", src:"设置", time:"10:02", text:"max_entries = 5000 · retention_days = 30 · sensitive_filter = true"},
+ {type:"url", group:"url", src:"Edge", time:"09:31", text:"https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-addclipboardformatlistener"},
+ {type:"text", group:"text", src:"文档", time:"09:15", text:"键鼠共享协议：UDP 组播 239.255.42.98:49800 心跳 1s，TCP 帧协议 0x02 InputEvent。"},
+];
+
+/* ================= 渲染 ================= */
+function renderNav(){
+  const g=[["核心","P0"],["集成","P1"],["扩展","P2"]];
+  document.getElementById("nav").innerHTML=g.map(([t,p])=>
+    `<div class="group">${t}</div>`+MODULES.filter(m=>m.p===p).map(m=>
+     `<button class="nav-item ${state.module===m.id?"active":""}" onclick="switchModule('${m.id}')">
+        ${ICON(m.icon)}${m.name}
+        ${m.demo?'<span class="dot"></span>':`<span class="tag">${m.p}</span>`}
+      </button>`).join("")).join("");
+}
+function renderSubnav(){
+  const s=document.getElementById("subnav");
+  if(state.module!=="clipboard"){s.innerHTML="";return}
+  s.innerHTML=`<h3>剪切板</h3>`+GROUPS.map(([k,n])=>{
+    const n2=k==="all"?ENTRIES.length:ENTRIES.filter(e=>e.group===k).length;
+    return `<button class="filter ${state.group===k?"on":""}" onclick="setGroup('${k}')">${n}<span class="n">${n2}</span></button>`}).join("")+
+    `<h3 style="margin-top:14px">视图</h3>
+     <button class="filter ${state.pinnedOnly?"on":""}" onclick="state.pinnedOnly=!state.pinnedOnly;renderSubnav();renderList()">★ 仅置顶</button>
+     <button class="filter">🏷 标签管理</button>
+     <button class="filter">⌥ 永不记录黑名单</button>`;
+}
+function filtered(){
+  const q=document.getElementById("globalSearch").value.trim().toLowerCase();
+  return ENTRIES.filter(e=>
+    (state.group==="all"||e.group===state.group)&&
+    (!state.pinnedOnly||e.pinned)&&
+    (!q||(e.text+" "+e.src).toLowerCase().includes(q)));
+}
+function renderList(){
+  const items=filtered();
+  const head=`<div class="content-head"><h2>剪切板历史</h2><span class="meta">${items.length} 条 · 保留 30 天 · 敏感数据已加密</span>
+    <div class="actions"><button class="btn" onclick="toast('ok','已清空','未置顶条目已安全删除')">清空未置顶</button>
+    <button class="btn primary" onclick="openQuick()">呼出快速面板</button></div></div>`;
+  document.getElementById("content").innerHTML=head+
+   `<div class="list">`+(items.length?items.map((e,i)=>`
+    <div class="entry" style="animation-delay:${Math.min(i*25,300)}ms" onclick="toast('ok','已写入剪贴板','${e.text.slice(0,18)}… (回写窗口 500ms 内不重复记录)')">
+      ${e.img?`<img class="thumb" src="${e.img}" alt="剪贴板图片缩略图">`:""}
+      <div class="body">
+        <div class="row1">
+          ${e.pinned?'<span class="chip pin">★ 置顶</span>':""}
+          ${e.secret?'<span class="chip secret">已加密</span>':`<span class="chip">${e.group}</span>`}
+          <span class="src">${e.src}</span><span class="time">${e.time}</span>
+        </div>
+        <div class="preview ${e.mono?"mono":""}">${e.text}</div>
+      </div>
+      <div class="ops">
+        <button title="粘贴" onclick="event.stopPropagation();toast('ok','已粘贴','写回系统剪贴板并模拟 Ctrl+V')">⏎</button>
+        <button title="置顶" onclick="event.stopPropagation();e2=ENTRIES.find(x=>x.text==='${e.text.slice(0,10)}');toast('ok','置顶状态已切换','')">☆</button>
+        <button title="删除" onclick="event.stopPropagation();toast('ok','已删除','含 blob 的条目同步清理了孤儿文件')">✕</button>
+      </div>
+    </div>`).join(""):
+    `<div class="empty"><div class="box"><div class="ico">☰</div><h3>没有匹配的记录</h3>
+      <p>调整筛选条件，或复制任意内容后这里会显示历史记录。<br>按 <kbd>Ctrl+Shift+V</kbd> 呼出快速面板。</p></div></div>`)+
+   `</div>`;
+}
+function renderGeneric(m){
+  const tips={
+    screenshot:["按 Ctrl+Shift+S 开始截图","捕获引擎 Windows.Graphics.Capture 就绪","选区 → 标注 → 保存/贴图/OCR 一条流水线"],
+    ocr:["按 Ctrl+Alt+O 屏幕取词识别","引擎：Windows.Media.Ocr（系统）· 支持中/英","识别结果可直接复制或送翻译"],
+    proxy:["代理模块为框架，不内置任何节点","首次使用将按需下载 sing-box 内核并校验签名","系统代理与 TUN 模式互斥"],
+    vault:["使用 Argon2id + AES-256-GCM 加密","支持 Windows Hello 免密解锁","失焦 5 分钟自动锁定并清零内存密钥"],
+    file:["USN/MFT 索引提供全盘秒搜","支持 FTP/WebDAV/S3 等存储驱动","大文件操作支持断点续传"],
+  }[m.id]||["该模块将在后续阶段实现","架构与接口已定义于 docs/impl/","在设置中可启用已实现的模块"];
+  document.getElementById("content").innerHTML=
+   `<div class="empty"><div class="box"><div class="ico">${ICON(m.icon)}</div><h3>${m.name}</h3>
+    <p>${tips.join("<br>")}</p><p style="margin-top:14px"><span class="chip">${m.p} · 阶段${m.p==="P0"?"一":m.p==="P1"?"二":"三"}交付</span></p></div></div>`;
+}
+function renderSettings(){
+  document.getElementById("subnav").innerHTML="";
+  document.getElementById("content").innerHTML=
+   `<div class="content-head"><h2>设置中心</h2><span class="meta">由各模块 config_schema 自动生成 · 修改即校验即保存</span></div>
+    <div class="settings">
+      <div class="set-group"><h3>剪切板中枢</h3>
+        ${toggle("捕获图片内容",">64KB 自动转 blob 存储",true)}
+        ${toggle("敏感数据保护","密钥 / 银行卡 / JWT 识别并加密存储",true)}
+        ${toggle("智能分组","URL / 代码 / JSON 自动分类",true)}
+        ${stepper("历史保留条数","超过后按最旧删除（置顶除外）",5000,100,100000,500)}
+        ${stepper("保留天数","到期自动清理",30,1,365,1)}
+      </div>
+      <div class="set-group"><h3>全局快捷键</h3>
+        ${keyrow("剪切板快速面板","Ctrl + Shift + V")}
+        ${keyrow("截图","Ctrl + Shift + S")}
+        ${keyrow("OCR 识别","Ctrl + Alt + O")}
+        ${keyrow("启动器","Alt + Space")}
+      </div>
+      <div class="set-group"><h3>外观</h3>
+        ${toggle("跟随系统主题","Windows 深色/浅色模式",true)}
+        ${toggle("Mica 材质","Win11 系统材质背景",true)}
+      </div>
+    </div>`;
+}
+const toggle=(t,s,on)=>`<div class="set-row"><div class="info"><b>${t}</b><span>${s}</span></div>
+  <button class="toggle ${on?"on":""}" onclick="this.classList.toggle('on')"></button></div>`;
+const stepper=(t,s,v,min,max,step)=>`<div class="set-row"><div class="info"><b>${t}</b><span>${s}</span></div>
+  <div class="stepper"><button onclick="stv(this,${-step},${min})">−</button><span class="v">${v}</span><button onclick="stv(this,${step},${max})">＋</button></div></div>`;
+const keyrow=(t,k)=>`<div class="set-row"><div class="info"><b>${t}</b></div><span class="chip" style="font-size:12px;padding:4px 10px">${k}</span></div>`;
+function stv(btn,d,limit){const v=btn.parentElement.querySelector(".v");let n=Math.max(0,Math.min(limit,+v.textContent+d));v.textContent=n}
+
+/* ================= 交互 ================= */
+function switchModule(id){
+  state.module=id;
+  const m=MODULES.find(x=>x.id===id);
+  renderNav();
+  if(id==="clipboard"){state.group="all";renderSubnav();renderList()}
+  else if(id==="settings"){renderSettings()}
+  else{renderSubnav();renderGeneric(m)}
+}
+function setGroup(g){state.group=g;renderSubnav();renderList()}
+function toggleTheme(){
+  const r=document.documentElement;
+  r.dataset.theme=r.dataset.theme==="dark"?"light":"dark";
+}
+/* 快速面板 */
+function openQuick(){
+  closeOverlays();document.getElementById("qpOverlay").classList.add("show");
+  document.getElementById("qpList").innerHTML=ENTRIES.slice(0,9).map((e,i)=>
+   `<div class="qp-item ${i===0?"sel":""}"><span class="num">${i+1}</span>
+     <span class="t">${e.text}</span><span style="font-size:11px;color:var(--text-3)">${e.time}</span></div>`).join("");
+}
+/* 启动器 */
+const LAUNCH=["◫ 打开剪切板历史","✂ 屏幕截图（区域）","⌦ OCR 屏幕识别","▤ 新建速记","⚙ 设置中心","▣ 重启 clipboard 模块","⏏ 退出 NexusForge"];
+function openLauncher(){
+  closeOverlays();document.getElementById("laOverlay").classList.add("show");
+  document.getElementById("laInput").value="";renderLauncher();setTimeout(()=>document.getElementById("laInput").focus(),30);
+}
+function renderLauncher(){
+  const q=document.getElementById("laInput").value.toLowerCase();
+  document.getElementById("laList").innerHTML=LAUNCH.filter(x=>x.toLowerCase().includes(q))
+   .map((x,i)=>`<div class="qp-item ${i===0?"sel":""}"><span class="num">${i+1}</span><span class="t">${x}</span></div>`).join("")
+   ||`<div class="qp-item"><span class="t" style="color:var(--text-3)">无匹配 — 回车直接执行命令行</span></div>`;
+}
+/* 截图选区演示 */
+let sDrag=null;
+function openShot(){closeOverlays();document.getElementById("shotDemo").classList.add("show")}
+function shotStart(e){const r=document.getElementById("selRect");sDrag=[e.clientX,e.clientY];r.style.display="block";upd(e)}
+function shotMove(e){if(sDrag)upd(e)}
+function shotEnd(){sDrag=null;const r=document.getElementById("selRect");r.style.display="none";
+  document.getElementById("shotDemo").classList.remove("show");
+  toast("ok","选区已确认","进入标注工具 → 完成后执行保存/复制/贴图动作")}
+function upd(e){const r=document.getElementById("selRect");
+  r.style.left=Math.min(sDrag[0],e.clientX)+"px";r.style.top=Math.min(sDrag[1],e.clientY)+"px";
+  r.style.width=Math.abs(e.clientX-sDrag[0])+"px";r.style.height=Math.abs(e.clientY-sDrag[1])+"px"}
+/* Toast */
+function toast(kind,title,sub){
+  const t=document.createElement("div");t.className="toast "+kind;
+  t.innerHTML=`<span class="t-ico">${kind==="ok"?"✓":"!"}</span><div><b>${title}</b><span>${sub}</span></div>`;
+  document.getElementById("toasts").appendChild(t);
+  setTimeout(()=>t.remove(),3200);
+}
+function closeOverlays(){document.querySelectorAll(".overlay").forEach(o=>o.classList.remove("show"))}
+/* 键盘 */
+document.addEventListener("keydown",e=>{
+  if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="v"){e.preventDefault();openQuick()}
+  if(e.altKey&&e.code==="Space"){e.preventDefault();openLauncher()}
+  if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="s"){e.preventDefault();openShot()}
+  if(e.key==="Escape")closeOverlays();
+  const ov=document.querySelector(".overlay.show")||document.getElementById("shotDemo");
+  if(ov&&/^[1-9]$/.test(e.key))toast("ok",`第 ${e.key} 项已写入剪贴板`,"快速面板即将关闭");
+});
+/* 启动 */
+switchModule("clipboard");
+</script>
+</body>
+</html>
