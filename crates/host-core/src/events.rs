@@ -27,6 +27,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("clipboard.captured", "剪贴板捕获入库。payload: {entry}"),
     ("clipboard.deleted", "剪贴板条目删除。payload: {id}"),
     ("clipboard.cleared", "剪贴板清空。payload: {removed}"),
+    ("clipboard.quick_panel_toggled", "快速面板呼出/隐藏请求（全局快捷键触发）。payload: {}"),
     ("screenshot.taken", "截图任务完成。payload: {task_id, file?}"),
     ("screenshot.ocr_requested", "截图模块请求 OCR。payload: {task_id, frame_ref}"),
     ("ocr.completed", "OCR 完成。payload: {source_task_id?, result}"),

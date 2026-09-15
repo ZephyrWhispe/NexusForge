@@ -1,7 +1,7 @@
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { CLIP_GROUPS } from "./modules";
 
-/** 二级导航（docs/DESIGN.md §3.4；剪切板模块：分组筛选 + 视图开关） */
+/** 二级导航（docs/DESIGN.md §3.4）：分组筛选（含实时计数）+ 视图开关 */
 const useStyles = makeStyles({
   root: {
     width: "190px",
@@ -48,21 +48,32 @@ const useStyles = makeStyles({
   },
 });
 
-export default function SubNav({ active, onSelect }: { active: string; onSelect: (id: string) => void }) {
+export default function SubNav({
+  active,
+  onSelect,
+  counts,
+}: {
+  active: string;
+  onSelect: (id: string) => void;
+  counts?: Record<string, number>;
+}) {
   const styles = useStyles();
   return (
     <aside className={styles.root} aria-label="剪切板分组">
       <span className={styles.title}>剪切板</span>
-      {CLIP_GROUPS.map((g) => (
-        <button
-          key={g.id}
-          className={`${styles.filter} ${active === g.id ? styles.filterOn : ""}`}
-          onClick={() => onSelect(g.id)}
-        >
-          {g.name}
-          <span className={styles.count}>{g.count}</span>
-        </button>
-      ))}
+      {CLIP_GROUPS.map((g) => {
+        const n = counts?.[g.id] ?? g.count;
+        return (
+          <button
+            key={g.id}
+            className={`${styles.filter} ${active === g.id ? styles.filterOn : ""}`}
+            onClick={() => onSelect(g.id)}
+          >
+            {g.name}
+            <span className={styles.count}>{n}</span>
+          </button>
+        );
+      })}
       <span className={styles.sectionTitle}>视图</span>
       <button className={styles.filter}>仅置顶</button>
       <button className={styles.filter}>标签管理</button>

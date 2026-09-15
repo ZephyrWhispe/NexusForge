@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { makeStyles, tokens, Text, Badge } from "@fluentui/react-components";
 import TitleBar from "../layout/TitleBar";
 import Toolbar from "../layout/Toolbar";
@@ -6,7 +6,11 @@ import ModuleNav from "../layout/ModuleNav";
 import SubNav from "../layout/SubNav";
 import StatusBar from "../layout/StatusBar";
 import MicaBackdrop from "../layout/MicaBackdrop";
+import ClipboardPanel from "../modules/clipboard/ClipboardPanel";
+import SchemaForm from "../settings/SchemaForm";
 import { MODULES } from "../layout/modules";
+import { IN_TAURI } from "../ipc/env";
+import { toggleQuickPanel } from "./quickPanelController";
 
 /**
  * 主工作台（docs/DESIGN.md §3 像素级布局：40/44/1fr/28 四行 + 228/190 双列导航）。
@@ -60,9 +64,32 @@ export default function MainWorkbench() {
   const [active, setActive] = useState("clipboard");
   const [group, setGroup] = useState("all");
   const [search, setSearch] = useState("");
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  // 稳定引用：防止 ClipboardPanel 的 load/refreshCounts 因回调重建而循环刷新
+  const onCounts = useCallback((c: Record<string, number>) => setCounts(c), []);
+
+  // U2-4/U3-5：全局快捷键（Ctrl+Shift+V）→ OS → 事件 → 快速面板切换
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    let unlisten: (() => void) | null = null;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen("nf:event", (e) => {
+          const topic = (e.payload as { topic?: string }).topic;
+          if (topic === "clipboard.quick_panel_toggled") void toggleQuickPanel();
+        }),
+      )
+      .then((u) => {
+        unlisten = u;
+      });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const current = MODULES.find((m) => m.id === active);
   const isClipboard = active === "clipboard";
+  const isSettings = active === "__settings";
 
   return (
     <div className={styles.app}>
@@ -73,29 +100,44 @@ export default function MainWorkbench() {
       <div className={styles.main}>
         <ModuleNav active={active} onChange={setActive} />
         <div className={styles.work}>
-          {isClipboard && <SubNav active={group} onSelect={setGroup} />}
+          {isClipboard && <SubNav active={group} onSelect={setGroup} counts={counts} />}
           <section className={styles.content} aria-label="内容区">
-            <div className={styles.head}>
-              <span className={styles.headTitle}>{current?.name ?? "NexusForge"}</span>
-              <Badge appearance="outline">{current?.phase ?? "P0"}</Badge>
-              <span className={styles.meta}>
-                {isClipboard
-                  ? "历史 · 保留 30 天 · 敏感数据已加密"
-                  : `${current?.phase} 模块将在对应阶段交付`}
-              </span>
-            </div>
-            <div className={styles.empty}>
-              <div>
-                <Text size={400} weight="semibold" block>
-                  {isClipboard ? "剪切板历史（U3 落地）" : "模块界面待实现"}
-                </Text>
-                <Text size={300} block style={{ marginTop: "8px" }}>
-                  {isClipboard
-                    ? "复制任意内容后，这里会显示历史记录"
-                    : "架构与接口已定义于 docs/impl/ 对应文档"}
-                </Text>
-              </div>
-            </div>
+            {isSettings ? (
+              <>
+                <div className={styles.head}>
+                  <span className={styles.headTitle}>设置中心</span>
+                  <Badge appearance="outline">schema 驱动</Badge>
+                  <span className={styles.meta}>修改即校验即保存</span>
+                </div>
+                <SchemaForm moduleId="clipboard" />
+              </>
+            ) : (
+              <>
+                <div className={styles.head}>
+                  <span className={styles.headTitle}>{current?.name ?? "NexusForge"}</span>
+                  <Badge appearance="outline">{current?.phase ?? "P0"}</Badge>
+                  <span className={styles.meta}>
+                    {isClipboard
+                      ? "历史 · 保留 30 天 · 敏感数据已加密（DPAPI）"
+                      : `${current?.phase} 模块将在对应阶段交付`}
+                  </span>
+                </div>
+                {isClipboard ? (
+                  <ClipboardPanel search={search} group={group} onCounts={onCounts} />
+                ) : (
+                  <div className={styles.empty}>
+                    <div>
+                      <Text size={400} weight="semibold" block>
+                        模块界面待实现
+                      </Text>
+                      <Text size={300} block style={{ marginTop: "8px" }}>
+                        架构与接口已定义于 docs/impl/ 对应文档
+                      </Text>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </section>
         </div>
       </div>

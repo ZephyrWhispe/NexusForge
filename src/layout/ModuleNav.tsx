@@ -148,6 +148,15 @@ export default function ModuleNav({ active, onChange }: Props) {
           })}
         </div>
       ))}
+      <div className={styles.group} style={{ marginTop: "10px" }} />
+      <button
+        className={`${styles.item} ${active === "__settings" ? styles.itemActive : ""}`}
+        onClick={() => onChange("__settings")}
+        aria-current={active === "__settings" ? "page" : undefined}
+      >
+        <SettingsRegular className={styles.icon} />
+        设置中心
+      </button>
     </nav>
   );
 }

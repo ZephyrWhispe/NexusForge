@@ -345,6 +345,7 @@ mod tests {
         Arc::new(ModuleContext {
             app_data_dir: std::env::temp_dir(),
             ports: Arc::new(Ports::new()),
+            event_bus: Arc::new(EventBus::new()),
         })
     }
 

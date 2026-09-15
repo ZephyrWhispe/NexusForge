@@ -17,6 +17,8 @@ struct Owner {
     module: String,
     priority: u8,
     binding: HotkeyBinding,
+    /// OS 热键触发时执行（快速返回；耗时逻辑自行转线程）
+    on_fire: Arc<dyn Fn() + Send + Sync>,
 }
 
 pub struct HotkeyManager {
@@ -24,9 +26,13 @@ pub struct HotkeyManager {
     by_combo: RwLock<HashMap<String, Owner>>,
     /// binding.id → 键组合（unregister 用）
     by_id: RwLock<HashMap<String, String>>,
+    /// os_id → on_fire（OS 分发器回调映射；Arc 化以便进入 'static 分发器闭包）
+    os_map: Arc<RwLock<HashMap<i32, Arc<dyn Fn() + Send + Sync>>>>,
     ports: Arc<Ports>,
     /// OS 热键 id 分配器
     next_os_id: RwLock<i32>,
+    /// 分发器是否已安装（每 Port 实例仅需一次）
+    dispatcher_installed: RwLock<bool>,
 }
 
 impl HotkeyManager {
@@ -34,9 +40,27 @@ impl HotkeyManager {
         Self {
             by_combo: RwLock::new(HashMap::new()),
             by_id: RwLock::new(HashMap::new()),
+            os_map: Arc::new(RwLock::new(HashMap::new())),
             ports,
             next_os_id: RwLock::new(1),
+            dispatcher_installed: RwLock::new(false),
         }
+    }
+
+    /// 安装 OS 分发器（幂等）：WM_HOTKEY → os_id → on_fire
+    fn ensure_dispatcher(&self, win: &Arc<dyn HotkeyWinPort>) {
+        let mut installed = self.dispatcher_installed.write().expect("dispatcher 写锁");
+        if *installed {
+            return;
+        }
+        // os_map 为 Arc<RwLock>：分发器闭包每次触发时取读锁
+        let os_map = Arc::clone(&self.os_map);
+        win.set_dispatcher(Arc::new(move |os_id| {
+            if let Some(fire) = os_map.read().expect("os_map 读锁").get(&os_id) {
+                fire();
+            }
+        }));
+        *installed = true;
     }
 
     fn combo(modifiers: u32, vk: u32) -> String {
@@ -48,6 +72,7 @@ impl HotkeyManager {
         owner_module: &str,
         owner_priority: u8,
         binding: HotkeyBinding,
+        on_fire: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<(), AppError> {
         let combo = Self::combo(binding.modifiers, binding.vk);
 
@@ -85,6 +110,7 @@ impl HotkeyManager {
 
         // OS 层注册（若端口已就绪）
         if let Some(win) = self.ports.get::<dyn HotkeyWinPort>() {
+            self.ensure_dispatcher(&win);
             let mut next = self.next_os_id.write().expect("os id 写锁");
             let os_id = *next;
             *next += 1;
@@ -99,12 +125,16 @@ impl HotkeyManager {
                     hint,
                 }
             })?;
+            self.os_map
+                .write()
+                .expect("os_map 写锁")
+                .insert(os_id, on_fire.clone());
         }
 
         let mut combos = self.by_combo.write().expect("by_combo 写锁");
         combos.insert(
             combo.clone(),
-            Owner { module: owner_module.into(), priority: owner_priority, binding: binding.clone() },
+            Owner { module: owner_module.into(), priority: owner_priority, binding: binding.clone(), on_fire },
         );
         drop(combos);
         self.by_id
@@ -159,10 +189,15 @@ mod tests {
         fn unregister(&self, _id: i32) -> Result<(), AppError> {
             Ok(())
         }
+        fn set_dispatcher(&self, _d: Arc<dyn Fn(i32) + Send + Sync>) {}
     }
 
     fn binding(id: &str, m: u32, vk: u32) -> HotkeyBinding {
         HotkeyBinding { id: id.into(), label: id.into(), modifiers: m, vk }
+    }
+
+    fn no_op() -> Arc<dyn Fn() + Send + Sync> {
+        Arc::new(|| {})
     }
 
     fn manager_with(win: Option<Arc<FakeWin>>) -> HotkeyManager {
@@ -178,20 +213,20 @@ mod tests {
     #[test]
     fn higher_priority_displaces_lower() {
         let mgr = manager_with(None);
-        mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32)).unwrap();
+        mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32), no_op()).unwrap();
         // priority 5 < 10 → 抢占成功
-        mgr.register("desktop", 5, binding("b", MOD, 'V' as u32)).unwrap();
+        mgr.register("desktop", 5, binding("b", MOD, 'V' as u32), no_op()).unwrap();
         assert_eq!(mgr.owner_of(MOD, 'V' as u32).unwrap().0, "desktop");
         // 原 owner 重试 → 现在轮到它失败
-        let err = mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32)).unwrap_err();
+        let err = mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32), no_op()).unwrap_err();
         assert_eq!(err.code(), codes::host::HOST_HOTKEY_001);
     }
 
     #[test]
     fn equal_or_lower_priority_rejected() {
         let mgr = manager_with(None);
-        mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32)).unwrap();
-        let err = mgr.register("desktop", 10, binding("b", MOD, 'V' as u32)).unwrap_err();
+        mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32), no_op()).unwrap();
+        let err = mgr.register("desktop", 10, binding("b", MOD, 'V' as u32), no_op()).unwrap_err();
         assert!(matches!(err, AppError::Permission { .. }));
         assert_eq!(mgr.owner_of(MOD, 'V' as u32).unwrap().0, "clipboard");
     }
@@ -199,7 +234,7 @@ mod tests {
     #[test]
     fn os_failure_maps_to_hotkey_002() {
         let mgr = manager_with(Some(Arc::new(FakeWin { ok: false, calls: AtomicU32::new(0) })));
-        let err = mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32)).unwrap_err();
+        let err = mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32), no_op()).unwrap_err();
         assert_eq!(err.code(), codes::host::HOST_HOTKEY_002);
     }
 
@@ -207,10 +242,10 @@ mod tests {
     fn os_registration_invoked_when_port_ready() {
         let win = Arc::new(FakeWin { ok: true, calls: AtomicU32::new(0) });
         let mgr = manager_with(Some(win.clone()));
-        mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32)).unwrap();
+        mgr.register("clipboard", 10, binding("a", MOD, 'V' as u32), no_op()).unwrap();
         assert_eq!(win.calls.load(Ordering::SeqCst), 1);
         // 同 id 换键：旧组合被移除
-        mgr.register("clipboard", 10, binding("a", MOD, 'P' as u32)).unwrap();
+        mgr.register("clipboard", 10, binding("a", MOD, 'P' as u32), no_op()).unwrap();
         assert!(mgr.owner_of(MOD, 'V' as u32).is_none());
         assert_eq!(mgr.owner_of(MOD, 'P' as u32).unwrap().0, "clipboard");
     }

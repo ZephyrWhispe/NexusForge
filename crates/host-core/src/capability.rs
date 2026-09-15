@@ -3,6 +3,8 @@
 //! 模块按需实现；注册表经 `Ports::register_multi` 收集多实例，
 //! 宿主聚合后驱动托盘菜单与全局快捷键注册。
 
+use std::sync::Arc;
+
 use crate::module::Module;
 use crate::ports::Port;
 
@@ -35,6 +37,14 @@ pub trait TrayProvider: Module + Port {
 /// 注册全局快捷键的模块能力
 pub trait HotkeyProvider: Module + Port {
     fn global_hotkeys(&self) -> Vec<HotkeyBinding>;
+    /// 绑定 id → 触发动作（宿主在 OS 热键到达时调用；动作须快速返回，耗时逻辑自行转线程）
+    fn hotkey_actions(&self) -> Vec<HotkeyAction>;
+}
+
+/// 热键触发动作
+pub struct HotkeyAction {
+    pub binding_id: String,
+    pub action: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// 托盘菜单聚合段（一个提供能力的模块一段）

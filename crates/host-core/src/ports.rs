@@ -137,8 +137,9 @@ impl PtyHandle {
 
 /// 剪贴板（win-integration：AddClipboardFormatListener + 消息循环线程）
 pub trait ClipboardPort: Port {
-    /// 启动监听；变更时回调 cb（在专用 OS 消息循环线程触发，回调内禁止长阻塞）
-    fn start_listener(&self, cb: Box<dyn Fn(ClipContent) + Send + Sync>) -> Result<(), AppError>;
+    /// 启动监听；变更时回调 (内容, 来源应用进程名)。回调在专用 OS 消息循环线程触发。
+    fn start_listener(&self, cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>)
+        -> Result<(), AppError>;
     /// 写回系统剪贴板；调用方须先标记回写窗口（docs/impl/02 C3 ③ 防循环）
     fn write(&self, content: &ClipContent) -> Result<(), AppError>;
 }
@@ -175,6 +176,14 @@ pub trait ConptyPort: Port {
 pub trait HotkeyWinPort: Port {
     fn register(&self, hotkey_id: i32, modifiers: u32, vk: u32) -> Result<(), AppError>;
     fn unregister(&self, hotkey_id: i32) -> Result<(), AppError>;
+    /// 设置 OS 事件分发器：WM_HOTKEY 到达时以 hotkey_id 回调（仅需设置一次）
+    fn set_dispatcher(&self, dispatcher: Arc<dyn Fn(i32) + Send + Sync>);
+}
+
+/// 本机数据加密（DPAPI 封装，剪贴板敏感条目存储用，docs/impl/02 C4）
+pub trait CryptoPort: Port {
+    fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError>;
+    fn unprotect(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +258,10 @@ mod tests {
         writes: AtomicU32,
     }
     impl ClipboardPort for FakeClipboard {
-        fn start_listener(&self, _cb: Box<dyn Fn(ClipContent) + Send + Sync>) -> Result<(), AppError> {
+        fn start_listener(
+            &self,
+            _cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>,
+        ) -> Result<(), AppError> {
             Ok(())
         }
         fn write(&self, _content: &ClipContent) -> Result<(), AppError> {

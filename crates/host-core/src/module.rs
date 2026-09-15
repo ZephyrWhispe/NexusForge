@@ -33,13 +33,14 @@ pub enum ModuleState {
 
 /// 依赖注入容器。
 ///
-/// 字段随宿主分层实现逐步扩展（S4 增加 event_bus，S6 增加 config）；
-/// 测试时构造空 Ports + 临时目录即可获得完整 mock 上下文。
+/// 测试时构造 Ports + 临时目录即可获得完整 mock 上下文。
 pub struct ModuleContext {
     /// `{appDataDir}`，模块专属库文件应放在其 `db/` 子目录（DESIGN O3）
     pub app_data_dir: PathBuf,
     /// 系统能力端口（O2：模块不得直接依赖 windows crate）
     pub ports: Arc<Ports>,
+    /// 事件总线（S4；跨模块通信唯一通道，DESIGN O1）
+    pub event_bus: Arc<crate::events::EventBus>,
 }
 
 /// 模块统一接口 —— 13 个功能模块与未来 WASM 插件的宿主侧契约。
@@ -115,6 +116,7 @@ mod tests {
         let ctx = Arc::new(ModuleContext {
             app_data_dir: std::env::temp_dir(),
             ports: Arc::new(Ports::new()),
+            event_bus: Arc::new(crate::events::EventBus::new()),
         });
         m.init(ctx).unwrap();
         assert_eq!(m.status(), ModuleState::Stopped);
@@ -128,7 +130,11 @@ mod tests {
     fn context_shares_ports_across_clones() {
         let ports = Arc::new(Ports::new());
         ports.register::<FakePort>(Arc::new(FakePort));
-        let ctx = Arc::new(ModuleContext { app_data_dir: PathBuf::from("."), ports });
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: PathBuf::from("."),
+            ports,
+            event_bus: Arc::new(crate::events::EventBus::new()),
+        });
         // 模拟两个模块共享同一 Ports 实例
         assert!(Arc::ptr_eq(&ctx.ports, &ctx.ports));
         assert!(ctx.ports.get::<FakePort>().is_some());

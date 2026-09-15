@@ -70,3 +70,63 @@ export async function hostConfigGet<T = Record<string, unknown>>(module: string)
 export async function hostConfigSet(module: string, values: unknown): Promise<void> {
   await invoke("host_config_set", { module, values });
 }
+
+// ---------------- 剪切板 IPC（docs/impl/02 C7 DTO 对齐）----------------
+
+export interface ClipEntry {
+  id: string;
+  content_type: "text" | "files" | "image";
+  preview: string;
+  blob_path: string | null;
+  origin: "local" | "remote";
+  source_app: string | null;
+  pinned: boolean;
+  group: string | null;
+  secret: boolean;
+  created_at: number;
+  usage_count: number;
+}
+
+export interface ClipPage {
+  items: ClipEntry[];
+  has_more: boolean;
+  total: number | null;
+}
+
+export interface ClipSearchQuery {
+  text?: string;
+  group?: string;
+  page?: number;
+  size?: number;
+}
+
+export function clipboardSearch(query: ClipSearchQuery): Promise<ClipPage> {
+  return invoke<ClipPage>("clipboard_search", { query });
+}
+export function clipboardGet(id: string): Promise<string> {
+  return invoke<string>("clipboard_get", { id });
+}
+export function clipboardPaste(id: string): Promise<void> {
+  return invoke("clipboard_paste", { id });
+}
+export function clipboardPin(id: string, pinned: boolean): Promise<void> {
+  return invoke("clipboard_pin", { id, pinned });
+}
+export function clipboardDelete(id: string): Promise<void> {
+  return invoke("clipboard_delete", { id });
+}
+export function clipboardClear(keepPinned: boolean): Promise<number> {
+  return invoke("clipboard_clear", { keepPinned });
+}
+/** 分组计数（SubNav 角标） */
+export function clipboardGroupCounts(): Promise<Record<string, number>> {
+  return invoke("clipboard_group_counts");
+}
+/** 图片条目字节（Base64 DIB） */
+export function clipboardGetImage(id: string): Promise<string> {
+  return invoke<string>("clipboard_get_image", { id });
+}
+/** 读模块配置 schema（设置中心自动渲染） */
+export function hostConfigSchema(module: string): Promise<Record<string, unknown>> {
+  return invoke("host_config_schema", { module });
+}

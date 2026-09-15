@@ -1,0 +1,20 @@
+[package]
+name = "clipboard-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "剪切板中枢：捕获管线 / 敏感过滤 / 智能分组 / SQLite(FTS5) 存储"
+
+[dependencies]
+host-core = { path = "../host-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+regex.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
