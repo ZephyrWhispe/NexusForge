@@ -1,23 +1,22 @@
-//! Tauri 集成层（docs/impl/01 S7）：宿主状态组装、事件转发、演示模块
-//!
-//! DemoModule 说明：M1 演示用最小模块，用于端到端验证
-//! 注册 → init/start → 托盘聚合 → 状态查询 → panic 隔离 重启链路。
-//! clipboard-core 注册后将移除。
+//! Tauri 集成层（docs/impl/01 S7）：宿主状态组装、事件转发、模块引导
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
-use host_core::capability::{HotkeyProvider, TrayMenuItem, TrayProvider};
+use host_core::capability::{HotkeyProvider, TrayProvider};
 use host_core::config::ConfigStore;
 use host_core::crash;
-use host_core::error::ModuleError;
 use host_core::events::EventBus;
 use host_core::hotkey::HotkeyManager;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
-use host_core::ports::Ports;
+use host_core::module::{Module, ModuleContext, ModuleState};
+use host_core::ports::{ClipboardPort, CryptoPort, HotkeyWinPort, Ports};
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
+use win_integration::clipboard::WindowsClipboard;
+use win_integration::dpapi::Dpapi;
+use win_integration::hotkey::HotkeyWin;
+
+use clipboard_core::module::ClipboardModule;
 
 /// 命令行启动选项（docs/impl/01 S6.5）
 pub struct StartupOptions {
@@ -45,6 +44,7 @@ pub struct HostState {
     pub config: Arc<ConfigStore>,
     pub registry: Arc<ModuleRegistry>,
     pub hotkeys: Arc<HotkeyManager>,
+    pub clipboard: Arc<ClipboardModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -60,18 +60,26 @@ impl HostState {
 
         let bus = Arc::new(EventBus::new());
         let ports = Arc::new(Ports::new());
+        // 真实 Windows 能力注册（win-integration）
+        ports.register::<dyn ClipboardPort>(Arc::new(WindowsClipboard::new()));
+        ports.register::<dyn CryptoPort>(Arc::new(Dpapi));
+        // 全局快捷键 OS 层：创建失败仅告警（应用内快捷键不受影响）
+        match HotkeyWin::new() {
+            Ok(hk) => {
+                ports.register::<dyn HotkeyWinPort>(Arc::new(hk));
+            }
+            Err(e) => tracing::warn!(error = %e, "全局快捷键 OS 层初始化失败"),
+        }
+
         let config = Arc::new(ConfigStore::new(app_data_dir.join("config"), bus.clone()));
         let _global = config.load()?;
         let registry = Arc::new(ModuleRegistry::new(bus.clone()));
         let hotkeys = Arc::new(HotkeyManager::new(ports.clone()));
 
-        // ---- M1 演示模块（临时，C1 移除）----
-        // 保留具体类型 Arc<DemoModule>，按需向上转型为不同 trait 对象注册
-        let demo: Arc<DemoModule> = Arc::new(DemoModule::default());
-        config.register_schema("demo", demo.config_schema());
-        registry.register(demo.clone())?;
-        registry.register_ability::<dyn TrayProvider>(demo.clone());
-        registry.register_ability::<dyn HotkeyProvider>(demo.clone());
+        // ---- P0 功能模块 ----
+        let clipboard = Arc::new(ClipboardModule::new());
+        config.register_schema("clipboard", clipboard.config_schema());
+        registry.register(clipboard.clone())?;
 
         Ok(Self {
             bus,
@@ -79,6 +87,7 @@ impl HostState {
             config,
             registry,
             hotkeys,
+            clipboard,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })
@@ -93,6 +102,7 @@ impl HostState {
         let ctx = Arc::new(ModuleContext {
             app_data_dir: self.app_data_dir.clone(),
             ports: self.ports.clone(),
+            event_bus: self.bus.clone(),
         });
         for (id, r) in self.registry.init_all(ctx).await {
             if let Err(e) = r {
@@ -104,11 +114,24 @@ impl HostState {
                 tracing::error!(module = %id, error = %e, "模块 start 失败");
             }
         }
-        // 模块全局快捷键批量注册（失败不阻断，UI 冲突面板可查）
+        // 模块全局快捷键批量注册：binding × action 按 binding_id 配对（失败不阻断，UI 冲突面板可查）
         for provider in self.registry.abilities().get_all::<dyn HotkeyProvider>() {
             let info = provider.info();
-            for binding in provider.global_hotkeys() {
-                if let Err(e) = self.hotkeys.register(info.id, info.priority, binding.clone()) {
+            let bindings = provider.global_hotkeys();
+            let actions: std::collections::HashMap<String, _> = provider
+                .hotkey_actions()
+                .into_iter()
+                .map(|a| (a.binding_id, a.action))
+                .collect();
+            for binding in bindings {
+                let Some(action) = actions.get(&binding.id).cloned() else {
+                    tracing::warn!(module = info.id, binding = %binding.id, "快捷键缺少触发动作，跳过注册");
+                    continue;
+                };
+                if let Err(e) =
+                    self.hotkeys
+                        .register(info.id, info.priority, binding.clone(), action)
+                {
                     tracing::warn!(module = info.id, binding = %binding.id, error = %e, "快捷键注册失败");
                 }
             }
@@ -145,70 +168,9 @@ pub fn forward_events(app: tauri::AppHandle, bus: Arc<EventBus>) {
 }
 
 // ---------------------------------------------------------------------------
-// M1 演示模块（临时，C1 移除）
+// 模块状态 DTO（前端 IPC 返回）
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-pub struct DemoModule {
-    state: AtomicU8,
-}
-
-impl Module for DemoModule {
-    fn info(&self) -> ModuleInfo {
-        ModuleInfo {
-            id: "demo",
-            name: "演示模块",
-            version: "0.1.0",
-            icon: Some("sparkle"),
-            priority: 200,
-        }
-    }
-    fn init(&self, _ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
-        self.state.store(1, Ordering::SeqCst);
-        Ok(())
-    }
-    fn start(&self) -> Result<(), ModuleError> {
-        self.state.store(2, Ordering::SeqCst);
-        Ok(())
-    }
-    fn stop(&self) -> Result<(), ModuleError> {
-        self.state.store(1, Ordering::SeqCst);
-        Ok(())
-    }
-    fn config_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "greeting": { "type": "string", "default": "你好，NexusForge" }
-            }
-        })
-    }
-    fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
-    }
-}
-
-impl TrayProvider for DemoModule {
-    fn tray_menu_items(&self) -> Vec<TrayMenuItem> {
-        vec![TrayMenuItem {
-            id: "demo.open".into(),
-            label: "打开演示面板".into(),
-            enabled: true,
-        }]
-    }
-}
-
-impl HotkeyProvider for DemoModule {
-    fn global_hotkeys(&self) -> Vec<host_core::capability::HotkeyBinding> {
-        vec![] // 演示模块不占用全局快捷键
-    }
-}
-
-/// 模块状态 DTO（前端 IPC 返回）
 #[derive(Serialize)]
 pub struct ModuleStatusDto {
     pub id: String,

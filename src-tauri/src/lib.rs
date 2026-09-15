@@ -23,6 +23,15 @@ pub fn run() {
             commands::host_module_restart,
             commands::host_config_get,
             commands::host_config_set,
+            commands::host_config_schema,
+            commands::clipboard_search,
+            commands::clipboard_get,
+            commands::clipboard_get_image,
+            commands::clipboard_paste,
+            commands::clipboard_pin,
+            commands::clipboard_delete,
+            commands::clipboard_clear,
+            commands::clipboard_group_counts,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

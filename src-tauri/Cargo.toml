@@ -20,3 +20,5 @@ serde.workspace = true
 serde_json.workspace = true
 host-core = { path = "../crates/host-core" }
 win-integration = { path = "../crates/win-integration" }
+clipboard-core = { path = "../crates/clipboard-core" }
+base64.workspace = true
