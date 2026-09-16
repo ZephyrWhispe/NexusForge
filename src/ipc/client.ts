@@ -302,3 +302,94 @@ export function ocrEngineStatus(): Promise<EngineStatusDto> {
 export function ocrCopyText(text: string): Promise<void> {
   return invoke("ocr_copy_text", { text });
 }
+
+// ---------------- KVM 键鼠共享 IPC（docs/impl/05 K8）----------------
+
+/** 已配对设备 */
+export interface PairedPeerDto {
+  device_id: string;
+  device_name: string;
+  fingerprint: string;
+  pubkey_b64: string;
+  paired_at: number;
+}
+
+/** 心跳发现的邻居 */
+export interface PeerInfoDto {
+  device_id: string;
+  device_name: string;
+  pubkey_fingerprint: string;
+  tcp_port: number;
+  caps: string[];
+  addr: string;
+  screen: { x: number; y: number; w: number; h: number };
+}
+
+/** 活跃会话（role: client=本端发起 / server=对端接入） */
+export interface SessionDto {
+  device_id: string;
+  device_name: string;
+  role: "client" | "server";
+}
+
+/** 控制状态（idle/controlling/controlled） */
+export interface ControlStateDto {
+  role: "idle" | "controlling" | "controlled";
+  device_id?: string;
+}
+
+/** 签发一次性配对码（返回 [码, 有效期毫秒]） */
+export function kvmIssuePairCode(): Promise<[string, number]> {
+  return invoke("kvm_issue_pair_code");
+}
+/** 向已发现设备发起配对（对端在其 UI 输入本端码，或反之） */
+export function kvmPairWith(addr: string, code: string): Promise<PairedPeerDto> {
+  return invoke("kvm_pair_with", { addr, code });
+}
+/** 解除配对 */
+export function kvmUnpair(deviceId: string): Promise<boolean> {
+  return invoke("kvm_unpair", { deviceId });
+}
+/** 已配对设备列表 */
+export function kvmPairedPeers(): Promise<PairedPeerDto[]> {
+  return invoke("kvm_paired_peers");
+}
+/** 已发现邻居列表 */
+export function kvmDiscoveredPeers(): Promise<PeerInfoDto[]> {
+  return invoke("kvm_discovered_peers");
+}
+/** 向已配对设备发起会话（返回对端 device_id） */
+export function kvmConnectTo(addr: string): Promise<string> {
+  return invoke("kvm_connect_to", { addr });
+}
+/** 发送剪贴板内容（Text/Image） */
+export function kvmSendClip(
+  deviceId: string,
+  content: { Text?: { text: string; html?: string | null } } | { Image?: unknown },
+): Promise<void> {
+  return invoke("kvm_send_clip", { deviceId, content });
+}
+/** 发送本地文件 */
+export function kvmSendFile(deviceId: string, path: string): Promise<void> {
+  return invoke("kvm_send_file", { deviceId, path });
+}
+/** 活跃会话列表 */
+export function kvmSessionList(): Promise<SessionDto[]> {
+  return invoke("kvm_session_list");
+}
+/** 设置 [设备→共享边] 映射 */
+export function kvmSetEdgeMap(map: Record<string, string>): Promise<void> {
+  return invoke("kvm_set_edge_map", { map });
+}
+/** 当前边缘映射 */
+export function kvmEdgeMap(): Promise<Record<string, string>> {
+  return invoke("kvm_edge_map");
+}
+/** 控制状态 */
+export function kvmControlState(): Promise<ControlStateDto> {
+  return invoke("kvm_control_state");
+}
+/** 手动释放控制权 */
+export function kvmReleaseControl(): Promise<void> {
+  return invoke("kvm_release_control");
+}

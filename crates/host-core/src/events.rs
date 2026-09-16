@@ -34,6 +34,16 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("ocr.completed", "OCR 完成。payload: {source_task_id?, result}"),
     ("ocr.failed", "OCR 失败。payload: {reason}"),
     ("operation.conflict", "文件操作同名冲突，等待 UI 应答。payload: {op_id, target}"),
+    ("kvm.peer_online", "键鼠共享发现新设备。payload: {peer}"),
+    ("kvm.peer_offline", "键鼠共享设备离线。payload: {device_id}"),
+    ("kvm.session_state", "键鼠共享会话状态迁移。payload: {device_id, state}"),
+    ("kvm.paired", "键鼠共享配对变更。payload: {peer?|device_id?, paired}"),
+    ("kvm.clip_received", "键鼠共享收到对端剪贴板。payload: {device_id, content}"),
+    ("kvm.file_incoming", "键鼠共享文件传输建档。payload: {device_id, transfer_id, name, size, received, total_chunks}"),
+    ("kvm.file_received", "键鼠共享文件接收完成（SHA256 校验通过）。payload: {device_id, transfer_id, name, path}"),
+    ("kvm.file_progress", "键鼠共享文件发送进度。payload: {transfer_id, sent_chunks, total_chunks}"),
+    ("kvm.transfer_ack", "键鼠共享传输回执。payload: {transfer_id, ok, error?}"),
+    ("kvm.control_state", "键鼠共享控制权迁移。payload: {role, device_id?, by?, reason?}"),
 ];
 
 /// 统一事件信封（前端收到格式与此一致，M1 冻结契约）

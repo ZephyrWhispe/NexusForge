@@ -187,6 +187,53 @@ pub trait CryptoPort: Port {
 }
 
 // ---------------------------------------------------------------------------
+// 键鼠共享输入口（docs/impl/05 K4/K5；win-integration 实现，kvm-core 经 Port 调用）
+// ---------------------------------------------------------------------------
+
+/// 底层输入事件（捕获与注入共用投影；可跨网络序列化）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RawInput {
+    KeyDown { vk: u16, scan: u32 },
+    KeyUp { vk: u16, scan: u32 },
+    /// 虚拟桌面物理像素绝对坐标
+    MouseMove { x: i32, y: i32 },
+    /// button: 0 左 1 右 2 中
+    MouseDown { button: u8, x: i32, y: i32 },
+    MouseUp { button: u8, x: i32, y: i32 },
+    /// delta: 正=上/右滚
+    Wheel { delta: i32, x: i32, y: i32 },
+}
+
+/// 低级输入捕获（win-integration：WH_KEYBOARD_LL/WH_MOUSE_LL 专用线程）
+pub trait InputHookPort: Port {
+    /// 启动捕获；回调在钩子专用线程触发，必须快（<5ms），慢逻辑自行入队。
+    /// 返回 false 表示事件被抑制（接管模式下不交还 OS，docs/impl/05 K4）。
+    fn start_capture(&self, cb: Box<dyn Fn(&RawInput) -> bool + Send + Sync>)
+        -> Result<(), AppError>;
+    /// 停止捕获并卸载钩子
+    fn stop_capture(&self) -> Result<(), AppError>;
+}
+
+/// 输入注入（win-integration：SendInput，绝对坐标按虚拟桌面归一化 0..65535）
+pub trait InputInjectPort: Port {
+    fn inject(&self, events: &[RawInput]) -> Result<(), AppError>;
+}
+
+/// 虚拟桌面矩形（屏幕原点 + 尺寸，副屏可为负坐标；K7 边缘切换与归一化共用）
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// 虚拟桌面信息（win-integration：GetSystemMetrics SM_X/YVIRTUALSCREEN 等）
+pub trait ScreenInfoPort: Port {
+    fn virtual_desktop(&self) -> Result<ScreenRect, AppError>;
+}
+
+// ---------------------------------------------------------------------------
 // Port 注册表
 // ---------------------------------------------------------------------------
 

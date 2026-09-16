@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core"]
+members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# kvm-core（docs/impl/05 K1–K7）
+socket2 = "0.5"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+rand = "0.8"
 
 # 发布配置（docs/impl/07 PERF2，阶段四启用前先保持默认可调试）
 [profile.dev]

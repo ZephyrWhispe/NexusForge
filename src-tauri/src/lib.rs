@@ -46,6 +46,19 @@ pub fn run() {
             commands::ocr_recognize,
             commands::ocr_engine_status,
             commands::ocr_copy_text,
+            commands::kvm_issue_pair_code,
+            commands::kvm_pair_with,
+            commands::kvm_unpair,
+            commands::kvm_paired_peers,
+            commands::kvm_discovered_peers,
+            commands::kvm_connect_to,
+            commands::kvm_send_clip,
+            commands::kvm_send_file,
+            commands::kvm_session_list,
+            commands::kvm_set_edge_map,
+            commands::kvm_edge_map,
+            commands::kvm_control_state,
+            commands::kvm_release_control,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

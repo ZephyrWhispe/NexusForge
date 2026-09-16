@@ -18,7 +18,7 @@ export const MODULES: ModuleDef[] = [
   { id: "vault", name: "安全与凭据", phase: "P1" },
   { id: "file", name: "文件与存储", phase: "P1" },
   { id: "desktop", name: "桌面效率", phase: "P1" },
-  { id: "kvm", name: "键鼠共享", phase: "P1" },
+  { id: "kvm", name: "键鼠共享", phase: "P1", running: true },
   { id: "editor", name: "文本与 PDF", phase: "P2" },
   { id: "notes", name: "笔记与知识", phase: "P2" },
   { id: "term", name: "终端与运维", phase: "P2" },

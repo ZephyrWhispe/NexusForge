@@ -1,0 +1,24 @@
+[package]
+name = "kvm-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+host-core = { path = "../host-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+socket2 = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

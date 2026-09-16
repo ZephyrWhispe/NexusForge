@@ -14,4 +14,5 @@ pub mod capture;
 pub mod clipboard;
 pub mod dpapi;
 pub mod hotkey;
+pub mod input;
 pub mod ocr;

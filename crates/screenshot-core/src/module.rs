@@ -523,6 +523,7 @@ impl ScreenshotModule {
         let bytes = std::fs::read(dir.join(&record.file))
             .map_err(|e| mod_err("SCREENSHOT_PIN_007", format!("读取贴图失败: {e}")))?;
         Ok(PinDataDto {
+            id: record.id.clone(),
             png_b64: base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
                 bytes,

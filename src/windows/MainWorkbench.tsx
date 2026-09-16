@@ -7,6 +7,7 @@ import SubNav from "../layout/SubNav";
 import StatusBar from "../layout/StatusBar";
 import MicaBackdrop from "../layout/MicaBackdrop";
 import ClipboardPanel from "../modules/clipboard/ClipboardPanel";
+import KvmPanel from "../modules/kvm/KvmPanel";
 import SchemaForm from "../settings/SchemaForm";
 import { MODULES } from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
@@ -117,6 +118,7 @@ export default function MainWorkbench() {
 
   const current = MODULES.find((m) => m.id === active);
   const isClipboard = active === "clipboard";
+  const isKvm = active === "kvm";
   const isSettings = active === "__settings";
 
   return (
@@ -147,11 +149,15 @@ export default function MainWorkbench() {
                   <span className={styles.meta}>
                     {isClipboard
                       ? "历史 · 保留 30 天 · 敏感数据已加密（DPAPI）"
-                      : `${current?.phase} 模块将在对应阶段交付`}
+                      : isKvm
+                        ? "发现 · 配对 · 会话 · 边缘切换（TCP+UDP+X25519）"
+                        : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
                   <ClipboardPanel search={search} group={group} onCounts={onCounts} />
+                ) : isKvm ? (
+                  <KvmPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>

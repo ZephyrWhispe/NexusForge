@@ -134,6 +134,8 @@ pub struct PinDto {
 
 #[derive(Debug, Serialize)]
 pub struct PinDataDto {
+    /// 贴图 id（前端关闭/更新须回传；缺失会导致关闭时删不掉持久化记录）
+    pub id: String,
     pub png_b64: String,
     pub x: i32,
     pub y: i32,

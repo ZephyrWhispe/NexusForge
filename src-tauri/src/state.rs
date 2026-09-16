@@ -9,16 +9,21 @@ use host_core::crash;
 use host_core::events::EventBus;
 use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
-use host_core::ports::{CapturePort, ClipboardPort, CryptoPort, HotkeyWinPort, OcrPort, Ports};
+use host_core::ports::{
+    CapturePort, ClipboardPort, CryptoPort, HotkeyWinPort, InputHookPort, InputInjectPort, OcrPort,
+    Ports, ScreenInfoPort,
+};
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
 use win_integration::capture::GdiCapture;
 use win_integration::clipboard::WindowsClipboard;
 use win_integration::dpapi::Dpapi;
 use win_integration::hotkey::HotkeyWin;
+use win_integration::input::{InputHookWin, InputInjectWin, ScreenInfoWin};
 use win_integration::ocr::WinOcr;
 
 use clipboard_core::module::ClipboardModule;
+use kvm_core::KvmModule;
 use ocr_core::OcrModule;
 use screenshot_core::ScreenshotModule;
 
@@ -51,6 +56,7 @@ pub struct HostState {
     pub clipboard: Arc<ClipboardModule>,
     pub screenshot: Arc<ScreenshotModule>,
     pub ocr: Arc<OcrModule>,
+    pub kvm: Arc<KvmModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -80,6 +86,10 @@ impl HostState {
             }
             Err(e) => tracing::warn!(error = %e, "全局快捷键 OS 层初始化失败"),
         }
+        // K4/K5/K7 输入捕获与注入 + 虚拟桌面信息（kvm-core 键鼠共享）
+        ports.register::<dyn InputHookPort>(Arc::new(InputHookWin::new()?));
+        ports.register::<dyn InputInjectPort>(Arc::new(InputInjectWin::new()));
+        ports.register::<dyn ScreenInfoPort>(Arc::new(ScreenInfoWin::new()));
 
         let config = Arc::new(ConfigStore::new(app_data_dir.join("config"), bus.clone()));
         let _global = config.load()?;
@@ -103,6 +113,11 @@ impl HostState {
         registry.register(ocr.clone())?;
         registry.register_ability::<dyn HotkeyProvider>(ocr.clone());
 
+        // ---- P1 键鼠共享（M4，docs/impl/05 K1–K7）----
+        let kvm = Arc::new(KvmModule::new());
+        config.register_schema("kvm", kvm.config_schema());
+        registry.register(kvm.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -112,6 +127,7 @@ impl HostState {
             clipboard,
             screenshot,
             ocr,
+            kvm,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })
