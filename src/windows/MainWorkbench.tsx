@@ -68,7 +68,7 @@ export default function MainWorkbench() {
   // 稳定引用：防止 ClipboardPanel 的 load/refreshCounts 因回调重建而循环刷新
   const onCounts = useCallback((c: Record<string, number>) => setCounts(c), []);
 
-  // U2-4/U3-5：全局快捷键（Ctrl+Shift+V）→ OS → 事件 → 快速面板切换
+  // U2-4/U3-5：全局快捷键 → OS → 事件 → 快速面板 / 截图覆盖层
   useEffect(() => {
     if (!IN_TAURI) return;
     let unlisten: (() => void) | null = null;
@@ -77,6 +77,10 @@ export default function MainWorkbench() {
         listen("nf:event", (e) => {
           const topic = (e.payload as { topic?: string }).topic;
           if (topic === "clipboard.quick_panel_toggled") void toggleQuickPanel();
+          if (topic === "screenshot.overlay_requested") {
+            const mode = (e.payload as { payload?: { mode?: string } }).payload?.mode;
+            void import("./overlayController").then((m) => m.startOverlay(mode === "ocr" ? "ocr" : "shot"));
+          }
         }),
       )
       .then((u) => {
@@ -85,6 +89,12 @@ export default function MainWorkbench() {
     return () => {
       unlisten?.();
     };
+  }, []);
+
+  // 启动恢复贴图（M3）
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    void import("./overlayController").then((m) => m.restorePins());
   }, []);
 
   const current = MODULES.find((m) => m.id === active);

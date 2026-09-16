@@ -130,3 +130,170 @@ export function clipboardGetImage(id: string): Promise<string> {
 export function hostConfigSchema(module: string): Promise<Record<string, unknown>> {
   return invoke("host_config_schema", { module });
 }
+
+// ---------------- 截图 IPC（docs/impl/03 P8 DTO 对齐）----------------
+
+export interface TaskStartDto {
+  task_id: string;
+  /** 虚拟桌面原点与尺寸（物理像素），覆盖层窗口定位用 */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface TaskInfoDto {
+  task_id: string;
+  /** shot | ocr */
+  mode: string;
+  width: number;
+  height: number;
+  png_b64: string;
+}
+
+export interface ConfirmRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface CropDto {
+  png_b64: string;
+  width: number;
+  height: number;
+}
+
+export interface AnnotationDto {
+  kind: "pen" | "rect" | "ellipse" | "arrow" | "text" | "mosaic" | "number";
+  color: string;
+  width: number;
+  points: [number, number][];
+  text?: string | null;
+  seq?: number | null;
+}
+
+export interface FinishRequestDto {
+  image_b64: string;
+  /** save | copy | pin；空 = 应用设置中的默认动作 */
+  actions: string[];
+  pin_x?: number | null;
+  pin_y?: number | null;
+  annotations?: AnnotationDto[];
+}
+
+export interface FinishDto {
+  file: string | null;
+  pin_id: string | null;
+}
+
+export interface ShotItemDto {
+  id: string;
+  created_ms: number;
+  width: number;
+  height: number;
+  file: string | null;
+  ocr_text: string | null;
+}
+
+export interface ShotPageDto {
+  items: ShotItemDto[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface PinDto {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  zoom: number;
+  opacity: number;
+}
+
+export interface PinDataDto extends PinDto {
+  png_b64: string;
+}
+
+/** 启动截图（抓全屏帧，返回覆盖层定位） */
+export function screenshotStart(mode: "shot" | "ocr"): Promise<TaskStartDto> {
+  return invoke("screenshot_start", { mode });
+}
+/** 覆盖层取背景帧 */
+export function screenshotTask(taskId: string): Promise<TaskInfoDto> {
+  return invoke("screenshot_task", { taskId });
+}
+/** 选区确认（物理像素，帧相对坐标） */
+export function screenshotConfirm(taskId: string, rect: ConfirmRect): Promise<CropDto> {
+  return invoke("screenshot_confirm", { taskId, rect });
+}
+/** 丢弃任务（取消时释放帧内存） */
+export function screenshotDiscard(taskId: string): Promise<void> {
+  return invoke("screenshot_discard", { taskId });
+}
+/** 完成（合成图 + 动作） */
+export function screenshotFinish(taskId: string, request: FinishRequestDto): Promise<FinishDto> {
+  return invoke("screenshot_finish", { taskId, request });
+}
+/** 截图历史分页 */
+export function screenshotHistoryList(page: number, size: number): Promise<ShotPageDto> {
+  return invoke("screenshot_history_list", { query: { page, size } });
+}
+/** 全部贴图（启动恢复） */
+export function screenshotPins(): Promise<PinDto[]> {
+  return invoke("screenshot_pins");
+}
+/** 贴图数据 */
+export function screenshotPinGet(id: string): Promise<PinDataDto> {
+  return invoke("screenshot_pin_get", { id });
+}
+/** 贴图缩放/透明度持久化 */
+export function screenshotPinUpdate(id: string, zoom: number, opacity: number): Promise<void> {
+  return invoke("screenshot_pin_update", { id, zoom, opacity });
+}
+/** 关闭贴图 */
+export function screenshotPinClose(id: string): Promise<void> {
+  return invoke("screenshot_pin_close", { id });
+}
+
+// ---------------- OCR IPC（docs/impl/04 O7 DTO 对齐）----------------
+
+export interface OcrRequestDto {
+  image_b64: string;
+  /** 偏好语言（BCP-47），空 = 系统默认 */
+  langs?: string[];
+  source_task_id?: string | null;
+}
+
+export interface OcrLineDto {
+  text: string;
+  rect: { x: number; y: number; w: number; h: number };
+  confidence: number;
+}
+
+export interface OcrResultDto {
+  lines: OcrLineDto[];
+  text: string;
+  lang: string;
+  engine: string;
+}
+
+export interface EngineStatusDto {
+  engines: { id: string; name: string; available: boolean }[];
+  languages: string[];
+}
+
+/** 识别 */
+export function ocrRecognize(request: OcrRequestDto): Promise<OcrResultDto> {
+  return invoke("ocr_recognize", { request });
+}
+/** 引擎状态 */
+export function ocrEngineStatus(): Promise<EngineStatusDto> {
+  return invoke("ocr_engine_status");
+}
+/** OCR 文本复制到剪贴板（进入剪贴板历史） */
+export function ocrCopyText(text: string): Promise<void> {
+  return invoke("ocr_copy_text", { text });
+}

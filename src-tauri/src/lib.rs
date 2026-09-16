@@ -32,6 +32,19 @@ pub fn run() {
             commands::clipboard_delete,
             commands::clipboard_clear,
             commands::clipboard_group_counts,
+            commands::screenshot_start,
+            commands::screenshot_task,
+            commands::screenshot_confirm,
+            commands::screenshot_discard,
+            commands::screenshot_finish,
+            commands::screenshot_history_list,
+            commands::screenshot_pins,
+            commands::screenshot_pin_get,
+            commands::screenshot_pin_update,
+            commands::screenshot_pin_close,
+            commands::ocr_recognize,
+            commands::ocr_engine_status,
+            commands::ocr_copy_text,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

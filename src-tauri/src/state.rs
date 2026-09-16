@@ -3,20 +3,24 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use host_core::capability::{HotkeyProvider, TrayProvider};
+use host_core::capability::HotkeyProvider;
 use host_core::config::ConfigStore;
 use host_core::crash;
 use host_core::events::EventBus;
 use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
-use host_core::ports::{ClipboardPort, CryptoPort, HotkeyWinPort, Ports};
+use host_core::ports::{CapturePort, ClipboardPort, CryptoPort, HotkeyWinPort, OcrPort, Ports};
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
+use win_integration::capture::GdiCapture;
 use win_integration::clipboard::WindowsClipboard;
 use win_integration::dpapi::Dpapi;
 use win_integration::hotkey::HotkeyWin;
+use win_integration::ocr::WinOcr;
 
 use clipboard_core::module::ClipboardModule;
+use ocr_core::OcrModule;
+use screenshot_core::ScreenshotModule;
 
 /// 命令行启动选项（docs/impl/01 S6.5）
 pub struct StartupOptions {
@@ -45,6 +49,8 @@ pub struct HostState {
     pub registry: Arc<ModuleRegistry>,
     pub hotkeys: Arc<HotkeyManager>,
     pub clipboard: Arc<ClipboardModule>,
+    pub screenshot: Arc<ScreenshotModule>,
+    pub ocr: Arc<OcrModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -63,6 +69,10 @@ impl HostState {
         // 真实 Windows 能力注册（win-integration）
         ports.register::<dyn ClipboardPort>(Arc::new(WindowsClipboard::new()));
         ports.register::<dyn CryptoPort>(Arc::new(Dpapi));
+        // 屏幕捕获：GDI BitBlt（docs/impl/03 P2，v1 主路径）
+        ports.register::<dyn CapturePort>(Arc::new(GdiCapture::new()));
+        // 系统 OCR：Windows.Media.Ocr（docs/impl/04 O2）
+        ports.register::<dyn OcrPort>(Arc::new(WinOcr::new()));
         // 全局快捷键 OS 层：创建失败仅告警（应用内快捷键不受影响）
         match HotkeyWin::new() {
             Ok(hk) => {
@@ -81,6 +91,13 @@ impl HostState {
         config.register_schema("clipboard", clipboard.config_schema());
         registry.register(clipboard.clone())?;
 
+        let screenshot = Arc::new(ScreenshotModule::new());
+        config.register_schema("screenshot", screenshot.config_schema());
+        registry.register(screenshot.clone())?;
+
+        let ocr = Arc::new(OcrModule::new());
+        registry.register(ocr.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -88,6 +105,8 @@ impl HostState {
             registry,
             hotkeys,
             clipboard,
+            screenshot,
+            ocr,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })
