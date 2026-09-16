@@ -87,16 +87,21 @@ impl HostState {
         let hotkeys = Arc::new(HotkeyManager::new(ports.clone()));
 
         // ---- P0 功能模块 ----
+        // register_ability：把模块的 HotkeyProvider/TrayProvider 能力登记进注册表
+        // （修复：此前从未调用，abilities() 恒为空，全部全局快捷键静默未注册）
         let clipboard = Arc::new(ClipboardModule::new());
         config.register_schema("clipboard", clipboard.config_schema());
         registry.register(clipboard.clone())?;
+        registry.register_ability::<dyn HotkeyProvider>(clipboard.clone());
 
         let screenshot = Arc::new(ScreenshotModule::new());
         config.register_schema("screenshot", screenshot.config_schema());
         registry.register(screenshot.clone())?;
+        registry.register_ability::<dyn HotkeyProvider>(screenshot.clone());
 
         let ocr = Arc::new(OcrModule::new());
         registry.register(ocr.clone())?;
+        registry.register_ability::<dyn HotkeyProvider>(ocr.clone());
 
         Ok(Self {
             bus,
@@ -134,6 +139,7 @@ impl HostState {
             }
         }
         // 模块全局快捷键批量注册：binding × action 按 binding_id 配对（失败不阻断，UI 冲突面板可查）
+        let mut registered = 0usize;
         for provider in self.registry.abilities().get_all::<dyn HotkeyProvider>() {
             let info = provider.info();
             let bindings = provider.global_hotkeys();
@@ -152,9 +158,12 @@ impl HostState {
                         .register(info.id, info.priority, binding.clone(), action)
                 {
                     tracing::warn!(module = info.id, binding = %binding.id, error = %e, "快捷键注册失败");
+                } else {
+                    registered += 1;
                 }
             }
         }
+        tracing::info!(count = registered, "全局快捷键注册完成");
         // 托盘聚合（原生 tray-icon 接入在 C1 里程碑；此处验证数据链路）
         let sections = host_core::capability::aggregate_tray(self.registry.abilities());
         tracing::info!(sections = ?sections, "托盘菜单聚合完成");
@@ -167,13 +176,17 @@ pub fn forward_events(app: tauri::AppHandle, bus: Arc<EventBus>) {
     for (topic, _) in host_core::events::TOPIC_REGISTRY {
         let mut rx = match bus.subscribe(topic) {
             Ok(rx) => rx,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::warn!(topic, error = %e, "事件主题订阅失败，前端将收不到该主题");
+                continue;
+            }
         };
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
+                        tracing::info!(topic = event.topic, "事件转发到前端");
                         if let Ok(v) = serde_json::to_value(&event) {
                             let _ = app.emit("nf:event", v);
                         }

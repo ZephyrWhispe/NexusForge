@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
@@ -70,6 +70,38 @@ export default function PinWindow() {
     hintTimer.current = window.setTimeout(() => setHint(false), 900);
   };
 
+  /** 关闭贴图：删记录 + 关窗（Esc/双击/右键共用） */
+  const closePin = useCallback(() => {
+    void screenshotPinClose(pinRef.current?.id ?? "")
+      .catch(() => undefined)
+      .finally(() => getCurrentWindow().close());
+  }, []);
+
+  // Esc 关闭（快捷退出大贴图）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closePin();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [closePin]);
+
+  // 首次打开 3 秒操作提示（交互不可发现是贴图最常见困惑）
+  const [intro, setIntro] = useState(true);
+  useEffect(() => {
+    if (!pin) return;
+    const t = window.setTimeout(() => setIntro(false), 3000);
+    return () => window.clearTimeout(t);
+  }, [pin]);
+
+  /** 按下起点 + 拖拽标志：移动超阈值才进入 OS 拖拽循环，
+   *  否则 startDragging 的模态循环会吞掉 click/dblclick，双击关闭失效 */
+  const downPos = useRef<{ x: number; y: number } | null>(null);
+  const dragging = useRef(false);
+
   const applyZoom = async (zoom: number) => {
     const p = pinRef.current;
     if (!p) return;
@@ -122,20 +154,32 @@ export default function PinWindow() {
         }
       }}
       onMouseDown={(e) => {
-        if (e.button === 0) void getCurrentWindow().startDragging();
+        if (e.button === 0) {
+          downPos.current = { x: e.clientX, y: e.clientY };
+          dragging.current = false;
+        }
       }}
-      onDoubleClick={() => {
-        void screenshotPinClose(pin.id)
-          .catch(() => undefined)
-          .finally(() => getCurrentWindow().close());
+      onMouseMove={(e) => {
+        // 超过 4px 才进入 OS 拖拽循环（保证双击/普通点击不被吞）
+        if (downPos.current && !dragging.current) {
+          const dx = e.clientX - downPos.current.x;
+          const dy = e.clientY - downPos.current.y;
+          if (Math.hypot(dx, dy) > 4) {
+            dragging.current = true;
+            void getCurrentWindow().startDragging();
+          }
+        }
       }}
+      onMouseUp={() => {
+        downPos.current = null;
+        dragging.current = false;
+      }}
+      onDoubleClick={closePin}
       onContextMenu={(e) => {
         e.preventDefault();
-        void screenshotPinClose(pin.id)
-          .catch(() => undefined)
-          .finally(() => getCurrentWindow().close());
+        closePin();
       }}
-      title="滚轮缩放 · Alt+滚轮透明度 · 拖拽移动 · 双击/右键关闭"
+      title="滚轮缩放 · Alt+滚轮透明度 · 拖拽移动 · 双击/右键/Esc 关闭"
     >
       <img
         className={styles.img}
@@ -144,8 +188,10 @@ export default function PinWindow() {
         draggable={false}
         style={{ opacity: pin.opacity }}
       />
-      <div className={`${styles.hint} ${hint ? styles.hintVisible : ""}`}>
-        {Math.round(pin.zoom * 100)}% · {Math.round(pin.opacity * 100)}%
+      <div className={`${styles.hint} ${hint || intro ? styles.hintVisible : ""}`}>
+        {intro
+          ? "拖拽移动 · 滚轮缩放 · Alt+滚轮透明度 · 双击/Esc/右键关闭"
+          : `${Math.round(pin.zoom * 100)}% · ${Math.round(pin.opacity * 100)}%`}
       </div>
     </div>
   );

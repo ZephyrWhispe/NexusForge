@@ -72,29 +72,47 @@ export default function MainWorkbench() {
   useEffect(() => {
     if (!IN_TAURI) return;
     let unlisten: (() => void) | null = null;
+    // StrictMode 双挂载：第一次 effect 的 listen 完成前 cleanup 已执行，
+    // cancelled 保证迟到的监听器被立即移除（否则泄漏为双发）
+    let cancelled = false;
     import("@tauri-apps/api/event")
       .then(({ listen }) =>
         listen("nf:event", (e) => {
-          const topic = (e.payload as { topic?: string }).topic;
-          if (topic === "clipboard.quick_panel_toggled") void toggleQuickPanel();
-          if (topic === "screenshot.overlay_requested") {
-            const mode = (e.payload as { payload?: { mode?: string } }).payload?.mode;
-            void import("./overlayController").then((m) => m.startOverlay(mode === "ocr" ? "ocr" : "shot"));
+          try {
+            const topic = (e.payload as { topic?: string }).topic;
+            if (topic === "clipboard.quick_panel_toggled") void toggleQuickPanel();
+            if (topic === "screenshot.overlay_requested") {
+              const mode = (e.payload as { payload?: { mode?: string } }).payload?.mode;
+              void import("./overlayController").then((m) => m.startOverlay(mode === "ocr" ? "ocr" : "shot"));
+            }
+          } catch (err) {
+            import("../ipc/client").then((c) => c.hostLog("error", `nf:event 处理异常: ${String(err)}`));
           }
         }),
       )
       .then((u) => {
+        if (cancelled) {
+          u();
+          return;
+        }
         unlisten = u;
+      })
+      .catch((err) => {
+        import("../ipc/client").then((c) => c.hostLog("error", `nf:event 监听注册失败: ${String(err)}`));
       });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);
 
-  // 启动恢复贴图（M3）
+  // 启动恢复贴图 + 预热隐藏覆盖层窗口（M3，热键秒开）
   useEffect(() => {
     if (!IN_TAURI) return;
-    void import("./overlayController").then((m) => m.restorePins());
+    void import("./overlayController").then((m) => {
+      m.restorePins();
+      m.prewarmOverlay();
+    });
   }, []);
 
   const current = MODULES.find((m) => m.id === active);

@@ -186,6 +186,16 @@ pub async fn clipboard_group_counts(state: State<'_, HostState>) -> Result<serde
         .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
 }
 
+/// 前端日志上报（webview console 外部不可见；关键异步失败经此进入宿主日志）
+#[tauri::command]
+pub fn host_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => tracing::error!(target: "webview", "{message}"),
+        "warn" => tracing::warn!(target: "webview", "{message}"),
+        _ => tracing::info!(target: "webview", "{message}"),
+    }
+}
+
 // ---------------- 截图命令（docs/impl/03 P8）----------------
 // GDI 捕获 / PNG 编解码为阻塞调用，统一 spawn_blocking
 

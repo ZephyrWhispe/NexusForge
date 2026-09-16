@@ -60,9 +60,12 @@ unsafe extern "system" fn wndproc(
         if raw != 0 {
             let shared = &*(raw as *const Shared);
             let os_id = wparam.0 as i32;
+            tracing::info!(os_id, "WM_HOTKEY 到达");
             if let Ok(d) = shared.dispatcher.lock() {
                 if let Some(f) = d.as_ref() {
                     f(os_id);
+                } else {
+                    tracing::warn!("WM_HOTKEY 到达但 dispatcher 未设置");
                 }
             }
             if let Ok(h) = shared.handlers.lock() {
@@ -125,7 +128,6 @@ impl HotkeyWin {
         std::thread::Builder::new()
             .name("hotkey-loop".into())
             .spawn(move || unsafe {
-                let (ready_tx, ready_rx) = channel::<HWND>();
                 let name: Vec<u16> = format!("NexusForgeHotkeyWnd{}\0", std::process::id())
                     .encode_utf16()
                     .collect();
@@ -157,8 +159,11 @@ impl HotkeyWin {
                 if hwnd.is_invalid() {
                     return;
                 }
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(shared_thread) as isize);
-                let _ = ready_tx.send(hwnd);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(shared_thread.clone()) as isize);
+                // 就绪信号：hwnd 必须写回 shared（register 依赖它投递 WM_APP 唤醒消息循环）
+                if let Ok(mut g) = shared_thread.hwnd.lock() {
+                    *g = Some(SendHwnd(hwnd.0 as usize));
+                }
                 let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
                 while GetMessageW(&mut msg, hwnd, 0, 0).as_bool() {
                     let _ = TranslateMessage(&msg);

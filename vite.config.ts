@@ -8,6 +8,10 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Rust 编译产物不参与 HMR watch：cargo build 期间的 dll 文件锁（EBUSY）会杀死 dev server
+    watch: {
+      ignored: ["**/target/**"],
+    },
   },
   build: {
     // Tauri WebView2（Chromium 内核）目标

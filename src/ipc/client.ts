@@ -61,6 +61,11 @@ export async function hostModuleRestart(id: string): Promise<void> {
   await invoke("host_module_restart", { id });
 }
 
+/** 前端日志上报进宿主日志（webview console 外部不可见） */
+export function hostLog(level: "info" | "warn" | "error", message: string): void {
+  invoke("host_log", { level, message }).catch(() => undefined);
+}
+
 /** 读模块配置 */
 export async function hostConfigGet<T = Record<string, unknown>>(module: string): Promise<T> {
   return invoke<T>("host_config_get", { module });

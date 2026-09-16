@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
@@ -59,9 +58,10 @@ unsafe fn grab_region(x: i32, y: i32, w: i32, h: i32) -> Result<Frame, AppError>
     if w <= 0 || h <= 0 {
         return Err(err("SCREENSHOT_CAPTURE_001", "区域尺寸无效"));
     }
-    let screen_dc = CreateDCW(PCWSTR::null(), None, None, None);
+    let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
     if screen_dc.is_invalid() {
-        return Err(err("SCREENSHOT_CAPTURE_001", "CreateDC 失败"));
+        let gle = windows::Win32::Foundation::GetLastError();
+        return Err(err("SCREENSHOT_CAPTURE_001", format!("CreateDC 失败 (GetLastError={gle:?})")));
     }
     let mem_dc = CreateCompatibleDC(screen_dc);
     let bitmap = CreateCompatibleBitmap(screen_dc, w, h);
@@ -121,9 +121,10 @@ unsafe fn grab_window(hwnd: isize) -> Result<Frame, AppError> {
         return Err(err("SCREENSHOT_CAPTURE_003", "窗口尺寸无效（最小化？）"));
     }
 
-    let screen_dc = CreateDCW(PCWSTR::null(), None, None, None);
+    let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
     if screen_dc.is_invalid() {
-        return Err(err("SCREENSHOT_CAPTURE_003", "CreateDC 失败"));
+        let gle = windows::Win32::Foundation::GetLastError();
+        return Err(err("SCREENSHOT_CAPTURE_003", format!("CreateDC 失败 (GetLastError={gle:?})")));
     }
     let mem_dc = CreateCompatibleDC(screen_dc);
     let bitmap = CreateCompatibleBitmap(screen_dc, w, h);

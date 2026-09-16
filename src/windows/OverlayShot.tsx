@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { makeStyles, tokens, Button, Text } from "@fluentui/react-components";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
+import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import {
   screenshotTask,
   screenshotConfirm,
   screenshotFinish,
   ocrRecognize,
+  hostLog,
+  type TaskStartDto,
   type TaskInfoDto,
   type CropDto,
   type OcrResultDto,
@@ -173,12 +177,27 @@ function dataUrlToB64(url: string): string {
   return idx >= 0 ? url.slice(idx + 1) : url;
 }
 
+/** 错误规范化：Tauri invoke 抛的是对象，String(e) 会显示成 "[object Object]" */
+function fmtErr(e: unknown): string {
+  if (e && typeof e === "object") {
+    const dto = e as { data?: { message?: string; code?: string } };
+    if (dto.data?.message) return `${dto.data.message} (${dto.data.code ?? ""})`;
+    return JSON.stringify(e);
+  }
+  return String(e);
+}
+
 export default function OverlayShot() {
   const styles = useStyles();
   const [task, setTask] = useState<TaskInfoDto | null>(null);
   const [stage, setStage] = useState<Stage>("select");
   const [crop, setCrop] = useState<CropDto | null>(null);
+  /** 致命错误（任务加载失败）：替换整页 */
   const [error, setError] = useState<string | null>(null);
+  /** 操作错误（复制/保存/OCR 等）：编辑页内错误条，不破坏界面 */
+  const [actionError, setActionError] = useState<string | null>(null);
+  /** 动作执行中（防连点 + 处理中反馈） */
+  const [busy, setBusy] = useState(false);
   const [ocrResult, setOcrResult] = useState<OcrResultDto | null>(null);
   const [ocrBusy, setOcrBusy] = useState(false);
   const [tool, setTool] = useState<Tool>("rect");
@@ -207,23 +226,65 @@ export default function OverlayShot() {
   /** 撤销/重做栈深度（state：驱动按钮 disabled，避免 ref 不触发渲染） */
   const [stackCounts, setStackCounts] = useState({ undo: 0, redo: 0 });
 
-  // 加载任务帧
-  useEffect(() => {
-    const taskId = new URLSearchParams(window.location.search).get("task");
-    if (!taskId) {
-      setError("缺少任务参数");
-      return;
+  /** 装载任务（预热路径）：定位窗口 → 取帧 → 重置状态 → 渲染完成后自显 */
+  const loadTask = useCallback(async (info: TaskStartDto) => {
+    try {
+      const win = getCurrentWindow();
+      // 物理像素显式定位（多显示器/高 DPI 下与抓帧坐标系一致）
+      await win.setPosition(new PhysicalPosition(info.x, info.y));
+      await win.setSize(new PhysicalSize(info.width, info.height));
+      const t: TaskInfoDto = await screenshotTask(info.task_id);
+      // 重置上一任务残留状态（预热窗口复用，组件不重新 mount）
+      annsRef.current = [];
+      redoRef.current = [];
+      setStackCounts({ undo: 0, redo: 0 });
+      setError(null);
+      setActionError(null);
+      setOcrResult(null);
+      setCrop(null);
+      setRect(null);
+      setAnchor(null);
+      setStage("select");
+      setTask(t);
+      // 等背景帧渲染完成后才显示，避免黑帧闪烁
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      await win.show();
+      await win.setFocus();
+      hostLog("info", `overlay: 任务 ${info.task_id} 就绪显示`);
+    } catch (e) {
+      const msg = fmtErr(e);
+      hostLog("error", `loadTask 失败: ${msg}`);
+      setError(msg);
+      await getCurrentWindow().show().catch(() => undefined); // 出错也要展示错误页
     }
-    screenshotTask(taskId)
-      .then((t) => {
-        setTask(t);
-        setStage(t.mode === "ocr" ? "select" : "select");
-      })
-      .catch((e) => setError(String(e)));
   }, []);
 
+  // 任务装载：URL 参数（回退路径）+ nf:overlay:task 事件（预热路径）
+  useEffect(() => {
+    const taskId = new URLSearchParams(window.location.search).get("task");
+    if (taskId) {
+      screenshotTask(taskId)
+        .then((t) => setTask(t))
+        .catch((e) => setError(fmtErr(e)));
+    }
+    let unlisten: (() => void) | null = null;
+    // StrictMode 双挂载：迟到监听器立即移除（与 MainWorkbench 同款防护）
+    let cancelled = false;
+    void listen<TaskStartDto>("nf:overlay:task", (e) => {
+      void loadTask(e.payload);
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [loadTask]);
+
+  /** 完成/取消后隐藏自身（保留预热窗口，下次热键秒开） */
   const closeSelf = useCallback(() => {
-    getCurrentWindow().close();
+    void getCurrentWindow().hide();
   }, []);
 
   const cancel = useCallback(() => {
@@ -286,7 +347,7 @@ export default function OverlayShot() {
         void runOcr(c);
       }
     } catch (e) {
-      setError(String(e));
+      setError(fmtErr(e));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task, rect]);
@@ -682,33 +743,44 @@ export default function OverlayShot() {
   // ---------------- 动作 ----------------
 
   const finish = async (actions: string[]) => {
-    if (!task) return;
-    const image = compositeB64();
-    if (!image) return;
+    if (!task || busy) return;
+    setBusy(true);
     try {
-      const result = await screenshotFinish(task.task_id, {
-        image_b64: image,
-        actions,
-        pin_x: null,
-        pin_y: null,
-        annotations: annsRef.current,
-      });
-      if (result.pin_id) {
-        // 贴图窗口在主窗口恢复逻辑之外需要立即打开
-        const { openPinWindow } = await import("./overlayController");
-        await openPinWindow({
-          id: result.pin_id,
-          x: window.screen.width / 2 - 100,
-          y: window.screen.height / 2 - 100,
-          width: crop?.width ?? 200,
-          height: crop?.height ?? 200,
-          zoom: 1,
-          opacity: 1,
+      const image = compositeB64();
+      if (!image) return;
+      try {
+        const result = await screenshotFinish(task.task_id, {
+          image_b64: image,
+          actions,
+          pin_x: null,
+          pin_y: null,
+          annotations: annsRef.current,
         });
+        if (result.pin_id) {
+          // 贴图窗口在主窗口恢复逻辑之外需要立即打开
+          const { openPinWindow } = await import("./overlayController");
+          const pw = crop?.width ?? 200;
+          const ph = crop?.height ?? 200;
+          const dpr = window.devicePixelRatio || 1;
+          await openPinWindow({
+            id: result.pin_id,
+            // 物理像素居中（screen 是 CSS 像素，需乘 dpr）
+            x: Math.round((window.screen.width * dpr) / 2 - pw / 2),
+            y: Math.round((window.screen.height * dpr) / 2 - ph / 2),
+            width: pw,
+            height: ph,
+            zoom: 1,
+            opacity: 1,
+          });
+        }
+        closeSelf();
+      } catch (e) {
+        const msg = fmtErr(e);
+        hostLog("error", `finish(actions=${actions.join(",")}) 失败: ${msg}`);
+        setActionError(msg);
       }
-      closeSelf();
-    } catch (e) {
-      setError(String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -725,7 +797,9 @@ export default function OverlayShot() {
       });
       setOcrResult(result);
     } catch (e) {
-      setError(`OCR 失败: ${String(e)}`);
+      const msg = fmtErr(e);
+      hostLog("error", `ocr_recognize 失败: ${msg}`);
+      setActionError(`OCR 失败: ${msg}`);
     } finally {
       setOcrBusy(false);
     }
@@ -888,30 +962,46 @@ export default function OverlayShot() {
       )}
 
       <div className={styles.toolbar}>
-        <Button size="small" appearance="primary" onClick={() => void finish([])}>
-          完成
+        <Button size="small" appearance="primary" onClick={() => void finish([])} disabled={busy}>
+          {busy ? "处理中…" : "完成"}
         </Button>
-        <Button size="small" onClick={() => void finish(["copy"])}>
+        <Button size="small" onClick={() => void finish(["copy"])} disabled={busy}>
           复制
         </Button>
-        <Button size="small" onClick={() => void finish(["save"])}>
+        <Button size="small" onClick={() => void finish(["save"])} disabled={busy}>
           保存
         </Button>
-        <Button size="small" onClick={() => void finish(["pin"])}>
+        <Button size="small" onClick={() => void finish(["pin"])} disabled={busy}>
           贴图
         </Button>
-        <Button size="small" onClick={() => void runOcr()} disabled={ocrBusy}>
+        <Button size="small" onClick={() => void runOcr()} disabled={ocrBusy || busy}>
           OCR
         </Button>
-        <Button size="small" onClick={() => setStage("select")}>
+        <Button size="small" onClick={() => setStage("select")} disabled={busy}>
           重选
         </Button>
       </div>
 
-      {error && (
-        <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>
-          {error}
-        </Text>
+      {actionError && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            borderRadius: tokens.borderRadiusLarge,
+            backgroundColor: tokens.colorNeutralBackground2,
+            border: `1px solid ${tokens.colorPaletteRedBorder1}`,
+            maxWidth: "86vw",
+          }}
+        >
+          <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>
+            {actionError}
+          </Text>
+          <Button size="small" onClick={() => setActionError(null)}>
+            知道了
+          </Button>
+        </div>
       )}
     </div>
   );

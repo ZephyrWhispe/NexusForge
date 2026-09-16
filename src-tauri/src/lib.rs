@@ -19,6 +19,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::host_system_accent,
+            commands::host_log,
             commands::host_modules_status,
             commands::host_module_restart,
             commands::host_config_get,

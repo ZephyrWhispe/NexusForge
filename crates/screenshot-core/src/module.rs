@@ -233,6 +233,7 @@ impl HotkeyProvider for ScreenshotModule {
         vec![HotkeyAction {
             binding_id: "screenshot.region".into(),
             action: Arc::new(move || {
+                tracing::info!("截图快捷键动作触发：publish screenshot.overlay_requested");
                 bus.publish(Event::new(
                     "screenshot.overlay_requested",
                     "screenshot",

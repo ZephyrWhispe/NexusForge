@@ -4565,6 +4565,8 @@ name = "win-integration"
 version = "0.1.0"
 dependencies = [
  "host-core",
+ "image",
+ "tracing",
  "windows 0.58.0",
 ]
 

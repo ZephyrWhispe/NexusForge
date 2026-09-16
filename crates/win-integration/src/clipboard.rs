@@ -261,15 +261,75 @@ impl ClipboardPort for WindowsClipboard {
                 ClipContent::Text { text, .. } => write_text(text),
                 ClipContent::Files { paths } => write_files(paths),
                 ClipContent::Image { format, bytes, .. } if format == "dib" => write_dib(bytes),
-                ClipContent::Image { .. } => Err(AppError::module(
-                    "CLIPBOARD_WRITE_001",
-                    "不支持的图片格式",
-                    None,
-                )),
+                ClipContent::Image { format: _, bytes, .. } => {
+                    // Port 契约：png 等编码由 win-integration 转为系统 DIB（CF_DIB 32bpp）
+                    match png_to_dib(bytes) {
+                        Ok(dib) => write_dib(&dib),
+                        Err(e) => Err(e),
+                    }
+                }
             };
             let _ = CloseClipboard();
             r
         }
+    }
+}
+
+/// PNG → CF_DIB（BITMAPINFOHEADER 40 字节 + 32bpp BGRA bottom-up，alpha 置 255）
+fn png_to_dib(png: &[u8]) -> Result<Vec<u8>, AppError> {
+    let img = image::load_from_memory(png)
+        .map_err(|e| AppError::module("CLIPBOARD_WRITE_001", format!("PNG 解码失败: {e}"), None))?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+    let src = rgba.into_raw();
+    let mut out = Vec::with_capacity(40 + w * h * 4);
+    out.extend_from_slice(&40u32.to_le_bytes()); // biSize
+    out.extend_from_slice(&(w as u32).to_le_bytes()); // biWidth
+    out.extend_from_slice(&(h as u32).to_le_bytes()); // biHeight 正数 = bottom-up
+    out.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    out.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+    out.extend_from_slice(&0u32.to_le_bytes()); // biCompression = BI_RGB
+    out.extend_from_slice(&((w * h * 4) as u32).to_le_bytes()); // biSizeImage
+    out.extend_from_slice(&0u32.to_le_bytes()); // biXPelsPerMeter
+    out.extend_from_slice(&0u32.to_le_bytes()); // biYPelsPerMeter
+    out.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+    out.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+    // bottom-up：从最后一行开始；BGRA 字节序 + alpha 强制 255（GDI DIB 无有效 alpha）
+    for row in (0..h).rev() {
+        for px in 0..w {
+            let off = (row * w + px) * 4;
+            out.push(src[off + 2]); // B
+            out.push(src[off + 1]); // G
+            out.push(src[off]); // R
+            out.push(255);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_to_dib_header_and_pixel_layout() {
+        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+        // 2x1 的 PNG：单行两像素
+        let mut buf = std::io::Cursor::new(Vec::new());
+        PngEncoder::new(&mut buf)
+            .write_image(&[1, 2, 3, 255, 4, 5, 6, 255], 2, 1, ExtendedColorType::Rgba8)
+            .unwrap();
+        let dib = png_to_dib(&buf.into_inner()).unwrap();
+        assert_eq!(&dib[0..16], &[
+            40, 0, 0, 0, // biSize=40
+            2, 0, 0, 0, // width=2
+            1, 0, 0, 0, // height=1
+            1, 0, // planes
+            32, 0, // bpp
+        ]);
+        // 唯一一行像素：BGR + alpha 255（GDI 无有效 alpha）
+        assert_eq!(&dib[40..44], &[3, 2, 1, 255]);
+        assert_eq!(&dib[44..48], &[6, 5, 4, 255]);
     }
 }
 

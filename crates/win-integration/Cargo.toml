@@ -7,6 +7,9 @@ description = "Windows 原生能力适配层：全仓库唯一允许依赖 windo
 
 [dependencies]
 host-core = { path = "../host-core" }
+tracing.workspace = true
+# PNG → DIB（剪贴板图片回写，Port 契约：png 由本层转系统格式）
+image.workspace = true
 
 [dependencies.windows]
 version = "0.58"
