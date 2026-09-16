@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core"]
+members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,8 @@ sha2 = "0.10"
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # 发布配置（docs/impl/07 PERF2，阶段四启用前先保持默认可调试）
 [profile.dev]

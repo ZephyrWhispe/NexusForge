@@ -28,6 +28,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("clipboard.deleted", "剪贴板条目删除。payload: {id}"),
     ("clipboard.cleared", "剪贴板清空。payload: {removed}"),
     ("clipboard.quick_panel_toggled", "快速面板呼出/隐藏请求（全局快捷键触发）。payload: {}"),
+    ("screenshot.overlay_requested", "请求呼出截图选区覆盖层（快捷键/OCR 触发）。payload: {mode: shot|ocr}"),
     ("screenshot.taken", "截图任务完成。payload: {task_id, file?}"),
     ("screenshot.ocr_requested", "截图模块请求 OCR。payload: {task_id, frame_ref}"),
     ("ocr.completed", "OCR 完成。payload: {source_task_id?, result}"),
@@ -79,10 +80,10 @@ impl EventBus {
         let bus = Self {
             channels: RwLock::new(HashMap::new()),
         };
+        // 全部编译期登记主题一次性注册：修复此前仅注册 host.* 导致
+        // 模块事件（clipboard.* / screenshot.* / ocr.*）无法发布与转发的问题
         for (topic, _) in TOPIC_REGISTRY {
-            if topic.starts_with("host.") {
-                let _ = bus.register_topic(topic);
-            }
+            let _ = bus.register_topic(topic);
         }
         bus
     }

@@ -29,4 +29,20 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     # 来源应用识别（GetClipboardOwner → 进程名）
     "Win32_System_Threading",
+    # WinRT 异步（IAsyncOperation::get）
+    "Foundation",
+    # Windows.Media.Ocr（docs/impl/04 O2）
+    "Media_Ocr",
+    # Language（BCP-47）
+    "Globalization",
+    # SoftwareBitmap
+    "Graphics_Imaging",
+    # CryptographicBuffer（BGRA → IBuffer）
+    "Security_Cryptography",
+    # IBuffer（OCR 像素缓冲）/ CreateCopyFromBuffer
+    "Storage_Streams",
+    # AvailableRecognizerLanguages 返回 IVectorView<Language>
+    "Foundation_Collections",
+    # PrintWindow 被 Windows 元数据归入 Storage.Xps（windows 0.58 已知归置）
+    "Win32_Storage_Xps",
 ]

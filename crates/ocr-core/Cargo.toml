@@ -1,0 +1,15 @@
+[package]
+name = "ocr-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "OCR 识别模块：引擎抽象 + Windows.Media.Ocr + 识别管线（docs/impl/04）"
+
+[dependencies]
+host-core = { path = "../host-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+image.workspace = true
+base64.workspace = true
