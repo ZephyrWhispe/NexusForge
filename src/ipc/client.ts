@@ -393,3 +393,108 @@ export function kvmControlState(): Promise<ControlStateDto> {
 export function kvmReleaseControl(): Promise<void> {
   return invoke("kvm_release_control");
 }
+
+// ---------------- 密码库 IPC（docs/impl/05 V7 DTO 对齐）----------------
+
+/** 密码库状态（三态：uninitialized / locked / unlocked） */
+export interface VaultStatusDto {
+  state: "uninitialized" | "locked" | "unlocked";
+  lockout_remaining_secs: number;
+  /** 头部快照（KDF 参数 / vault_id，无机密） */
+  kdf: {
+    version: number;
+    vault_id: string;
+    kdf: { algo: string; m_cost_kib: number; t_cost: number; p_cost: number; salt_b64: string };
+    wrapped_dek: { nonce_b64: string; ct_b64: string };
+  } | null;
+}
+
+export type FieldKindDto = "password" | "url" | "note" | "otp" | "text";
+
+export interface EntryFieldDto {
+  key: string;
+  kind: FieldKindDto;
+  value: string;
+}
+
+export interface VaultEntryDto {
+  id: string;
+  folder_id: string | null;
+  title: string;
+  favorite: boolean;
+  fields: EntryFieldDto[];
+  totp_secret: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface VaultFolderDto {
+  id: string;
+  name: string;
+  created_at: number;
+}
+
+export interface PasswordPolicyDto {
+  length: number;
+  upper: boolean;
+  lower: boolean;
+  digits: boolean;
+  symbols: boolean;
+  avoid_ambiguous: boolean;
+}
+
+export function vaultStatus(): Promise<VaultStatusDto> {
+  return invoke("vault_status");
+}
+export function vaultCreate(masterPassword: string): Promise<VaultStatusDto["kdf"]> {
+  return invoke("vault_create", { masterPassword });
+}
+export function vaultUnlock(masterPassword: string): Promise<void> {
+  return invoke("vault_unlock", { masterPassword });
+}
+export function vaultLock(): Promise<void> {
+  return invoke("vault_lock");
+}
+export function vaultChangeMasterPassword(oldPassword: string, newPassword: string): Promise<unknown> {
+  return invoke("vault_change_master_password", { oldPassword, newPassword });
+}
+export function vaultFolders(): Promise<VaultFolderDto[]> {
+  return invoke("vault_folders");
+}
+export function vaultFolderCreate(name: string): Promise<VaultFolderDto> {
+  return invoke("vault_folder_create", { name });
+}
+export function vaultFolderRename(id: string, name: string): Promise<boolean> {
+  return invoke("vault_folder_rename", { id, name });
+}
+export function vaultFolderDelete(id: string): Promise<boolean> {
+  return invoke("vault_folder_delete", { id });
+}
+export function vaultEntries(folderId: string | null, search: string | null): Promise<VaultEntryDto[]> {
+  return invoke("vault_entries", { folderId, search });
+}
+export function vaultEntryGet(id: string): Promise<VaultEntryDto | null> {
+  return invoke("vault_entry_get", { id });
+}
+export function vaultEntryAdd(input: {
+  title: string;
+  folder_id: string | null;
+  favorite: boolean;
+  fields: EntryFieldDto[];
+  totp_secret: string | null;
+}): Promise<VaultEntryDto> {
+  return invoke("vault_entry_add", input);
+}
+export function vaultEntryUpdate(entry: VaultEntryDto): Promise<VaultEntryDto> {
+  return invoke("vault_entry_update", { entry });
+}
+export function vaultEntryDelete(id: string): Promise<boolean> {
+  return invoke("vault_entry_delete", { id });
+}
+export function vaultGeneratePassword(policy: PasswordPolicyDto): Promise<string> {
+  return invoke("vault_generate_password", { policy });
+}
+/** 当前 TOTP 码 + 剩余秒数 */
+export function vaultTotpNow(secret: string): Promise<[string, number]> {
+  return invoke("vault_totp_now", { secret });
+}

@@ -24,4 +24,5 @@ clipboard-core = { path = "../crates/clipboard-core" }
 screenshot-core = { path = "../crates/screenshot-core" }
 ocr-core = { path = "../crates/ocr-core" }
 kvm-core = { path = "../crates/kvm-core" }
+vault-core = { path = "../crates/vault-core" }
 base64.workspace = true

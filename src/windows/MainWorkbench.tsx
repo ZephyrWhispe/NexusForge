@@ -8,6 +8,7 @@ import StatusBar from "../layout/StatusBar";
 import MicaBackdrop from "../layout/MicaBackdrop";
 import ClipboardPanel from "../modules/clipboard/ClipboardPanel";
 import KvmPanel from "../modules/kvm/KvmPanel";
+import VaultPanel from "../modules/vault/VaultPanel";
 import SchemaForm from "../settings/SchemaForm";
 import { MODULES } from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
@@ -119,6 +120,7 @@ export default function MainWorkbench() {
   const current = MODULES.find((m) => m.id === active);
   const isClipboard = active === "clipboard";
   const isKvm = active === "kvm";
+  const isVault = active === "vault";
   const isSettings = active === "__settings";
 
   return (
@@ -151,13 +153,17 @@ export default function MainWorkbench() {
                       ? "历史 · 保留 30 天 · 敏感数据已加密（DPAPI）"
                       : isKvm
                         ? "发现 · 配对 · 会话 · 边缘切换（TCP+UDP+X25519）"
-                        : `${current?.phase} 模块将在对应阶段交付`}
+                        : isVault
+                          ? "Argon2id 信封 · AES-256-GCM 条目 · TOTP"
+                          : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
                   <ClipboardPanel search={search} group={group} onCounts={onCounts} />
                 ) : isKvm ? (
                   <KvmPanel />
+                ) : isVault ? (
+                  <VaultPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>

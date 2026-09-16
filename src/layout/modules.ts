@@ -15,7 +15,7 @@ export const MODULES: ModuleDef[] = [
   { id: "screenshot", name: "截图与录屏", phase: "P0", running: true },
   { id: "ocr", name: "OCR 与翻译", phase: "P0", running: true },
   { id: "proxy", name: "代理与 VPN", phase: "P1" },
-  { id: "vault", name: "安全与凭据", phase: "P1" },
+  { id: "vault", name: "安全与凭据", phase: "P1", running: true },
   { id: "file", name: "文件与存储", phase: "P1" },
   { id: "desktop", name: "桌面效率", phase: "P1" },
   { id: "kvm", name: "键鼠共享", phase: "P1", running: true },

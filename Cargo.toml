@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core"]
+members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core", "crates/vault-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,6 +28,12 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 rand = "0.8"
+
+# vault-core（docs/impl/05 V1–V6）
+argon2 = "0.5"
+aes-gcm = "0.10"
+hmac = "0.12"
+sha1 = "0.10"
 
 # 发布配置（docs/impl/07 PERF2，阶段四启用前先保持默认可调试）
 [profile.dev]

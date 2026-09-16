@@ -59,6 +59,22 @@ pub fn run() {
             commands::kvm_edge_map,
             commands::kvm_control_state,
             commands::kvm_release_control,
+            commands::vault_status,
+            commands::vault_create,
+            commands::vault_unlock,
+            commands::vault_lock,
+            commands::vault_change_master_password,
+            commands::vault_folders,
+            commands::vault_folder_create,
+            commands::vault_folder_rename,
+            commands::vault_folder_delete,
+            commands::vault_entries,
+            commands::vault_entry_get,
+            commands::vault_entry_add,
+            commands::vault_entry_update,
+            commands::vault_entry_delete,
+            commands::vault_generate_password,
+            commands::vault_totp_now,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

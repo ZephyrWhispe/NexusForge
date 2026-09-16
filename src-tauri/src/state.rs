@@ -26,6 +26,7 @@ use clipboard_core::module::ClipboardModule;
 use kvm_core::KvmModule;
 use ocr_core::OcrModule;
 use screenshot_core::ScreenshotModule;
+use vault_core::VaultModule;
 
 /// 命令行启动选项（docs/impl/01 S6.5）
 pub struct StartupOptions {
@@ -57,6 +58,7 @@ pub struct HostState {
     pub screenshot: Arc<ScreenshotModule>,
     pub ocr: Arc<OcrModule>,
     pub kvm: Arc<KvmModule>,
+    pub vault: Arc<VaultModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -118,6 +120,11 @@ impl HostState {
         config.register_schema("kvm", kvm.config_schema());
         registry.register(kvm.clone())?;
 
+        // ---- P1 安全与凭据（M5，docs/impl/05 V1–V7）----
+        let vault = Arc::new(VaultModule::new());
+        config.register_schema("vault", vault.config_schema());
+        registry.register(vault.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -128,6 +135,7 @@ impl HostState {
             screenshot,
             ocr,
             kvm,
+            vault,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })

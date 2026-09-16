@@ -44,6 +44,8 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("kvm.file_progress", "键鼠共享文件发送进度。payload: {transfer_id, sent_chunks, total_chunks}"),
     ("kvm.transfer_ack", "键鼠共享传输回执。payload: {transfer_id, ok, error?}"),
     ("kvm.control_state", "键鼠共享控制权迁移。payload: {role, device_id?, by?, reason?}"),
+    ("vault.state_changed", "密码库锁定状态迁移。payload: {state: uninitialized|locked|unlocked}"),
+    ("vault.entries_changed", "密码库条目/文件夹变更。payload: {action, id?}"),
 ];
 
 /// 统一事件信封（前端收到格式与此一致，M1 冻结契约）
