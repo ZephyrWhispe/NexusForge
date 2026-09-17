@@ -58,6 +58,8 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("notes.changed", "笔记库变更（创建/写入/删除/重命名/索引同步/卡片/画布）。payload: {action, path?}"),
     ("term.output", "终端输出批处理（8ms 窗口合并，单批 ≤ 64KB；内容敏感不进日志）。payload: {session_id, data, seq}"),
     ("term.exit", "终端会话结束。payload: {session_id, code?}"),
+    ("sys.metrics", "系统资源采样（1s 节流）。payload: {ts_ms, cpu, mem_used, mem_total, net_bps, disks}"),
+    ("sys.pkg_line", "包管理器命令输出行。payload: {source, action, line}"),
 ];
 
 /// 统一事件信封（前端收到格式与此一致，M1 冻结契约）

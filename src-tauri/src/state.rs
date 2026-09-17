@@ -11,8 +11,8 @@ use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
     CapturePort, ClipboardPort, ConptyPort, CryptoPort, DockerPipePort, HotkeyWinPort, InputHookPort,
-    InputInjectPort, OcrPort, Ports, RecycleBinPort, ScreenInfoPort, ShellPort, SysProxyPort, ThumbPort,
-    UsnIndexPort,
+    InputInjectPort, OcrPort, PerfPort, Ports, RecycleBinPort, ScreenInfoPort, ShellPort, SysProxyPort,
+    ThumbPort, UsnIndexPort,
 };
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
@@ -29,6 +29,7 @@ use clipboard_core::module::ClipboardModule;
 use desktop_core::DesktopModule;
 use editor_core::EditorModule;
 use notes_core::NotesModule;
+use sys_core::SysModule;
 use term_core::TermModule;
 use file_core::FileModule;
 use kvm_core::KvmModule;
@@ -74,6 +75,7 @@ pub struct HostState {
     pub editor: Arc<EditorModule>,
     pub notes: Arc<NotesModule>,
     pub term: Arc<TermModule>,
+    pub sys: Arc<SysModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -115,6 +117,8 @@ impl HostState {
         ports.register::<dyn ShellPort>(Arc::new(ShellOps));
         // T1 ConPTY（term-core，docs/impl/06 T）
         ports.register::<dyn ConptyPort>(Arc::new(win_integration::conpty::ConptyWin::new()));
+        // SY4 性能采样（sys-core，docs/impl/06 SY）
+        ports.register::<dyn PerfPort>(Arc::new(win_integration::perf::PdhWin::new()?));
         // T6 Docker Engine named pipe（docs/impl/06 T6）
         ports.register::<dyn DockerPipePort>(Arc::new(win_integration::docker::DockerPipeWin::new()));
         // PR4 系统代理（proxy-core，docs/impl/05 PR）：注册表 + WinINET 广播
@@ -194,6 +198,11 @@ impl HostState {
         config.register_schema("term", term.config_schema());
         registry.register(term.clone())?;
 
+        // ---- P2 系统管理（M12，docs/impl/06 SY1–SY4）----
+        let sys = Arc::new(SysModule::new(&app_data_dir));
+        config.register_schema("sys", sys.config_schema());
+        registry.register(sys.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -211,6 +220,7 @@ impl HostState {
             editor,
             notes,
             term,
+            sys,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })

@@ -31,4 +31,5 @@ desktop-core = { path = "../crates/desktop-core" }
 editor-core = { path = "../crates/editor-core" }
 notes-core = { path = "../crates/notes-core" }
 term-core = { path = "../crates/term-core" }
+sys-core = { path = "../crates/sys-core" }
 base64.workspace = true

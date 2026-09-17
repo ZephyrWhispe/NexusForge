@@ -191,6 +191,15 @@ pub fn run() {
             commands::term_docker_containers,
             commands::term_docker_lifecycle,
             commands::term_docker_logs,
+            // 系统管理（M12 SY1–SY4）
+            commands::sys_pkg_sources,
+            commands::sys_pkg_list,
+            commands::sys_pkg_cmd_preview,
+            commands::sys_pkg_action,
+            commands::sys_clean_targets,
+            commands::sys_clean_scan,
+            commands::sys_clean_execute,
+            commands::sys_metrics_history,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

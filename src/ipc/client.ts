@@ -1126,3 +1126,75 @@ export function termDockerLifecycle(id: string, start: boolean): Promise<void> {
 export function termDockerLogs(id: string, tail: number): Promise<string> {
   return invoke("term_docker_logs", { id, tail });
 }
+
+// ======================== 系统管理（M12 SY，docs/impl/06） ========================
+
+export interface PkgSourceDto {
+  id: string;
+  label: string;
+  available: boolean;
+}
+export interface PkgEntryDto {
+  id: string;
+  name: string;
+  version: string;
+  available: string | null;
+  source: string;
+}
+export interface CleanTargetDto {
+  id: string;
+  label: string;
+  dir: string;
+  exts: string[];
+  need_admin: boolean;
+  safe_default: boolean;
+  optional: boolean;
+}
+export interface CleanScanItemDto {
+  target_id: string;
+  label: string;
+  need_admin: boolean;
+  safe_default: boolean;
+  files: number;
+  reclaim_bytes: number;
+  skipped_recent: number;
+  missing: boolean;
+}
+export interface DiskPointDto {
+  mount: string;
+  used: number;
+  total: number;
+}
+export interface MetricsPointDto {
+  ts_ms: number;
+  cpu: number;
+  mem_used: number;
+  mem_total: number;
+  net_bps: number;
+  disks: DiskPointDto[];
+}
+
+export function sysPkgSources(): Promise<PkgSourceDto[]> {
+  return invoke("sys_pkg_sources");
+}
+export function sysPkgList(): Promise<PkgEntryDto[]> {
+  return invoke("sys_pkg_list");
+}
+export function sysPkgCmdPreview(source: string, action: string, packageId: string): Promise<string> {
+  return invoke("sys_pkg_cmd_preview", { source, action, packageId });
+}
+export function sysPkgAction(source: string, action: string, packageId: string): Promise<string[]> {
+  return invoke("sys_pkg_action", { source, action, packageId });
+}
+export function sysCleanTargets(): Promise<CleanTargetDto[]> {
+  return invoke("sys_clean_targets");
+}
+export function sysCleanScan(): Promise<CleanScanItemDto[]> {
+  return invoke("sys_clean_scan");
+}
+export function sysCleanExecute(selectedIds: string[], recycle: boolean): Promise<number> {
+  return invoke("sys_clean_execute", { selectedIds, recycle });
+}
+export function sysMetricsHistory(): Promise<MetricsPointDto[]> {
+  return invoke("sys_metrics_history");
+}

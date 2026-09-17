@@ -38,6 +38,10 @@ features = [
     "Win32_System_IO",
     # 系统代理（proxy-core PR4）：注册表读写 + WinINET 广播
     "Win32_System_Registry",
+    # 性能采样（sys-core SY4）：PDH CPU/网络
+    "Win32_System_Performance",
+    # 内存/磁盘空间（sys-core SY4）：GlobalMemoryStatusEx/GetDiskFreeSpaceExW
+    "Win32_System_SystemInformation",
     "Win32_Networking_WinInet",
     "Win32_Security",
     # DPAPI（docs/impl/02 C4）

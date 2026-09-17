@@ -229,6 +229,27 @@ pub trait DockerPipePort: Port {
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<HttpResp, AppError>;
 }
 
+/// 磁盘空间（sys-core SY4）
+#[derive(Clone, Debug, Serialize)]
+pub struct DiskSpace {
+    /// 盘符如 "C:\\"
+    pub mount: String,
+    pub free: u64,
+    pub total: u64,
+}
+
+/// 性能采样（win-integration/perf.rs：PDH + GlobalMemoryStatusEx，SY4；实现内部 1s 采样线程缓存最新值）
+pub trait PerfPort: Port {
+    /// CPU 使用率 0-100
+    fn cpu_percent(&self) -> Result<f64, AppError>;
+    /// (已用, 总量) 字节
+    fn mem_bytes(&self) -> Result<(u64, u64), AppError>;
+    /// 各盘空间
+    fn disk_spaces(&self) -> Result<Vec<DiskSpace>, AppError>;
+    /// 网络总吞吐（字节/秒，全部接口求和）
+    fn net_bps(&self) -> Result<f64, AppError>;
+}
+
 /// RegisterHotKey 底层封装（宿主 HotkeyManager 专用，S6.2 使用）
 pub trait HotkeyWinPort: Port {
     fn register(&self, hotkey_id: i32, modifiers: u32, vk: u32) -> Result<(), AppError>;

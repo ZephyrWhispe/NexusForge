@@ -15,6 +15,7 @@ import DesktopPanel from "../modules/desktop/DesktopPanel";
 import EditorPanel from "../modules/editor/EditorPanel";
 import NotesPanel from "../modules/notes/NotesPanel";
 import TerminalPanel from "../modules/term/TerminalPanel";
+import SysPanel from "../modules/sys/SysPanel";
 import { toggleLauncher } from "./launcherController";
 import { toggleNoteBar } from "./notebarController";
 import SchemaForm from "../settings/SchemaForm";
@@ -137,6 +138,7 @@ export default function MainWorkbench() {
   const isEditor = active === "editor";
   const isNotes = active === "notes";
   const isTerm = active === "term";
+  const isSys = active === "sys";
   const isSettings = active === "__settings";
 
   return (
@@ -183,7 +185,9 @@ export default function MainWorkbench() {
                                     ? "Markdown 库 · [[双链]] 反链 · SM-2 复习 · 自由画布"
                                     : isTerm
                                       ? "ConPTY 终端 · WSL · SSH/SFTP（TOFU） · Docker"
-                                      : `${current?.phase} 模块将在对应阶段交付`}
+                                      : isSys
+                                        ? "资源监控 · 系统清理（白名单） · winget/scoop/choco"
+                                        : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
@@ -204,6 +208,8 @@ export default function MainWorkbench() {
                   <NotesPanel />
                 ) : isTerm ? (
                   <TerminalPanel />
+                ) : isSys ? (
+                  <SysPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>

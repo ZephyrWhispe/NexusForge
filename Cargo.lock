@@ -2873,6 +2873,7 @@ dependencies = [
  "screenshot-core",
  "serde",
  "serde_json",
+ "sys-core",
  "tauri",
  "tauri-build",
  "term-core",
@@ -5023,6 +5024,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "sys-core"
+version = "0.1.0"
+dependencies = [
+ "host-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
