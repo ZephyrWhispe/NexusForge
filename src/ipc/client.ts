@@ -661,3 +661,96 @@ export function fileRenamePlan(
 export function fileRenameApply(plans: RenamePlanDto[]): Promise<number> {
   return invoke("file_rename_apply", { plans });
 }
+
+// ======================== 代理（M7 PR，docs/impl/05） ========================
+
+export interface ProxyStatusDto {
+  mode: "off" | "system" | "tun";
+  kernel_running: boolean;
+  kernel_id: string | null;
+  inbound_port: number;
+  nodes_total: number;
+  subs_total: number;
+  admin: boolean;
+  wintun_installed: boolean;
+  kernel_installed: boolean;
+  kernel_version: string | null;
+  has_backup: boolean;
+  restored_last_run: boolean;
+}
+
+export interface ProxySubDto {
+  id: string;
+  name: string;
+  url: string;
+  updated_ms: number;
+  node_count: number;
+}
+
+export interface ProxyNodeDto {
+  tag: string;
+  kind: string;
+  server: string;
+  port: number;
+  sub_id: string;
+}
+
+export interface ProxyNodeDelayDto {
+  tag: string;
+  sub_id: string;
+  /** TCP 连接延迟毫秒；null = 3s 超时不可达 */
+  ms: number | null;
+}
+
+export interface ProxyLogLineDto {
+  ts_ms: number;
+  text: string;
+}
+
+export interface ProxyManifestDto {
+  kernel_id: string;
+  kernel_version: string;
+  sha256: string;
+  installed_at: number;
+  channel: string;
+}
+
+export function proxyStatus(): Promise<ProxyStatusDto> {
+  return invoke("proxy_status");
+}
+export function proxyKernelInstall(version?: string | null): Promise<ProxyManifestDto> {
+  return invoke("proxy_kernel_install", { version });
+}
+export function proxyWintunInstall(): Promise<void> {
+  return invoke("proxy_wintun_install");
+}
+export function proxySubs(): Promise<ProxySubDto[]> {
+  return invoke("proxy_subs");
+}
+export function proxySubAdd(name: string, url: string): Promise<ProxySubDto> {
+  return invoke("proxy_sub_add", { name, url });
+}
+export function proxySubRemove(id: string): Promise<boolean> {
+  return invoke("proxy_sub_remove", { id });
+}
+export function proxySubUpdate(id: string): Promise<ProxySubDto> {
+  return invoke("proxy_sub_update", { id });
+}
+export function proxyNodes(): Promise<ProxyNodeDto[]> {
+  return invoke("proxy_nodes");
+}
+export function proxyDirectRules(): Promise<string[]> {
+  return invoke("proxy_direct_rules");
+}
+export function proxySetDirectRules(rules: string[]): Promise<void> {
+  return invoke("proxy_set_direct_rules", { rules });
+}
+export function proxySetMode(mode: "off" | "system" | "tun"): Promise<void> {
+  return invoke("proxy_set_mode", { mode });
+}
+export function proxyDelayTest(): Promise<ProxyNodeDelayDto[]> {
+  return invoke("proxy_delay_test");
+}
+export function proxyLogs(limit?: number): Promise<ProxyLogLineDto[]> {
+  return invoke("proxy_logs", { limit });
+}

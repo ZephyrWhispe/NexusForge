@@ -10,6 +10,7 @@ import ClipboardPanel from "../modules/clipboard/ClipboardPanel";
 import KvmPanel from "../modules/kvm/KvmPanel";
 import VaultPanel from "../modules/vault/VaultPanel";
 import FilePanel from "../modules/file/FilePanel";
+import ProxyPanel from "../modules/proxy/ProxyPanel";
 import SchemaForm from "../settings/SchemaForm";
 import { MODULES } from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
@@ -123,6 +124,7 @@ export default function MainWorkbench() {
   const isKvm = active === "kvm";
   const isVault = active === "vault";
   const isFile = active === "file";
+  const isProxy = active === "proxy";
   const isSettings = active === "__settings";
 
   return (
@@ -159,7 +161,9 @@ export default function MainWorkbench() {
                           ? "Argon2id 信封 · AES-256-GCM 条目 · TOTP"
                           : isFile
                             ? "浏览 · 操作队列（断点续传） · 冲突策略 · 搜索 · 批量重命名"
-                            : `${current?.phase} 模块将在对应阶段交付`}
+                            : isProxy
+                              ? "sing-box 内核 · 系统代理/TUN · 订阅解析 · 崩溃自动还原"
+                              : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
@@ -170,6 +174,8 @@ export default function MainWorkbench() {
                   <VaultPanel />
                 ) : isFile ? (
                   <FilePanel />
+                ) : isProxy ? (
+                  <ProxyPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>

@@ -10,9 +10,33 @@ use tauri::Manager;
 pub fn run() {
     let opts = StartupOptions::from_env();
 
-    // --restore-proxy：紧急还原系统代理后退出（真实实现在阶段二 PR4 接入）
+    // --restore-proxy：紧急还原系统代理后退出（崩溃抢救通道，还原挂点之三）
     if opts.restore_proxy {
-        eprintln!("[NexusForge] --restore-proxy：系统代理还原将在代理模块交付后生效。");
+        // Tauri 壳尚未启动：手动拼 app data 目录（须与 tauri.conf.json identifier 一致）
+        match std::env::var("APPDATA")
+            .map(|base| std::path::PathBuf::from(base).join("com.nexusforge.app").join("proxy"))
+        {
+            Ok(proxy_dir) => {
+                let sp = win_integration::sysproxy::WindowsSysProxy;
+                // 端口读持久化状态（用于识别我们的标记值 127.0.0.1:{port}）；无记录退回默认
+                let port = std::fs::read(proxy_dir.join("proxy_state.json"))
+                    .ok()
+                    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+                    .and_then(|v| v.get("mixed_port").and_then(|p| p.as_u64()))
+                    .unwrap_or(7890) as u16;
+                match proxy_core::sysproxy::restore_if_ours(&proxy_dir, &sp, port) {
+                    Ok(true) => println!("[NexusForge] --restore-proxy：残留系统代理已还原。"),
+                    Ok(false) => {
+                        println!("[NexusForge] --restore-proxy：无残留代理（用户已自行修改），备份已清理。")
+                    }
+                    Err(e) => {
+                        eprintln!("[NexusForge] --restore-proxy：标记值还原失败（{e}），退回备份还原。");
+                        proxy_core::sysproxy::restore_quiet(&proxy_dir, &sp);
+                    }
+                }
+            }
+            Err(_) => eprintln!("[NexusForge] --restore-proxy：无法定位 APPDATA 目录。"),
+        }
         std::process::exit(0);
     }
 
@@ -92,6 +116,19 @@ pub fn run() {
             commands::file_drivers,
             commands::file_rename_plan,
             commands::file_rename_apply,
+            commands::proxy_status,
+            commands::proxy_kernel_install,
+            commands::proxy_wintun_install,
+            commands::proxy_subs,
+            commands::proxy_sub_add,
+            commands::proxy_sub_remove,
+            commands::proxy_sub_update,
+            commands::proxy_nodes,
+            commands::proxy_direct_rules,
+            commands::proxy_set_direct_rules,
+            commands::proxy_set_mode,
+            commands::proxy_delay_test,
+            commands::proxy_logs,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

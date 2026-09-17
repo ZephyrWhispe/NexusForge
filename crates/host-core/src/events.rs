@@ -49,6 +49,9 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("kvm.control_state", "键鼠共享控制权迁移。payload: {role, device_id?, by?, reason?}"),
     ("vault.state_changed", "密码库锁定状态迁移。payload: {state: uninitialized|locked|unlocked}"),
     ("vault.entries_changed", "密码库条目/文件夹变更。payload: {action, id?}"),
+    ("proxy.state_changed", "代理模式/内核状态迁移。payload: {mode, kernel_running, kernel_id?, inbound_port?}"),
+    ("proxy.log_line", "代理内核日志行。payload: {line}"),
+    ("proxy.nodes_changed", "订阅/节点列表变更。payload: {sub_id?, total}"),
 ];
 
 /// 统一事件信封（前端收到格式与此一致，M1 冻结契约）

@@ -184,6 +184,27 @@ pub trait ConptyPort: Port {
     fn spawn(&self, cfg: TermCfg) -> Result<PtyHandle, AppError>;
 }
 
+/// 系统代理当前值（HKCU `...\Internet Settings` 投影，docs/impl/05 PR4）
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SysProxyState {
+    pub enable: bool,
+    /// "127.0.0.1:7890" 或 "http=...;https=..." 形式
+    pub server: String,
+    /// 分号分隔的例外列表（`<local>` 表示本地主机名直连）
+    pub bypass: String,
+}
+
+/// 系统代理设置（win-integration/sysproxy.rs：注册表读写 + WinINET 广播；proxy-core PR4 使用）
+pub trait SysProxyPort: Port {
+    fn read(&self) -> Result<SysProxyState, AppError>;
+    /// 写 ProxyEnable/ProxyServer/ProxyOverride（不广播；写后必须调 [`refresh`](Self::refresh)）
+    fn write(&self, state: &SysProxyState) -> Result<(), AppError>;
+    /// InternetSetOption 广播立即生效
+    fn refresh(&self) -> Result<(), AppError>;
+    /// 当前进程是否以管理员运行（PR5 TUN 前置条件）
+    fn is_admin(&self) -> bool;
+}
+
 /// RegisterHotKey 底层封装（宿主 HotkeyManager 专用，S6.2 使用）
 pub trait HotkeyWinPort: Port {
     fn register(&self, hotkey_id: i32, modifiers: u32, vk: u32) -> Result<(), AppError>;

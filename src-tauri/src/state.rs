@@ -11,7 +11,7 @@ use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
     CapturePort, ClipboardPort, CryptoPort, HotkeyWinPort, InputHookPort, InputInjectPort, OcrPort,
-    Ports, RecycleBinPort, ScreenInfoPort, ThumbPort, UsnIndexPort,
+    Ports, RecycleBinPort, ScreenInfoPort, SysProxyPort, SysProxyState, ThumbPort, UsnIndexPort,
 };
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
@@ -21,11 +21,13 @@ use win_integration::dpapi::Dpapi;
 use win_integration::hotkey::HotkeyWin;
 use win_integration::input::{InputHookWin, InputInjectWin, ScreenInfoWin};
 use win_integration::ocr::WinOcr;
+use win_integration::sysproxy::WindowsSysProxy;
 
 use clipboard_core::module::ClipboardModule;
 use file_core::FileModule;
 use kvm_core::KvmModule;
 use ocr_core::OcrModule;
+use proxy_core::ProxyModule;
 use screenshot_core::ScreenshotModule;
 use vault_core::VaultModule;
 
@@ -33,7 +35,7 @@ use vault_core::VaultModule;
 pub struct StartupOptions {
     /// `--safe-mode`：只启动宿主，不 init/start 任何模块
     pub safe_mode: bool,
-    /// `--restore-proxy`：紧急还原系统代理后退出（真实还原在阶段二 PR4 接入）
+    /// `--restore-proxy`：紧急还原系统代理后退出（真实实现在 lib.rs，PR4 接入）
     pub restore_proxy: bool,
 }
 
@@ -61,6 +63,7 @@ pub struct HostState {
     pub kvm: Arc<KvmModule>,
     pub vault: Arc<VaultModule>,
     pub file: Arc<FileModule>,
+    pub proxy: Arc<ProxyModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -98,6 +101,19 @@ impl HostState {
         ports.register::<dyn ThumbPort>(Arc::new(win_integration::shell::ShellThumb));
         ports.register::<dyn RecycleBinPort>(Arc::new(win_integration::shell::RecycleBin));
         ports.register::<dyn UsnIndexPort>(Arc::new(win_integration::usn::UsnIndex::new()));
+        // PR4 系统代理（proxy-core，docs/impl/05 PR）：注册表 + WinINET 广播
+        let sys_proxy: Arc<dyn SysProxyPort> = Arc::new(WindowsSysProxy);
+        ports.register::<dyn SysProxyPort>(sys_proxy.clone());
+
+        // 崩溃恢复钩子：panic 时还原系统代理（断网最高危场景兜底，docs/impl/05 PR 风险标注）
+        // 另两处还原：ProxyModule::stop（正常退出）+ lib.rs `--restore-proxy`（紧急抢救）
+        {
+            let hook_dir = app_data_dir.join("proxy");
+            let hook_sp = sys_proxy;
+            crash::add_recovery_hook(Arc::new(move || {
+                proxy_core::sysproxy::restore_quiet(&hook_dir, hook_sp.as_ref());
+            }));
+        }
 
         let config = Arc::new(ConfigStore::new(app_data_dir.join("config"), bus.clone()));
         let _global = config.load()?;
@@ -136,6 +152,11 @@ impl HostState {
         config.register_schema("file", file.config_schema());
         registry.register(file.clone())?;
 
+        // ---- P1 网络代理（M7，docs/impl/05 PR1–PR6；合规：不内置节点/订阅）----
+        let proxy = Arc::new(ProxyModule::new());
+        config.register_schema("proxy", proxy.config_schema());
+        registry.register(proxy.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -148,6 +169,7 @@ impl HostState {
             kvm,
             vault,
             file,
+            proxy,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })
