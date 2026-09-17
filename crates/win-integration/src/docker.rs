@@ -3,7 +3,6 @@
 //! Content-Length / chunked 两种响应均支持；v1 同步阻塞实现（IPC 层 spawn_blocking）。
 
 use std::os::windows::ffi::OsStrExt;
-use std::time::Duration;
 
 use host_core::error::AppError;
 use host_core::ports::{DockerPipePort, HttpResp};

@@ -28,6 +28,45 @@ pub struct PdfOpResult {
     pub size: u64,
 }
 
+/// 构造 n 页简单 PDF（验收测试用：每页单内容流 + Helvetica F1）
+pub fn make_test_pdf(path: &Path, pages: u32, text: &str) -> Result<()> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.add_object(dictionary! {
+        "Type" => "Pages",
+        "Kids" => Object::Array(vec![]),
+        "Count" => Object::Integer(0),
+    });
+    for i in 1..=pages {
+        let content = Stream::new(
+            dictionary! {},
+            format!("BT /F1 12 Tf 72 720 Td (Page {} {text}) Tj ET", i).into_bytes(),
+        );
+        let content_id = doc.add_object(content);
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792)]),
+            "Contents" => Object::Reference(content_id),
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" } }
+            },
+        });
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            if let Ok(Object::Array(kids)) = d.get_mut(b"Kids") {
+                kids.push(Object::Reference(page_id));
+            }
+            d.set("Count", Object::Integer(i as i64));
+        }
+    }
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => Object::Reference(pages_id),
+    });
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+    doc.save(path).map_err(EditorError::Io)?;
+    Ok(())
+}
+
 /// 解析并取页数/大小
 pub fn info(path: &Path) -> Result<PdfInfo> {
     let doc = load(path)?;

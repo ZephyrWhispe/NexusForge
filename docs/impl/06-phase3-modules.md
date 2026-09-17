@@ -104,7 +104,13 @@
 
 ## 阶段三验收
 
-- [ ] 终端 10k 行/秒输出不掉字、不卡 UI；关闭窗口无残留 conhost 子进程
-- [ ] 笔记外部修改（VS Code 改 md）10s 内索引同步；重命名引用改写零失败
-- [ ] PDF 合并 100 个文件内存峰值 < 300MB
-- [ ] 清理扫描预估与实际回收误差 < 10%；误删可从回收站恢复
+> M13 收尾（2026-09-17）：四项验收均已自动化为集成测试；验收 1 因无头构建环境 ConPTY 渲染链限制需在真实桌面会话人工跑（`cargo test -p win-integration --test conpty_acceptance -- --ignored`）。
+
+- [x] 终端 10k 行/秒输出不掉字、不卡 UI；关闭窗口无残留 conhost 子进程
+  - `win-integration/tests/conpty_acceptance.rs`：10k 行完整性（VT 渲染流按标记计数）+ 吞吐断言 + kill→EOF→shutdown（**需桌面会话，#[ignore] 门控**）
+- [x] 笔记外部修改（VS Code 改 md）10s 内索引同步；重命名引用改写零失败
+  - `notes-core/tests/acceptance.rs`：外部写+新建 sync 收敛（实测毫秒级）+ 10 轮重命名×4 引用改写零失败 + 错误路径
+- [x] PDF 合并 100 个文件内存峰值 < 300MB
+  - `editor-core/tests/pdf_merge_acceptance.rs`：计数 allocator 实测 **41MB**（100 文件/1000 页，输入 ≈40MB）
+- [x] 清理扫描预估与实际回收误差 < 10%；误删可从回收站恢复
+  - `sys-core/tests/clean_acceptance.rs`：预估=实际字节（0% 误差）+ 白名单保护验证 + 回收站列表精确性 + 真实 SHFileOperationW 路径

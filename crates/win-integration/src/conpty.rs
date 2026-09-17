@@ -17,7 +17,7 @@ use host_core::ports::{ConptyPort, PtyHandle, TermCfg};
 use tokio::sync::mpsc;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
+    CloseHandle, HANDLE, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::Console::{
@@ -27,7 +27,7 @@ use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList,
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
 };
 /// 单会话资源（Arc 共享；kill 闭包与最后一次 Drop 幂等触发关闭）
@@ -120,16 +120,10 @@ fn make_pipe() -> Result<(HANDLE, HANDLE), AppError> {
 
 impl ConptyPort for ConptyWin {
     fn spawn(&self, cfg: TermCfg) -> Result<PtyHandle, AppError> {
-        // 1. 两条匿名管道：input（我们写 w → PTY 读 r）、output（PTY 写 w → 我们读 r）
+        // 1. 两条匿名管道（两端可继承，EchoCon 模式）：input（我们写 w → PTY 读 r）、
+        //    output（PTY 写 w → 我们读 r）
         let (in_read, in_write) = make_pipe()?;
         let (out_read, out_write) = make_pipe()?;
-        // 我们持有的两端摘除继承位（防子进程持有导致 EOF 永不到来）
-        unsafe {
-            SetHandleInformation(in_write, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                .map_err(|e| AppError::module("TERM_PTY_001", format!("SetHandleInformation(in_write): {e}"), None))?;
-            SetHandleInformation(out_read, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                .map_err(|e| AppError::module("TERM_PTY_001", format!("SetHandleInformation(out_read): {e}"), None))?;
-        }
 
         // 2. CreatePseudoConsole（PTY 取走 in_read / out_write）
         let size = COORD { X: cfg.cols.max(1) as i16, Y: cfg.rows.max(1) as i16 };
@@ -137,7 +131,7 @@ impl ConptyPort for ConptyWin {
             CreatePseudoConsole(size, in_read, out_write, 0)
                 .map_err(|e| AppError::module("TERM_PTY_002", format!("CreatePseudoConsole 失败: {e}"), None))?
         };
-        // 子端句柄已被 ConPTY 复制，关闭我们的副本
+        // ConPTY 内部已复制句柄，关闭我们的副本（EchoCon 模式）
         unsafe {
             let _ = CloseHandle(in_read);
             let _ = CloseHandle(out_write);
@@ -145,7 +139,7 @@ impl ConptyPort for ConptyWin {
 
         // 3. 子进程（shell 为完整命令行）
         let env_block = build_env_block(&cfg.env);
-        let (h_process, h_thread) = unsafe { spawn_child(&cfg, hpc, env_block.as_ptr()) }?;
+        let (h_process, h_thread) = unsafe { spawn_child(&cfg, hpc, env_block.as_deref()) }?;
 
         let inner = Arc::new(SessionInner {
             hpc,
@@ -154,6 +148,23 @@ impl ConptyPort for ConptyWin {
             in_write,
             closed: AtomicBool::new(false),
         });
+
+        // 子进程退出监视线程：cmd 等自然退出后 ConPTY 不会自动关闭（hpc 与 hpc 绑定而非子进程），
+        // 必须主动 shutdown → ClosePseudoConsole → 读端 EOF → 会话收尾（幂等，kill 路径共享）
+        let watcher = Arc::downgrade(&inner);
+        std::thread::Builder::new()
+            .name("nf-pty-watch".into())
+            .spawn(move || {
+                // Arc 降级持有：inner 被 kill/reader 回收后监视线程自动结束
+                while let Some(arc) = watcher.upgrade() {
+                    let wr = unsafe { WaitForSingleObject(arc.h_process, INFINITE) };
+                    // 自然退出/kill 的统一关闭入口（幂等）
+                    let _ = wr;
+                    arc.shutdown();
+                    return;
+                }
+            })
+            .ok();
 
         // 4. 输出线程：同步 ReadFile → blocking_send（EOF = ClosePseudoConsole 触发）
         let (out_tx, output_rx) = mpsc::channel::<Vec<u8>>(512);
@@ -166,16 +177,15 @@ impl ConptyPort for ConptyWin {
                 let mut buf = [0u8; 8192];
                 loop {
                     let mut n: u32 = 0;
-                    let ok = unsafe {
+                    let r = unsafe {
                         windows::Win32::Storage::FileSystem::ReadFile(
                             out.0,
                             Some(&mut buf),
                             Some(&mut n),
                             None,
                         )
-                        .is_ok()
                     };
-                    if !ok || n == 0 {
+                    if r.is_err() || n == 0 {
                         break;
                     }
                     if out_tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
@@ -247,9 +257,13 @@ pub(crate) fn conpty_exit_code(inner: &Arc<SessionInner>) -> Option<u32> {
     inner.exit_code()
 }
 
-/// 环境块：继承当前进程 + cfg.env 覆盖（终端必须保留 PATH 等）；UTF-16 排序块
-fn build_env_block(env: &HashMap<String, String>) -> Vec<u16> {
-    let mut merged: HashMap<String, String> = std::env::vars().collect();
+/// 环境块：cfg.env 为空 → None（子进程继承父环境，终端语义正确）；
+/// 非空 → 父环境 + cfg.env 覆盖（过滤以 '=' 开头的系统隐藏变量如 =C:）
+fn build_env_block(env: &HashMap<String, String>) -> Option<Vec<u16>> {
+    if env.is_empty() {
+        return None; // CreateProcessW lpenvironment=None = 继承
+    }
+    let mut merged: HashMap<String, String> = std::env::vars().filter(|(k, _)| !k.starts_with('=')).collect();
     for (k, v) in env {
         merged.insert(k.clone(), v.clone());
     }
@@ -258,19 +272,23 @@ fn build_env_block(env: &HashMap<String, String>) -> Vec<u16> {
     let mut block = Vec::new();
     for (k, v) in pairs {
         block.extend(k.encode_utf16());
-        block.push(0);
+        block.push(b'=' as u16); // 环境块格式：NAME=VALUE\0
         block.extend(v.encode_utf16());
         block.push(0);
     }
     block.push(0);
-    block
+    Some(block)
 }
 
 /// STARTUPINFOEXW + PSEUDOCONSOLE 属性创建子进程；返回 (hProcess, hThread)
 ///
 /// # Safety
-/// `env_block` 必须是以双 NUL 结尾的 UTF-16 块指针；hpc 必须有效
-unsafe fn spawn_child(cfg: &TermCfg, hpc: HPCON, env_block: *const u16) -> Result<(HANDLE, HANDLE), AppError> {
+/// `env_block` 若为 Some 必须是以双 NUL 结尾的 UTF-16 块指针；hpc 必须有效
+unsafe fn spawn_child(
+    cfg: &TermCfg,
+    hpc: HPCON,
+    env_block: Option<&[u16]>,
+) -> Result<(HANDLE, HANDLE), AppError> {
     // 属性列表（1 项：PSEUDOCONSOLE）；先取尺寸（null 调用返回错误但写回 size）
     let mut list_size: usize = 0;
     let _ = InitializeProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST(std::ptr::null_mut()), 1, 0, &mut list_size);
@@ -282,7 +300,8 @@ unsafe fn spawn_child(cfg: &TermCfg, hpc: HPCON, env_block: *const u16) -> Resul
         list,
         0,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-        Some(hpc.0 as *mut core::ffi::c_void),
+        // lpValue = 指向句柄值的指针（不是句柄值本身当地址）
+        Some(std::ptr::from_ref(&hpc.0).cast::<core::ffi::c_void>()),
         std::mem::size_of::<usize>(),
         None,
         None,
@@ -307,14 +326,19 @@ unsafe fn spawn_child(cfg: &TermCfg, hpc: HPCON, env_block: *const u16) -> Resul
     si.lpAttributeList = list;
     let mut pi = PROCESS_INFORMATION::default();
 
+    // env=None（继承父环境）时不设 CREATE_UNICODE_ENVIRONMENT——
+    // 实测：NULL 环境块 + UNICODE flag 会导致 console 子进程 0xC0000142 初始化失败
+    let flags = EXTENDED_STARTUPINFO_PRESENT
+        | if env_block.is_some() { CREATE_UNICODE_ENVIRONMENT } else { Default::default() };
+
     let ok = CreateProcessW(
         PCWSTR::null(),
         PWSTR(cmd.as_mut_ptr()),
         None,
         None,
         false,
-        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-        Some(env_block.cast()),
+        flags,
+        env_block.map(|b| b.as_ptr() as *const core::ffi::c_void),
         cwd_wide
             .as_ref()
             .map(|v| PCWSTR::from_raw(v.as_ptr()))

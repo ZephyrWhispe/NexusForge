@@ -4,7 +4,7 @@
 //! 清理扫描/包管理均不在此处（见 clean.rs / pkg.rs）。
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use host_core::ports::PerfPort;
 use serde::{Deserialize, Serialize};

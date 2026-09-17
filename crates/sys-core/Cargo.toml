@@ -10,3 +10,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# 验收测试（docs/impl/06 尾部清单）：真实回收站路径
+win-integration = { path = "../win-integration" }
