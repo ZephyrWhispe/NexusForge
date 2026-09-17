@@ -139,3 +139,26 @@ impl RecycleBinPort for RecycleBin {
         Ok(paths.len() as u32)
     }
 }
+
+/// Shell 启动（ShellExecuteW，desktop-core D1 启动器经 ShellPort 使用）
+pub struct ShellOps;
+
+impl host_core::ports::ShellPort for ShellOps {
+    fn shell_execute(&self, path: &str) -> Result<(), AppError> {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::{w, HSTRING};
+        let file = HSTRING::from(path);
+        let h = unsafe { ShellExecuteW(None, w!("open"), &file, None, None, SW_SHOWNORMAL) };
+        // SE_ERR 约定：返回值 > 32 成功
+        let code = h.0 as isize;
+        if code <= 32 {
+            return Err(AppError::module(
+                "DESKTOP_LAUNCH_001",
+                format!("ShellExecuteW 失败（SE_ERR={code}）: {path}"),
+                Some("目标可能不存在、被占用或需要管理员权限"),
+            ));
+        }
+        Ok(())
+    }
+}

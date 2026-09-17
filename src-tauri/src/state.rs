@@ -11,7 +11,8 @@ use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
     CapturePort, ClipboardPort, CryptoPort, HotkeyWinPort, InputHookPort, InputInjectPort, OcrPort,
-    Ports, RecycleBinPort, ScreenInfoPort, SysProxyPort, SysProxyState, ThumbPort, UsnIndexPort,
+    Ports, RecycleBinPort, ScreenInfoPort, ShellPort, SysProxyPort, ThumbPort,
+    UsnIndexPort,
 };
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
@@ -21,9 +22,11 @@ use win_integration::dpapi::Dpapi;
 use win_integration::hotkey::HotkeyWin;
 use win_integration::input::{InputHookWin, InputInjectWin, ScreenInfoWin};
 use win_integration::ocr::WinOcr;
+use win_integration::shell::ShellOps;
 use win_integration::sysproxy::WindowsSysProxy;
 
 use clipboard_core::module::ClipboardModule;
+use desktop_core::DesktopModule;
 use file_core::FileModule;
 use kvm_core::KvmModule;
 use ocr_core::OcrModule;
@@ -64,6 +67,7 @@ pub struct HostState {
     pub vault: Arc<VaultModule>,
     pub file: Arc<FileModule>,
     pub proxy: Arc<ProxyModule>,
+    pub desktop: Arc<DesktopModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -101,6 +105,8 @@ impl HostState {
         ports.register::<dyn ThumbPort>(Arc::new(win_integration::shell::ShellThumb));
         ports.register::<dyn RecycleBinPort>(Arc::new(win_integration::shell::RecycleBin));
         ports.register::<dyn UsnIndexPort>(Arc::new(win_integration::usn::UsnIndex::new()));
+        // D1 Shell 启动（desktop-core 启动器，docs/impl/05 D）
+        ports.register::<dyn ShellPort>(Arc::new(ShellOps));
         // PR4 系统代理（proxy-core，docs/impl/05 PR）：注册表 + WinINET 广播
         let sys_proxy: Arc<dyn SysProxyPort> = Arc::new(WindowsSysProxy);
         ports.register::<dyn SysProxyPort>(sys_proxy.clone());
@@ -157,6 +163,12 @@ impl HostState {
         config.register_schema("proxy", proxy.config_schema());
         registry.register(proxy.clone())?;
 
+        // ---- P1 桌面效率（M8，docs/impl/05 D1–D4）----
+        let desktop = Arc::new(DesktopModule::new(&app_data_dir));
+        config.register_schema("desktop", desktop.config_schema());
+        registry.register(desktop.clone())?;
+        registry.register_ability::<dyn HotkeyProvider>(desktop.clone());
+
         Ok(Self {
             bus,
             ports,
@@ -170,6 +182,7 @@ impl HostState {
             vault,
             file,
             proxy,
+            desktop,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })

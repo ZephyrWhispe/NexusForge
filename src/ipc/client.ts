@@ -754,3 +754,87 @@ export function proxyDelayTest(): Promise<ProxyNodeDelayDto[]> {
 export function proxyLogs(limit?: number): Promise<ProxyLogLineDto[]> {
   return invoke("proxy_logs", { limit });
 }
+
+// ======================== 桌面效率（M8 D，docs/impl/05） ========================
+
+export type DesktopItemKind = "app" | "action";
+
+export interface DesktopIndexItemDto {
+  id: string;
+  name: string;
+  kind: DesktopItemKind;
+  path: string;
+  source: string;
+  topic?: string | null;
+  payload?: unknown;
+}
+
+export interface DesktopLauncherHitDto {
+  id: string;
+  name: string;
+  kind: DesktopItemKind;
+  path: string;
+  source: string;
+  topic?: string | null;
+  payload?: unknown;
+  /** 综合打分（0,1] */
+  score: number;
+}
+
+export interface DesktopTidyItemDto {
+  name: string;
+  path: string;
+  category: string;
+}
+
+export interface DesktopTidyPlanDto {
+  groups: [string, DesktopTidyItemDto[]][];
+  total: number;
+}
+
+export interface DesktopNoteDto {
+  id: string;
+  content: string;
+  tags: string[];
+  remind_at: number | null;
+  reminded: boolean;
+  done: boolean;
+  created_ms: number;
+}
+
+export function desktopLauncherSearch(query: string): Promise<DesktopLauncherHitDto[]> {
+  return invoke("desktop_launcher_search", { query });
+}
+export function desktopLauncherLaunch(id: string): Promise<void> {
+  return invoke("desktop_launcher_launch", { id });
+}
+export function desktopLauncherStatus(): Promise<[boolean, number]> {
+  return invoke("desktop_launcher_status");
+}
+export function desktopTidyPlan(): Promise<DesktopTidyPlanDto> {
+  return invoke("desktop_tidy_plan");
+}
+export function desktopTidyApply(): Promise<[number, number]> {
+  return invoke("desktop_tidy_apply");
+}
+export function desktopTidyRestore(): Promise<number> {
+  return invoke("desktop_tidy_restore");
+}
+export function desktopTidyStatus(): Promise<boolean> {
+  return invoke("desktop_tidy_status");
+}
+export function desktopNoteAdd(content: string): Promise<DesktopNoteDto> {
+  return invoke("desktop_note_add", { content });
+}
+export function desktopNoteList(includeDone: boolean): Promise<DesktopNoteDto[]> {
+  return invoke("desktop_note_list", { includeDone });
+}
+export function desktopNoteDone(id: string, done: boolean): Promise<boolean> {
+  return invoke("desktop_note_done", { id, done });
+}
+export function desktopNoteRemove(id: string): Promise<boolean> {
+  return invoke("desktop_note_remove", { id });
+}
+export function desktopNotesDue(): Promise<DesktopNoteDto[]> {
+  return invoke("desktop_notes_due");
+}

@@ -27,4 +27,5 @@ kvm-core = { path = "../crates/kvm-core" }
 vault-core = { path = "../crates/vault-core" }
 file-core = { path = "../crates/file-core" }
 proxy-core = { path = "../crates/proxy-core" }
+desktop-core = { path = "../crates/desktop-core" }
 base64.workspace = true

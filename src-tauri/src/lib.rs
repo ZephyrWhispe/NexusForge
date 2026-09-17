@@ -129,6 +129,18 @@ pub fn run() {
             commands::proxy_set_mode,
             commands::proxy_delay_test,
             commands::proxy_logs,
+            commands::desktop_launcher_search,
+            commands::desktop_launcher_launch,
+            commands::desktop_launcher_status,
+            commands::desktop_tidy_plan,
+            commands::desktop_tidy_apply,
+            commands::desktop_tidy_restore,
+            commands::desktop_tidy_status,
+            commands::desktop_note_add,
+            commands::desktop_note_list,
+            commands::desktop_note_done,
+            commands::desktop_note_remove,
+            commands::desktop_notes_due,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

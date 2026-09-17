@@ -11,6 +11,9 @@ import KvmPanel from "../modules/kvm/KvmPanel";
 import VaultPanel from "../modules/vault/VaultPanel";
 import FilePanel from "../modules/file/FilePanel";
 import ProxyPanel from "../modules/proxy/ProxyPanel";
+import DesktopPanel from "../modules/desktop/DesktopPanel";
+import { toggleLauncher } from "./launcherController";
+import { toggleNoteBar } from "./notebarController";
 import SchemaForm from "../settings/SchemaForm";
 import { MODULES } from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
@@ -89,6 +92,8 @@ export default function MainWorkbench() {
               const mode = (e.payload as { payload?: { mode?: string } }).payload?.mode;
               void import("./overlayController").then((m) => m.startOverlay(mode === "ocr" ? "ocr" : "shot"));
             }
+            if (topic === "desktop.launcher_toggled") void toggleLauncher();
+            if (topic === "desktop.note_quick") void toggleNoteBar();
           } catch (err) {
             import("../ipc/client").then((c) => c.hostLog("error", `nf:event 处理异常: ${String(err)}`));
           }
@@ -125,6 +130,7 @@ export default function MainWorkbench() {
   const isVault = active === "vault";
   const isFile = active === "file";
   const isProxy = active === "proxy";
+  const isDesktop = active === "desktop";
   const isSettings = active === "__settings";
 
   return (
@@ -163,7 +169,9 @@ export default function MainWorkbench() {
                             ? "浏览 · 操作队列（断点续传） · 冲突策略 · 搜索 · 批量重命名"
                             : isProxy
                               ? "sing-box 内核 · 系统代理/TUN · 订阅解析 · 崩溃自动还原"
-                              : `${current?.phase} 模块将在对应阶段交付`}
+                              : isDesktop
+                                ? "快速启动器（Alt+Q） · 速记（Ctrl+Alt+N） · 桌面整理"
+                                : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
@@ -176,6 +184,8 @@ export default function MainWorkbench() {
                   <FilePanel />
                 ) : isProxy ? (
                   <ProxyPanel />
+                ) : isDesktop ? (
+                  <DesktopPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>

@@ -3,6 +3,8 @@ import MainWorkbench from "./windows/MainWorkbench";
 import QuickPanel from "./windows/QuickPanel";
 import OverlayShot from "./windows/OverlayShot";
 import PinWindow from "./windows/PinWindow";
+import LauncherWindow from "./windows/LauncherWindow";
+import NoteBarWindow from "./windows/NoteBarWindow";
 
 /**
  * 窗口角色路由（docs/UI-PLAN.md U2-1）：
@@ -11,6 +13,8 @@ import PinWindow from "./windows/PinWindow";
  * - theme-preview     → 主题基线页（U1-2）
  * - overlay           → 截图选区+标注覆盖层（M3）
  * - pin               → 贴图置顶窗口（M3）
+ * - launcher          → 快速启动器（M8 D1）
+ * - notebar           → 快速速记条（M8 D4）
  */
 export default function App({ windowRole }: { windowRole: string }) {
   switch (windowRole) {
@@ -22,6 +26,10 @@ export default function App({ windowRole }: { windowRole: string }) {
       return <OverlayShot />;
     case "pin":
       return <PinWindow />;
+    case "launcher":
+      return <LauncherWindow />;
+    case "notebar":
+      return <NoteBarWindow />;
     default:
       return <MainWorkbench />;
   }

@@ -205,6 +205,12 @@ pub trait SysProxyPort: Port {
     fn is_admin(&self) -> bool;
 }
 
+/// Shell 启动（win-integration/shell.rs：ShellExecuteW；desktop-core D1 启动器使用）
+pub trait ShellPort: Port {
+    /// 以默认方式打开路径（exe/lnk/文档）；返回错误码 <= 32 视为失败
+    fn shell_execute(&self, path: &str) -> Result<(), AppError>;
+}
+
 /// RegisterHotKey 底层封装（宿主 HotkeyManager 专用，S6.2 使用）
 pub trait HotkeyWinPort: Port {
     fn register(&self, hotkey_id: i32, modifiers: u32, vk: u32) -> Result<(), AppError>;

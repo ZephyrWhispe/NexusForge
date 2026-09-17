@@ -840,6 +840,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "host-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2458,6 +2473,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clipboard-core",
+ "desktop-core",
  "file-core",
  "host-core",
  "kvm-core",
