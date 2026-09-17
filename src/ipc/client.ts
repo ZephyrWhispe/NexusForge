@@ -911,3 +911,120 @@ export function pdfCompress(path: string): Promise<PdfOpResultDto> {
 export function pdfWatermark(path: string, text: string): Promise<PdfOpResultDto> {
   return invoke("pdf_watermark", { path, text });
 }
+
+// ======================== 笔记与知识（M10 N，docs/impl/06） ========================
+
+export interface NoteMetaDto {
+  path: string;
+  title: string;
+  tags: string[];
+  mtime_ms: number;
+  size: number;
+}
+export interface NoteReadDto {
+  content: string;
+  meta: NoteMetaDto;
+}
+export interface NoteLinkDto {
+  dst: string;
+  dst_path: string;
+}
+export interface NoteBacklinkDto {
+  src: string;
+  title: string;
+  snippet: string;
+}
+export interface NoteSyncResultDto {
+  added: number;
+  updated: number;
+  removed: number;
+  total: number;
+}
+export interface NoteCardDto {
+  id: string;
+  note_path: string | null;
+  front: string;
+  back: string;
+  ef: number;
+  interval_days: number;
+  reps: number;
+  due_ms: number;
+}
+export interface CanvasNodeDto {
+  id: string;
+  kind: "note" | "sticky" | "image" | string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  ref?: string | null;
+  text?: string | null;
+  src?: string | null;
+  label?: string | null;
+}
+export interface CanvasEdgeDto {
+  id: string;
+  from: string;
+  to: string;
+  label?: string | null;
+}
+export interface CanvasDocDto {
+  version: number;
+  nodes: CanvasNodeDto[];
+  edges: CanvasEdgeDto[];
+}
+
+export function notesList(): Promise<NoteMetaDto[]> {
+  return invoke("notes_list");
+}
+export function notesRead(relPath: string): Promise<NoteReadDto> {
+  return invoke("notes_read", { relPath });
+}
+export function notesCreate(relPath: string, content?: string): Promise<NoteMetaDto> {
+  return invoke("notes_create", { relPath, content: content ?? null });
+}
+export function notesWrite(relPath: string, content: string): Promise<void> {
+  return invoke("notes_write", { relPath, content });
+}
+export function notesDelete(relPath: string): Promise<void> {
+  return invoke("notes_delete", { relPath });
+}
+export function notesRename(oldPath: string, newPath: string): Promise<void> {
+  return invoke("notes_rename", { oldPath, newPath });
+}
+export function notesLinks(relPath: string): Promise<NoteLinkDto[]> {
+  return invoke("notes_links", { relPath });
+}
+export function notesBacklinks(relPath: string): Promise<NoteBacklinkDto[]> {
+  return invoke("notes_backlinks", { relPath });
+}
+export function notesSync(): Promise<NoteSyncResultDto> {
+  return invoke("notes_sync");
+}
+export function notesReindex(): Promise<NoteSyncResultDto> {
+  return invoke("notes_reindex");
+}
+export function notesCards(): Promise<NoteCardDto[]> {
+  return invoke("notes_cards");
+}
+export function notesCardCreate(front: string, back: string, notePath?: string): Promise<NoteCardDto> {
+  return invoke("notes_card_create", { front, back, notePath: notePath ?? null });
+}
+export function notesCardDelete(id: string): Promise<boolean> {
+  return invoke("notes_card_delete", { id });
+}
+export function notesReviewQueue(): Promise<NoteCardDto[]> {
+  return invoke("notes_review_queue");
+}
+export function notesReviewGrade(id: string, quality: number): Promise<NoteCardDto> {
+  return invoke("notes_review_grade", { id, quality });
+}
+export function notesCanvasGet(dir: string): Promise<CanvasDocDto> {
+  return invoke("notes_canvas_get", { dir });
+}
+export function notesCanvasSave(dir: string, doc: CanvasDocDto): Promise<void> {
+  return invoke("notes_canvas_save", { dir, doc });
+}
+export function notesCanvasDirs(): Promise<string[]> {
+  return invoke("notes_canvas_dirs");
+}

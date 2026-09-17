@@ -2616,6 +2616,7 @@ dependencies = [
  "file-core",
  "host-core",
  "kvm-core",
+ "notes-core",
  "ocr-core",
  "proxy-core",
  "screenshot-core",
@@ -2647,6 +2648,22 @@ dependencies = [
  "bytecount",
  "memchr",
  "nom",
+]
+
+[[package]]
+name = "notes-core"
+version = "0.1.0"
+dependencies = [
+ "file-core",
+ "host-core",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

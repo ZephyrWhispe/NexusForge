@@ -55,6 +55,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("desktop.launcher_toggled", "快速启动器呼出/隐藏请求（全局快捷键触发）。payload: {}"),
     ("desktop.note_quick", "快速速记条呼出请求（全局快捷键触发）。payload: {}"),
     ("desktop.remind_due", "随记提醒到期。payload: {id, content, remind_at, tags}"),
+    ("notes.changed", "笔记库变更（创建/写入/删除/重命名/索引同步/卡片/画布）。payload: {action, path?}"),
 ];
 
 /// 统一事件信封（前端收到格式与此一致，M1 冻结契约）

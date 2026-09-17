@@ -29,6 +29,14 @@ pub trait StorageDriver: Send + Sync {
     fn quota(&self, _path: &Path) -> Option<(u64, u64)> {
         None
     }
+    /// 读取文件内容（notes-core N5 多存储后端复用；远程驱动按能力实现）
+    fn read_file(&self, _path: &Path) -> Result<Vec<u8>, FileError> {
+        Err(FileError::Unsupported("read_file".into()))
+    }
+    /// 写出文件内容（驱动负责建父目录；本地实现走 tmp+rename 原子替换）
+    fn write_file(&self, _path: &Path, _data: &[u8]) -> Result<(), FileError> {
+        Err(FileError::Unsupported("write_file".into()))
+    }
 }
 
 /// 本地盘驱动：委托 [`crate::browse`] 与 std::fs
@@ -69,6 +77,20 @@ impl StorageDriver for LocalDriver {
             std::fs::create_dir_all(crate::browse::to_long_path(parent))?;
         }
         std::fs::rename(crate::browse::to_long_path(from), crate::browse::to_long_path(to))?;
+        Ok(())
+    }
+    fn read_file(&self, path: &Path) -> Result<Vec<u8>, FileError> {
+        Ok(std::fs::read(crate::browse::to_long_path(path))?)
+    }
+    fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), FileError> {
+        let long = crate::browse::to_long_path(path);
+        if let Some(parent) = long.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // tmp + rename 原子替换，防半写损坏
+        let tmp = long.with_extension("nf-tmp");
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, &long)?;
         Ok(())
     }
 }

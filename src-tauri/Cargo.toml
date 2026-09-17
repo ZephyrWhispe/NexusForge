@@ -29,4 +29,5 @@ file-core = { path = "../crates/file-core" }
 proxy-core = { path = "../crates/proxy-core" }
 desktop-core = { path = "../crates/desktop-core" }
 editor-core = { path = "../crates/editor-core" }
+notes-core = { path = "../crates/notes-core" }
 base64.workspace = true

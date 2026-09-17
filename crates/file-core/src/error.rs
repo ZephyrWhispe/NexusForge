@@ -20,6 +20,8 @@ pub enum FileError {
     Rule(String),
     #[error("USN 索引不可用: {0}")]
     Usn(String),
+    #[error("该驱动不支持此操作: {0}")]
+    Unsupported(String),
 }
 
 impl FileError {
@@ -35,6 +37,7 @@ impl FileError {
             FileError::Preview(_) => "FILE_PREVIEW_001",
             FileError::Rule(_) => "FILE_RENAME_001",
             FileError::Usn(_) => "FILE_SEARCH_001",
+            FileError::Unsupported(_) => "FILE_OPS_005",
         }
     }
 }

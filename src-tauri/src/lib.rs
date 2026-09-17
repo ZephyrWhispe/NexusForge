@@ -154,6 +154,25 @@ pub fn run() {
             commands::pdf_split,
             commands::pdf_compress,
             commands::pdf_watermark,
+            // 笔记与知识（M10 N1–N5）
+            commands::notes_list,
+            commands::notes_read,
+            commands::notes_create,
+            commands::notes_write,
+            commands::notes_delete,
+            commands::notes_rename,
+            commands::notes_links,
+            commands::notes_backlinks,
+            commands::notes_sync,
+            commands::notes_reindex,
+            commands::notes_cards,
+            commands::notes_card_create,
+            commands::notes_card_delete,
+            commands::notes_review_queue,
+            commands::notes_review_grade,
+            commands::notes_canvas_get,
+            commands::notes_canvas_save,
+            commands::notes_canvas_dirs,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

@@ -28,6 +28,7 @@ use win_integration::sysproxy::WindowsSysProxy;
 use clipboard_core::module::ClipboardModule;
 use desktop_core::DesktopModule;
 use editor_core::EditorModule;
+use notes_core::NotesModule;
 use file_core::FileModule;
 use kvm_core::KvmModule;
 use ocr_core::OcrModule;
@@ -70,6 +71,7 @@ pub struct HostState {
     pub proxy: Arc<ProxyModule>,
     pub desktop: Arc<DesktopModule>,
     pub editor: Arc<EditorModule>,
+    pub notes: Arc<NotesModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -176,6 +178,11 @@ impl HostState {
         config.register_schema("editor", editor.config_schema());
         registry.register(editor.clone())?;
 
+        // ---- P2 笔记与知识（M10，docs/impl/06 N1–N5）----
+        let notes = Arc::new(NotesModule::new(&app_data_dir));
+        config.register_schema("notes", notes.config_schema());
+        registry.register(notes.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -191,6 +198,7 @@ impl HostState {
             proxy,
             desktop,
             editor,
+            notes,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })

@@ -13,6 +13,7 @@ import FilePanel from "../modules/file/FilePanel";
 import ProxyPanel from "../modules/proxy/ProxyPanel";
 import DesktopPanel from "../modules/desktop/DesktopPanel";
 import EditorPanel from "../modules/editor/EditorPanel";
+import NotesPanel from "../modules/notes/NotesPanel";
 import { toggleLauncher } from "./launcherController";
 import { toggleNoteBar } from "./notebarController";
 import SchemaForm from "../settings/SchemaForm";
@@ -133,6 +134,7 @@ export default function MainWorkbench() {
   const isProxy = active === "proxy";
   const isDesktop = active === "desktop";
   const isEditor = active === "editor";
+  const isNotes = active === "notes";
   const isSettings = active === "__settings";
 
   return (
@@ -175,7 +177,9 @@ export default function MainWorkbench() {
                                 ? "快速启动器（Alt+Q） · 速记（Ctrl+Alt+N） · 桌面整理"
                                 : isEditor
                                   ? "Monaco 编辑器 · 编码检测 · Markdown 预览 · PDF 工具"
-                                  : `${current?.phase} 模块将在对应阶段交付`}
+                                  : isNotes
+                                    ? "Markdown 库 · [[双链]] 反链 · SM-2 复习 · 自由画布"
+                                    : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
@@ -192,6 +196,8 @@ export default function MainWorkbench() {
                   <DesktopPanel />
                 ) : isEditor ? (
                   <EditorPanel />
+                ) : isNotes ? (
+                  <NotesPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>
