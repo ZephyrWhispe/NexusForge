@@ -6,7 +6,7 @@
 //! - 全部方法为同步签名：阻塞调用由调用方（模块）放入 spawn_blocking。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -165,6 +165,18 @@ pub trait HelloPort: Port {
 /// USN/MFT 全盘文件索引（阶段二 file-core 使用）
 pub trait UsnIndexPort: Port {
     fn search(&self, query: &str, limit: u32) -> Result<Vec<FileHit>, AppError>;
+}
+
+/// 系统 Shell 缩略图（win-integration：IShellItemImageFactory；file-core F4 视频等预览）
+pub trait ThumbPort: Port {
+    /// 返回 (width, height, PNG 字节)；无缩略图资源时返回错误
+    fn thumbnail(&self, path: &Path, px: u32) -> Result<(u32, u32, Vec<u8>), AppError>;
+}
+
+/// 回收站删除（win-integration：SHFileOperationW + FOF_ALLOWUNDO；file-core F2）
+pub trait RecycleBinPort: Port {
+    /// 整批移入回收站；返回成功条数
+    fn delete(&self, paths: &[PathBuf]) -> Result<u32, AppError>;
 }
 
 /// ConPTY 伪终端（阶段三 term-core 使用）

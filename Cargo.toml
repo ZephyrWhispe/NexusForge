@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core", "crates/vault-core"]
+members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core", "crates/vault-core", "crates/file-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,7 +21,10 @@ base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# file-core（docs/impl/05 F1–F7）
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # kvm-core（docs/impl/05 K1–K7）
 socket2 = "0.5"
 x25519-dalek = { version = "2", features = ["static_secrets"] }

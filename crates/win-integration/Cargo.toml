@@ -26,6 +26,11 @@ features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # Shell 缩略图/回收站（file-core F4/F2）+ USN 索引（F5）
+    "Win32_System_Com",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
     # DPAPI（docs/impl/02 C4）
     "Win32_Security_Cryptography",
     # 全局快捷键（docs/UI-PLAN.md U2-4）

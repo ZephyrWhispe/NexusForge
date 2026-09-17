@@ -25,4 +25,5 @@ screenshot-core = { path = "../crates/screenshot-core" }
 ocr-core = { path = "../crates/ocr-core" }
 kvm-core = { path = "../crates/kvm-core" }
 vault-core = { path = "../crates/vault-core" }
+file-core = { path = "../crates/file-core" }
 base64.workspace = true

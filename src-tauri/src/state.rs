@@ -11,7 +11,7 @@ use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
     CapturePort, ClipboardPort, CryptoPort, HotkeyWinPort, InputHookPort, InputInjectPort, OcrPort,
-    Ports, ScreenInfoPort,
+    Ports, RecycleBinPort, ScreenInfoPort, ThumbPort, UsnIndexPort,
 };
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
@@ -23,6 +23,7 @@ use win_integration::input::{InputHookWin, InputInjectWin, ScreenInfoWin};
 use win_integration::ocr::WinOcr;
 
 use clipboard_core::module::ClipboardModule;
+use file_core::FileModule;
 use kvm_core::KvmModule;
 use ocr_core::OcrModule;
 use screenshot_core::ScreenshotModule;
@@ -59,6 +60,7 @@ pub struct HostState {
     pub ocr: Arc<OcrModule>,
     pub kvm: Arc<KvmModule>,
     pub vault: Arc<VaultModule>,
+    pub file: Arc<FileModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -92,6 +94,10 @@ impl HostState {
         ports.register::<dyn InputHookPort>(Arc::new(InputHookWin::new()?));
         ports.register::<dyn InputInjectPort>(Arc::new(InputInjectWin::new()));
         ports.register::<dyn ScreenInfoPort>(Arc::new(ScreenInfoWin::new()));
+        // F4 Shell 缩略图 / F2 回收站 / F5 USN 索引（file-core，docs/impl/05 F）
+        ports.register::<dyn ThumbPort>(Arc::new(win_integration::shell::ShellThumb));
+        ports.register::<dyn RecycleBinPort>(Arc::new(win_integration::shell::RecycleBin));
+        ports.register::<dyn UsnIndexPort>(Arc::new(win_integration::usn::UsnIndex::new()));
 
         let config = Arc::new(ConfigStore::new(app_data_dir.join("config"), bus.clone()));
         let _global = config.load()?;
@@ -125,6 +131,11 @@ impl HostState {
         config.register_schema("vault", vault.config_schema());
         registry.register(vault.clone())?;
 
+        // ---- P1 文件与存储（M6，docs/impl/05 F1–F7）----
+        let file = Arc::new(FileModule::new());
+        config.register_schema("file", file.config_schema());
+        registry.register(file.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -136,6 +147,7 @@ impl HostState {
             ocr,
             kvm,
             vault,
+            file,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })

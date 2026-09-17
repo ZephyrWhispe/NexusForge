@@ -16,3 +16,5 @@ pub mod dpapi;
 pub mod hotkey;
 pub mod input;
 pub mod ocr;
+pub mod shell;
+pub mod usn;

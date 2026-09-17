@@ -498,3 +498,166 @@ export function vaultGeneratePassword(policy: PasswordPolicyDto): Promise<string
 export function vaultTotpNow(secret: string): Promise<[string, number]> {
   return invoke("vault_totp_now", { secret });
 }
+
+// ---------------- 文件与存储（docs/impl/05 F，M6）----------------
+
+export interface FileEntryDto {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified_ms: number;
+  ext: string;
+  hidden: boolean;
+}
+
+export type FileSortKey = "name" | "size" | "modified" | "type";
+
+export interface DriveInfoDto {
+  letter: string;
+  path: string;
+  free_bytes: number;
+  total_bytes: number;
+}
+
+export type ConflictPolicyDto = "ask" | "skip" | "overwrite" | "rename";
+
+export type FileOpKind = "copy" | "move" | "delete" | "compress" | "extract";
+
+export interface OpSpecDto {
+  kind: FileOpKind;
+  srcs: string[];
+  dst: string;
+  policy: ConflictPolicyDto;
+  recycle?: boolean;
+}
+
+export interface ConflictItemDto {
+  name: string;
+  dst: string;
+}
+
+export interface FileEnqueueDto {
+  op_id: string | null;
+  conflicts: ConflictItemDto[];
+}
+
+export type OpStateDto = "Queued" | "Running" | "Paused" | "Done" | "Failed" | "Canceled";
+
+export interface OpProgressDto {
+  op_id: string;
+  kind: FileOpKind;
+  state: OpStateDto;
+  current: string;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  error: string | null;
+}
+
+export interface PendingOpDto {
+  op_id: string;
+  kind: FileOpKind;
+  srcs: string[];
+  dst: string;
+  policy: ConflictPolicyDto;
+  recycle: boolean;
+  file_index: number;
+  bytes_done: number;
+  created_ms: number;
+}
+
+export type PreviewDto =
+  | { kind: "text"; content: string; truncated: boolean }
+  | { kind: "image"; data_url: string; width: number; height: number }
+  | { kind: "shell"; data_url: string; width: number; height: number }
+  | { kind: "unsupported"; reason: string };
+
+export interface FileHitDto {
+  path: string;
+  score: number;
+}
+
+export interface SearchResultDto {
+  hits: FileHitDto[];
+  degraded: boolean;
+}
+
+export interface DriverInfoDto {
+  id: string;
+  label: string;
+  roots: string[];
+}
+
+export type RenameCaseDto = "none" | "lower" | "upper";
+
+export interface RenameRuleDto {
+  template: string;
+  regex?: string | null;
+  replacement?: string;
+  case?: RenameCaseDto;
+  start?: number;
+}
+
+export interface RenamePlanDto {
+  from: string;
+  to: string;
+  conflict: boolean;
+}
+
+export function fileDrives(): Promise<DriveInfoDto[]> {
+  return invoke("file_drives");
+}
+export function fileList(path: string, sort?: FileSortKey, asc?: boolean): Promise<FileEntryDto[]> {
+  return invoke("file_list", { path, sort, asc });
+}
+export function fileBreadcrumbs(path: string): Promise<[string, string][]> {
+  return invoke("file_breadcrumbs", { path });
+}
+export function fileMkdir(path: string): Promise<void> {
+  return invoke("file_mkdir", { path });
+}
+export function fileRenameEntry(from: string, to: string): Promise<void> {
+  return invoke("file_rename_entry", { from, to });
+}
+export function fileEnqueue(spec: OpSpecDto): Promise<FileEnqueueDto> {
+  return invoke("file_enqueue", { spec });
+}
+export function fileOpsActive(): Promise<OpProgressDto[]> {
+  return invoke("file_ops_active");
+}
+export function fileOpsPending(): Promise<PendingOpDto[]> {
+  return invoke("file_ops_pending");
+}
+export function fileOpPause(opId: string): Promise<void> {
+  return invoke("file_op_pause", { opId });
+}
+export function fileOpResume(opId: string): Promise<string> {
+  return invoke("file_op_resume", { opId });
+}
+export function fileOpCancel(opId: string): Promise<void> {
+  return invoke("file_op_cancel", { opId });
+}
+export function fileOpDropPending(opId: string): Promise<boolean> {
+  return invoke("file_op_drop_pending", { opId });
+}
+export function filePreview(path: string): Promise<PreviewDto> {
+  return invoke("file_preview", { path });
+}
+export function fileSearch(query: string, limit?: number, root?: string | null): Promise<SearchResultDto> {
+  return invoke("file_search", { query, limit, root });
+}
+export function fileDrivers(): Promise<DriverInfoDto[]> {
+  return invoke("file_drivers");
+}
+export function fileRenamePlan(
+  dir: string,
+  names: string[],
+  rule: RenameRuleDto,
+): Promise<RenamePlanDto[]> {
+  return invoke("file_rename_plan", { dir, names, rule });
+}
+export function fileRenameApply(plans: RenamePlanDto[]): Promise<number> {
+  return invoke("file_rename_apply", { plans });
+}

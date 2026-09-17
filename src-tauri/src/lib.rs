@@ -75,6 +75,23 @@ pub fn run() {
             commands::vault_entry_delete,
             commands::vault_generate_password,
             commands::vault_totp_now,
+            commands::file_drives,
+            commands::file_list,
+            commands::file_breadcrumbs,
+            commands::file_mkdir,
+            commands::file_rename_entry,
+            commands::file_enqueue,
+            commands::file_ops_active,
+            commands::file_ops_pending,
+            commands::file_op_pause,
+            commands::file_op_resume,
+            commands::file_op_cancel,
+            commands::file_op_drop_pending,
+            commands::file_preview,
+            commands::file_search,
+            commands::file_drivers,
+            commands::file_rename_plan,
+            commands::file_rename_apply,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

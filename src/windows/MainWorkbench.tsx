@@ -9,6 +9,7 @@ import MicaBackdrop from "../layout/MicaBackdrop";
 import ClipboardPanel from "../modules/clipboard/ClipboardPanel";
 import KvmPanel from "../modules/kvm/KvmPanel";
 import VaultPanel from "../modules/vault/VaultPanel";
+import FilePanel from "../modules/file/FilePanel";
 import SchemaForm from "../settings/SchemaForm";
 import { MODULES } from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
@@ -121,6 +122,7 @@ export default function MainWorkbench() {
   const isClipboard = active === "clipboard";
   const isKvm = active === "kvm";
   const isVault = active === "vault";
+  const isFile = active === "file";
   const isSettings = active === "__settings";
 
   return (
@@ -155,7 +157,9 @@ export default function MainWorkbench() {
                         ? "发现 · 配对 · 会话 · 边缘切换（TCP+UDP+X25519）"
                         : isVault
                           ? "Argon2id 信封 · AES-256-GCM 条目 · TOTP"
-                          : `${current?.phase} 模块将在对应阶段交付`}
+                          : isFile
+                            ? "浏览 · 操作队列（断点续传） · 冲突策略 · 搜索 · 批量重命名"
+                            : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
@@ -164,6 +168,8 @@ export default function MainWorkbench() {
                   <KvmPanel />
                 ) : isVault ? (
                   <VaultPanel />
+                ) : isFile ? (
+                  <FilePanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>
