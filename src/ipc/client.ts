@@ -1028,3 +1028,101 @@ export function notesCanvasSave(dir: string, doc: CanvasDocDto): Promise<void> {
 export function notesCanvasDirs(): Promise<string[]> {
   return invoke("notes_canvas_dirs");
 }
+
+// ======================== 终端与运维（M11 T，docs/impl/06） ========================
+
+export type TermKindDto =
+  | { kind: "local" }
+  | { kind: "wsl"; distro: string }
+  | { kind: "ssh"; host: string; port: number; user: string };
+
+export interface TermSessionDto {
+  id: string;
+  kind: TermKindDto;
+  title: string;
+  alive: boolean;
+  cols: number;
+  rows: number;
+}
+export interface SshAuthDto {
+  kind: "password" | "key";
+  password?: string;
+  key_path?: string;
+  passphrase?: string;
+}
+export interface SshKnownHostDto {
+  host: string;
+  fingerprint: string;
+}
+export interface SftpEntryDto {
+  name: string;
+  is_dir: boolean;
+  size: number;
+}
+export interface DockerContainerDto {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+}
+
+export function termSpawnLocal(shell?: string, cwd?: string, cols = 80, rows = 24): Promise<TermSessionDto> {
+  return invoke("term_spawn_local", { shell: shell ?? null, cwd: cwd ?? null, cols, rows });
+}
+export function termSpawnWsl(distro: string, cols = 80, rows = 24): Promise<TermSessionDto> {
+  return invoke("term_spawn_wsl", { distro, cols, rows });
+}
+export function termWslList(): Promise<string[]> {
+  return invoke("term_wsl_list");
+}
+export function termWrite(sessionId: string, data: string): Promise<void> {
+  return invoke("term_write", { sessionId, data });
+}
+export function termResize(sessionId: string, cols: number, rows: number): Promise<void> {
+  return invoke("term_resize", { sessionId, cols, rows });
+}
+export function termAck(sessionId: string, receivedTotal: number): Promise<void> {
+  return invoke("term_ack", { sessionId, receivedTotal });
+}
+export function termKill(sessionId: string): Promise<void> {
+  return invoke("term_kill", { sessionId });
+}
+export function termSessions(): Promise<TermSessionDto[]> {
+  return invoke("term_sessions");
+}
+export function termSshConnect(
+  conn: { host: string; port: number; user: string; auth: SshAuthDto; cols: number; rows: number },
+): Promise<TermSessionDto> {
+  return invoke("term_ssh_connect", { conn });
+}
+export function termSshKnownHosts(): Promise<SshKnownHostDto[]> {
+  return invoke("term_ssh_known_hosts");
+}
+export function termSshForgetHost(host: string): Promise<boolean> {
+  return invoke("term_ssh_forget_host", { host });
+}
+export function termSftpList(
+  host: string, port: number, user: string, auth: SshAuthDto, path: string,
+): Promise<SftpEntryDto[]> {
+  return invoke("term_sftp_list", { host, port, user, auth, path });
+}
+export function termSftpDownload(
+  host: string, port: number, user: string, auth: SshAuthDto, remotePath: string, localPath: string,
+): Promise<number> {
+  return invoke("term_sftp_download", { host, port, user, auth, remotePath, localPath });
+}
+export function termSftpUpload(
+  host: string, port: number, user: string, auth: SshAuthDto, localPath: string, remotePath: string,
+): Promise<number> {
+  return invoke("term_sftp_upload", { host, port, user, auth, localPath, remotePath });
+}
+export function termDockerContainers(): Promise<DockerContainerDto[]> {
+  return invoke("term_docker_containers");
+}
+export function termDockerLifecycle(id: string, start: boolean): Promise<void> {
+  return invoke("term_docker_lifecycle", { id, start });
+}
+export function termDockerLogs(id: string, tail: number): Promise<string> {
+  return invoke("term_docker_logs", { id, tail });
+}

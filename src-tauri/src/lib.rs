@@ -173,6 +173,24 @@ pub fn run() {
             commands::notes_canvas_get,
             commands::notes_canvas_save,
             commands::notes_canvas_dirs,
+            // 终端与运维（M11 T1–T6）
+            commands::term_spawn_local,
+            commands::term_spawn_wsl,
+            commands::term_wsl_list,
+            commands::term_write,
+            commands::term_resize,
+            commands::term_ack,
+            commands::term_kill,
+            commands::term_sessions,
+            commands::term_ssh_connect,
+            commands::term_ssh_known_hosts,
+            commands::term_ssh_forget_host,
+            commands::term_sftp_list,
+            commands::term_sftp_download,
+            commands::term_sftp_upload,
+            commands::term_docker_containers,
+            commands::term_docker_lifecycle,
+            commands::term_docker_logs,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;

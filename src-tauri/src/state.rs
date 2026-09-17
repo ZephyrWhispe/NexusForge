@@ -10,8 +10,8 @@ use host_core::events::EventBus;
 use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
-    CapturePort, ClipboardPort, CryptoPort, HotkeyWinPort, InputHookPort, InputInjectPort, OcrPort,
-    Ports, RecycleBinPort, ScreenInfoPort, ShellPort, SysProxyPort, ThumbPort,
+    CapturePort, ClipboardPort, ConptyPort, CryptoPort, DockerPipePort, HotkeyWinPort, InputHookPort,
+    InputInjectPort, OcrPort, Ports, RecycleBinPort, ScreenInfoPort, ShellPort, SysProxyPort, ThumbPort,
     UsnIndexPort,
 };
 use host_core::registry::ModuleRegistry;
@@ -29,6 +29,7 @@ use clipboard_core::module::ClipboardModule;
 use desktop_core::DesktopModule;
 use editor_core::EditorModule;
 use notes_core::NotesModule;
+use term_core::TermModule;
 use file_core::FileModule;
 use kvm_core::KvmModule;
 use ocr_core::OcrModule;
@@ -72,6 +73,7 @@ pub struct HostState {
     pub desktop: Arc<DesktopModule>,
     pub editor: Arc<EditorModule>,
     pub notes: Arc<NotesModule>,
+    pub term: Arc<TermModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -111,6 +113,10 @@ impl HostState {
         ports.register::<dyn UsnIndexPort>(Arc::new(win_integration::usn::UsnIndex::new()));
         // D1 Shell 启动（desktop-core 启动器，docs/impl/05 D）
         ports.register::<dyn ShellPort>(Arc::new(ShellOps));
+        // T1 ConPTY（term-core，docs/impl/06 T）
+        ports.register::<dyn ConptyPort>(Arc::new(win_integration::conpty::ConptyWin::new()));
+        // T6 Docker Engine named pipe（docs/impl/06 T6）
+        ports.register::<dyn DockerPipePort>(Arc::new(win_integration::docker::DockerPipeWin::new()));
         // PR4 系统代理（proxy-core，docs/impl/05 PR）：注册表 + WinINET 广播
         let sys_proxy: Arc<dyn SysProxyPort> = Arc::new(WindowsSysProxy);
         ports.register::<dyn SysProxyPort>(sys_proxy.clone());
@@ -183,6 +189,11 @@ impl HostState {
         config.register_schema("notes", notes.config_schema());
         registry.register(notes.clone())?;
 
+        // ---- P2 终端与运维（M11，docs/impl/06 T1–T6）----
+        let term = Arc::new(TermModule::new(&app_data_dir));
+        config.register_schema("term", term.config_schema());
+        registry.register(term.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -199,6 +210,7 @@ impl HostState {
             desktop,
             editor,
             notes,
+            term,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })

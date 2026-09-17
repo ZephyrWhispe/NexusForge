@@ -112,7 +112,7 @@ pub struct PtyHandle {
     pub input_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     pub output_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     pub resize_tx: tokio::sync::mpsc::Sender<(u16, u16)>,
-    kill: Box<dyn FnOnce() + Send>,
+    pub kill: Box<dyn FnOnce() + Send>,
 }
 
 impl PtyHandle {
@@ -128,6 +128,11 @@ impl PtyHandle {
     /// 显式终止会话（幂等：Drop 亦会调用）
     pub fn kill(self) {
         (self.kill)();
+    }
+
+    /// 拿走关闭闭包但不执行（供会话表延迟调用：用户 kill / reader EOF / 模块 stop）
+    pub fn into_kill(self) -> Box<dyn FnOnce() + Send> {
+        self.kill
     }
 }
 
@@ -209,6 +214,19 @@ pub trait SysProxyPort: Port {
 pub trait ShellPort: Port {
     /// 以默认方式打开路径（exe/lnk/文档）；返回错误码 <= 32 视为失败
     fn shell_execute(&self, path: &str) -> Result<(), AppError>;
+}
+
+/// Docker Engine HTTP over named pipe 响应（docs/impl/06 T6）
+#[derive(Clone, Debug)]
+pub struct HttpResp {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// Docker Engine named pipe 客户端（win-integration/docker.rs：`\\.\pipe\docker_engine`）
+pub trait DockerPipePort: Port {
+    /// 发 HTTP/1.1 请求（Connection: close 短连接；body 为 None 即 GET）
+    fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<HttpResp, AppError>;
 }
 
 /// RegisterHotKey 底层封装（宿主 HotkeyManager 专用，S6.2 使用）

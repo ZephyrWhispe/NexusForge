@@ -10,10 +10,15 @@ host-core = { path = "../host-core" }
 tracing.workspace = true
 # PNG → DIB（剪贴板图片回写，Port 契约：png 由本层转系统格式）
 image.workspace = true
+# ConPTY worker（docs/impl/06 T1）：PtyHandle 为 tokio mpsc 契约 + 写/resize 串行 worker
+tokio.workspace = true
 
 [dependencies.windows]
 version = "0.58"
 features = [
+    # ConPTY 伪终端（docs/impl/06 T1）：0.58 归置在 Console/Pipes 模块
+    "Win32_System_Console",
+    "Win32_System_Pipes",
     # 系统强调色：DwmGetColorizationColor
     "Win32_Graphics_Dwm",
     "Win32_Foundation",

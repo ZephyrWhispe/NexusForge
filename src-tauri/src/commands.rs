@@ -1828,3 +1828,322 @@ pub async fn notes_canvas_dirs(state: State<'_, HostState>) -> Result<Vec<String
         .map_err(notes_err)
 }
 
+
+// ======================== 终端与运维（M11 T，docs/impl/06） ========================
+
+use host_core::ports::DockerPipePort;
+
+fn term_err(e: term_core::TermError) -> AppError {
+    AppError::module(e.code(), e.to_string(), None)
+}
+
+/// 本地/WSL 会话参数
+#[derive(serde::Deserialize)]
+pub struct TermSpawnDto {
+    /// "local" | "wsl"
+    pub kind: String,
+    /// 本地完整命令行（None = 默认 PowerShell）
+    pub shell: Option<String>,
+    pub cwd: Option<std::path::PathBuf>,
+    pub wsl_distro: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// 本地会话（T1）
+#[tauri::command]
+pub async fn term_spawn_local(
+    shell: Option<String>,
+    cwd: Option<std::path::PathBuf>,
+    cols: u16,
+    rows: u16,
+    state: State<'_, HostState>,
+) -> Result<term_core::SessionInfo, AppError> {
+    state
+        .term
+        .sessions()
+        .spawn_local(shell, cwd, cols, rows)
+        .await
+        .map_err(term_err)
+}
+
+/// WSL 会话（T5）
+#[tauri::command]
+pub async fn term_spawn_wsl(
+    distro: String,
+    cols: u16,
+    rows: u16,
+    state: State<'_, HostState>,
+) -> Result<term_core::SessionInfo, AppError> {
+    state
+        .term
+        .sessions()
+        .spawn_wsl(&distro, cols, rows)
+        .await
+        .map_err(term_err)
+}
+
+/// WSL 分发列表（T5）
+#[tauri::command]
+pub async fn term_wsl_list(state: State<'_, HostState>) -> Result<Vec<String>, AppError> {
+    let distros = tokio::task::spawn_blocking(term_core::wsl::list_distros)
+        .await
+        .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
+        .map_err(term_err)?;
+    Ok(distros)
+}
+
+/// 终端输入（UTF-8；含控制序列）
+#[tauri::command]
+pub async fn term_write(
+    session_id: String,
+    data: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    state
+        .term
+        .sessions()
+        .get(&session_id)
+        .map_err(term_err)?
+        .write(data.into_bytes())
+        .await
+        .map_err(term_err)
+}
+
+/// 调整尺寸
+#[tauri::command]
+pub async fn term_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    state
+        .term
+        .sessions()
+        .get(&session_id)
+        .map_err(term_err)?
+        .resize(cols, rows)
+        .await
+        .map_err(term_err)
+}
+
+/// 背压 ack（T2：前端回传累计已收字节数）
+#[tauri::command]
+pub async fn term_ack(
+    session_id: String,
+    received_total: i64,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    state
+        .term
+        .sessions()
+        .ack(&session_id, received_total)
+        .map_err(term_err)
+}
+
+/// 终止会话
+#[tauri::command]
+pub async fn term_kill(session_id: String, state: State<'_, HostState>) -> Result<(), AppError> {
+    state.term.sessions().kill_session(&session_id).map_err(term_err)
+}
+
+/// 会话列表
+#[tauri::command]
+pub async fn term_sessions(
+    state: State<'_, HostState>,
+) -> Result<Vec<term_core::SessionInfo>, AppError> {
+    Ok(state.term.sessions().list())
+}
+
+// ---- T3 SSH/SFTP ----
+
+/// SSH 参数（auth 内联）
+#[derive(serde::Deserialize)]
+pub struct SshConnectDto {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub auth: term_core::SshAuth,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// SSH 终端会话（T3）
+#[tauri::command]
+pub async fn term_ssh_connect(
+    conn: SshConnectDto,
+    state: State<'_, HostState>,
+) -> Result<term_core::SessionInfo, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget {
+        host: conn.host,
+        port: conn.port,
+        user: conn.user,
+        auth: conn.auth,
+    };
+    ssh.open_shell(target, conn.cols, conn.rows, state.term.sessions())
+        .await
+        .map_err(term_err)
+}
+
+/// 已记录主机指纹列表（TOFU 管理）
+#[tauri::command]
+pub async fn term_ssh_known_hosts(
+    state: State<'_, HostState>,
+) -> Result<Vec<SshKnownHostDto>, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    Ok(ssh
+        .known_hosts()
+        .entries()
+        .into_iter()
+        .map(|(host, fingerprint)| SshKnownHostDto { host, fingerprint })
+        .collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct SshKnownHostDto {
+    pub host: String,
+    pub fingerprint: String,
+}
+
+/// 删除主机指纹（用户确认主机重建后）
+#[tauri::command]
+pub async fn term_ssh_forget_host(
+    host: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let (h, port) = parse_host_port(&host);
+    ssh.known_hosts().remove(&h, port).map_err(term_err)
+}
+
+fn parse_host_port(host: &str) -> (String, u16) {
+    // "[h]:port" / "h"（缺省 22）
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some((h, p)) = rest.split_once("]:") {
+            return (h.to_string(), p.parse().unwrap_or(22));
+        }
+    }
+    (host.to_string(), 22)
+}
+
+/// SFTP 目录列表
+#[tauri::command]
+pub async fn term_sftp_list(
+    host: String,
+    port: u16,
+    user: String,
+    auth: term_core::SshAuth,
+    path: String,
+    state: State<'_, HostState>,
+) -> Result<Vec<term_core::SftpEntry>, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget { host, port, user, auth };
+    ssh.sftp_list(&target, &path).await.map_err(term_err)
+}
+
+/// SFTP 下载
+#[tauri::command]
+pub async fn term_sftp_download(
+    host: String,
+    port: u16,
+    user: String,
+    auth: term_core::SshAuth,
+    remote_path: String,
+    local_path: std::path::PathBuf,
+    state: State<'_, HostState>,
+) -> Result<u64, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget { host, port, user, auth };
+    ssh.sftp_download(&target, &remote_path, &local_path)
+        .await
+        .map_err(term_err)
+}
+
+/// SFTP 上传
+#[tauri::command]
+pub async fn term_sftp_upload(
+    host: String,
+    port: u16,
+    user: String,
+    auth: term_core::SshAuth,
+    local_path: std::path::PathBuf,
+    remote_path: String,
+    state: State<'_, HostState>,
+) -> Result<u64, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget { host, port, user, auth };
+    ssh.sftp_upload(&target, &local_path, &remote_path)
+        .await
+        .map_err(term_err)
+}
+
+// ---- T6 Docker ----
+
+/// 容器列表
+#[tauri::command]
+pub async fn term_docker_containers(
+    state: State<'_, HostState>,
+) -> Result<Vec<term_core::docker::DockerContainer>, AppError> {
+    let docker = state
+        .ports
+        .get::<dyn DockerPipePort>()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "Docker 管道未注册", None))?;
+    tokio::task::spawn_blocking(move || term_core::docker::containers_list(docker.as_ref()))
+        .await
+        .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
+        .map_err(term_err)
+}
+
+/// 启动/停止容器
+#[tauri::command]
+pub async fn term_docker_lifecycle(
+    id: String,
+    start: bool,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let docker = state
+        .ports
+        .get::<dyn DockerPipePort>()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "Docker 管道未注册", None))?;
+    tokio::task::spawn_blocking(move || term_core::docker::container_lifecycle(docker.as_ref(), &id, start))
+        .await
+        .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
+        .map_err(term_err)
+}
+
+/// 容器日志（tail 最近 N 行）
+#[tauri::command]
+pub async fn term_docker_logs(
+    id: String,
+    tail: u32,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
+    let docker = state
+        .ports
+        .get::<dyn DockerPipePort>()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "Docker 管道未注册", None))?;
+    tokio::task::spawn_blocking(move || term_core::docker::container_logs(docker.as_ref(), &id, tail))
+        .await
+        .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
+        .map_err(term_err)
+}

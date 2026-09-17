@@ -14,6 +14,7 @@ import ProxyPanel from "../modules/proxy/ProxyPanel";
 import DesktopPanel from "../modules/desktop/DesktopPanel";
 import EditorPanel from "../modules/editor/EditorPanel";
 import NotesPanel from "../modules/notes/NotesPanel";
+import TerminalPanel from "../modules/term/TerminalPanel";
 import { toggleLauncher } from "./launcherController";
 import { toggleNoteBar } from "./notebarController";
 import SchemaForm from "../settings/SchemaForm";
@@ -135,6 +136,7 @@ export default function MainWorkbench() {
   const isDesktop = active === "desktop";
   const isEditor = active === "editor";
   const isNotes = active === "notes";
+  const isTerm = active === "term";
   const isSettings = active === "__settings";
 
   return (
@@ -179,7 +181,9 @@ export default function MainWorkbench() {
                                   ? "Monaco 编辑器 · 编码检测 · Markdown 预览 · PDF 工具"
                                   : isNotes
                                     ? "Markdown 库 · [[双链]] 反链 · SM-2 复习 · 自由画布"
-                                    : `${current?.phase} 模块将在对应阶段交付`}
+                                    : isTerm
+                                      ? "ConPTY 终端 · WSL · SSH/SFTP（TOFU） · Docker"
+                                      : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
@@ -198,6 +202,8 @@ export default function MainWorkbench() {
                   <EditorPanel />
                 ) : isNotes ? (
                   <NotesPanel />
+                ) : isTerm ? (
+                  <TerminalPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>

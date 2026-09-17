@@ -12,6 +12,8 @@
 pub mod accent;
 pub mod capture;
 pub mod clipboard;
+pub mod conpty;
+pub mod docker;
 pub mod dpapi;
 pub mod hotkey;
 pub mod input;

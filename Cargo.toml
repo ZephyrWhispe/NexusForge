@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core", "crates/vault-core", "crates/file-core", "crates/proxy-core", "crates/desktop-core", "crates/editor-core", "crates/notes-core"]
+members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core", "crates/vault-core", "crates/file-core", "crates/proxy-core", "crates/desktop-core", "crates/editor-core", "crates/notes-core", "crates/term-core"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,22 @@
+[package]
+name = "term-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+host-core = { path = "../host-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
+zeroize = { workspace = true }
+
+# T3 SSH/SFTP（docs/impl/06 T3）：russh + russh-sftp（Handler 为 async_trait 风格）
+russh = "0.46"
+russh-sftp = "2"
+async-trait = "0.1"
