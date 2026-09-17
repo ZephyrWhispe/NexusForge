@@ -1,0 +1,16 @@
+[package]
+name = "editor-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+host-core = { path = "../host-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+encoding_rs = { workspace = true }
+chardetng = { workspace = true }
+lopdf = { workspace = true }

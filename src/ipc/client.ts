@@ -838,3 +838,76 @@ export function desktopNoteRemove(id: string): Promise<boolean> {
 export function desktopNotesDue(): Promise<DesktopNoteDto[]> {
   return invoke("desktop_notes_due");
 }
+
+// ======================== 文本与 PDF（M9 E，docs/impl/06） ========================
+
+export type EditorEncodingKind = "utf8" | "utf8bom" | "utf16le" | "gbk" | "latin1";
+export type EditorEol = "crlf" | "lf";
+
+export interface EditorSessionInfoDto {
+  id: string;
+  path: string;
+  name: string;
+  encoding: EditorEncodingKind;
+  encoding_label: string;
+  eol: EditorEol;
+  /** 混合行尾（保存将整文件统一——UI 需明示） */
+  eol_mixed: boolean;
+  dirty: boolean;
+  size: number;
+  /** >5MB：关语法高亮（E2） */
+  big_file: boolean;
+  /** >50MB：只读 */
+  readonly: boolean;
+}
+
+export interface PdfInfoDto {
+  pages: number;
+  size: number;
+}
+
+export interface PdfOpResultDto {
+  output: string;
+  pages: number;
+  size: number;
+}
+
+export function editorOpen(path: string): Promise<EditorSessionInfoDto> {
+  return invoke("editor_open", { path });
+}
+export function editorContent(id: string): Promise<string> {
+  return invoke("editor_content", { id });
+}
+export function editorUpdate(id: string, content: string): Promise<boolean> {
+  return invoke("editor_update", { id, content });
+}
+export function editorSave(id: string): Promise<EditorSessionInfoDto> {
+  return invoke("editor_save", { id });
+}
+export function editorSaveAs(id: string, target: string): Promise<EditorSessionInfoDto> {
+  return invoke("editor_save_as", { id, target });
+}
+export function editorAutosave(id: string, content: string): Promise<boolean> {
+  return invoke("editor_autosave", { id, content });
+}
+export function editorClose(id: string): Promise<boolean> {
+  return invoke("editor_close", { id });
+}
+export function editorSessions(): Promise<EditorSessionInfoDto[]> {
+  return invoke("editor_sessions");
+}
+export function pdfInfo(path: string): Promise<PdfInfoDto> {
+  return invoke("pdf_info", { path });
+}
+export function pdfMerge(inputs: string[], output: string): Promise<PdfOpResultDto> {
+  return invoke("pdf_merge", { inputs, output });
+}
+export function pdfSplit(path: string, outDir: string): Promise<PdfOpResultDto[]> {
+  return invoke("pdf_split", { path, outDir });
+}
+export function pdfCompress(path: string): Promise<PdfOpResultDto> {
+  return invoke("pdf_compress", { path });
+}
+export function pdfWatermark(path: string, text: string): Promise<PdfOpResultDto> {
+  return invoke("pdf_watermark", { path, text });
+}

@@ -12,6 +12,7 @@ import VaultPanel from "../modules/vault/VaultPanel";
 import FilePanel from "../modules/file/FilePanel";
 import ProxyPanel from "../modules/proxy/ProxyPanel";
 import DesktopPanel from "../modules/desktop/DesktopPanel";
+import EditorPanel from "../modules/editor/EditorPanel";
 import { toggleLauncher } from "./launcherController";
 import { toggleNoteBar } from "./notebarController";
 import SchemaForm from "../settings/SchemaForm";
@@ -131,6 +132,7 @@ export default function MainWorkbench() {
   const isFile = active === "file";
   const isProxy = active === "proxy";
   const isDesktop = active === "desktop";
+  const isEditor = active === "editor";
   const isSettings = active === "__settings";
 
   return (
@@ -171,7 +173,9 @@ export default function MainWorkbench() {
                               ? "sing-box 内核 · 系统代理/TUN · 订阅解析 · 崩溃自动还原"
                               : isDesktop
                                 ? "快速启动器（Alt+Q） · 速记（Ctrl+Alt+N） · 桌面整理"
-                                : `${current?.phase} 模块将在对应阶段交付`}
+                                : isEditor
+                                  ? "Monaco 编辑器 · 编码检测 · Markdown 预览 · PDF 工具"
+                                  : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
@@ -186,6 +190,8 @@ export default function MainWorkbench() {
                   <ProxyPanel />
                 ) : isDesktop ? (
                   <DesktopPanel />
+                ) : isEditor ? (
+                  <EditorPanel />
                 ) : (
                   <div className={styles.empty}>
                     <div>

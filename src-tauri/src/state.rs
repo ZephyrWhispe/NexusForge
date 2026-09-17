@@ -27,6 +27,7 @@ use win_integration::sysproxy::WindowsSysProxy;
 
 use clipboard_core::module::ClipboardModule;
 use desktop_core::DesktopModule;
+use editor_core::EditorModule;
 use file_core::FileModule;
 use kvm_core::KvmModule;
 use ocr_core::OcrModule;
@@ -68,6 +69,7 @@ pub struct HostState {
     pub file: Arc<FileModule>,
     pub proxy: Arc<ProxyModule>,
     pub desktop: Arc<DesktopModule>,
+    pub editor: Arc<EditorModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -169,6 +171,11 @@ impl HostState {
         registry.register(desktop.clone())?;
         registry.register_ability::<dyn HotkeyProvider>(desktop.clone());
 
+        // ---- P2 文本与 PDF（M9，docs/impl/06 E1–E4）----
+        let editor = Arc::new(EditorModule::new(&app_data_dir));
+        config.register_schema("editor", editor.config_schema());
+        registry.register(editor.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -183,6 +190,7 @@ impl HostState {
             file,
             proxy,
             desktop,
+            editor,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })

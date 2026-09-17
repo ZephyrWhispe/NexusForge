@@ -141,6 +141,19 @@ pub fn run() {
             commands::desktop_note_done,
             commands::desktop_note_remove,
             commands::desktop_notes_due,
+            commands::editor_open,
+            commands::editor_content,
+            commands::editor_update,
+            commands::editor_save,
+            commands::editor_save_as,
+            commands::editor_autosave,
+            commands::editor_close,
+            commands::editor_sessions,
+            commands::pdf_info,
+            commands::pdf_merge,
+            commands::pdf_split,
+            commands::pdf_compress,
+            commands::pdf_watermark,
         ])
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;
