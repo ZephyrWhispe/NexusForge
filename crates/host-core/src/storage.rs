@@ -49,11 +49,19 @@ pub trait StorageDriver: Send + Sync {
     }
     /// 读取文件内容（notes-core N5 多存储后端复用；远程驱动按能力实现）
     fn read_file(&self, _path: &Path) -> Result<Vec<u8>, AppError> {
-        Err(AppError::module("FILE_OPS_005", "该驱动不支持 read_file", None))
+        Err(AppError::module(
+            "FILE_OPS_005",
+            "该驱动不支持 read_file",
+            None,
+        ))
     }
     /// 写出文件内容（驱动负责建父目录；本地实现走 tmp+rename 原子替换）
     fn write_file(&self, _path: &Path, _data: &[u8]) -> Result<(), AppError> {
-        Err(AppError::module("FILE_OPS_005", "该驱动不支持 write_file", None))
+        Err(AppError::module(
+            "FILE_OPS_005",
+            "该驱动不支持 write_file",
+            None,
+        ))
     }
 }
 

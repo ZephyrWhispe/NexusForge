@@ -269,7 +269,11 @@ impl DiscoveryService {
             };
             peers.insert(
                 hb.device_id,
-                PeerEntry { info: info.clone(), last_seen: std::time::Instant::now(), seq: hb.seq },
+                PeerEntry {
+                    info: info.clone(),
+                    last_seen: std::time::Instant::now(),
+                    seq: hb.seq,
+                },
             );
             if first {
                 Some(PeerEvent::Online(info))
@@ -349,7 +353,12 @@ mod tests {
             pubkey_fingerprint: "ff".repeat(16),
             tcp_port: 49900,
             caps: vec!["input".into(), "clip".into(), "file".into()],
-            screen: ScreenRect { x: 0, y: 0, w: 1920, h: 1080 },
+            screen: ScreenRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
         }
     }
 
@@ -422,11 +431,14 @@ mod tests {
         );
         let h_a2 = svc_a2.clone().run().await.unwrap();
         tokio::time::sleep(Duration::from_millis(700)).await;
-        let evs = events_a2.lock().unwrap();
-        assert!(
-            evs.iter().any(|e| matches!(e, PeerEvent::Offline(id) if id == "ghost")),
-            "应收到 ghost 离线事件，实际: {evs:?}"
-        );
+        {
+            let evs = events_a2.lock().unwrap();
+            assert!(
+                evs.iter()
+                    .any(|e| matches!(e, PeerEvent::Offline(id) if id == "ghost")),
+                "应收到 ghost 离线事件，实际: {evs:?}"
+            );
+        }
         h_a2.shutdown().await;
     }
 

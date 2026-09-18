@@ -19,7 +19,10 @@ pub struct VaultModule {
 
 impl VaultModule {
     pub fn new() -> Self {
-        Self { service: RwLock::new(None), state: AtomicU8::new(0) }
+        Self {
+            service: RwLock::new(None),
+            state: AtomicU8::new(0),
+        }
     }
 
     /// IPC 层入口（全部命令经此取服务；未 init 返回 None）
@@ -48,8 +51,10 @@ impl Module for VaultModule {
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
         let svc = VaultService::open(&ctx.app_data_dir)
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
-        *self.service.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(Arc::new(svc));
+        *self
+            .service
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(svc));
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }

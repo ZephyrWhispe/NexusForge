@@ -29,13 +29,19 @@ impl TaskSchdOps {
             .args(args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| AppError::module("AUTO_TASK_001", format!("schtasks 启动失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("AUTO_TASK_001", format!("schtasks 启动失败: {e}"), None)
+            })?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if !out.status.success() {
             return Err(AppError::module(
                 "AUTO_TASK_002",
-                format!("schtasks {} 失败: {}", args.first().unwrap_or(&""), stderr.trim()),
+                format!(
+                    "schtasks {} 失败: {}",
+                    args.first().unwrap_or(&""),
+                    stderr.trim()
+                ),
                 None,
             ));
         }
@@ -48,12 +54,18 @@ impl TaskSchdOps {
             .args(args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| AppError::module("AUTO_TASK_001", format!("schtasks 启动失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("AUTO_TASK_001", format!("schtasks 启动失败: {e}"), None)
+            })?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             return Err(AppError::module(
                 "AUTO_TASK_002",
-                format!("schtasks {} 失败: {}", args.first().unwrap_or(&""), stderr.trim()),
+                format!(
+                    "schtasks {} 失败: {}",
+                    args.first().unwrap_or(&""),
+                    stderr.trim()
+                ),
                 None,
             ));
         }
@@ -64,7 +76,9 @@ impl TaskSchdOps {
     fn decode(raw: &[u8]) -> String {
         if raw.starts_with(&[0xFF, 0xFE]) {
             let utf16: Vec<u16> = raw[2..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             String::from_utf16_lossy(&utf16)
@@ -81,11 +95,20 @@ impl Default for TaskSchdOps {
 }
 
 impl TaskSchdPort for TaskSchdOps {
-    fn ensure_daily(&self, task_name: &str, exe: &str, args: &str, time: &str) -> Result<(), AppError> {
+    fn ensure_daily(
+        &self,
+        task_name: &str,
+        exe: &str,
+        args: &str,
+        time: &str,
+    ) -> Result<(), AppError> {
         // /TR 命令行整体加引号 + exe 内层引号（路径含空格）
         let tr = format!("\"{exe}\" {args}");
         // /F 存在则覆盖（幂等）；/SC DAILY 每日 /ST HH:MM
-        Self::run(&["/Create", "/TN", task_name, "/TR", &tr, "/SC", "DAILY", "/ST", time, "/F"]).map(|_| ())
+        Self::run(&[
+            "/Create", "/TN", task_name, "/TR", &tr, "/SC", "DAILY", "/ST", time, "/F",
+        ])
+        .map(|_| ())
     }
 
     fn remove(&self, task_name: &str) -> Result<(), AppError> {
@@ -140,14 +163,18 @@ mod tests {
         // 命令行格式由 ensure_daily 拼接；此处校验格式约定
         let exe = r"C:\Program Files\NexusForge\nexusforge.exe";
         let tr = format!("\"{exe}\" --run-rule abc");
-        assert_eq!(tr, r#""C:\Program Files\NexusForge\nexusforge.exe" --run-rule abc"#);
+        assert_eq!(
+            tr,
+            r#""C:\Program Files\NexusForge\nexusforge.exe" --run-rule abc"#
+        );
     }
 
     /// remove 幂等：删除不存在的任务不报错
     #[test]
     fn remove_idempotent() {
         let ops = TaskSchdOps::new();
-        ops.remove(&format!("{TASK_PREFIX}nonexistent_test")).unwrap();
+        ops.remove(&format!("{TASK_PREFIX}nonexistent_test"))
+            .unwrap();
     }
 
     /// 真机：系统任务 query_enabled 三态语义（存在→Some；不存在→None）
@@ -156,10 +183,14 @@ mod tests {
         let ops = TaskSchdOps::new();
         // 系统内置任务（Win10/11 均存在）
         let known = ops
-            .query_enabled(r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser")
+            .query_enabled(
+                r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+            )
             .unwrap();
         assert!(known.is_some(), "系统任务应存在");
-        let missing = ops.query_enabled(r"\Microsoft\Windows\NexusForge_Nonexistent_ZZ").unwrap();
+        let missing = ops
+            .query_enabled(r"\Microsoft\Windows\NexusForge_Nonexistent_ZZ")
+            .unwrap();
         assert!(missing.is_none());
     }
 }

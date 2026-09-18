@@ -76,7 +76,10 @@ pub fn segment_lines(mut lines: Vec<OcrLine>) -> Vec<OcrLine> {
         return lines;
     }
     lines.sort_by(|a, b| {
-        a.rect.y.partial_cmp(&b.rect.y).unwrap_or(std::cmp::Ordering::Equal)
+        a.rect
+            .y
+            .partial_cmp(&b.rect.y)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     // 行高中位数
     let mut heights: Vec<f32> = lines.iter().map(|l| l.rect.h).collect();
@@ -98,7 +101,10 @@ pub fn segment_lines(mut lines: Vec<OcrLine>) -> Vec<OcrLine> {
     let mut out = Vec::new();
     for band in &mut bands {
         band.sort_by(|a, b| {
-            a.rect.x.partial_cmp(&b.rect.x).unwrap_or(std::cmp::Ordering::Equal)
+            a.rect
+                .x
+                .partial_cmp(&b.rect.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         out.extend(band.iter().cloned());
     }

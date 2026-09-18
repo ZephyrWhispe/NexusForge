@@ -18,7 +18,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// provisioned 移除的包名合法字符（模板拼接白名单；0-9 A-Z a-z 点 下划线）
 fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
 }
 
 pub struct AppxOps;
@@ -45,10 +48,19 @@ impl AppxOps {
              Write-Output $p.Count }} else {{ Write-Output 0 }}"
         );
         let out = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| AppError::module("SYS_APPX_002", format!("PowerShell 启动失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("SYS_APPX_002", format!("PowerShell 启动失败: {e}"), None)
+            })?;
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -71,12 +83,19 @@ impl Default for AppxOps {
 impl AppxPort for AppxOps {
     fn list(&self, name_filter: &str) -> Result<Vec<AppxPackage>, AppError> {
         use windows::Management::Deployment::PackageManager;
-        let manager = PackageManager::new()
-            .map_err(|e| AppError::module("SYS_APPX_004", format!("PackageManager 初始化失败: {e}"), None))?;
+        let manager = PackageManager::new().map_err(|e| {
+            AppError::module(
+                "SYS_APPX_004",
+                format!("PackageManager 初始化失败: {e}"),
+                None,
+            )
+        })?;
         let pkgs = manager
             // 空 userSecurityId = 当前用户（Windows API 语义）；同步返回集合
             .FindPackagesByUserSecurityId(&windows::core::HSTRING::new())
-            .map_err(|e| AppError::module("SYS_APPX_005", format!("枚举 Appx 包失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("SYS_APPX_005", format!("枚举 Appx 包失败: {e}"), None)
+            })?;
         let mut result = Vec::new();
         for p in pkgs.into_iter() {
             let Ok(id) = p.Id() else { continue };
@@ -86,7 +105,10 @@ impl AppxPort for AppxOps {
                 continue;
             }
             let Ok(full) = id.FullName() else { continue };
-            result.push(AppxPackage { name: name_str, full_name: full.to_string() });
+            result.push(AppxPackage {
+                name: name_str,
+                full_name: full.to_string(),
+            });
         }
         Ok(result)
     }
@@ -100,17 +122,32 @@ impl AppxPort for AppxOps {
                 None,
             ));
         }
-        let manager = PackageManager::new()
-            .map_err(|e| AppError::module("SYS_APPX_004", format!("PackageManager 初始化失败: {e}"), None))?;
+        let manager = PackageManager::new().map_err(|e| {
+            AppError::module(
+                "SYS_APPX_004",
+                format!("PackageManager 初始化失败: {e}"),
+                None,
+            )
+        })?;
         let targets = self.list(name_filter)?;
         let mut removed = 0u32;
         for p in &targets {
             let op = manager
                 .RemovePackageAsync(&windows::core::HSTRING::from(&p.full_name))
-                .map_err(|e| AppError::module("SYS_APPX_006", format!("移除 {} 失败: {e}", p.full_name), None))?;
-            let result = op
-                .get()
-                .map_err(|e| AppError::module("SYS_APPX_006", format!("等待移除 {} 失败: {e}", p.full_name), None))?;
+                .map_err(|e| {
+                    AppError::module(
+                        "SYS_APPX_006",
+                        format!("移除 {} 失败: {e}", p.full_name),
+                        None,
+                    )
+                })?;
+            let result = op.get().map_err(|e| {
+                AppError::module(
+                    "SYS_APPX_006",
+                    format!("等待移除 {} 失败: {e}", p.full_name),
+                    None,
+                )
+            })?;
             let err_text = result.ErrorText().unwrap_or_default();
             if !err_text.is_empty() {
                 // 包被系统占用等 → 如实报错不重试（spec §5：提示可从 Store 重装）
@@ -154,7 +191,10 @@ mod tests {
         let ops = AppxOps::new();
         let all = ops.list("").unwrap();
         assert!(!all.is_empty(), "当前用户必有 Appx 包（框架包）");
-        assert!(all[0].full_name.len() > all[0].name.len(), "全名含版本/hash");
+        assert!(
+            all[0].full_name.len() > all[0].name.len(),
+            "全名含版本/hash"
+        );
         // 前缀过滤语义
         let filtered = ops.list(&all[0].name).unwrap();
         assert!(filtered.iter().all(|p| p.name.starts_with(&all[0].name)));

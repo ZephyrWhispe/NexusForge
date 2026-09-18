@@ -25,7 +25,10 @@ pub fn host_modules_status(state: State<'_, HostState>) -> Vec<ModuleStatusDto> 
     infos
         .into_iter()
         .map(|info| ModuleStatusDto {
-            state: status.get(info.id).copied().unwrap_or(host_core::module::ModuleState::Uninitialized),
+            state: status
+                .get(info.id)
+                .copied()
+                .unwrap_or(host_core::module::ModuleState::Uninitialized),
             id: info.id.to_owned(),
             name: info.name.to_owned(),
             version: info.version.to_owned(),
@@ -42,13 +45,19 @@ pub async fn host_module_restart(id: String, state: State<'_, HostState>) -> Res
 
 /// 读模块配置
 #[tauri::command]
-pub fn host_config_get(module: String, state: State<'_, HostState>) -> Result<serde_json::Value, AppError> {
+pub fn host_config_get(
+    module: String,
+    state: State<'_, HostState>,
+) -> Result<serde_json::Value, AppError> {
     state.config.get_module(&module)
 }
 
 /// 读模块配置 schema（设置中心自动渲染）
 #[tauri::command]
-pub fn host_config_schema(module: String, state: State<'_, HostState>) -> Result<serde_json::Value, AppError> {
+pub fn host_config_schema(
+    module: String,
+    state: State<'_, HostState>,
+) -> Result<serde_json::Value, AppError> {
     state
         .config
         .schema_of(&module)
@@ -110,7 +119,11 @@ pub async fn clipboard_paste(id: String, state: State<'_, HostState>) -> Result<
                 bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
             },
             Payload::SecretB64(_) => {
-                return Err(AppError::module("CLIPBOARD_PASTE_004", "加密条目状态异常", None))
+                return Err(AppError::module(
+                    "CLIPBOARD_PASTE_004",
+                    "加密条目状态异常",
+                    None,
+                ))
             }
         };
         clipboard.write_back(&content)
@@ -121,22 +134,33 @@ pub async fn clipboard_paste(id: String, state: State<'_, HostState>) -> Result<
 
 /// 图片条目字节（Base64 DIB），前端 canvas 解码预览用
 #[tauri::command]
-pub async fn clipboard_get_image(id: String, state: State<'_, HostState>) -> Result<String, AppError> {
-    use clipboard_core::store::Payload;
+pub async fn clipboard_get_image(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
     use base64::Engine;
+    use clipboard_core::store::Payload;
     let clipboard = state.clipboard.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        match clipboard.get_payload(&id)? {
-            Some(Payload::Image { bytes, .. }) => Ok(base64::engine::general_purpose::STANDARD.encode(bytes)),
-            _ => Err(AppError::module("CLIPBOARD_QUERY_004", "条目不是图片", None)),
+    tauri::async_runtime::spawn_blocking(move || match clipboard.get_payload(&id)? {
+        Some(Payload::Image { bytes, .. }) => {
+            Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
         }
+        _ => Err(AppError::module(
+            "CLIPBOARD_QUERY_004",
+            "条目不是图片",
+            None,
+        )),
     })
     .await
     .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
 }
 
 #[tauri::command]
-pub async fn clipboard_pin(id: String, pinned: bool, state: State<'_, HostState>) -> Result<(), AppError> {
+pub async fn clipboard_pin(
+    id: String,
+    pinned: bool,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
     let clipboard = state.clipboard.clone();
     tauri::async_runtime::spawn_blocking(move || clipboard.pin(&id, pinned))
         .await
@@ -162,7 +186,10 @@ pub async fn clipboard_delete(id: String, state: State<'_, HostState>) -> Result
 }
 
 #[tauri::command]
-pub async fn clipboard_clear(keep_pinned: bool, state: State<'_, HostState>) -> Result<u32, AppError> {
+pub async fn clipboard_clear(
+    keep_pinned: bool,
+    state: State<'_, HostState>,
+) -> Result<u32, AppError> {
     let clipboard = state.clipboard.clone();
     let n = tauri::async_runtime::spawn_blocking(move || clipboard.clear(keep_pinned))
         .await
@@ -180,7 +207,9 @@ pub async fn clipboard_clear(keep_pinned: bool, state: State<'_, HostState>) -> 
 
 /// 分组计数（SubNav 角标）
 #[tauri::command]
-pub async fn clipboard_group_counts(state: State<'_, HostState>) -> Result<serde_json::Value, AppError> {
+pub async fn clipboard_group_counts(
+    state: State<'_, HostState>,
+) -> Result<serde_json::Value, AppError> {
     let clipboard = state.clipboard.clone();
     tauri::async_runtime::spawn_blocking(move || clipboard.group_counts())
         .await
@@ -265,8 +294,8 @@ pub async fn screenshot_history_list(
     let screenshot = state.screenshot.clone();
     let store = screenshot.history_store();
     tauri::async_runtime::spawn_blocking(move || {
-        let store = store
-            .ok_or_else(|| AppError::module("SCREENSHOT_STATE_001", "模块未就绪", None))?;
+        let store =
+            store.ok_or_else(|| AppError::module("SCREENSHOT_STATE_001", "模块未就绪", None))?;
         store.list(&query)
     })
     .await
@@ -401,7 +430,9 @@ pub fn kvm_unpair(device_id: String, state: State<'_, HostState>) -> Result<bool
 
 /// 已配对设备列表
 #[tauri::command]
-pub fn kvm_paired_peers(state: State<'_, HostState>) -> Result<Vec<kvm_core::PairedPeer>, AppError> {
+pub fn kvm_paired_peers(
+    state: State<'_, HostState>,
+) -> Result<Vec<kvm_core::PairedPeer>, AppError> {
     state.kvm.paired_peers().map_err(kvm_err)
 }
 
@@ -555,9 +586,8 @@ pub async fn vault_create(
     tauri::async_runtime::spawn_blocking(move || svc2.create(&master_password, None))
         .await
         .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-        .map(|h| {
+        .inspect(|_h| {
             publish_vault_state(&state, &svc);
-            h
         })
 }
 
@@ -598,16 +628,17 @@ pub async fn vault_change_master_password(
     })
     .await
     .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-    .map(|h| {
+    .inspect(|_h| {
         publish_vault_state(&state, &svc);
-        h
     })
 }
 
 // ---- 文件夹 ----
 
 #[tauri::command]
-pub async fn vault_folders(state: State<'_, HostState>) -> Result<Vec<vault_core::Folder>, AppError> {
+pub async fn vault_folders(
+    state: State<'_, HostState>,
+) -> Result<Vec<vault_core::Folder>, AppError> {
     let svc = vault_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || svc.list_folders())
         .await
@@ -623,9 +654,8 @@ pub async fn vault_folder_create(
     tauri::async_runtime::spawn_blocking(move || svc.create_folder(&name))
         .await
         .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-        .map(|f| {
+        .inspect(|f| {
             publish_vault_entries(&state, "folder_created", Some(&f.id));
-            f
         })
 }
 
@@ -640,27 +670,28 @@ pub async fn vault_folder_rename(
     tauri::async_runtime::spawn_blocking(move || svc.rename_folder(&id2, &name))
         .await
         .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-        .map(|ok| {
+        .inspect(|&ok| {
             if ok {
                 publish_vault_entries(&state, "folder_renamed", Some(&id));
             }
-            ok
         })
 }
 
 /// 删除文件夹（条目保留，folder_id 置空）
 #[tauri::command]
-pub async fn vault_folder_delete(id: String, state: State<'_, HostState>) -> Result<bool, AppError> {
+pub async fn vault_folder_delete(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
     let svc = vault_service(&state)?;
     let id2 = id.clone();
     tauri::async_runtime::spawn_blocking(move || svc.delete_folder(&id2))
         .await
         .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-        .map(|ok| {
+        .inspect(|&ok| {
             if ok {
                 publish_vault_entries(&state, "folder_deleted", Some(&id));
             }
-            ok
         })
 }
 
@@ -707,9 +738,8 @@ pub async fn vault_entry_add(
     })
     .await
     .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-    .map(|e| {
+    .inspect(|e| {
         publish_vault_entries(&state, "entry_added", Some(&e.id));
-        e
     })
 }
 
@@ -723,9 +753,8 @@ pub async fn vault_entry_update(
     tauri::async_runtime::spawn_blocking(move || svc.update_entry(entry))
         .await
         .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-        .map(|e| {
+        .inspect(|e| {
             publish_vault_entries(&state, "entry_updated", Some(&e.id));
-            e
         })
 }
 
@@ -736,20 +765,17 @@ pub async fn vault_entry_delete(id: String, state: State<'_, HostState>) -> Resu
     tauri::async_runtime::spawn_blocking(move || svc.delete_entry(&id2))
         .await
         .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
-        .map(|ok| {
+        .inspect(|&ok| {
             if ok {
                 publish_vault_entries(&state, "entry_deleted", Some(&id));
             }
-            ok
         })
 }
 
 // ---- 工具：生成器 / TOTP ----
 
 #[tauri::command]
-pub fn vault_generate_password(
-    policy: vault_core::PasswordPolicy,
-) -> Result<String, AppError> {
+pub fn vault_generate_password(policy: vault_core::PasswordPolicy) -> Result<String, AppError> {
     vault_core::generate_password(&policy)
 }
 
@@ -782,7 +808,9 @@ fn file_err(e: file_core::FileError) -> AppError {
 
 /// 盘符列表（F1）
 #[tauri::command]
-pub async fn file_drives(state: State<'_, HostState>) -> Result<Vec<file_core::DriveInfo>, AppError> {
+pub async fn file_drives(
+    state: State<'_, HostState>,
+) -> Result<Vec<file_core::DriveInfo>, AppError> {
     let svc = file_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || Ok(svc.drives()))
         .await
@@ -850,15 +878,20 @@ pub async fn file_enqueue(
     state: State<'_, HostState>,
 ) -> Result<FileEnqueueDto, AppError> {
     let svc = file_service(&state)?;
-    tauri::async_runtime::spawn_blocking(move || svc.enqueue(spec).map(|(op_id, conflicts)| FileEnqueueDto { op_id, conflicts }))
-        .await
-        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
-        .map_err(file_err)
+    tauri::async_runtime::spawn_blocking(move || {
+        svc.enqueue(spec)
+            .map(|(op_id, conflicts)| FileEnqueueDto { op_id, conflicts })
+    })
+    .await
+    .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+    .map_err(file_err)
 }
 
 /// 活跃/近期操作（F2）
 #[tauri::command]
-pub async fn file_ops_active(state: State<'_, HostState>) -> Result<Vec<file_core::OpProgress>, AppError> {
+pub async fn file_ops_active(
+    state: State<'_, HostState>,
+) -> Result<Vec<file_core::OpProgress>, AppError> {
     let svc = file_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || Ok(svc.ops_active()))
         .await
@@ -867,7 +900,9 @@ pub async fn file_ops_active(state: State<'_, HostState>) -> Result<Vec<file_cor
 
 /// 崩溃恢复扫描：未完成操作（F2，docs/impl/01 S6.5）
 #[tauri::command]
-pub async fn file_ops_pending(state: State<'_, HostState>) -> Result<Vec<file_core::PendingOp>, AppError> {
+pub async fn file_ops_pending(
+    state: State<'_, HostState>,
+) -> Result<Vec<file_core::PendingOp>, AppError> {
     let svc = file_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || Ok(svc.ops_pending()))
         .await
@@ -886,7 +921,10 @@ pub async fn file_op_pause(op_id: String, state: State<'_, HostState>) -> Result
 
 /// 恢复操作（返回新 op_id）
 #[tauri::command]
-pub async fn file_op_resume(op_id: String, state: State<'_, HostState>) -> Result<String, AppError> {
+pub async fn file_op_resume(
+    op_id: String,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
     let svc = file_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || svc.op_resume(&op_id))
         .await
@@ -953,7 +991,9 @@ pub async fn file_search(
 
 /// 存储驱动列表（F6）
 #[tauri::command]
-pub async fn file_drivers(state: State<'_, HostState>) -> Result<Vec<file_core::DriverInfo>, AppError> {
+pub async fn file_drivers(
+    state: State<'_, HostState>,
+) -> Result<Vec<file_core::DriverInfo>, AppError> {
     let svc = file_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || Ok(svc.drivers()))
         .await
@@ -1055,10 +1095,7 @@ pub async fn proxy_sub_add(
 
 /// 删除订阅（连其节点一并清除）
 #[tauri::command]
-pub async fn proxy_sub_remove(
-    id: String,
-    state: State<'_, HostState>,
-) -> Result<bool, AppError> {
+pub async fn proxy_sub_remove(id: String, state: State<'_, HostState>) -> Result<bool, AppError> {
     let svc = proxy_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || svc.sub_remove(&id))
         .await
@@ -1078,7 +1115,9 @@ pub async fn proxy_sub_update(
 
 /// 节点列表（全部订阅聚合）
 #[tauri::command]
-pub async fn proxy_nodes(state: State<'_, HostState>) -> Result<Vec<proxy_core::NodeDto>, AppError> {
+pub async fn proxy_nodes(
+    state: State<'_, HostState>,
+) -> Result<Vec<proxy_core::NodeDto>, AppError> {
     let svc = proxy_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || Ok(svc.nodes()))
         .await
@@ -1109,10 +1148,7 @@ pub async fn proxy_set_direct_rules(
 
 /// 切换模式：off（停内核+还原）/ system（内核+系统代理）/ tun（内核+TUN，需管理员）
 #[tauri::command]
-pub async fn proxy_set_mode(
-    mode: String,
-    state: State<'_, HostState>,
-) -> Result<(), AppError> {
+pub async fn proxy_set_mode(mode: String, state: State<'_, HostState>) -> Result<(), AppError> {
     let svc = proxy_service(&state)?;
     let mode = proxy_core::Mode::parse(&mode).map_err(proxy_err)?;
     tauri::async_runtime::spawn_blocking(move || svc.set_mode(mode))
@@ -1167,12 +1203,15 @@ pub async fn desktop_launcher_search(
 
 /// 启动条目（App → ShellExecuteW；Action → 发事件；记频次）
 #[tauri::command]
-pub async fn desktop_launcher_launch(id: String, state: State<'_, HostState>) -> Result<(), AppError> {
+pub async fn desktop_launcher_launch(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || m.launch(&id))
         .await
         .map_err(|e| AppError::module("DESKTOP_IPC_001", e.to_string(), None))?
-        .map_err(|e| AppError::from(e))
+        .map_err(AppError::from)
 }
 
 /// 索引状态（是否就绪 + 条目数）
@@ -1188,7 +1227,9 @@ pub async fn desktop_launcher_status(
 
 /// 桌面整理预览（D3）
 #[tauri::command]
-pub async fn desktop_tidy_plan(state: State<'_, HostState>) -> Result<desktop_core::TidyPlan, AppError> {
+pub async fn desktop_tidy_plan(
+    state: State<'_, HostState>,
+) -> Result<desktop_core::TidyPlan, AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || m.tidy_planner().plan(m.desktop_dir()))
         .await
@@ -1198,9 +1239,7 @@ pub async fn desktop_tidy_plan(state: State<'_, HostState>) -> Result<desktop_co
 
 /// 执行桌面整理（返回移动数/跳过数）
 #[tauri::command]
-pub async fn desktop_tidy_apply(
-    state: State<'_, HostState>,
-) -> Result<(usize, usize), AppError> {
+pub async fn desktop_tidy_apply(state: State<'_, HostState>) -> Result<(usize, usize), AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || m.tidy_planner().apply(m.desktop_dir()))
         .await
@@ -1233,9 +1272,9 @@ pub async fn desktop_note_add(
 ) -> Result<desktop_core::Note, AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = m.note_store().ok_or_else(|| {
-            desktop_core::DesktopError::BadState("随记库未初始化".into())
-        })?;
+        let store = m
+            .note_store()
+            .ok_or_else(|| desktop_core::DesktopError::BadState("随记库未初始化".into()))?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -1255,9 +1294,9 @@ pub async fn desktop_note_list(
 ) -> Result<Vec<desktop_core::Note>, AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = m.note_store().ok_or_else(|| {
-            desktop_core::DesktopError::BadState("随记库未初始化".into())
-        })?;
+        let store = m
+            .note_store()
+            .ok_or_else(|| desktop_core::DesktopError::BadState("随记库未初始化".into()))?;
         store.list(include_done)
     })
     .await
@@ -1274,9 +1313,9 @@ pub async fn desktop_note_done(
 ) -> Result<bool, AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = m.note_store().ok_or_else(|| {
-            desktop_core::DesktopError::BadState("随记库未初始化".into())
-        })?;
+        let store = m
+            .note_store()
+            .ok_or_else(|| desktop_core::DesktopError::BadState("随记库未初始化".into()))?;
         store.set_done(&id, done)
     })
     .await
@@ -1286,12 +1325,15 @@ pub async fn desktop_note_done(
 
 /// 删除随记
 #[tauri::command]
-pub async fn desktop_note_remove(id: String, state: State<'_, HostState>) -> Result<bool, AppError> {
+pub async fn desktop_note_remove(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = m.note_store().ok_or_else(|| {
-            desktop_core::DesktopError::BadState("随记库未初始化".into())
-        })?;
+        let store = m
+            .note_store()
+            .ok_or_else(|| desktop_core::DesktopError::BadState("随记库未初始化".into()))?;
         store.remove(&id)
     })
     .await
@@ -1301,12 +1343,14 @@ pub async fn desktop_note_remove(id: String, state: State<'_, HostState>) -> Res
 
 /// 手动拉取到期提醒（后台轮询之外的补充路径）
 #[tauri::command]
-pub async fn desktop_notes_due(state: State<'_, HostState>) -> Result<Vec<desktop_core::Note>, AppError> {
+pub async fn desktop_notes_due(
+    state: State<'_, HostState>,
+) -> Result<Vec<desktop_core::Note>, AppError> {
     let m = desktop_module(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = m.note_store().ok_or_else(|| {
-            desktop_core::DesktopError::BadState("随记库未初始化".into())
-        })?;
+        let store = m
+            .note_store()
+            .ok_or_else(|| desktop_core::DesktopError::BadState("随记库未初始化".into()))?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -1339,10 +1383,7 @@ pub async fn editor_open(
 
 /// 取会话内容（打开后拉取一次）
 #[tauri::command]
-pub async fn editor_content(
-    id: String,
-    state: State<'_, HostState>,
-) -> Result<String, AppError> {
+pub async fn editor_content(id: String, state: State<'_, HostState>) -> Result<String, AppError> {
     let m = state.editor.clone();
     tauri::async_runtime::spawn_blocking(move || m.sessions().content(&id))
         .await
@@ -1430,7 +1471,7 @@ pub async fn pdf_info(
     path: std::path::PathBuf,
     state: State<'_, HostState>,
 ) -> Result<editor_core::PdfInfo, AppError> {
-    let m = state.editor.clone();
+    let _m = state.editor.clone();
     tauri::async_runtime::spawn_blocking(move || editor_core::pdf::info(&path))
         .await
         .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
@@ -1531,8 +1572,13 @@ fn notes_notify(state: &HostState, action: &str, path: Option<&str>) {
 
 /// 全库笔记列表（N1）
 #[tauri::command]
-pub async fn notes_list(state: State<'_, HostState>) -> Result<Vec<notes_core::model::NoteMeta>, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+pub async fn notes_list(
+    state: State<'_, HostState>,
+) -> Result<Vec<notes_core::model::NoteMeta>, AppError> {
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.list_notes())
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
@@ -1545,7 +1591,10 @@ pub async fn notes_read(
     rel_path: String,
     state: State<'_, HostState>,
 ) -> Result<NoteReadDto, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || {
         let (content, meta) = m.read(&rel_path)?;
         Ok(NoteReadDto { content, meta })
@@ -1568,7 +1617,10 @@ pub async fn notes_create(
     content: Option<String>,
     state: State<'_, HostState>,
 ) -> Result<notes_core::model::NoteMeta, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let body = content.unwrap_or_else(|| {
         let stem = std::path::Path::new(&rel_path)
             .file_stem()
@@ -1579,9 +1631,8 @@ pub async fn notes_create(
     tauri::async_runtime::spawn_blocking(move || m.create(&rel_path, &body))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
-        .map(|meta| {
+        .inspect(|meta| {
             notes_notify_inner(&state, "create", Some(&meta.path));
-            meta
         })
         .map_err(notes_err)
 }
@@ -1597,7 +1648,10 @@ pub async fn notes_write(
     content: String,
     state: State<'_, HostState>,
 ) -> Result<(), AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let rel2 = rel_path.clone();
     tauri::async_runtime::spawn_blocking(move || m.write(&rel_path, &content))
         .await
@@ -1611,7 +1665,10 @@ pub async fn notes_write(
 /// 删除笔记（联动卡片解除关联）
 #[tauri::command]
 pub async fn notes_delete(rel_path: String, state: State<'_, HostState>) -> Result<(), AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let rel2 = rel_path.clone();
     tauri::async_runtime::spawn_blocking(move || m.delete(&rel_path))
         .await
@@ -1629,7 +1686,10 @@ pub async fn notes_rename(
     new_path: String,
     state: State<'_, HostState>,
 ) -> Result<(), AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let new2 = new_path.clone();
     tauri::async_runtime::spawn_blocking(move || m.rename(&old_path, &new_path))
         .await
@@ -1646,7 +1706,10 @@ pub async fn notes_links(
     rel_path: String,
     state: State<'_, HostState>,
 ) -> Result<Vec<LinkDto>, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || {
         let rows = m.links_of(&rel_path)?;
         Ok(rows
@@ -1671,7 +1734,10 @@ pub async fn notes_backlinks(
     rel_path: String,
     state: State<'_, HostState>,
 ) -> Result<Vec<notes_core::model::Backlink>, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.backlinks(&rel_path))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
@@ -1680,28 +1746,36 @@ pub async fn notes_backlinks(
 
 /// 增量索引（外部编辑器改动收敛）
 #[tauri::command]
-pub async fn notes_sync(state: State<'_, HostState>) -> Result<notes_core::model::SyncResult, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+pub async fn notes_sync(
+    state: State<'_, HostState>,
+) -> Result<notes_core::model::SyncResult, AppError> {
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.sync())
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
-        .map(|r| {
+        .inspect(|_r| {
             notes_notify_inner(&state, "sync", None);
-            r
         })
         .map_err(notes_err)
 }
 
 /// 全量重建索引
 #[tauri::command]
-pub async fn notes_reindex(state: State<'_, HostState>) -> Result<notes_core::model::SyncResult, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+pub async fn notes_reindex(
+    state: State<'_, HostState>,
+) -> Result<notes_core::model::SyncResult, AppError> {
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.reindex())
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
-        .map(|r| {
+        .inspect(|_r| {
             notes_notify_inner(&state, "reindex", None);
-            r
         })
         .map_err(notes_err)
 }
@@ -1710,8 +1784,13 @@ pub async fn notes_reindex(state: State<'_, HostState>) -> Result<notes_core::mo
 
 /// 全部卡片
 #[tauri::command]
-pub async fn notes_cards(state: State<'_, HostState>) -> Result<Vec<notes_core::model::Card>, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+pub async fn notes_cards(
+    state: State<'_, HostState>,
+) -> Result<Vec<notes_core::model::Card>, AppError> {
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.cards().list())
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
@@ -1726,14 +1805,16 @@ pub async fn notes_card_create(
     note_path: Option<String>,
     state: State<'_, HostState>,
 ) -> Result<notes_core::model::Card, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let now = now_ms();
     tauri::async_runtime::spawn_blocking(move || m.cards().create(&front, &back, note_path, now))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
-        .map(|card| {
+        .inspect(|_card| {
             notes_notify_inner(&state, "cards", None);
-            card
         })
         .map_err(notes_err)
 }
@@ -1741,13 +1822,15 @@ pub async fn notes_card_create(
 /// 删除卡片
 #[tauri::command]
 pub async fn notes_card_delete(id: String, state: State<'_, HostState>) -> Result<bool, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.cards().delete(&id))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
-        .map(|ok| {
+        .inspect(|_ok| {
             notes_notify_inner(&state, "cards", None);
-            ok
         })
         .map_err(notes_err)
 }
@@ -1757,7 +1840,10 @@ pub async fn notes_card_delete(id: String, state: State<'_, HostState>) -> Resul
 pub async fn notes_review_queue(
     state: State<'_, HostState>,
 ) -> Result<Vec<notes_core::model::Card>, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let now = now_ms();
     tauri::async_runtime::spawn_blocking(move || m.review_queue(now))
         .await
@@ -1772,14 +1858,16 @@ pub async fn notes_review_grade(
     quality: u32,
     state: State<'_, HostState>,
 ) -> Result<notes_core::model::Card, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let now = now_ms();
     tauri::async_runtime::spawn_blocking(move || m.grade_card(&id, quality, now))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
-        .map(|card| {
+        .inspect(|_card| {
             notes_notify_inner(&state, "cards", None);
-            card
         })
         .map_err(notes_err)
 }
@@ -1792,7 +1880,10 @@ pub async fn notes_canvas_get(
     dir: String,
     state: State<'_, HostState>,
 ) -> Result<notes_core::model::CanvasDoc, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.canvas_get(&dir))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
@@ -1806,7 +1897,10 @@ pub async fn notes_canvas_save(
     doc: notes_core::model::CanvasDoc,
     state: State<'_, HostState>,
 ) -> Result<(), AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let dir2 = dir.clone();
     tauri::async_runtime::spawn_blocking(move || m.canvas_save(&dir, &doc))
         .await
@@ -1820,13 +1914,15 @@ pub async fn notes_canvas_save(
 /// 画布可用目录列表
 #[tauri::command]
 pub async fn notes_canvas_dirs(state: State<'_, HostState>) -> Result<Vec<String>, AppError> {
-    let m = state.notes.library().ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     tauri::async_runtime::spawn_blocking(move || m.canvas_dirs())
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .map_err(notes_err)
 }
-
 
 // ======================== 终端与运维（M11 T，docs/impl/06） ========================
 
@@ -1834,19 +1930,6 @@ use host_core::ports::DockerPipePort;
 
 fn term_err(e: term_core::TermError) -> AppError {
     AppError::module(e.code(), e.to_string(), None)
-}
-
-/// 本地/WSL 会话参数
-#[derive(serde::Deserialize)]
-pub struct TermSpawnDto {
-    /// "local" | "wsl"
-    pub kind: String,
-    /// 本地完整命令行（None = 默认 PowerShell）
-    pub shell: Option<String>,
-    pub cwd: Option<std::path::PathBuf>,
-    pub wsl_distro: Option<String>,
-    pub cols: u16,
-    pub rows: u16,
 }
 
 /// 本地会话（T1）
@@ -1884,7 +1967,7 @@ pub async fn term_spawn_wsl(
 
 /// WSL 分发列表（T5）
 #[tauri::command]
-pub async fn term_wsl_list(state: State<'_, HostState>) -> Result<Vec<String>, AppError> {
+pub async fn term_wsl_list(_state: State<'_, HostState>) -> Result<Vec<String>, AppError> {
     let distros = tokio::task::spawn_blocking(term_core::wsl::list_distros)
         .await
         .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
@@ -1944,7 +2027,11 @@ pub async fn term_ack(
 /// 终止会话
 #[tauri::command]
 pub async fn term_kill(session_id: String, state: State<'_, HostState>) -> Result<(), AppError> {
-    state.term.sessions().kill_session(&session_id).map_err(term_err)
+    state
+        .term
+        .sessions()
+        .kill_session(&session_id)
+        .map_err(term_err)
 }
 
 /// 会话列表
@@ -2050,7 +2137,12 @@ pub async fn term_sftp_list(
         .term
         .ssh()
         .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
-    let target = term_core::SshTarget { host, port, user, auth };
+    let target = term_core::SshTarget {
+        host,
+        port,
+        user,
+        auth,
+    };
     ssh.sftp_list(&target, &path).await.map_err(term_err)
 }
 
@@ -2069,7 +2161,12 @@ pub async fn term_sftp_download(
         .term
         .ssh()
         .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
-    let target = term_core::SshTarget { host, port, user, auth };
+    let target = term_core::SshTarget {
+        host,
+        port,
+        user,
+        auth,
+    };
     ssh.sftp_download(&target, &remote_path, &local_path)
         .await
         .map_err(term_err)
@@ -2090,7 +2187,12 @@ pub async fn term_sftp_upload(
         .term
         .ssh()
         .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
-    let target = term_core::SshTarget { host, port, user, auth };
+    let target = term_core::SshTarget {
+        host,
+        port,
+        user,
+        auth,
+    };
     ssh.sftp_upload(&target, &local_path, &remote_path)
         .await
         .map_err(term_err)
@@ -2124,10 +2226,12 @@ pub async fn term_docker_lifecycle(
         .ports
         .get::<dyn DockerPipePort>()
         .ok_or_else(|| AppError::module("TERM_IPC_001", "Docker 管道未注册", None))?;
-    tokio::task::spawn_blocking(move || term_core::docker::container_lifecycle(docker.as_ref(), &id, start))
-        .await
-        .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
-        .map_err(term_err)
+    tokio::task::spawn_blocking(move || {
+        term_core::docker::container_lifecycle(docker.as_ref(), &id, start)
+    })
+    .await
+    .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
+    .map_err(term_err)
 }
 
 /// 容器日志（tail 最近 N 行）
@@ -2141,10 +2245,12 @@ pub async fn term_docker_logs(
         .ports
         .get::<dyn DockerPipePort>()
         .ok_or_else(|| AppError::module("TERM_IPC_001", "Docker 管道未注册", None))?;
-    tokio::task::spawn_blocking(move || term_core::docker::container_logs(docker.as_ref(), &id, tail))
-        .await
-        .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
-        .map_err(term_err)
+    tokio::task::spawn_blocking(move || {
+        term_core::docker::container_logs(docker.as_ref(), &id, tail)
+    })
+    .await
+    .map_err(|e| AppError::module("TERM_IPC_001", e.to_string(), None))?
+    .map_err(term_err)
 }
 
 // ======================== 系统管理（M12 SY，docs/impl/06） ========================
@@ -2178,7 +2284,9 @@ pub async fn sys_pkg_sources(state: State<'_, HostState>) -> Result<Vec<PkgSourc
 
 /// 已装清单合并视图（SY2：多源去重，winget 优先）
 #[tauri::command]
-pub async fn sys_pkg_list(state: State<'_, HostState>) -> Result<Vec<sys_core::PkgEntry>, AppError> {
+pub async fn sys_pkg_list(
+    state: State<'_, HostState>,
+) -> Result<Vec<sys_core::PkgEntry>, AppError> {
     let m = state.sys.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut sources = Vec::new();
@@ -2395,7 +2503,13 @@ pub async fn automation_replay(
         .rules()
         .into_iter()
         .find(|r| r.id == rule_id)
-        .ok_or_else(|| AppError::module("AUTO_RULE_001", format!("规则 {rule_id} 已删除，无法重放"), None))?;
+        .ok_or_else(|| {
+            AppError::module(
+                "AUTO_RULE_001",
+                format!("规则 {rule_id} 已删除，无法重放"),
+                None,
+            )
+        })?;
     engine.replay(&dead_id, &rule).map_err(auto_err)
 }
 
@@ -2431,7 +2545,10 @@ pub async fn automation_plugin_install(
 
 /// 删除插件
 #[tauri::command]
-pub async fn automation_plugin_remove(id: String, state: State<'_, HostState>) -> Result<bool, AppError> {
+pub async fn automation_plugin_remove(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
     let store = state
         .automation
         .plugin_store()
@@ -2450,7 +2567,9 @@ fn sync_err(e: sync_core::SyncError) -> AppError {
 
 /// 配对设备列表（信任根复用 KVM 配对；UI 选择同步目标）
 #[tauri::command]
-pub async fn sync_peers(state: State<'_, HostState>) -> Result<Vec<kvm_core::PairedPeer>, AppError> {
+pub async fn sync_peers(
+    state: State<'_, HostState>,
+) -> Result<Vec<kvm_core::PairedPeer>, AppError> {
     Ok(state.sync.peers())
 }
 
@@ -2467,22 +2586,25 @@ pub async fn sync_now(
     addr: String,
     state: State<'_, HostState>,
 ) -> Result<sync_core::SyncSummary, AppError> {
-    state.sync.sync_with(&device_id, &addr).await.map_err(sync_err)
+    state
+        .sync
+        .sync_with(&device_id, &addr)
+        .await
+        .map_err(sync_err)
 }
 
 // ======================== WinOps Tweak 引擎（M16 W0–W4，docs/impl/08） ========================
 
 /// 组装 WinOps 端口聚合（registry 必备；tasks/services/maintenance/appx 注册缺失容忍为 None）
-fn winops_ports(state: &HostState) -> Result<
-    (
-        std::sync::Arc<dyn host_core::ports::RegistryOps>,
-        Option<std::sync::Arc<dyn host_core::ports::TaskTogglePort>>,
-        Option<std::sync::Arc<dyn host_core::ports::ServiceCtlPort>>,
-        Option<std::sync::Arc<dyn host_core::ports::MaintenancePort>>,
-        Option<std::sync::Arc<dyn host_core::ports::AppxPort>>,
-    ),
-    AppError,
-> {
+type WinOpsPorts = (
+    std::sync::Arc<dyn host_core::ports::RegistryOps>,
+    Option<std::sync::Arc<dyn host_core::ports::TaskTogglePort>>,
+    Option<std::sync::Arc<dyn host_core::ports::ServiceCtlPort>>,
+    Option<std::sync::Arc<dyn host_core::ports::MaintenancePort>>,
+    Option<std::sync::Arc<dyn host_core::ports::AppxPort>>,
+);
+
+fn winops_ports(state: &HostState) -> Result<WinOpsPorts, AppError> {
     let registry = state
         .ports
         .get::<dyn host_core::ports::RegistryOps>()
@@ -2496,19 +2618,21 @@ fn winops_ports(state: &HostState) -> Result<
 
 /// 目录清单（内置 + 外置 {appData}/winops/catalog/*.json 覆盖）
 #[tauri::command]
-pub async fn winops_catalog(state: State<'_, HostState>) -> Result<Vec<sys_core::winops::Tweak>, AppError> {
+pub async fn winops_catalog(
+    state: State<'_, HostState>,
+) -> Result<Vec<sys_core::winops::Tweak>, AppError> {
     let external = state.app_data_dir.join("winops").join("catalog");
-    tauri::async_runtime::spawn_blocking(move || {
-        sys_core::winops::load_catalog(Some(&external))
-    })
-    .await
-    .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
-    .map_err(sys_err)
+    tauri::async_runtime::spawn_blocking(move || sys_core::winops::load_catalog(Some(&external)))
+        .await
+        .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
+        .map_err(sys_err)
 }
 
 /// 扫描应用状态（三态：已应用/未应用/需管理员——requires_admin 且非提权进程）
 #[tauri::command]
-pub async fn winops_scan(state: State<'_, HostState>) -> Result<Vec<(sys_core::winops::Tweak, sys_core::winops::ScanState)>, AppError> {
+pub async fn winops_scan(
+    state: State<'_, HostState>,
+) -> Result<Vec<(sys_core::winops::Tweak, sys_core::winops::ScanState)>, AppError> {
     let external = state.app_data_dir.join("winops").join("catalog");
     let (reg, tasks, services, maintenance, appx) = winops_ports(&state)?;
     let is_admin = state
@@ -2537,21 +2661,26 @@ pub async fn winops_scan(state: State<'_, HostState>) -> Result<Vec<(sys_core::w
 fn winops_needs_elevation(t: &sys_core::winops::Tweak) -> bool {
     use sys_core::winops::TweakAction;
     t.requires_admin
-        || t.actions
-            .iter()
-            .any(|a| match a {
-                TweakAction::Registry { key, .. } => key.starts_with("HKLM"),
-                TweakAction::AppxRemove { all_users: true, .. } => true,
-                TweakAction::Exec { .. } | TweakAction::RestorePoint { .. } | TweakAction::EmptyWorkingSet {} => true,
-                TweakAction::DefenderRealtime { .. } => true,
-                _ => false,
-            })
+        || t.actions.iter().any(|a| match a {
+            TweakAction::Registry { key, .. } => key.starts_with("HKLM"),
+            TweakAction::AppxRemove {
+                all_users: true, ..
+            } => true,
+            TweakAction::Exec { .. }
+            | TweakAction::RestorePoint { .. }
+            | TweakAction::EmptyWorkingSet {} => true,
+            TweakAction::DefenderRealtime { .. } => true,
+            _ => false,
+        })
 }
 
 /// BAVR 应用（备份 → 写入 → 校验 → 失败补偿；成功后备份落 {appData}/winops/backup.json）
 /// 非提权进程应用需管理员条目：拉起提权 Helper（UAC）→ helper-backed 数据面执行
 #[tauri::command]
-pub async fn winops_apply(id: String, state: State<'_, HostState>) -> Result<sys_core::winops::ApplyReport, AppError> {
+pub async fn winops_apply(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<sys_core::winops::ApplyReport, AppError> {
     let external = state.app_data_dir.join("winops").join("catalog");
     let app_dir = state.app_data_dir.clone();
     let (reg, tasks, services, maintenance, appx) = winops_ports(&state)?;
@@ -2563,43 +2692,53 @@ pub async fn winops_apply(id: String, state: State<'_, HostState>) -> Result<sys
         .unwrap_or(false);
     // 闭包错误类型显式标注 AppError：内部 ensure_up/spawner 都是 AppError，
     // 靠尾部 map_err(sys_err) 反推会把闭包错误类型定成 SysError 而冲突（E0277）
-    tauri::async_runtime::spawn_blocking(move || -> Result<sys_core::winops::ApplyReport, AppError> {
-        let tweaks = sys_core::winops::load_catalog(Some(&external)).map_err(sys_err)?;
-        let tweak = tweaks
-            .into_iter()
-            .find(|t| t.id == id)
-            .ok_or_else(|| sys_core::SysError::Catalog(format!("Tweak {id} 不存在")))
-            .map_err(sys_err)?;
-        let report = if winops_needs_elevation(&tweak) && !is_admin {
-            // 提权数据面：HKLM registry → helper；HKCU → 本地；Service/Task/FileClean/Appx → helper
-            let spawner = helper_spawn.ok_or_else(|| {
-                AppError::module("SYS_HELPER_006", "HelperSpawnPort 未注册", None)
-            })?;
-            crate::winops_helper::ensure_up(spawner.as_ref())?;
-            let routing = crate::winops_helper::RoutingRegistry::new(reg.clone());
-            let ports = sys_core::winops::SysPorts {
-                registry: &routing,
-                tasks: Some(&crate::winops_helper::HelperTasks),
-                services: Some(&crate::winops_helper::HelperServices),
-                maintenance: Some(&crate::winops_helper::HelperMaintenance),
-                appx: Some(&crate::winops_helper::HelperAppx),
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<sys_core::winops::ApplyReport, AppError> {
+            let tweaks = sys_core::winops::load_catalog(Some(&external)).map_err(sys_err)?;
+            let tweak = tweaks
+                .into_iter()
+                .find(|t| t.id == id)
+                .ok_or_else(|| sys_core::SysError::Catalog(format!("Tweak {id} 不存在")))
+                .map_err(sys_err)?;
+            let report = if winops_needs_elevation(&tweak) && !is_admin {
+                // 提权数据面：HKLM registry → helper；HKCU → 本地；Service/Task/FileClean/Appx → helper
+                let spawner = helper_spawn.ok_or_else(|| {
+                    AppError::module("SYS_HELPER_006", "HelperSpawnPort 未注册", None)
+                })?;
+                crate::winops_helper::ensure_up(spawner.as_ref())?;
+                let routing = crate::winops_helper::RoutingRegistry::new(reg.clone());
+                let ports = sys_core::winops::SysPorts {
+                    registry: &routing,
+                    tasks: Some(&crate::winops_helper::HelperTasks),
+                    services: Some(&crate::winops_helper::HelperServices),
+                    maintenance: Some(&crate::winops_helper::HelperMaintenance),
+                    appx: Some(&crate::winops_helper::HelperAppx),
+                };
+                sys_core::winops::apply(&ports, &tweak, true).map_err(sys_err)?
+            } else {
+                let ports = sys_core::winops::SysPorts {
+                    registry: reg.as_ref(),
+                    tasks: tasks.as_deref(),
+                    services: services.as_deref(),
+                    maintenance: maintenance.as_deref(),
+                    appx: appx.as_deref(),
+                };
+                sys_core::winops::apply(&ports, &tweak, is_admin).map_err(sys_err)?
             };
-            sys_core::winops::apply(&ports, &tweak, true).map_err(sys_err)?
-        } else {
-            let ports = sys_core::winops::SysPorts {
-                registry: reg.as_ref(),
-                tasks: tasks.as_deref(),
-                services: services.as_deref(),
-                maintenance: maintenance.as_deref(),
-                appx: appx.as_deref(),
-            };
-            sys_core::winops::apply(&ports, &tweak, is_admin).map_err(sys_err)?
-        };
-        sys_core::winops::BackupStore::open(&app_dir).save(&report).map_err(sys_err)?;
-        // W7 审计：apply 落 JSONL（写失败不阻断）
-        sys_core::winops::AuditStore::open(&app_dir).record("ui", &id, "apply", Some(report.verified), "");
-        Ok(report)
-    })
+            sys_core::winops::BackupStore::open(&app_dir)
+                .save(&report)
+                .map_err(sys_err)?;
+            // W7 审计：apply 落 JSONL（写失败不阻断）
+            sys_core::winops::AuditStore::open(&app_dir).record(
+                "ui",
+                &id,
+                "apply",
+                Some(report.verified),
+                "",
+            );
+            Ok(report)
+        },
+    )
     .await
     .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
 }
@@ -2633,7 +2772,9 @@ pub async fn winops_rollback(id: String, state: State<'_, HostState>) -> Result<
         let store = sys_core::winops::BackupStore::open(&app_dir);
         let backup = store.take(&id);
         if backup.is_empty() {
-            return Err(sys_core::SysError::Catalog(format!("Tweak {id} 无备份可回滚")));
+            return Err(sys_core::SysError::Catalog(format!(
+                "Tweak {id} 无备份可回滚"
+            )));
         }
         let result = if crate::winops_helper::backup_needs_elevation(&backup) && !is_admin {
             let spawner = helper_spawn

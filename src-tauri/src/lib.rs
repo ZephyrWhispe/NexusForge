@@ -8,8 +8,8 @@ use automation_core::engine::ActionHandler;
 use automation_core::error as auto_err;
 use host_core::ports::ShellPort;
 use state::StartupOptions;
-use tauri::Manager;
 use std::sync::Arc;
+use tauri::Manager;
 
 /// 独立规则执行的最小动作处理器（A4：Task Scheduler 触发 `--run-rule` 无完整宿主）
 /// publish/notify 无总线收方 → 记日志；run_wasm 无插件库 → 报未开放
@@ -22,11 +22,22 @@ impl ActionHandler for StandaloneHandler {
             .map_err(|e| auto_err::AutomationError::Action(e.to_string()))
     }
     fn publish(&self, topic: &str, payload: serde_json::Value) -> auto_err::Result<()> {
-        tracing::info!(topic, ?payload, "--run-rule 独立进程无事件总线，publish 记日志");
+        tracing::info!(
+            topic,
+            ?payload,
+            "--run-rule 独立进程无事件总线，publish 记日志"
+        );
         Ok(())
     }
-    fn ipc_command(&self, module: &str, cmd: &str, _args: &serde_json::Value) -> auto_err::Result<()> {
-        Err(auto_err::AutomationError::Action(format!("独立进程不支持 IpcCommand（{module}.{cmd}）")))
+    fn ipc_command(
+        &self,
+        module: &str,
+        cmd: &str,
+        _args: &serde_json::Value,
+    ) -> auto_err::Result<()> {
+        Err(auto_err::AutomationError::Action(format!(
+            "独立进程不支持 IpcCommand（{module}.{cmd}）"
+        )))
     }
     fn run_wasm(&self, path: &str, _func: &str) -> auto_err::Result<()> {
         Err(auto_err::AutomationError::Action(format!(
@@ -51,7 +62,11 @@ fn run_standalone_rule(rule_id: &str) {
     let log_guard = host_core::logging::init_tracing(&rules_path.parent().unwrap().join("log"));
     Box::leak(Box::new(log_guard));
     tracing::info!(rule_id, "Task Scheduler 触发独立规则执行");
-    match automation_core::standalone::run_rule_standalone(&rules_path, rule_id, Arc::new(StandaloneHandler)) {
+    match automation_core::standalone::run_rule_standalone(
+        &rules_path,
+        rule_id,
+        Arc::new(StandaloneHandler),
+    ) {
         Ok(true) => println!("[NexusForge] 规则 {rule_id} 已执行。"),
         Ok(false) => println!("[NexusForge] 规则 {rule_id} 不存在或已停用。"),
         Err(e) => {
@@ -74,9 +89,11 @@ pub fn run() {
     // --restore-proxy：紧急还原系统代理后退出（崩溃抢救通道，还原挂点之三）
     if opts.restore_proxy {
         // Tauri 壳尚未启动：手动拼 app data 目录（须与 tauri.conf.json identifier 一致）
-        match std::env::var("APPDATA")
-            .map(|base| std::path::PathBuf::from(base).join("com.nexusforge.app").join("proxy"))
-        {
+        match std::env::var("APPDATA").map(|base| {
+            std::path::PathBuf::from(base)
+                .join("com.nexusforge.app")
+                .join("proxy")
+        }) {
             Ok(proxy_dir) => {
                 let sp = win_integration::sysproxy::WindowsSysProxy;
                 // 端口读持久化状态（用于识别我们的标记值 127.0.0.1:{port}）；无记录退回默认
@@ -91,7 +108,9 @@ pub fn run() {
                         println!("[NexusForge] --restore-proxy：无残留代理（用户已自行修改），备份已清理。")
                     }
                     Err(e) => {
-                        eprintln!("[NexusForge] --restore-proxy：标记值还原失败（{e}），退回备份还原。");
+                        eprintln!(
+                            "[NexusForge] --restore-proxy：标记值还原失败（{e}），退回备份还原。"
+                        );
                         proxy_core::sysproxy::restore_quiet(&proxy_dir, &sp);
                     }
                 }
@@ -302,7 +321,10 @@ pub fn run() {
                 tracing::warn!(?report.last_crash_file, "检测到上次运行发生崩溃");
             }
             if report.pending_ops > 0 {
-                tracing::warn!(count = report.pending_ops, "存在未完成的文件操作，可在 UI 中选择继续或回滚");
+                tracing::warn!(
+                    count = report.pending_ops,
+                    "存在未完成的文件操作，可在 UI 中选择继续或回滚"
+                );
             }
 
             app.manage(host.clone());

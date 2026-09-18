@@ -84,11 +84,7 @@ impl OcrModule {
 
     /// 引擎状态（O8：start 时探测，此处读缓存）
     pub fn status(&self) -> EngineStatusDto {
-        let langs = self
-            .languages
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let langs = self.languages.read().map(|g| g.clone()).unwrap_or_default();
         EngineStatusDto {
             engines: vec![EngineInfo {
                 id: "win-ocr".into(),
@@ -122,9 +118,14 @@ impl Module for OcrModule {
             .ports
             .get::<dyn OcrPort>()
             .ok_or_else(|| ModuleError::Init("OcrPort 未注册（win-integration 缺失）".into()))?;
-        *self.port.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(port);
-        *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(ctx.event_bus.clone());
+        *self
+            .port
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(port);
+        *self
+            .bus
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -216,7 +217,8 @@ fn downscale_if_needed(w: u32, h: u32, rgba: Vec<u8>) -> (u32, u32, Vec<u8>) {
     let nh = ((h as f32 * scale) as u32).max(1);
     match image::RgbaImage::from_raw(w, h, rgba) {
         Some(img) => {
-            let resized = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
+            let resized =
+                image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
             (nw, nh, resized.into_raw())
         }
         None => (w, h, Vec::new()), // 尺寸与缓冲不匹配属内部错误，交给后续校验

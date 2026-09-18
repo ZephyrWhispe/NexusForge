@@ -195,7 +195,11 @@ impl LauncherIndex {
                 })
             })
             .collect();
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         Ok(hits)
     }
@@ -210,7 +214,10 @@ impl LauncherIndex {
         }
         // 持久化失败仅记日志（频次属可丢数据）
         if let Ok(map) = self.usage.read() {
-            if let Err(e) = std::fs::write(&self.usage_file, serde_json::to_vec(&*map).unwrap_or_default()) {
+            if let Err(e) = std::fs::write(
+                &self.usage_file,
+                serde_json::to_vec(&*map).unwrap_or_default(),
+            ) {
                 tracing::warn!(error = %e, "usage.json 写入失败");
             }
         }
@@ -334,7 +341,7 @@ mod tests {
         write_lnk(&sm, "Alpine.lnk");
 
         let idx = LauncherIndex::new(dir.join("usage.json"));
-        idx.build(&[sm.clone()], &[]);
+        idx.build(std::slice::from_ref(&sm), &[]);
         // 都匹配 "al"，最初按打分可能持平；给 Alpine 记 5 次使用
         for _ in 0..5 {
             idx.record_launch(&format!("app:{}", sm.join("Alpine.lnk").display()));
@@ -355,9 +362,19 @@ mod tests {
         let dir = tmpdir("action");
         let idx = LauncherIndex::new(dir.join("usage.json"));
         idx.build(&[], &[]);
-        idx.register_action("screenshot", "截图", "screenshot.overlay_requested", serde_json::json!({"mode":"shot"}));
+        idx.register_action(
+            "screenshot",
+            "截图",
+            "screenshot.overlay_requested",
+            serde_json::json!({"mode":"shot"}),
+        );
         // 重复注册覆盖不重复
-        idx.register_action("screenshot", "截图", "screenshot.overlay_requested", serde_json::json!({"mode":"shot"}));
+        idx.register_action(
+            "screenshot",
+            "截图",
+            "screenshot.overlay_requested",
+            serde_json::json!({"mode":"shot"}),
+        );
 
         let hits = idx.search("截图", 10).unwrap();
         assert_eq!(hits.len(), 1);

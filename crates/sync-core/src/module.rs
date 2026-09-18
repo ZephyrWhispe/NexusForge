@@ -14,16 +14,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
+use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
 use host_core::error::ModuleError;
 use host_core::events::{topic, Event, EventBus};
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
-use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
 
 use crate::engine::{ApplyOutcome, ChangeApplier, SyncEngine};
 use crate::error::SyncError;
 use crate::oplog::{OpLog, DELETED_KEY};
 use crate::transport::{
-    handshake_client, handshake_server, read_hello_frame, read_msg, write_msg, SyncMsg, SyncSession, BATCH_LIMIT,
+    handshake_client, handshake_server, read_hello_frame, read_msg, write_msg, SyncMsg,
+    SyncSession, BATCH_LIMIT,
 };
 
 type R<T> = std::result::Result<T, SyncError>;
@@ -79,17 +80,19 @@ impl SyncCtx {
     fn publish_state(&self, summary: &SyncSummary) {
         let Some(bus) = &self.bus else { return };
         if let Some(t) = topic("sync.state_changed") {
-            let _ = bus.publish(Event::new(t, "sync", serde_json::to_value(summary).unwrap_or_default()));
+            let _ = bus.publish(Event::new(
+                t,
+                "sync",
+                serde_json::to_value(summary).unwrap_or_default(),
+            ));
         }
     }
 
     /// 应用一批远端变更（统计 + 游标推进；initiator 与 responder 共用）
-    fn apply_ops(
-        &self,
-        ops: &[crate::oplog::OpEntry],
-        peer_key: &str,
-    ) -> (u32, u32, u32) {
-        let Ok(applier) = self.applier() else { return (0, 0, 0) };
+    fn apply_ops(&self, ops: &[crate::oplog::OpEntry], peer_key: &str) -> (u32, u32, u32) {
+        let Ok(applier) = self.applier() else {
+            return (0, 0, 0);
+        };
         let mut applied = 0u32;
         let mut lost = 0u32;
         let mut conflicts = 0u32;
@@ -161,7 +164,15 @@ async fn run_responder(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummar
             summary.pulled_applied = applied;
             summary.pulled_lost = lost;
             summary.conflicts = conflicts;
-            write_msg(session, &SyncMsg::Ack { until_ts: 0, applied, lost }).await?;
+            write_msg(
+                session,
+                &SyncMsg::Ack {
+                    until_ts: 0,
+                    applied,
+                    lost,
+                },
+            )
+            .await?;
         }
         SyncMsg::Err { msg } => return Err(SyncError::Proto(msg)),
         m => return Err(SyncError::Proto(format!("responder 首消息非 Push: {m:?}"))),
@@ -174,7 +185,11 @@ async fn run_responder(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummar
             write_msg(session, &SyncMsg::Push { ops, more: false }).await?;
             let _ = read_msg(session).await?; // Ack（initiator 负责其游标）
         }
-        m => return Err(SyncError::Proto(format!("responder 第二消息非 Pull: {m:?}"))),
+        m => {
+            return Err(SyncError::Proto(format!(
+                "responder 第二消息非 Pull: {m:?}"
+            )))
+        }
     }
     ctx.publish_state(&summary);
     Ok(summary)
@@ -248,8 +263,12 @@ impl SyncModule {
     /// 仅当新路径不存在且旧文件存在时搬移（含 WAL/SHM 伴生文件）；无正式发布版本，
     /// 搬移后旧条件永假，幂等。
     fn migrate_legacy_db_path(&self) {
-        let Some(new_parent) = self.db_path.parent() else { return };
-        let Some(app_data) = new_parent.parent() else { return };
+        let Some(new_parent) = self.db_path.parent() else {
+            return;
+        };
+        let Some(app_data) = new_parent.parent() else {
+            return;
+        };
         let legacy = app_data.join("sync").join("sync.db");
         if !legacy.exists() || self.db_path.exists() {
             return;
@@ -271,7 +290,10 @@ impl SyncModule {
         }
         // 旧目录此时应已为空；非空（历史杂项）则保留不误删
         let _ = std::fs::remove_dir(app_data.join("sync"));
-        tracing::info!("sync.db 已从 {}/sync 归位到 db/（D-12）", app_data.display());
+        tracing::info!(
+            "sync.db 已从 {}/sync 归位到 db/（D-12）",
+            app_data.display()
+        );
     }
 
     /// 配对设备列表（SYNC 面板）
@@ -286,7 +308,13 @@ impl SyncModule {
 
     /// op_log 状态（面板统计）
     pub fn status(&self) -> serde_json::Value {
-        let count = self.log.read().ok().and_then(|g| g.clone()).map(|l| l.count()).unwrap_or(0);
+        let count = self
+            .log
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .map(|l| l.count())
+            .unwrap_or(0);
         serde_json::json!({ "op_count": count, "port": self.port.load(Ordering::SeqCst) })
     }
 
@@ -317,10 +345,13 @@ impl SyncModule {
         if !ctx.store.is_paired(device_id) {
             return Err(SyncError::Peer(format!("设备 {device_id} 未配对")));
         }
-        let stream = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
-            .await
-            .map_err(|_| SyncError::Net("连接超时".into()))?
-            .map_err(|e| SyncError::Net(e.to_string()))?;
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| SyncError::Net("连接超时".into()))?
+        .map_err(|e| SyncError::Net(e.to_string()))?;
         let mut session = handshake_client(stream, &ctx.identity, &ctx.store).await?;
         if session.peer.device_id != device_id {
             return Err(SyncError::Peer(format!(
@@ -351,12 +382,18 @@ impl SyncModule {
             if cancel.load(Ordering::SeqCst) {
                 break;
             }
-            let Ok((stream, _)) = listener.accept().await else { continue };
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
             let ctx = ctx.clone();
             tokio::spawn(async move {
                 let mut stream = stream;
-                let Ok(hello) = read_hello_frame(&mut stream).await else { return };
-                let Ok(mut session) = handshake_server(stream, &ctx.identity, &ctx.store, hello).await else {
+                let Ok(hello) = read_hello_frame(&mut stream).await else {
+                    return;
+                };
+                let Ok(mut session) =
+                    handshake_server(stream, &ctx.identity, &ctx.store, hello).await
+                else {
                     return;
                 };
                 let peer_id = session.peer.device_id.clone();
@@ -385,11 +422,20 @@ impl Module for SyncModule {
         let crypto = ctx.ports.get::<dyn host_core::ports::CryptoPort>();
         let identity = DeviceIdentity::load_or_create(&ctx.app_data_dir.join("kvm"), crypto)
             .map_err(|e| ModuleError::Init(e.to_string()))?;
-        *self.identity.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(identity));
+        *self
+            .identity
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(identity));
         self.migrate_legacy_db_path();
         let log = OpLog::open(&self.db_path).map_err(|e| ModuleError::Init(e.to_string()))?;
-        *self.log.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(log));
-        *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self
+            .log
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(log));
+        *self
+            .bus
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -415,9 +461,14 @@ impl Module for SyncModule {
                                 if event.source == "sync" {
                                     continue; // 防自环（理论不可达：apply 直调不发事件）
                                 }
-                                let action =
-                                    event.payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                                if let Some(path) = event.payload.get("path").and_then(|v| v.as_str()) {
+                                let action = event
+                                    .payload
+                                    .get("action")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if let Some(path) =
+                                    event.payload.get("path").and_then(|v| v.as_str())
+                                {
                                     if matches!(action, "create" | "write" | "delete") {
                                         if let Err(e) = record_change_with(&ctx2, path, action) {
                                             tracing::warn!(path, error = %e, "本地变更入 op_log 失败");
@@ -484,7 +535,10 @@ mod tests {
         let dir = temp_appdata("d12path");
         let m = SyncModule::new(&dir);
         let parent = m.db_path().parent().unwrap();
-        assert!(parent.ends_with("db"), "sync.db 应位于 {{appData}}/db/ 下，实际 {parent:?}");
+        assert!(
+            parent.ends_with("db"),
+            "sync.db 应位于 {{appData}}/db/ 下，实际 {parent:?}"
+        );
         assert_eq!(m.db_path().file_name().unwrap(), "sync.db");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -501,7 +555,10 @@ mod tests {
         let m = SyncModule::new(&dir);
         m.migrate_legacy_db_path();
         assert_eq!(std::fs::read(m.db_path()).unwrap(), b"legacy-bytes");
-        assert_eq!(std::fs::read(dir.join("db").join("sync.db-wal")).unwrap(), b"wal-bytes");
+        assert_eq!(
+            std::fs::read(dir.join("db").join("sync.db-wal")).unwrap(),
+            b"wal-bytes"
+        );
         assert!(!legacy_dir.exists(), "搬移后旧空目录应被移除");
 
         // 幂等：再跑一次不动内容

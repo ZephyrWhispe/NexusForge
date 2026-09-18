@@ -15,16 +15,17 @@ use host_core::ports::{
     ClipContent, CryptoPort, InputHookPort, InputInjectPort, RawInput, ScreenInfoPort, ScreenRect,
 };
 
-use crate::discovery::{DiscoveryConfig, DiscoveryHandle, DiscoveryService, OwnIdentity, PeerEvent};
+use crate::discovery::{
+    DiscoveryConfig, DiscoveryHandle, DiscoveryService, OwnIdentity, PeerEvent,
+};
 use crate::edge::{ControlReleasePayload, ControlTakePayload, Decision, Edge, EdgeSwitch};
-use crate::pairing::{PairCodeManager, PairingService, PairedPeer, PairStore};
+use crate::pairing::{PairCodeManager, PairStore, PairedPeer, PairingService};
 use crate::session::{MsgType, SessionEvent, SessionHandle, SessionManager, SessionServeHandle};
 use crate::transfer::{self, AckPayload, ChunkOutcome, MetaOutcome, TransferManager};
 
 const STATE_UNINIT: u8 = 0;
 const STATE_STOPPED: u8 = 1;
 const STATE_RUNNING: u8 = 2;
-const STATE_ERROR: u8 = 3;
 
 /// 本端主动发起（客户端角色）的会话句柄表：connect_to 登记入内，
 /// Closed 事件时移除。服务端接入会话由 SessionManager 注册表持有。
@@ -156,7 +157,11 @@ impl KvmModule {
     }
 
     /// IPC：向已发现设备发起配对（addr 由发现层解析）
-    pub fn pair_with(&self, addr: std::net::SocketAddr, code: &str) -> Result<PairedPeer, ModuleError> {
+    pub fn pair_with(
+        &self,
+        addr: std::net::SocketAddr,
+        code: &str,
+    ) -> Result<PairedPeer, ModuleError> {
         let pairing = self
             .pairing
             .read()
@@ -165,7 +170,10 @@ impl KvmModule {
             .ok_or(ModuleError::NotReady)?;
         // 读守卫显式绑定到函数尾（临时值不可跨语句借用——工程教训见记忆）
         let running_guard = self.running.read().expect("running 锁");
-        let rt = running_guard.as_ref().map(|r| &r._rt).ok_or(ModuleError::NotReady)?;
+        let rt = running_guard
+            .as_ref()
+            .map(|r| &r._rt)
+            .ok_or(ModuleError::NotReady)?;
         // 模块 runtime 专属线程池上执行；命令线程短暂阻塞（握手 ≤10s）
         let result = rt.block_on(pairing.pair_with(addr, code));
         drop(running_guard);
@@ -223,7 +231,10 @@ impl KvmModule {
             .clone()
             .ok_or(ModuleError::NotReady)?;
         let running_guard = self.running.read().expect("running 锁");
-        let rt = running_guard.as_ref().map(|r| &r._rt).ok_or(ModuleError::NotReady)?;
+        let rt = running_guard
+            .as_ref()
+            .map(|r| &r._rt)
+            .ok_or(ModuleError::NotReady)?;
         let handle = rt
             .block_on(sessions.connect(addr, ev_tx))
             .map_err(|e| ModuleError::Start(e.to_string()))?;
@@ -245,7 +256,10 @@ impl KvmModule {
             .session_to(device_id)
             .ok_or_else(|| ModuleError::Start(format!("设备 {device_id} 无活跃会话")))?;
         let running_guard = self.running.read().expect("running 锁");
-        let rt = running_guard.as_ref().map(|r| &r._rt).ok_or(ModuleError::NotReady)?;
+        let rt = running_guard
+            .as_ref()
+            .map(|r| &r._rt)
+            .ok_or(ModuleError::NotReady)?;
         rt.block_on(transfer::send_clip(&handle, &content))
             .map_err(|e| ModuleError::Start(e.to_string()))
     }
@@ -262,7 +276,12 @@ impl KvmModule {
             .expect("rt_handle 锁")
             .clone()
             .ok_or(ModuleError::NotReady)?;
-        let bus = self.bus.read().expect("bus 锁").clone().ok_or(ModuleError::NotReady)?;
+        let bus = self
+            .bus
+            .read()
+            .expect("bus 锁")
+            .clone()
+            .ok_or(ModuleError::NotReady)?;
         rt.spawn(async move {
             let on_progress = {
                 let bus = bus.clone();
@@ -336,10 +355,13 @@ impl KvmModule {
             .edges()
             .iter()
             .map(|(id, e)| {
-                (id.clone(), match e {
-                    Edge::Left => "left".to_string(),
-                    Edge::Right => "right".to_string(),
-                })
+                (
+                    id.clone(),
+                    match e {
+                        Edge::Left => "left".to_string(),
+                        Edge::Right => "right".to_string(),
+                    },
+                )
             })
             .collect()
     }
@@ -349,7 +371,9 @@ impl KvmModule {
         let es = self.edge_switch.lock().expect("edge 锁");
         match es.controlling_device() {
             Some(device_id) => serde_json::json!({ "role": "controlling", "device_id": device_id }),
-            None if self.controlled.load(Ordering::Relaxed) => serde_json::json!({ "role": "controlled" }),
+            None if self.controlled.load(Ordering::Relaxed) => {
+                serde_json::json!({ "role": "controlled" })
+            }
             None => serde_json::json!({ "role": "idle" }),
         }
     }
@@ -435,7 +459,9 @@ impl Module for KvmModule {
 
         // ② 配对服务（K2）：一次性码 + 指纹白名单持久化
         let codes = Arc::new(PairCodeManager::new());
-        let store = Arc::new(PairStore::load_or_default(&dir).map_err(|e| ModuleError::Init(e.to_string()))?);
+        let store = Arc::new(
+            PairStore::load_or_default(&dir).map_err(|e| ModuleError::Init(e.to_string()))?,
+        );
         let pairing = PairingService::new(identity.clone(), codes.clone(), store.clone());
 
         // ③ K6 接收端状态机：incoming 根目录
@@ -750,17 +776,17 @@ impl Module for KvmModule {
         let sessions_handle = rt.block_on(async {
             session_mgr
                 .clone()
-                .serve(
-                    listener,
-                    ev_tx.clone(),
-                    paired_cb,
-                )
+                .serve(listener, ev_tx.clone(), paired_cb)
                 .await
         });
 
         // ---- K7 输入捕获 + 转发 worker（端口缺失则降级：仅发现/配对/传输）----
         let hook_port = self.hook.read().expect("hook 锁").clone();
-        let own_screen = self.own_screen.read().expect("own_screen 锁").unwrap_or_default();
+        let own_screen = self
+            .own_screen
+            .read()
+            .expect("own_screen 锁")
+            .unwrap_or_default();
         if let (Some(hook), true) = (hook_port, own_screen.w > 0 && own_screen.h > 0) {
             let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
             // 钩子回调：仅决策（<5ms），IO 全部投递 worker
@@ -927,8 +953,11 @@ impl Module for KvmModule {
         *self.session_events.write().expect("session_events 锁") = Some(ev_tx);
         *self.rt_handle.write().expect("rt_handle 锁") = Some(rt.handle().clone());
 
-        *self.running.write().expect("running 锁") =
-            Some(Running { _rt: rt, discovery: discovery_handle, sessions: sessions_handle });
+        *self.running.write().expect("running 锁") = Some(Running {
+            _rt: rt,
+            discovery: discovery_handle,
+            sessions: sessions_handle,
+        });
         self.state.store(STATE_RUNNING, Ordering::SeqCst);
         tracing::info!("KVM 发现、配对、会话与传输服务已启动");
         Ok(())
@@ -940,7 +969,10 @@ impl Module for KvmModule {
             let _ = hook.stop_capture();
         }
         self.controlled.store(false, Ordering::Relaxed);
-        self.edge_switch.lock().expect("edge 锁").force_release("module-stop");
+        self.edge_switch
+            .lock()
+            .expect("edge 锁")
+            .force_release("module-stop");
         // 客户端会话句柄先行关断（Drop 发 close 信号）
         *self.outbound.write().expect("outbound 锁") = None;
         *self.session_events.write().expect("session_events 锁") = None;

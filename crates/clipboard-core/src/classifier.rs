@@ -70,7 +70,10 @@ mod tests {
 
     #[test]
     fn classifies_url_json_color_code() {
-        assert_eq!(Classifier::classify("https://learn.microsoft.com/"), Some(("url", 0.95)));
+        assert_eq!(
+            Classifier::classify("https://learn.microsoft.com/"),
+            Some(("url", 0.95))
+        );
         assert_eq!(
             Classifier::classify(r#"{"a": 1, "b": [2, 3]}"#),
             Some(("json", 0.9))
@@ -85,6 +88,9 @@ mod tests {
     #[test]
     fn plain_text_and_secrets() {
         assert_eq!(Classifier::classify("今天下午三点评审会改到四点。"), None);
-        assert_eq!(Classifier::classify("sk-abcdefghijklmnopqrstuvwxyz123456"), Some(("secret", 0.99)));
+        assert_eq!(
+            Classifier::classify("sk-abcdefghijklmnopqrstuvwxyz123456"),
+            Some(("secret", 0.99))
+        );
     }
 }

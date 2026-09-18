@@ -42,19 +42,33 @@ impl Default for SearchOpts {
     }
 }
 
-pub fn search(usn: Option<&dyn UsnIndexPort>, opts: &SearchOpts) -> Result<SearchResult, FileError> {
+pub fn search(
+    usn: Option<&dyn UsnIndexPort>,
+    opts: &SearchOpts,
+) -> Result<SearchResult, FileError> {
     let q = opts.query.trim().to_owned();
     if q.is_empty() {
-        return Ok(SearchResult { hits: vec![], degraded: false });
+        return Ok(SearchResult {
+            hits: vec![],
+            degraded: false,
+        });
     }
     if let Some(port) = usn {
         match port.search(&q, opts.limit) {
-            Ok(hits) => return Ok(SearchResult { hits, degraded: false }),
+            Ok(hits) => {
+                return Ok(SearchResult {
+                    hits,
+                    degraded: false,
+                })
+            }
             // 无管理员权限等场景：降级遍历（docs/impl/05 F 风险标注）
             Err(e) => tracing::warn!(error = %e, "USN 索引查询失败，降级目录遍历"),
         }
     }
-    Ok(SearchResult { hits: walk_search(&q, opts)?, degraded: true })
+    Ok(SearchResult {
+        hits: walk_search(&q, opts)?,
+        degraded: true,
+    })
 }
 
 fn default_root() -> PathBuf {
@@ -67,8 +81,15 @@ fn default_root() -> PathBuf {
 fn skip_dir(name: &str) -> bool {
     matches!(
         name,
-        "Windows" | "AppData" | "$Recycle.Bin" | "System Volume Information"
-            | "node_modules" | ".git" | "target" | "dist" | "$WINDOWS.~BT"
+        "Windows"
+            | "AppData"
+            | "$Recycle.Bin"
+            | "System Volume Information"
+            | "node_modules"
+            | ".git"
+            | "target"
+            | "dist"
+            | "$WINDOWS.~BT"
     )
 }
 
@@ -84,11 +105,11 @@ fn score(name_lower: &str, q_lower: &str) -> f32 {
     }
 }
 
-fn walk_search(query: &str, opts: &SearchOpts) -> Result<Vec<host_core::ports::FileHit>, FileError> {
-    let root = opts
-        .root
-        .clone()
-        .unwrap_or_else(default_root);
+fn walk_search(
+    query: &str,
+    opts: &SearchOpts,
+) -> Result<Vec<host_core::ports::FileHit>, FileError> {
+    let root = opts.root.clone().unwrap_or_else(default_root);
     let q_lower = query.to_lowercase();
     let mut hits: Vec<host_core::ports::FileHit> = Vec::new();
     let walker = walkdir::WalkDir::new(to_long_path(&root))
@@ -115,7 +136,11 @@ fn walk_search(query: &str, opts: &SearchOpts) -> Result<Vec<host_core::ports::F
             });
         }
     }
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(opts.limit as usize);
     Ok(hits)
 }
@@ -146,7 +171,11 @@ mod tests {
         };
         let r = search(None, &opts).unwrap();
         assert!(r.degraded, "无 USN 端口应标注降级");
-        let mut names: Vec<_> = r.hits.iter().map(|h| h.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        let mut names: Vec<_> = r
+            .hits
+            .iter()
+            .map(|h| h.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
         names.sort();
         assert_eq!(names, vec!["Report-2026.txt", "report_final.txt"]);
         // node_modules 内命中被跳过
@@ -165,11 +194,25 @@ mod tests {
     fn usn_port_takes_priority() {
         struct FakeUsn;
         impl UsnIndexPort for FakeUsn {
-            fn search(&self, _q: &str, _limit: u32) -> Result<Vec<host_core::ports::FileHit>, host_core::error::AppError> {
-                Ok(vec![host_core::ports::FileHit { path: PathBuf::from("C:\\fake.txt"), score: 1.0 }])
+            fn search(
+                &self,
+                _q: &str,
+                _limit: u32,
+            ) -> Result<Vec<host_core::ports::FileHit>, host_core::error::AppError> {
+                Ok(vec![host_core::ports::FileHit {
+                    path: PathBuf::from("C:\\fake.txt"),
+                    score: 1.0,
+                }])
             }
         }
-        let r = search(Some(&FakeUsn), &SearchOpts { query: "fake".into(), ..Default::default() }).unwrap();
+        let r = search(
+            Some(&FakeUsn),
+            &SearchOpts {
+                query: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(!r.degraded);
         assert_eq!(r.hits.len(), 1);
         assert_eq!(r.hits[0].path, PathBuf::from("C:\\fake.txt"));

@@ -8,10 +8,12 @@ import {
   clipboardDelete,
   clipboardGroupCounts,
   type ClipEntry,
+  type ClipSearchQuery,
 } from "../../ipc/client";
 import { IN_TAURI } from "../../ipc/env";
 import { reportError } from "../../stores/notifications";
 import DibThumb from "./DibThumb";
+import { keyActivate } from "../../a11y";
 
 /**
  * 剪切板历史面板（docs/UI-PLAN.md U3-1..U3-4、U3-6）。
@@ -105,6 +107,16 @@ function fmtTime(ts: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/** 查询参数构造（纯函数，Vitest 覆盖）：空搜索不参与过滤；"all" 分组不进 SQL；分页页码原样下传 */
+export function clipSearchParams(search: string, group: string, page: number, size = 50): ClipSearchQuery {
+  return {
+    text: search || undefined,
+    group: group !== "all" ? group : undefined,
+    page,
+    size,
+  };
+}
+
 interface Props {
   search: string;
   group: string;
@@ -128,12 +140,7 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
 
   const load = useCallback(
     async (p: number, append: boolean) => {
-      const res = await clipboardSearch({
-        text: search || undefined,
-        group: group !== "all" ? group : undefined,
-        page: p,
-        size: 50,
-      });
+      const res = await clipboardSearch(clipSearchParams(search, group, p));
       setEntries((prev) => (append ? [...prev, ...res.items] : res.items));
       setHasMore(res.has_more);
       setPage(p);
@@ -230,6 +237,9 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
                   className={styles.entry}
                   style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
                   onClick={() => doPaste(e)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={keyActivate(() => doPaste(e))}
                 >
                   {e.content_type === "image" && <DibThumb id={e.id} />}
                   <div className={styles.body}>

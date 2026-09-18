@@ -61,12 +61,16 @@ pub struct RenamePlan {
 }
 
 /// 生成重命名计划（F7：预览阶段；names 为 dir 下的文件名子集，空 = 全部条目）
-pub fn build_plan(dir: &Path, names: &[String], rule: &RenameRule) -> Result<Vec<RenamePlan>, FileError> {
+pub fn build_plan(
+    dir: &Path,
+    names: &[String],
+    rule: &RenameRule,
+) -> Result<Vec<RenamePlan>, FileError> {
     let re = rule
         .regex
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|s| regex::Regex::new(s))
+        .map(regex::Regex::new)
         .transpose()
         .map_err(|e| FileError::Rule(e.to_string()))?;
 
@@ -125,7 +129,8 @@ pub fn build_plan(dir: &Path, names: &[String], rule: &RenameRule) -> Result<Vec
     }
     // ④ 冲突标注：目标已存在（非自身）或计划内重复（多次出现的目标全部标记）；
     //    模板结果与源相同（no-op）不计冲突
-    let mut target_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut target_count: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for plan in &plans {
         if plan.from != plan.to {
             *target_count
@@ -223,7 +228,10 @@ mod tests {
     }
 
     fn rule(template: &str) -> RenameRule {
-        RenameRule { template: template.into(), ..Default::default() }
+        RenameRule {
+            template: template.into(),
+            ..Default::default()
+        }
     }
 
     #[test]

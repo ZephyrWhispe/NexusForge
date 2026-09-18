@@ -13,8 +13,8 @@ use windows::core::Interface;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP,
-    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP,
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+    BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP,
 };
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromParsingName, SHFileOperationW, FOF_ALLOWUNDO,
@@ -34,12 +34,18 @@ impl ThumbPort for ShellThumb {
         unsafe {
             let item: windows::Win32::UI::Shell::IShellItem =
                 SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None)
-            .map_err(|e| AppError::module("FILE_PREVIEW_002", e.to_string(), None))?;
+                    .map_err(|e| AppError::module("FILE_PREVIEW_002", e.to_string(), None))?;
             let factory: IShellItemImageFactory = item
                 .cast()
                 .map_err(|e| AppError::module("FILE_PREVIEW_002", e.to_string(), None))?;
             let hbmp: HBITMAP = factory
-                .GetImage(SIZE { cx: px as i32, cy: px as i32 }, SIIGBF_RESIZETOFIT)
+                .GetImage(
+                    SIZE {
+                        cx: px as i32,
+                        cy: px as i32,
+                    },
+                    SIIGBF_RESIZETOFIT,
+                )
                 .map_err(|e| AppError::module("FILE_PREVIEW_002", e.to_string(), None))?;
 
             let png = hbitmap_to_png(hbmp);
@@ -60,9 +66,13 @@ fn hbitmap_to_png(hbmp: HBITMAP) -> Result<(u32, u32, Vec<u8>), AppError> {
             Some(&mut bm as *mut _ as *mut _),
         );
         if n == 0 {
-            return Err(AppError::module("FILE_PREVIEW_003", "GetObjectW 失败", None));
+            return Err(AppError::module(
+                "FILE_PREVIEW_003",
+                "GetObjectW 失败",
+                None,
+            ));
         }
-        let (w, h) = (bm.bmWidth.max(0) as i32, bm.bmHeight.max(0) as i32);
+        let (w, h) = (bm.bmWidth.max(0), bm.bmHeight.max(0));
 
         let mut bi = BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -91,7 +101,7 @@ fn hbitmap_to_png(hbmp: HBITMAP) -> Result<(u32, u32, Vec<u8>), AppError> {
             return Err(AppError::module("FILE_PREVIEW_003", "GetDIBits 失败", None));
         }
         // BGRA → RGBA（image crate RgbaImage 期望 RGBA）
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
         let img = RgbaImage::from_raw(w as u32, h as u32, buf)
@@ -120,7 +130,8 @@ impl RecycleBinPort for RecycleBin {
             wFunc: 3, // FO_DELETE
             pFrom: PCWSTR(list.as_ptr()),
             pTo: PCWSTR::null(),
-            fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0) as u16,
+            fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0)
+                as u16,
             fAnyOperationsAborted: false.into(),
             hNameMappings: std::ptr::null_mut(),
             lpszProgressTitle: PCWSTR::null(),
@@ -145,9 +156,9 @@ pub struct ShellOps;
 
 impl host_core::ports::ShellPort for ShellOps {
     fn shell_execute(&self, path: &str) -> Result<(), AppError> {
+        use windows::core::{w, HSTRING};
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        use windows::core::{w, HSTRING};
         let file = HSTRING::from(path);
         let h = unsafe { ShellExecuteW(None, w!("open"), &file, None, None, SW_SHOWNORMAL) };
         // SE_ERR 约定：返回值 > 32 成功

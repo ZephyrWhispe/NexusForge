@@ -14,7 +14,7 @@ use host_core::events::{Event, EventBus};
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
 use host_core::ports::ShellPort;
 
-use crate::index::{LauncherIndex, ItemKind};
+use crate::index::{ItemKind, LauncherIndex};
 use crate::note::NoteStore;
 
 /// 提醒轮询间隔
@@ -66,14 +66,15 @@ impl DesktopModule {
     }
 
     pub fn tidy_planner(&self) -> crate::tidy::TidyPlanner {
-        crate::tidy::TidyPlanner::new(
-            self.app_data_dir.join("desktop").join("tidy_manifest.json"),
-        )
+        crate::tidy::TidyPlanner::new(self.app_data_dir.join("desktop").join("tidy_manifest.json"))
     }
 
     /// launch：App → ShellExecuteW；Action → 发事件。均记频次。
     pub fn launch(&self, id: &str) -> Result<(), ModuleError> {
-        let item = self.index.get(id).map_err(|e| ModuleError::Init(e.to_string()))?;
+        let item = self
+            .index
+            .get(id)
+            .map_err(|e| ModuleError::Init(e.to_string()))?;
         self.index.record_launch(id);
         let bus = self.bus.read().ok().and_then(|g| g.clone());
         match item.kind {
@@ -91,7 +92,12 @@ impl DesktopModule {
             ItemKind::Action => {
                 // 动作 = 发对应模块主题事件（截图/OCR/剪贴板面板已在该模块内实现响应）
                 if let (Some(bus), Some(topic)) = (bus, item.topic) {
-                    bus.publish(Event::new(topic, "desktop", item.payload.unwrap_or_default())).ok();
+                    bus.publish(Event::new(
+                        topic,
+                        "desktop",
+                        item.payload.unwrap_or_default(),
+                    ))
+                    .ok();
                 }
             }
         }
@@ -101,7 +107,13 @@ impl DesktopModule {
     /// 提醒轮询线程（start 在 spawn_blocking 内被调用，无 tokio 上下文 → std::thread）
     fn start_remind_loop(&self) {
         let already = self.remind_cancel.swap(false, Ordering::SeqCst);
-        if already && self.remind_thread.read().map(|g| g.is_some()).unwrap_or(false) {
+        if already
+            && self
+                .remind_thread
+                .read()
+                .map(|g| g.is_some())
+                .unwrap_or(false)
+        {
             // 线程仍在跑（cancel 复位即可），不重复拉起
             return;
         }
@@ -111,37 +123,35 @@ impl DesktopModule {
         let (Some(notes), Some(bus)) = (notes, bus) else {
             return;
         };
-        let handle = std::thread::spawn(move || {
-            loop {
-                if cancel.load(Ordering::SeqCst) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(REMIND_POLL_MS));
-                if cancel.load(Ordering::SeqCst) {
-                    break;
-                }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                match notes.take_due(now) {
-                    Ok(due) => {
-                        for n in due {
-                            bus.publish(Event::new(
-                                "desktop.remind_due",
-                                "desktop",
-                                serde_json::json!({
-                                    "id": n.id,
-                                    "content": n.content,
-                                    "remind_at": n.remind_at,
-                                    "tags": n.tags,
-                                }),
-                            ))
-                            .ok();
-                        }
+        let handle = std::thread::spawn(move || loop {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(REMIND_POLL_MS));
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            match notes.take_due(now) {
+                Ok(due) => {
+                    for n in due {
+                        bus.publish(Event::new(
+                            "desktop.remind_due",
+                            "desktop",
+                            serde_json::json!({
+                                "id": n.id,
+                                "content": n.content,
+                                "remind_at": n.remind_at,
+                                "tags": n.tags,
+                            }),
+                        ))
+                        .ok();
                     }
-                    Err(e) => tracing::warn!(error = %e, "提醒轮询失败"),
                 }
+                Err(e) => tracing::warn!(error = %e, "提醒轮询失败"),
             }
         });
         *self.remind_thread.write().expect("提醒线程句柄写锁") = Some(handle);
@@ -180,9 +190,18 @@ impl Module for DesktopModule {
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
         let notes = NoteStore::open(&ctx.app_data_dir.join("db").join("desktop.db"))
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
-        *self.notes.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(notes));
-        *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
-        *self.shell.write().map_err(|_| ModuleError::Init("锁污染".into()))? = ctx.ports.get::<dyn ShellPort>();
+        *self
+            .notes
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(notes));
+        *self
+            .bus
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self
+            .shell
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = ctx.ports.get::<dyn ShellPort>();
 
         // D1：同步构建索引（bootstrap_modules 在后台任务里调用 init，不阻塞 UI）
         let total = self
@@ -282,13 +301,23 @@ impl HotkeyProvider for DesktopModule {
             HotkeyAction {
                 binding_id: "desktop.launcher_toggle".into(),
                 action: Arc::new(move || {
-                    bus1.publish(Event::new("desktop.launcher_toggled", "desktop", serde_json::json!({}))).ok();
+                    bus1.publish(Event::new(
+                        "desktop.launcher_toggled",
+                        "desktop",
+                        serde_json::json!({}),
+                    ))
+                    .ok();
                 }),
             },
             HotkeyAction {
                 binding_id: "desktop.note_quick".into(),
                 action: Arc::new(move || {
-                    bus2.publish(Event::new("desktop.note_quick", "desktop", serde_json::json!({}))).ok();
+                    bus2.publish(Event::new(
+                        "desktop.note_quick",
+                        "desktop",
+                        serde_json::json!({}),
+                    ))
+                    .ok();
                 }),
             },
         ]

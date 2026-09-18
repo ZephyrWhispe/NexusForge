@@ -82,7 +82,9 @@ impl PdhWin {
                     }
                 }
             })
-            .map_err(|e| AppError::module("SYS_PERF_001", format!("采样线程创建失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("SYS_PERF_001", format!("采样线程创建失败: {e}"), None)
+            })?;
 
         Ok(Self {
             snapshot,
@@ -137,14 +139,20 @@ fn pdh(code: u32, what: &str) -> Result<(), AppError> {
     if code == 0 {
         Ok(())
     } else {
-        Err(AppError::module("SYS_PERF_002", format!("{what} 失败（PDH 0x{code:08X}）"), None))
+        Err(AppError::module(
+            "SYS_PERF_002",
+            format!("{what} 失败（PDH 0x{code:08X}）"),
+            None,
+        ))
     }
 }
 
 fn add_english(query: PdhQuery, path: &str) -> Result<PdhCounter, AppError> {
     let mut wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let mut counter: PdhCounter = 0;
-    let r = unsafe { PdhAddEnglishCounterW(query, PCWSTR::from_raw(wide.as_mut_ptr()), 0, &mut counter) };
+    let r = unsafe {
+        PdhAddEnglishCounterW(query, PCWSTR::from_raw(wide.as_mut_ptr()), 0, &mut counter)
+    };
     pdh(r, &format!("PdhAddEnglishCounterW({path})"))?;
     Ok(counter)
 }
@@ -170,7 +178,7 @@ unsafe fn formatted_values(counter: PdhCounter) -> Option<Vec<f64>> {
     if size == 0 {
         return None;
     }
-    let mut buf = vec![0u8; size as usize];
+    let buf = vec![0u8; size as usize];
     let r = PdhGetFormattedCounterArrayW(
         counter,
         PDH_FMT_DOUBLE,
@@ -185,7 +193,12 @@ unsafe fn formatted_values(counter: PdhCounter) -> Option<Vec<f64>> {
         buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W,
         count as usize,
     );
-    Some(items.iter().map(|item| item.FmtValue.Anonymous.doubleValue).collect())
+    Some(
+        items
+            .iter()
+            .map(|item| item.FmtValue.Anonymous.doubleValue)
+            .collect(),
+    )
 }
 
 /// 内存（GlobalMemoryStatusEx）

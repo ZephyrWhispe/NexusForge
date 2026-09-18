@@ -53,6 +53,25 @@ interface JsonSchemaProp {
 
 type Values = Record<string, unknown>;
 
+/** 默认值合并（纯函数，Vitest 覆盖）：存量配置优先，缺失键回填 schema 默认值 */
+export function mergeDefaults(
+  props: Record<string, JsonSchemaProp>,
+  stored: Values | null | undefined,
+): Values {
+  const merged: Values = { ...stored };
+  for (const [k, p] of Object.entries(props)) {
+    if (merged[k] === undefined && p.default !== undefined) merged[k] = p.default;
+  }
+  return merged;
+}
+
+/** 整数控件值防御：Number() 永不返回 nullish，旧写法 `Number(x) ?? 0` 的 ?? 是死代码；
+ *  undefined/NaN/非数值统一落 0 */
+export function toFiniteNum(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function SchemaForm({ moduleId }: { moduleId: string }) {
   const styles = useStyles();
   const [schema, setSchema] = useState<Record<string, JsonSchemaProp> | null>(null);
@@ -70,11 +89,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
         const props = (s.properties ?? {}) as Record<string, JsonSchemaProp>;
         setSchema(props);
         // 空配置 → 填充 schema 默认值
-        const merged: Values = { ...v };
-        for (const [k, p] of Object.entries(props)) {
-          if (merged[k] === undefined && p.default !== undefined) merged[k] = p.default;
-        }
-        setValues(merged);
+        setValues(mergeDefaults(props, v));
       })
       .catch((e) => setError(String(e)));
   }, [moduleId]);
@@ -112,13 +127,12 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
           )}
           {prop.type === "integer" && (
             <SpinButton
-              value={Number(values[key]) ?? 0}
+              value={toFiniteNum(values[key])}
               min={prop.minimum}
               max={prop.maximum}
               step={Math.max(1, Math.round(((prop.maximum ?? 100) - (prop.minimum ?? 0)) / 100))}
               onChange={(_, d) => {
-                const v = d.value ?? Number(values[key]) ?? 0;
-                save({ ...values, [key]: v });
+                save({ ...values, [key]: d.value ?? toFiniteNum(values[key]) });
               }}
               appearance="outline"
             />

@@ -8,6 +8,7 @@ import {
   type DesktopLauncherHitDto,
 } from "../ipc/client";
 import { reportError } from "../stores/notifications";
+import { keyActivate } from "../a11y";
 
 /**
  * 快速启动器窗口（docs/impl/05 D1+D2）：独立置顶小窗，Alt+Q 全局呼出。
@@ -149,6 +150,8 @@ export default function LauncherWindow() {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={onKeyDown}
+        // 呼出式启动器：窗口出现即聚焦输入框是核心交互（Esc/Enter 键处理都挂在 input 上）
+        // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus
       />
       {error && <div className={styles.error}>{error}</div>}
@@ -167,6 +170,9 @@ export default function LauncherWindow() {
               className={`${styles.item} ${i === active ? styles.itemActive : ""}`}
               onMouseEnter={() => setActive(i)}
               onClick={() => void launch(h)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={keyActivate(() => void launch(h))}
             >
               <Badge appearance="outline" size="small">
                 {KIND_LABEL[h.kind]}

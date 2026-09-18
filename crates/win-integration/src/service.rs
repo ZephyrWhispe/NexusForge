@@ -65,8 +65,13 @@ impl ServiceCtlPort for ServiceOps {
     fn query(&self, name: &str) -> Result<ServiceInfo, AppError> {
         // qc：启动类型（START_TYPE 行：2 AUTO / 3 DEMAND / 4 DISABLED / 5 DRIVER 等）
         let qc = Self::run(&["qc", name])?;
-        let start_num = Self::parse_numeric(&qc, "START_TYPE")
-            .ok_or_else(|| AppError::module("SYS_SVC_003", format!("服务 {name} START_TYPE 解析失败"), None))?;
+        let start_num = Self::parse_numeric(&qc, "START_TYPE").ok_or_else(|| {
+            AppError::module(
+                "SYS_SVC_003",
+                format!("服务 {name} START_TYPE 解析失败"),
+                None,
+            )
+        })?;
         let start_type = match start_num {
             2 => StartType::Auto,
             3 => StartType::Manual,
@@ -83,7 +88,11 @@ impl ServiceCtlPort for ServiceOps {
         // query：运行状态（STATE 行：4 RUNNING）
         let q = Self::run(&["query", name])?;
         let running = Self::parse_numeric(&q, "STATE") == Some(4);
-        Ok(ServiceInfo { name: name.to_string(), start_type, running })
+        Ok(ServiceInfo {
+            name: name.to_string(),
+            start_type,
+            running,
+        })
     }
 
     fn set_start_type(&self, name: &str, st: StartType) -> Result<(), AppError> {
@@ -131,7 +140,10 @@ mod tests {
         let info = ops.query("Dnscache").unwrap();
         assert_eq!(info.name, "Dnscache");
         // Dnscache 无法被禁用（受保护），启动类型为 Auto 或 Manual
-        assert!(matches!(info.start_type, StartType::Auto | StartType::Manual));
+        assert!(matches!(
+            info.start_type,
+            StartType::Auto | StartType::Manual
+        ));
         let missing = ops.query("NexusForge_Nonexistent_SVC_ZZ");
         assert!(missing.is_err(), "不存在的服务应报错");
     }

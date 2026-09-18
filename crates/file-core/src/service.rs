@@ -24,7 +24,11 @@ pub struct FileService {
 impl FileService {
     /// 打开服务：建 pending_ops 目录 + 启动 2 worker（docs/impl/05 F2）。
     /// 进度回调 → EventBus operation.* 主题。
-    pub fn open(app_data_dir: &Path, bus: Arc<EventBus>, ports: Arc<Ports>) -> Result<Self, FileError> {
+    pub fn open(
+        app_data_dir: &Path,
+        bus: Arc<EventBus>,
+        ports: Arc<Ports>,
+    ) -> Result<Self, FileError> {
         let store = app_data_dir.join("pending_ops");
         let bus_cb = bus.clone();
         let cb: crate::ops::ProgressFn = Arc::new(move |p: OpProgress| {
@@ -67,7 +71,12 @@ impl FileService {
 
     // ---- F1 浏览 ----
 
-    pub fn list_dir(&self, path: &Path, sort: SortKey, asc: bool) -> Result<Vec<FileEntry>, FileError> {
+    pub fn list_dir(
+        &self,
+        path: &Path,
+        sort: SortKey,
+        asc: bool,
+    ) -> Result<Vec<FileEntry>, FileError> {
         browse::list_dir(path, sort, asc)
     }
 
@@ -80,11 +89,17 @@ impl FileService {
     }
 
     pub fn mkdir(&self, path: &Path) -> Result<(), host_core::error::AppError> {
-        self.drivers.get("local").expect("LocalDriver 内置").mkdir(path)
+        self.drivers
+            .get("local")
+            .expect("LocalDriver 内置")
+            .mkdir(path)
     }
 
     pub fn rename_entry(&self, from: &Path, to: &Path) -> Result<(), host_core::error::AppError> {
-        self.drivers.get("local").expect("LocalDriver 内置").rename(from, to)
+        self.drivers
+            .get("local")
+            .expect("LocalDriver 内置")
+            .rename(from, to)
     }
 
     // ---- F2/F3 操作队列 ----
@@ -95,7 +110,10 @@ impl FileService {
             let dst_dir = if spec.dst.is_dir() {
                 spec.dst.clone()
             } else {
-                spec.dst.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+                spec.dst
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."))
             };
             let conflicts = scan_conflicts(&spec.srcs, &dst_dir);
             if !conflicts.is_empty() && spec.policy == ConflictPolicy::Ask {

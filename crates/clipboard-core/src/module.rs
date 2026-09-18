@@ -79,7 +79,7 @@ impl Default for ClipboardModule {
     }
 }
 
-fn err(code: &str, m: impl Into<String>) -> ModuleError {
+fn err(_code: &str, m: impl Into<String>) -> ModuleError {
     ModuleError::Init(m.into())
 }
 
@@ -95,32 +95,50 @@ impl Module for ClipboardModule {
     }
 
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
-        let store = Arc::new(ClipStore::open(
-            &ctx.app_data_dir.join("db").join("clipboard.db"),
-            ctx.app_data_dir.join("blobs").join("clipboard"),
-        ).map_err(|e| ModuleError::Storage(e.to_string()))?);
+        let store = Arc::new(
+            ClipStore::open(
+                &ctx.app_data_dir.join("db").join("clipboard.db"),
+                ctx.app_data_dir.join("blobs").join("clipboard"),
+            )
+            .map_err(|e| ModuleError::Storage(e.to_string()))?,
+        );
         // D-05：启动期孤儿 blob GC（删除失败的补偿路径也在此收敛）
         match store.gc_orphan_blobs() {
             Ok(n) if n > 0 => tracing::info!(n, "启动清理：已覆写删除孤儿 blob"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "孤儿 blob GC 失败（不影响启动）"),
         }
-        let port = ctx
-            .ports
-            .get::<dyn ClipboardPort>()
-            .ok_or_else(|| err("CLIPBOARD_INIT_001", "ClipboardPort 未注册（win-integration 缺失）"))?;
+        let port = ctx.ports.get::<dyn ClipboardPort>().ok_or_else(|| {
+            err(
+                "CLIPBOARD_INIT_001",
+                "ClipboardPort 未注册（win-integration 缺失）",
+            )
+        })?;
         let crypto = ctx
             .ports
             .get::<dyn CryptoPort>()
             .ok_or_else(|| err("CLIPBOARD_INIT_002", "CryptoPort 未注册（信封加密缺失）"))?;
 
-        *self.db_dir.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(ctx.app_data_dir.clone());
-        *self.store.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(store);
-        *self.port.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(port);
-        *self.crypto.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(crypto);
-        *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(ctx.event_bus.clone());
+        *self
+            .db_dir
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.app_data_dir.clone());
+        *self
+            .store
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(store);
+        *self
+            .port
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(port);
+        *self
+            .crypto
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(crypto);
+        *self
+            .bus
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -161,8 +179,10 @@ impl Module for ClipboardModule {
                 self.write_back.clone(),
             )
             .map_err(|e| ModuleError::Start(e.to_string()))?;
-            *self.pipeline.write().map_err(|_| ModuleError::Start("锁污染".into()))? =
-                Some(handle);
+            *self
+                .pipeline
+                .write()
+                .map_err(|_| ModuleError::Start("锁污染".into()))? = Some(handle);
         }
         // 启动 C9 清理线程
         self.start_cleanup();
@@ -187,7 +207,10 @@ impl Module for ClipboardModule {
                 flag.store(3, Ordering::SeqCst);
             }
         }
-        *self.cleanup_cancel.write().map_err(|_| ModuleError::Stop("锁污染".into()))? = None;
+        *self
+            .cleanup_cancel
+            .write()
+            .map_err(|_| ModuleError::Stop("锁污染".into()))? = None;
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -231,8 +254,8 @@ impl Module for ClipboardModule {
     }
 
     fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError> {
-        let cfg: ClipboardConfig = serde_json::from_value(values)
-            .map_err(|e| ModuleError::Config(e.to_string()))?;
+        let cfg: ClipboardConfig =
+            serde_json::from_value(values).map_err(|e| ModuleError::Config(e.to_string()))?;
         if let Ok(mut g) = self.config.try_lock() {
             *g = cfg;
         }
@@ -282,11 +305,7 @@ impl ClipboardModule {
     /// C9 定时清理线程（docs/impl/02 C9）：start 时启动，每 6h 执行一次 purge；
     /// 用 std::thread + 取消标志（start 在 spawn_blocking 内被调用，无 tokio 上下文）
     fn start_cleanup(&self) {
-        let already = self
-            .cleanup_cancel
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let already = self.cleanup_cancel.read().ok().and_then(|g| g.clone());
         if already.is_some() {
             return; // 幂等：restart 时 stop 已清空，此分支防御
         }
@@ -311,7 +330,9 @@ impl ClipboardModule {
                     waited += step;
                 }
                 let cfg = config.try_lock().map(|g| g.clone()).unwrap_or_default();
-                let removed = store.purge(cfg.retention_days, cfg.max_entries).unwrap_or(0);
+                let removed = store
+                    .purge(cfg.retention_days, cfg.max_entries)
+                    .unwrap_or(0);
                 if removed > 0 {
                     tracing::info!(removed, "剪切板历史定期清理完成");
                 }
@@ -327,7 +348,10 @@ impl ClipboardModule {
     }
 
     /// 查询入口（C7 IPC 调用）
-    pub fn search(&self, q: &SearchQuery) -> Result<crate::types::Page<crate::types::ClipEntry>, AppError> {
+    pub fn search(
+        &self,
+        q: &SearchQuery,
+    ) -> Result<crate::types::Page<crate::types::ClipEntry>, AppError> {
         self.store()
             .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?
             .search(q)
@@ -365,33 +389,38 @@ impl ClipboardModule {
 
     /// 解密读取（clipboard_get；信封解密经 CryptoPort）
     pub fn get_content(&self, id: &str) -> Result<Option<String>, AppError> {
-        let store = self
-            .store()
-            .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?;
+        let store =
+            self.store()
+                .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?;
         let crypto = self
             .crypto
             .read()
             .ok()
             .and_then(|g| g.clone())
-            .ok_or(AppError::module("CLIPBOARD_QUERY_001", "CryptoPort 未就绪", None))?;
+            .ok_or(AppError::module(
+                "CLIPBOARD_QUERY_001",
+                "CryptoPort 未就绪",
+                None,
+            ))?;
         store.get_content(id, move |c| crypto.unprotect(c))
     }
 
     /// 载荷读取（clipboard_paste / clipboard_get_image 用；secret 自动解密）
-    pub fn get_payload(
-        &self,
-        id: &str,
-    ) -> Result<Option<crate::store::Payload>, AppError> {
+    pub fn get_payload(&self, id: &str) -> Result<Option<crate::store::Payload>, AppError> {
         use crate::store::Payload;
-        let store = self
-            .store()
-            .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?;
+        let store =
+            self.store()
+                .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?;
         let crypto = self
             .crypto
             .read()
             .ok()
             .and_then(|g| g.clone())
-            .ok_or(AppError::module("CLIPBOARD_QUERY_001", "CryptoPort 未就绪", None))?;
+            .ok_or(AppError::module(
+                "CLIPBOARD_QUERY_001",
+                "CryptoPort 未就绪",
+                None,
+            ))?;
         match store.get_payload(id)? {
             Some(Payload::SecretB64(b64)) => {
                 use base64::Engine;
@@ -399,7 +428,9 @@ impl ClipboardModule {
                     .decode(&b64)
                     .map_err(|e| AppError::module("CLIPBOARD_QUERY_003", e.to_string(), None))?;
                 let plain = crypto.unprotect(&cipher)?;
-                Ok(Some(Payload::Text(String::from_utf8_lossy(&plain).to_string())))
+                Ok(Some(Payload::Text(
+                    String::from_utf8_lossy(&plain).to_string(),
+                )))
             }
             other => Ok(other),
         }

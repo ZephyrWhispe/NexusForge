@@ -62,7 +62,9 @@ impl Module for NotesModule {
         let storage = ctx
             .ports
             .get::<dyn host_core::storage::StoragePort>()
-            .ok_or_else(|| ModuleError::Init("StoragePort 未注册（宿主需在模块 init 前登记）".into()))?;
+            .ok_or_else(|| {
+                ModuleError::Init("StoragePort 未注册（宿主需在模块 init 前登记）".into())
+            })?;
         let driver = storage
             .driver("local")
             .ok_or_else(|| ModuleError::Init("本地存储驱动缺失".into()))?;
@@ -70,10 +72,19 @@ impl Module for NotesModule {
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
         // 首次增量索引（外部编辑器改动在此收敛；失败不阻塞模块启动）
         match lib.sync() {
-            Ok(r) => tracing::info!(added = r.added, updated = r.updated, removed = r.removed, total = r.total, "笔记索引同步完成"),
+            Ok(r) => tracing::info!(
+                added = r.added,
+                updated = r.updated,
+                removed = r.removed,
+                total = r.total,
+                "笔记索引同步完成"
+            ),
             Err(e) => tracing::warn!(error = %e, "笔记索引同步失败（UI 可手动 reindex）"),
         }
-        *self.library.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(lib));
+        *self
+            .library
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(lib));
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }

@@ -7,12 +7,12 @@ use std::os::windows::ffi::OsStrExt;
 use host_core::error::AppError;
 use host_core::ports::{DockerPipePort, HttpResp};
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::GENERIC_READ;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING,
 };
-use windows::Win32::Foundation::GENERIC_READ;
 
 /// Docker Engine named pipe 路径
 const PIPE_PATH: &str = r"\\.\pipe\docker_engine";
@@ -43,7 +43,7 @@ impl DockerPipePort for DockerPipeWin {
         unsafe {
             let handle = CreateFileW(
                 PCWSTR::from_raw(pipe_name.as_ptr()),
-                (GENERIC_READ.0 | GENERIC_WRITE.0) as u32,
+                GENERIC_READ.0 | GENERIC_WRITE.0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
@@ -91,11 +91,16 @@ fn write_all(handle: HANDLE, data: &[u8]) -> Result<(), AppError> {
     while off < data.len() {
         let mut n: u32 = 0;
         unsafe {
-            WriteFile(handle, Some(&data[off..]), Some(&mut n), None)
-                .map_err(|e| AppError::module("TERM_DOCKER_002", format!("写管道失败: {e}"), None))?;
+            WriteFile(handle, Some(&data[off..]), Some(&mut n), None).map_err(|e| {
+                AppError::module("TERM_DOCKER_002", format!("写管道失败: {e}"), None)
+            })?;
         }
         if n == 0 {
-            return Err(AppError::module("TERM_DOCKER_002", "写管道零字节".to_string(), None));
+            return Err(AppError::module(
+                "TERM_DOCKER_002",
+                "写管道零字节".to_string(),
+                None,
+            ));
         }
         off += n as usize;
     }
@@ -114,7 +119,11 @@ fn read_all(handle: HANDLE) -> Result<Vec<u8>, AppError> {
         }
         out.extend_from_slice(&buf[..n as usize]);
         if out.len() > MAX_BODY {
-            return Err(AppError::module("TERM_DOCKER_003", "响应超上限".to_string(), None));
+            return Err(AppError::module(
+                "TERM_DOCKER_003",
+                "响应超上限".to_string(),
+                None,
+            ));
         }
     }
     Ok(out)
@@ -133,7 +142,13 @@ fn parse_response(raw: &[u8]) -> Result<HttpResp, AppError> {
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| AppError::module("TERM_DOCKER_004", format!("状态行异常: {status_line}"), None))?;
+        .ok_or_else(|| {
+            AppError::module(
+                "TERM_DOCKER_004",
+                format!("状态行异常: {status_line}"),
+                None,
+            )
+        })?;
 
     let mut content_length: Option<usize> = None;
     let mut chunked = false;
@@ -158,9 +173,8 @@ fn parse_response(raw: &[u8]) -> Result<HttpResp, AppError> {
 
 fn decode_chunked(mut data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    loop {
-        // 找行尾读 chunk 大小
-        let Some(line_end) = find(data, b"\r\n") else { break };
+    while let Some(line_end) = find(data, b"\r\n") {
+        // 读 chunk 大小行
         let size_str = String::from_utf8_lossy(&data[..line_end]).into_owned();
         let size = usize::from_str_radix(size_str.trim().split(';').next().unwrap_or("0"), 16)
             .unwrap_or(0);

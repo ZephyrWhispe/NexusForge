@@ -18,7 +18,7 @@ pub mod score;
 pub mod tidy;
 
 pub use error::{DesktopError, Result};
-pub use index::{IndexItem, ItemKind, LauncherIndex, LauncherHit};
+pub use index::{IndexItem, ItemKind, LauncherHit, LauncherIndex};
 pub use module::DesktopModule;
 pub use note::{Note, NoteStore};
 pub use score::FuzzyHit;

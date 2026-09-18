@@ -29,9 +29,13 @@ pub enum VaultState {
 enum Inner {
     Uninitialized,
     Locked,
-    Unlocked { dek: SecretKey },
+    Unlocked {
+        dek: SecretKey,
+    },
     /// 冷却中：arg 保存冷却结束时刻
-    Cooling { until: Instant },
+    Cooling {
+        until: Instant,
+    },
 }
 
 fn err(code: &str, msg: impl Into<String>) -> AppError {
@@ -55,13 +59,25 @@ impl VaultService {
         let header = if meta_path.exists() {
             let raw = std::fs::read_to_string(&meta_path)
                 .map_err(|e| err("VAULT_META_001", format!("读取 vault.meta 失败: {e}")))?;
-            Some(serde_json::from_str::<VaultHeader>(&raw)
-                .map_err(|e| err("VAULT_META_002", format!("vault.meta 解析失败: {e}")))?)
+            Some(
+                serde_json::from_str::<VaultHeader>(&raw)
+                    .map_err(|e| err("VAULT_META_002", format!("vault.meta 解析失败: {e}")))?,
+            )
         } else {
             None
         };
-        let inner = if header.is_some() { Inner::Locked } else { Inner::Uninitialized };
-        Ok(Self { meta_path, store, header: RwLock::new(header), inner: Mutex::new(inner), attempts: Mutex::new(0) })
+        let inner = if header.is_some() {
+            Inner::Locked
+        } else {
+            Inner::Uninitialized
+        };
+        Ok(Self {
+            meta_path,
+            store,
+            header: RwLock::new(header),
+            inner: Mutex::new(inner),
+            attempts: Mutex::new(0),
+        })
     }
 
     pub fn state(&self) -> VaultState {
@@ -87,7 +103,11 @@ impl VaultService {
     }
 
     /// 新建保险库（未初始化态）；kdf None 用默认参数（64MiB/t3/p4）
-    pub fn create(&self, master_password: &str, kdf: Option<KdfParams>) -> Result<VaultHeader, AppError> {
+    pub fn create(
+        &self,
+        master_password: &str,
+        kdf: Option<KdfParams>,
+    ) -> Result<VaultHeader, AppError> {
         let mut inner = self.inner.lock().expect("vault inner 锁");
         if !matches!(&*inner, Inner::Uninitialized) {
             return Err(err("VAULT_STATE_001", "保险库已存在，不能重复创建"));
@@ -113,7 +133,10 @@ impl VaultService {
                 }
                 Inner::Cooling { until } if *until > Instant::now() => {
                     let remain = until.saturating_duration_since(Instant::now()).as_secs();
-                    return Err(err("VAULT_LOCKED_002", format!("尝试次数过多，请 {remain}s 后重试")));
+                    return Err(err(
+                        "VAULT_LOCKED_002",
+                        format!("尝试次数过多，请 {remain}s 后重试"),
+                    ));
                 }
                 // 冷却已结束：降级为 Locked 继续本次尝试（计数已在触发时清零）
                 Inner::Cooling { .. } => self.attempts_snapshot(),
@@ -121,7 +144,9 @@ impl VaultService {
                 Inner::Locked => self.attempts_snapshot(),
             }
         };
-        let header = self.header().ok_or_else(|| err("VAULT_META_003", "头部缺失"))?;
+        let header = self
+            .header()
+            .ok_or_else(|| err("VAULT_META_003", "头部缺失"))?;
         match crypto::unwrap_dek(&header, master_password) {
             Ok(dek) => {
                 let mut inner = self.inner.lock().expect("vault inner 锁");
@@ -168,7 +193,9 @@ impl VaultService {
         if self.state() != VaultState::Unlocked {
             return Err(err("VAULT_LOCKED_001", "请先解锁再修改主密码"));
         }
-        let header = self.header().ok_or_else(|| err("VAULT_META_003", "头部缺失"))?;
+        let header = self
+            .header()
+            .ok_or_else(|| err("VAULT_META_003", "头部缺失"))?;
         let header2 = crypto::change_master_password(&header, old, new)?;
         self.persist_header(&header2)?;
         *self.header.write().expect("header 锁") = Some(header2.clone());
@@ -285,7 +312,10 @@ impl VaultService {
 
     pub fn get_entry(&self, id: &str) -> Result<Option<Entry>, AppError> {
         let dek = self.dek()?;
-        self.store.get_entry(id)?.map(|row| Ok(self.decrypt_row(row, &dek))).transpose()
+        self.store
+            .get_entry(id)?
+            .map(|row| Ok(self.decrypt_row(row, &dek)))
+            .transpose()
     }
 
     // ---- 文件夹透传（无敏感数据）----
@@ -348,8 +378,16 @@ mod tests {
 
     fn sample_fields() -> Vec<EntryField> {
         vec![
-            EntryField { key: "password".into(), kind: crate::model::FieldKind::Password, value: "s3cret-VALUE-xyz".into() },
-            EntryField { key: "url".into(), kind: crate::model::FieldKind::Url, value: "https://github.com".into() },
+            EntryField {
+                key: "password".into(),
+                kind: crate::model::FieldKind::Password,
+                value: "s3cret-VALUE-xyz".into(),
+            },
+            EntryField {
+                key: "url".into(),
+                kind: crate::model::FieldKind::Url,
+                value: "https://github.com".into(),
+            },
         ]
     }
 
@@ -379,7 +417,12 @@ mod tests {
 
         for i in 0..MAX_ATTEMPTS {
             // 每次尝试前不处于冷却
-            assert_eq!(v.lockout_remaining_secs(), 0, "第 {} 次尝试前不应处于冷却", i + 1);
+            assert_eq!(
+                v.lockout_remaining_secs(),
+                0,
+                "第 {} 次尝试前不应处于冷却",
+                i + 1
+            );
             let _ = v.unlock("bad").unwrap_err();
         }
         // 第 5 次错误后进入冷却：正确密码也被拒
@@ -394,7 +437,15 @@ mod tests {
         let v = VaultService::open(&dir).unwrap();
         v.create("master-pw", Some(test_kdf())).unwrap();
 
-        let entry = v.add_entry(None, "GitHub", true, sample_fields(), Some("GEZDGNBVGY3TQOJQ".into())).unwrap();
+        let entry = v
+            .add_entry(
+                None,
+                "GitHub",
+                true,
+                sample_fields(),
+                Some("GEZDGNBVGY3TQOJQ".into()),
+            )
+            .unwrap();
         assert_eq!(entry.fields[0].value, "s3cret-VALUE-xyz");
 
         let listed = v.list_entries(None, Some("git")).unwrap();
@@ -408,7 +459,10 @@ mod tests {
         e2.fields[0].value = "new-pass-99".into();
         let updated = v.update_entry(e2).unwrap();
         assert_eq!(updated.fields[0].value, "new-pass-99");
-        assert_eq!(v.get_entry(&updated.id).unwrap().unwrap().title, "GitHub 改");
+        assert_eq!(
+            v.get_entry(&updated.id).unwrap().unwrap().title,
+            "GitHub 改"
+        );
 
         // 删除
         assert!(v.delete_entry(&updated.id).unwrap());
@@ -418,9 +472,18 @@ mod tests {
         let db = dir.join("db").join("vault.db");
         let mut blob = std::fs::read(&db).unwrap_or_default();
         blob.extend(std::fs::read(db.with_extension("db-wal")).unwrap_or_default());
-        assert!(!blob.windows(15).any(|w| w == b"s3cret-VALUE-xyz"), "库文件不得含明文密码");
-        assert!(!blob.windows(8).any(|w| w == b"new-pass-99"), "库文件不得含明文密码");
-        assert!(!blob.windows(16).any(|w| w == b"GEZDGNBVGY3TQOJQ"), "库文件不得含明文 TOTP 密钥");
+        assert!(
+            !blob.windows(15).any(|w| w == b"s3cret-VALUE-xyz"),
+            "库文件不得含明文密码"
+        );
+        assert!(
+            !blob.windows(8).any(|w| w == b"new-pass-99"),
+            "库文件不得含明文密码"
+        );
+        assert!(
+            !blob.windows(16).any(|w| w == b"GEZDGNBVGY3TQOJQ"),
+            "库文件不得含明文 TOTP 密钥"
+        );
     }
 
     #[test]
@@ -439,7 +502,8 @@ mod tests {
         {
             let v = VaultService::open(&dir).unwrap();
             v.create("master-pw", Some(test_kdf())).unwrap();
-            v.add_entry(None, "Site", false, sample_fields(), None).unwrap();
+            v.add_entry(None, "Site", false, sample_fields(), None)
+                .unwrap();
             v.lock().unwrap();
         }
         // 重新打开：meta 仍在，锁定态，解锁后数据完好
@@ -449,4 +513,3 @@ mod tests {
         assert_eq!(v2.list_entries(None, None).unwrap().len(), 1);
     }
 }
-

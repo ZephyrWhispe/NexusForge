@@ -10,7 +10,7 @@
 
 | 编号 | 主题 | 类型 | 优先级 | 批次 | 状态 |
 |------|------|------|--------|------|------|
-| D-01 | 门禁先行：CI 与工具链先于功能补齐 | 流程 | P0 | 2 | 待实施 |
+| D-01 | 门禁先行：CI 与工具链先于功能补齐 | 流程 | P0 | 2 | 已完成（待首次 CI 绿 run） |
 | D-02 | 消除模块间直接依赖（O1 红线） | 补实现 | P0 | 1 | 已完成 |
 | D-03 | 事件总线统一背压 API（O8） | 补实现 | P1 | 2 | 待实施 |
 | D-04 | 剪贴板敏感数据改用 AES-256-GCM 信封加密 | 补实现 | P0 | 1 | 已完成 |
@@ -26,7 +26,7 @@
 | D-14 | 引入 Zustand 三 store，替换轮询与静态状态 | 补实现 | P1 | 1 | 已完成 |
 | D-15 | 锁策略统一（parking_lot + 回调无锁快照） | 补实现 | P0 | 2 | 待实施 |
 | D-16 | host-core 收敛公共工具与 ModuleStateCell | 补实现 | P1 | 2 | 待实施 |
-| D-17 | 前端工程门禁（ESLint + Vitest + CI） | 补实现 | P0 | 2 | 待实施 |
+| D-17 | 前端工程门禁（ESLint + Vitest + CI） | 补实现 | P0 | 2 | 已完成 |
 | D-18 | 前端组件基线 + 破坏性操作统一二次确认 | 补实现 | P1 | 2 | 待实施 |
 | D-19 | 全局错误通道与模块重启入口 | 补实现 | P0 | 1 | 已完成 |
 | D-20 | ConPTY 诊断探针与验收门禁治理 | 治理 | P0 | 0 | 已完成 |
@@ -47,6 +47,8 @@
 - **依据**：本地已出现 44 处静默吞错、186 处锁 `unwrap`、生命周期泄漏等缺陷，均是"无门禁即无回归保护"的直接产物。补功能会放大存量风险。
 - **代价**：短期交付节奏变慢一天量级；换来后续所有改动的可验证性。
 - **验收**：`gh` 上出现首个绿色 CI run；门禁红灯能真实拦住一次人为缺陷。
+- **实施记录（2026-09-18）**：`.github/workflows/{ci,release,nightly}.yml` 落地。ci.yml：windows runner 上 `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace`，ubuntu runner 上 `tsc --noEmit` + `npm run lint` + `npm run test`。release.yml（tag v* / 手动）与 nightly.yml（cron + artifact）走 `tauri build`，因 updater 私钥与代码签名证书尚未持有，以 `--config` 临时关闭 `createUpdaterArtifacts`（文件内有待办注释）。rustfmt 基线（约千处重排）作为独立提交进入同一批次，避免污染功能性 diff。
+- **完成证据（2026-09-18，本地等价门禁全绿）**：`cargo fmt --all --check` OK；`cargo clippy --workspace --all-targets -- -D warnings` 零告警（清理 40+ 条，含两个真缺陷：kvm-core pairing.rs 的 reject 闭包内 future 从未 await → **PairReject 帧从未发出**，改宏内联 await 并以 `pair_wrong_code_rejected` 断言 `KVM_PAIR_005` 回归锁死；clipboard-core secrets.rs `if strong {...} else {...}` 两分支同体——数字规则的 `^…$` 锚点已表达整串语义，删除伪分支）。红灯拦截演示：clippy `err_expect` 在新增回归测试写法上真实报错过一次并已修。GitHub 首绿 run 待推送后以 `gh run list` 复核（D-01 验收尾项）。
 
 ### D-02 消除模块间直接依赖（O1 红线）
 
@@ -180,6 +182,9 @@
 - **背景**：`package.json` 仅 `tsc && vite build`；无 ESLint/Prettier/Vitest/Testing Library/Playwright；UI-PLAN §4 要求"eslint 零告警"、U8-1/U8-2/U8-3 三项无产出。
 - **决策**：ESLint（`react-hooks` + `jsx-a11y`）先落地——它可自动捕获本次发现的"行不可聚焦""点击无键盘等价"类问题与 `exhaustive-deps`；Vitest 首批测试聚焦纯逻辑：`parseAppError`、`SchemaForm` 默认值合并、剪贴板筛选/分页参数构造。Playwright 视觉基线列入 v1.1。
 - **验收**：`npm run lint` 与 `npm run test` 进入 `ci.yml`；现存 7 处 `eslint-disable-next-line react-hooks/exhaustive-deps` 逐条复核。
+- **实施记录（2026-09-18）**：ESLint 9 扁平配置（typescript-eslint 8 + eslint-plugin-react-hooks 7 + jsx-a11y），`no-empty` 关闭空 catch 豁免作为 D-19 兜底；react-hooks v7 随附的 6 条 React-Compiler 系规则（set-state-in-effect 等）超出本裁决范围，逐条关闭并注明留待独立立项。jsx-a11y 静态检查看不见 spread 属性，故键盘等价采用**字面属性**模式：`role="button" tabIndex={0} onKeyDown={keyActivate(fn)}`（`src/a11y.ts`），覆盖剪切板/笔记/终端（会话页签、kill、SFTP 行）/vault/启动器/快查面板 8 类行元素；不可键盘化的装饰面（遮罩、十字准星画布、贴图缩放手势面）标 `role="presentation"`。2 处 `no-autofocus` 豁免（启动器/速记条为呼出式窗口，出现即聚焦是核心交互）。Vitest 3（jsdom 环境，锁 v3 因 v5 要求 Vite≥6 与项目 Vite 5.4 冲突）+ 19 条首批测试（parseAppError 7 / mergeDefaults+toFiniteNum 9 / clipSearchParams 3）。
+- **7 处 exhaustive-deps disable 逐条判定**：3 处为陈旧遗留（依赖实际早已补全，豁免纯属僵尸）直接删除——EditorPanel 挂载 effect、OverlayShot `[crop, task]` effect 等；1 处修复：OverlayShot `setupCanvas` 本为 `useCallback(…, [])` 稳定引用，直接入依赖表并去掉豁免；余 3 处保留并就地写明原因（OverlayShot keydown：undo/redo 为每渲染新建的 ref-only 函数，入表即每帧重挂监听且行为不变；OverlayShot confirmSelection：runOcr 是其后置 `const`，TDZ 无法入表；EditorPanel Ctrl+S：doSave 同理每渲染新身份，activeId 已在表内保证语义正确）。3+1+3=7，逐条清零。
+- **完成证据（2026-09-18）**：`npx tsc --noEmit` 0 错误、`npm run lint` 0 告警（全仓首次）、`npm run test` 19/19。门禁顺带揪出并修复真实缺陷：SchemaForm `Number(x) ?? 0` 死空值合并（NaN 泄漏进 SpinButton，抽出 `toFiniteNum` + 6 条单测锁行为）、TerminalPanel SFTP 路径拼接双侧同值的死三元。
 
 ### D-18 前端组件基线 + 破坏性操作统一二次确认
 

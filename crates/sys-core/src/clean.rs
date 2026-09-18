@@ -113,7 +113,9 @@ pub fn scan_target(target: &CleanTarget, now_ms: i64) -> Result<CleanScanItem> {
 }
 
 fn scan_dir(dir: &Path, target: &CleanTarget, now_ms: i64, item: &mut CleanScanItem) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
@@ -159,7 +161,11 @@ pub fn execute_target(
     if !dir.exists() {
         return Err(SysError::CleanTarget(target.dir.clone()));
     }
-    let mut scan = CleanScanItem { files: 0, reclaim_bytes: 0, ..Default::default() };
+    let mut scan = CleanScanItem {
+        files: 0,
+        reclaim_bytes: 0,
+        ..Default::default()
+    };
     scan_dir(&dir, target, now_ms, &mut scan);
     // 再次收集具体文件路径（与扫描同白名单）
     let mut paths = Vec::new();
@@ -179,7 +185,9 @@ pub fn execute_target(
 }
 
 fn collect_files(dir: &Path, target: &CleanTarget, now_ms: i64, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
@@ -320,7 +328,10 @@ mod tests {
             optional: false,
         };
         assert!(scan_target(&t, now()).is_err());
-        let t2 = CleanTarget { optional: true, ..t };
+        let t2 = CleanTarget {
+            optional: true,
+            ..t
+        };
         assert!(scan_target(&t2, now()).unwrap().missing);
     }
 }

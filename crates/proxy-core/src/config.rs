@@ -31,9 +31,7 @@ pub struct GenOptions<'a> {
 /// 生成 sing-box 配置 JSON（写入 `{appData}/proxy/config.json` 由内核消费）
 pub fn generate(opts: &GenOptions) -> Result<serde_json::Value> {
     if opts.nodes.is_empty() {
-        return Err(ProxyError::Config(
-            "无可用节点：请先添加并更新订阅".into(),
-        ));
+        return Err(ProxyError::Config("无可用节点：请先添加并更新订阅".into()));
     }
     let node_tags: Vec<String> = opts.nodes.iter().map(|n| n.outbound_tag()).collect();
     let mut node_outbounds: Vec<serde_json::Value> =
@@ -225,7 +223,11 @@ mod tests {
         assert_eq!(inbound["listen_port"], 7890);
         let outbounds = cfg["outbounds"].as_array().unwrap();
         assert_eq!(outbounds[0]["type"], "selector");
-        assert_eq!(outbounds[0]["outbounds"].as_array().unwrap().len(), 3, "2 节点 + auto");
+        assert_eq!(
+            outbounds[0]["outbounds"].as_array().unwrap().len(),
+            3,
+            "2 节点 + auto"
+        );
         assert_eq!(outbounds[2]["type"], "shadowsocks");
         assert_eq!(outbounds[3]["type"], "trojan");
         assert_eq!(outbounds[3]["tls"]["server_name"], "example.com");
@@ -248,7 +250,10 @@ mod tests {
 
     #[test]
     fn rule_mode_includes_direct_domains() {
-        let domains = vec![".corp.example.com".to_string(), "internal.local".to_string()];
+        let domains = vec![
+            ".corp.example.com".to_string(),
+            "internal.local".to_string(),
+        ];
         let opts = GenOptions {
             mixed_port: 7890,
             mode: RouteMode::Rule,
@@ -258,7 +263,9 @@ mod tests {
         };
         let cfg = generate(&opts).unwrap();
         let rules = cfg["route"]["rules"].as_array().unwrap();
-        assert!(rules.iter().any(|r| r["domain_suffix"].as_array().map(|a| a.len()) == Some(2)));
+        assert!(rules
+            .iter()
+            .any(|r| r["domain_suffix"].as_array().map(|a| a.len()) == Some(2)));
     }
 
     #[test]

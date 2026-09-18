@@ -11,7 +11,10 @@ use std::sync::{Arc, RwLock};
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus};
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
-use host_core::ports::{AppxPort, MaintenancePort, PerfPort, RecycleBinPort, RegistryOps, ServiceCtlPort, TaskTogglePort};
+use host_core::ports::{
+    AppxPort, MaintenancePort, PerfPort, RecycleBinPort, RegistryOps, ServiceCtlPort,
+    TaskTogglePort,
+};
 
 use crate::clean;
 use crate::metrics::{MetricsBuffer, MetricsPoint};
@@ -73,7 +76,10 @@ impl SysModule {
     }
 
     pub fn manager(&self, id: &str) -> Option<&dyn PkgManager> {
-        self.managers.iter().find(|m| m.id() == id).map(|b| b.as_ref())
+        self.managers
+            .iter()
+            .find(|m| m.id() == id)
+            .map(|b| b.as_ref())
     }
 
     pub fn targets(&self) -> &[clean::CleanTarget] {
@@ -90,15 +96,25 @@ impl SysModule {
 
     fn publish_metrics(&self, point: &MetricsPoint) {
         if let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) {
-            bus.publish(Event::new("sys.metrics", "sys", serde_json::to_value(point).unwrap_or_default()))
-                .ok();
+            bus.publish(Event::new(
+                "sys.metrics",
+                "sys",
+                serde_json::to_value(point).unwrap_or_default(),
+            ))
+            .ok();
         }
     }
 
     /// 采样线程（start 在后台调用；1s 采样 → 缓冲 + 事件节流 1s）
     fn start_sampler(&self) {
         let already = self.sample_cancel.swap(false, Ordering::SeqCst);
-        if already && self.sample_thread.read().map(|g| g.is_some()).unwrap_or(false) {
+        if already
+            && self
+                .sample_thread
+                .read()
+                .map(|g| g.is_some())
+                .unwrap_or(false)
+        {
             return; // 线程仍在跑，cancel 复位即可
         }
         let Some(perf) = self.perf.read().ok().and_then(|g| g.clone()) else {
@@ -161,7 +177,10 @@ impl SysModule {
                 let store = crate::winops::BackupStore::open(&dir);
                 let regressed = crate::winops::regression_check(&ports, &store, &tweaks);
                 if !regressed.is_empty() {
-                    tracing::warn!(count = regressed.len(), "WinOps 回归检测发现被系统改回的设置");
+                    tracing::warn!(
+                        count = regressed.len(),
+                        "WinOps 回归检测发现被系统改回的设置"
+                    );
                     bus.publish(Event::new(
                         "sys.verify_result",
                         "sys",
@@ -190,11 +209,24 @@ impl Module for SysModule {
             .ports
             .get::<dyn PerfPort>()
             .ok_or_else(|| ModuleError::Init("PerfPort 未注册".into()))?;
-        *self.perf.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(perf);
-        *self.recycle.write().map_err(|_| ModuleError::Init("锁污染".into()))? = ctx.ports.get::<dyn RecycleBinPort>();
-        *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self
+            .perf
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(perf);
+        *self
+            .recycle
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? =
+            ctx.ports.get::<dyn RecycleBinPort>();
+        *self
+            .bus
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
         // WinOps 数据面快照（注册缺失容忍——回归检测按 None 跳过对应比对）
-        *self.winops.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(WinopsFace {
+        *self
+            .winops
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(WinopsFace {
             registry: ctx
                 .ports
                 .get::<dyn RegistryOps>()

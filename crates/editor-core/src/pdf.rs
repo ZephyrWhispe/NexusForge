@@ -72,9 +72,7 @@ pub fn info(path: &Path) -> Result<PdfInfo> {
     let doc = load(path)?;
     Ok(PdfInfo {
         pages: doc.get_pages().len() as u32,
-        size: std::fs::metadata(path)
-            .map_err(EditorError::Io)?
-            .len(),
+        size: std::fs::metadata(path).map_err(EditorError::Io)?.len(),
     })
 }
 
@@ -94,10 +92,7 @@ pub fn merge(inputs: &[std::path::PathBuf], output: &Path) -> Result<PdfOpResult
 /// 拆分为单页 PDF 输出到目录（`{stem}_1.pdf`…）
 pub fn split(path: &Path, out_dir: &Path) -> Result<Vec<PdfOpResult>> {
     let doc = load(path)?;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("page");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
     std::fs::create_dir_all(out_dir).map_err(EditorError::Io)?;
 
     let mut results = Vec::new();
@@ -150,11 +145,7 @@ pub fn compress(path: &Path) -> Result<PdfOpResult> {
     } else {
         // 幂等保护：压缩无效（或变大），保留原文件
         let _ = std::fs::remove_file(&tmp);
-        tracing::info!(
-            orig = orig_size,
-            new = new_size,
-            "压缩无收益，保留原文件"
-        );
+        tracing::info!(orig = orig_size, new = new_size, "压缩无收益，保留原文件");
     }
     Ok(PdfOpResult {
         output: path.display().to_string(),
@@ -185,9 +176,7 @@ pub fn watermark(path: &Path, text: &str) -> Result<PdfOpResult> {
 // ---- 内部 ----
 
 fn load(path: &Path) -> Result<Document> {
-    Document::load(path).map_err(|e| {
-        EditorError::Pdf(format!("解析 {} 失败: {e}", path.display()))
-    })
+    Document::load(path).map_err(|e| EditorError::Pdf(format!("解析 {} 失败: {e}", path.display())))
 }
 
 fn finish(mut doc: Document, output: &Path) -> Result<PdfOpResult> {
@@ -270,7 +259,9 @@ fn clone_array(
     dst: &mut Document,
     map: &mut std::collections::HashMap<ObjectId, ObjectId>,
 ) -> Vec<Object> {
-    arr.into_iter().map(|v| clone_value(src, v, dst, map)).collect()
+    arr.into_iter()
+        .map(|v| clone_value(src, v, dst, map))
+        .collect()
 }
 
 fn clone_value(
@@ -315,11 +306,7 @@ fn append_page_to_tree(doc: &mut Document, page_id: ObjectId) {
         .ok()
         .and_then(|d| d.get(b"Kids").ok())
         .and_then(|o| o.as_array().ok())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|o| o.as_reference().ok())
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|o| o.as_reference().ok()).collect())
         .unwrap_or_default();
     let mut kids = kids_ids;
     kids.push(page_id);
@@ -340,10 +327,7 @@ fn stamp_page(doc: &mut Document, page_id: ObjectId, text: &str) -> Result<()> {
         "BT /F1 48 Tf 0.85 g 0.85 G 0.2 Tc 45 200 Td ({}) Tj ET ",
         sanitize_pdf_text(text)
     );
-    let content_id = doc.add_object(Stream::new(
-        dictionary! {},
-        content_data.into_bytes(),
-    ));
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content_data.into_bytes()));
     // 字体对象（标准 14 字体：Helvetica，无需嵌入）
     let font_id = doc.add_object(dictionary! {
         "Type" => "Font",
@@ -362,10 +346,7 @@ fn stamp_page(doc: &mut Document, page_id: ObjectId, text: &str) -> Result<()> {
                 let old = *rid;
                 page.set(
                     "Contents",
-                    Object::Array(vec![
-                        Object::Reference(old),
-                        Object::Reference(content_id),
-                    ]),
+                    Object::Array(vec![Object::Reference(old), Object::Reference(content_id)]),
                 );
             }
             Ok(Object::Array(arr)) => {
@@ -440,7 +421,10 @@ mod tests {
             "Count" => Object::Integer(0),
         });
         for i in 1..=pages {
-            let content = Stream::new(dictionary! {}, format!("BT /F1 12 Tf 72 720 Td (Page {} {text}) Tj ET", i).into_bytes());
+            let content = Stream::new(
+                dictionary! {},
+                format!("BT /F1 12 Tf 72 720 Td (Page {} {text}) Tj ET", i).into_bytes(),
+            );
             let content_id = doc.add_object(content);
             let page_id = doc.add_object(dictionary! {
                 "Type" => "Page",
@@ -526,7 +510,10 @@ mod tests {
         let after = std::fs::metadata(&a).unwrap().len();
         assert!(after <= before, "压缩后不得大于原文件（幂等保护）");
         assert_eq!(r.pages, 5);
-        assert!(!a.with_extension("pdf.nforge-tmp").exists(), "临时文件应清理或替换");
+        assert!(
+            !a.with_extension("pdf.nforge-tmp").exists(),
+            "临时文件应清理或替换"
+        );
     }
 
     #[test]

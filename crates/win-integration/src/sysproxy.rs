@@ -8,9 +8,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Networking::WinInet::{
     InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
 };
-use windows::Win32::Security::{
-    GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
     KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_SZ, REG_VALUE_TYPE,
@@ -72,11 +70,17 @@ unsafe fn read_sz(key: HKEY, name: &str) -> Result<String, AppError> {
     let n = (len as usize / 2).min(1024);
     let wide = &buf[..n * 2];
     let u16s: Vec<u16> = wide
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     Ok(String::from_utf16_lossy(
-        &u16s.iter().copied().take_while(|&c| c != 0).collect::<Vec<_>>(),
+        &u16s
+            .iter()
+            .copied()
+            .take_while(|&c| c != 0)
+            .collect::<Vec<_>>(),
     ))
 }
 
@@ -127,7 +131,8 @@ impl SysProxyPort for WindowsSysProxy {
             for v in &bypass_utf16 {
                 bypass_bytes.extend_from_slice(&v.to_ne_bytes());
             }
-            let set_bypass = RegSetValueExW(key, w!("ProxyOverride"), 0, REG_SZ, Some(&bypass_bytes));
+            let set_bypass =
+                RegSetValueExW(key, w!("ProxyOverride"), 0, REG_SZ, Some(&bypass_bytes));
             let _ = RegCloseKey(key);
             if set_dword.is_err() {
                 return Err(err("ProxyEnable 写入", set_dword.0));
@@ -145,10 +150,16 @@ impl SysProxyPort for WindowsSysProxy {
     fn refresh(&self) -> Result<(), AppError> {
         // 广播让 WinINET/应用感知变更（无需句柄，全局生效）
         unsafe {
-            InternetSetOptionW(None, INTERNET_OPTION_SETTINGS_CHANGED, None, 0)
-                .map_err(|e| AppError::module("PROXY_SYS_002", format!("SETTINGS_CHANGED 广播失败: {e}"), None))?;
-            InternetSetOptionW(None, INTERNET_OPTION_REFRESH, None, 0)
-                .map_err(|e| AppError::module("PROXY_SYS_002", format!("REFRESH 广播失败: {e}"), None))?;
+            InternetSetOptionW(None, INTERNET_OPTION_SETTINGS_CHANGED, None, 0).map_err(|e| {
+                AppError::module(
+                    "PROXY_SYS_002",
+                    format!("SETTINGS_CHANGED 广播失败: {e}"),
+                    None,
+                )
+            })?;
+            InternetSetOptionW(None, INTERNET_OPTION_REFRESH, None, 0).map_err(|e| {
+                AppError::module("PROXY_SYS_002", format!("REFRESH 广播失败: {e}"), None)
+            })?;
         }
         Ok(())
     }

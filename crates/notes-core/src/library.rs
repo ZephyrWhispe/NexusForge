@@ -31,7 +31,12 @@ impl NoteLibrary {
         std::fs::create_dir_all(&root).map_err(NoteError::Io)?;
         let index = Arc::new(NoteIndex::open(db_path)?);
         let cards = Arc::new(CardStore::new(index.conn())?);
-        Ok(Self { root, driver, index, cards })
+        Ok(Self {
+            root,
+            driver,
+            index,
+            cards,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -109,11 +114,7 @@ impl NoteLibrary {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let title = fm
-            .title
-            .clone()
-            .or_else(|| first_h1(body))
-            .unwrap_or(stem);
+        let title = fm.title.clone().or_else(|| first_h1(body)).unwrap_or(stem);
         let mut tags = fm.tags.clone();
         for t in extract_tags(body) {
             if !tags.iter().any(|e| e.eq_ignore_ascii_case(&t)) {
@@ -145,7 +146,10 @@ impl NoteLibrary {
             return String::new();
         }
         let norm = d.replace('\\', "/");
-        for cand in [norm.as_str(), &format!("{}.md", norm.trim_end_matches(".md"))] {
+        for cand in [
+            norm.as_str(),
+            &format!("{}.md", norm.trim_end_matches(".md")),
+        ] {
             if let Some(hit) = universe.iter().find(|p| p.as_str() == cand) {
                 return hit.clone();
             }
@@ -172,7 +176,10 @@ impl NoteLibrary {
         let mut out = Vec::new();
         let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
-            let entries = self.driver.list(&dir).map_err(|e| NoteError::Driver(e.to_string()))?;
+            let entries = self
+                .driver
+                .list(&dir)
+                .map_err(|e| NoteError::Driver(e.to_string()))?;
             for e in entries {
                 if e.hidden || e.name.ends_with(".nf-tmp") {
                     continue;
@@ -224,7 +231,12 @@ impl NoteLibrary {
                 removed += 1;
             }
         }
-        Ok(SyncResult { added, updated, removed, total: disk.len() })
+        Ok(SyncResult {
+            added,
+            updated,
+            removed,
+            total: disk.len(),
+        })
     }
 
     /// 全量重建（清索引三表后 sync；cards 保留）
@@ -244,7 +256,9 @@ impl NoteLibrary {
         self.write_text(&rel, content)?;
         let universe = self.universe_with(&rel)?;
         self.index_one(&rel, &universe)?;
-        Ok(self.index.get(&rel)?.ok_or_else(|| NoteError::BadState("索引失败".into()))?)
+        self.index
+            .get(&rel)?
+            .ok_or_else(|| NoteError::BadState("索引失败".into()))
     }
 
     pub fn read(&self, rel: &str) -> Result<(String, NoteMeta)> {
@@ -324,7 +338,11 @@ impl NoteLibrary {
                         .map(|l| l.trim().to_string())
                 })
                 .unwrap_or_default();
-            out.push(Backlink { src, title, snippet });
+            out.push(Backlink {
+                src,
+                title,
+                snippet,
+            });
         }
         Ok(out)
     }
@@ -361,7 +379,9 @@ impl NoteLibrary {
             if src == &old {
                 continue; // 自引用由改名后的新路径处理
             }
-            let Ok(content) = self.read_text(src) else { continue };
+            let Ok(content) = self.read_text(src) else {
+                continue;
+            };
             let next = rewrite_links(&content, &old_stem, &new_stem);
             if next != content {
                 if let Err(e) = self.write_text(src, &next) {
@@ -415,11 +435,17 @@ impl NoteLibrary {
         let mut out = vec![String::new()];
         let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
-            let Ok(entries) = self.driver.list(&dir) else { continue };
+            let Ok(entries) = self.driver.list(&dir) else {
+                continue;
+            };
             for e in entries {
                 if e.is_dir && !e.hidden {
                     stack.push(e.path.clone());
-                    if let Ok(rel) = e.path.strip_prefix(&self.root).map(|p| p.to_string_lossy().replace('\\', "/")) {
+                    if let Ok(rel) = e
+                        .path
+                        .strip_prefix(&self.root)
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    {
                         out.push(rel);
                     }
                 }
@@ -466,9 +492,15 @@ fn rewrite_links(content: &str, old_stem: &str, new_stem: &str) -> String {
     let r1 = Regex::new(&format!(r"\[\[{esc_old}(\||\]\])")).expect("改写正则1");
     let r2 = Regex::new(&format!(r"(\[\[[^\]\|]*/){esc_old}(\||\]\])")).expect("改写正则2");
     let r3 = Regex::new(&format!(r"\[\[{esc_old}\.md(\||\]\])")).expect("改写正则3");
-    let s = r1.replace_all(content, |c: &regex::Captures| format!("[[{new_stem}{}", &c[1]));
-    let s = r2.replace_all(&s, |c: &regex::Captures| format!("{}{new_stem}{}", &c[1], &c[2]));
-    let s = r3.replace_all(&s, |c: &regex::Captures| format!("[[{new_stem}.md{}", &c[1]));
+    let s = r1.replace_all(content, |c: &regex::Captures| {
+        format!("[[{new_stem}{}", &c[1])
+    });
+    let s = r2.replace_all(&s, |c: &regex::Captures| {
+        format!("{}{new_stem}{}", &c[1], &c[2])
+    });
+    let s = r3.replace_all(&s, |c: &regex::Captures| {
+        format!("[[{new_stem}.md{}", &c[1])
+    });
     s.into_owned()
 }
 
@@ -578,7 +610,12 @@ mod tests {
     #[test]
     fn create_read_write_index_and_sync() {
         let l = lib("crud");
-        let meta = l.create("rust/入门.md", "# Rust 入门\n内容 #lang/rust\n见 [[todo]]\n").unwrap();
+        let meta = l
+            .create(
+                "rust/入门.md",
+                "# Rust 入门\n内容 #lang/rust\n见 [[todo]]\n",
+            )
+            .unwrap();
         assert_eq!(meta.title, "Rust 入门");
         assert!(meta.tags.iter().any(|t| t == "lang/rust"));
         assert!(l.create("rust/入门.md", "").is_err());
@@ -615,7 +652,11 @@ mod tests {
     #[test]
     fn rename_rewrites_references_with_rollback() {
         let l = lib("rename");
-        l.create("a.md", "[[old]] 与 [[old|别名]] 与 [[sub/old]] 与 [[old.md]]\n").unwrap();
+        l.create(
+            "a.md",
+            "[[old]] 与 [[old|别名]] 与 [[sub/old]] 与 [[old.md]]\n",
+        )
+        .unwrap();
         l.create("sub/old.md", "# 旧\n[[a]]\n").unwrap();
         l.reindex().unwrap();
 
@@ -681,7 +722,11 @@ mod tests {
 
     #[test]
     fn rewrite_links_rules() {
-        let out = rewrite_links("[[old]] [[old|a]] [[x/old]] [[old.md]] [[oldx]]", "old", "new");
+        let out = rewrite_links(
+            "[[old]] [[old|a]] [[x/old]] [[old.md]] [[oldx]]",
+            "old",
+            "new",
+        );
         assert_eq!(out, "[[new]] [[new|a]] [[x/new]] [[new.md]] [[oldx]]");
     }
 }

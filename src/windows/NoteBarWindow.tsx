@@ -64,6 +64,8 @@ export default function NoteBarWindow() {
         className={styles.input}
         placeholder="记点什么… 支持 #标签、“明天/周几 X点”提醒"
         value={text}
+        // 速记条定位即输入：窗口唤出后首键必须落在输入框（保存/取消都在此 input 的 keydown 上）
+        // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {

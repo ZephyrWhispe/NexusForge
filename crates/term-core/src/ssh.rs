@@ -29,8 +29,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SshAuth {
-    Password { password: String },
-    Key { key_path: String, passphrase: Option<String> },
+    Password {
+        password: String,
+    },
+    Key {
+        key_path: String,
+        passphrase: Option<String>,
+    },
 }
 
 /// 连接目标
@@ -54,7 +59,10 @@ impl KnownHosts {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
             Err(_) => HashMap::new(),
         };
-        Ok(Self { path, map: RwLock::new(map) })
+        Ok(Self {
+            path,
+            map: RwLock::new(map),
+        })
     }
 
     fn key(host: &str, port: u16) -> String {
@@ -67,7 +75,11 @@ impl KnownHosts {
 
     /// 查询已记录指纹
     pub fn get(&self, host: &str, port: u16) -> Option<String> {
-        self.map.read().expect("known_hosts 锁污染").get(&Self::key(host, port)).cloned()
+        self.map
+            .read()
+            .expect("known_hosts 锁污染")
+            .get(&Self::key(host, port))
+            .cloned()
     }
 
     /// 记录/更新指纹（UI 明确接受后调用）
@@ -79,10 +91,8 @@ impl KnownHosts {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(TermError::Io)?;
         }
-        let data =
-            serde_json::to_vec_pretty(&*self.map.read().expect("known_hosts 锁污染")).map_err(|e| {
-                TermError::BadState(format!("known_hosts 序列化失败: {e}"))
-            })?;
+        let data = serde_json::to_vec_pretty(&*self.map.read().expect("known_hosts 锁污染"))
+            .map_err(|e| TermError::BadState(format!("known_hosts 序列化失败: {e}")))?;
         std::fs::write(&self.path, data).map_err(TermError::Io)?;
         Ok(())
     }
@@ -96,9 +106,8 @@ impl KnownHosts {
             .remove(&Self::key(host, port))
             .is_some();
         if removed {
-            let data =
-                serde_json::to_vec_pretty(&*self.map.read().expect("known_hosts 锁污染"))
-                    .map_err(|e| TermError::BadState(format!("known_hosts 序列化失败: {e}")))?;
+            let data = serde_json::to_vec_pretty(&*self.map.read().expect("known_hosts 锁污染"))
+                .map_err(|e| TermError::BadState(format!("known_hosts 序列化失败: {e}")))?;
             std::fs::write(&self.path, data).map_err(TermError::Io)?;
         }
         Ok(removed)
@@ -120,6 +129,11 @@ impl KnownHosts {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.read().expect("known_hosts 锁污染").len()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -168,7 +182,10 @@ async fn authenticate(handle: &mut Handle<TofuHandler>, user: &str, auth: &SshAu
             .authenticate_password(user, password.as_str())
             .await
             .map_err(|e| TermError::Auth(format!("密码认证失败: {e}")))?,
-        SshAuth::Key { key_path, passphrase } => {
+        SshAuth::Key {
+            key_path,
+            passphrase,
+        } => {
             let mut buf = std::fs::read(key_path).map_err(TermError::Io)?;
             let key = match russh::keys::decode_openssh(
                 &buf,
@@ -252,13 +269,21 @@ impl SshService {
         rows: u16,
         sessions: &TermSessions,
     ) -> Result<SessionInfo> {
-        let mut handle = connect_ssh(&target, self.known.clone()).await?;
+        let handle = connect_ssh(&target, self.known.clone()).await?;
         let channel = handle
             .channel_open_session()
             .await
             .map_err(|e| TermError::Ssh(format!("打开会话通道失败: {e}")))?;
         channel
-            .request_pty(false, "xterm-256color", cols.max(1) as u32, rows.max(1) as u32, 0, 0, &[])
+            .request_pty(
+                false,
+                "xterm-256color",
+                cols.max(1) as u32,
+                rows.max(1) as u32,
+                0,
+                0,
+                &[],
+            )
             .await
             .map_err(|e| TermError::Ssh(format!("请求 PTY 失败: {e}")))?;
         channel
@@ -278,7 +303,7 @@ impl SshService {
         let ch_in = channel.clone();
         tokio::spawn(async move {
             while let Some(data) = input_rx.recv().await {
-                let mut ch = ch_in.lock().await;
+                let ch = ch_in.lock().await;
                 if ch.data(&data[..]).await.is_err() {
                     break;
                 }
@@ -288,8 +313,12 @@ impl SshService {
         let ch_r = channel.clone();
         tokio::spawn(async move {
             while let Some((c, r)) = resize_rx.recv().await {
-                let mut ch = ch_r.lock().await;
-                if ch.window_change(c.max(1) as u32, r.max(1) as u32, 0, 0).await.is_err() {
+                let ch = ch_r.lock().await;
+                if ch
+                    .window_change(c.max(1) as u32, r.max(1) as u32, 0, 0)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -334,7 +363,7 @@ impl SshService {
                 // kill：关 channel + 断开连接（FnOnce 同步上下文内 spawn 异步清理）
                 let ch = channel.clone();
                 tokio::spawn(async move {
-                    let mut c = ch.lock().await;
+                    let c = ch.lock().await;
                     let _ = c.close().await;
                 });
                 tokio::spawn(async move {
@@ -369,14 +398,21 @@ impl SshService {
     }
 
     /// SFTP 下载（远程 → 本地）
-    pub async fn sftp_download(&self, target: &SshTarget, remote: &str, local: &Path) -> Result<u64> {
+    pub async fn sftp_download(
+        &self,
+        target: &SshTarget,
+        remote: &str,
+        local: &Path,
+    ) -> Result<u64> {
         let mut handle = connect_ssh(target, self.known.clone()).await?;
         let sftp = open_sftp(&mut handle).await?;
         let mut remote_file = sftp
             .open(remote)
             .await
             .map_err(|e| TermError::Sftp(format!("打开远程文件失败: {e}")))?;
-        let mut local_file = tokio::fs::File::create(local).await.map_err(TermError::Io)?;
+        let mut local_file = tokio::fs::File::create(local)
+            .await
+            .map_err(TermError::Io)?;
         let n = tokio::io::copy(&mut remote_file, &mut local_file)
             .await
             .map_err(TermError::Io)?;
@@ -396,7 +432,10 @@ impl SshService {
         let n = tokio::io::copy(&mut local_file, &mut remote_file)
             .await
             .map_err(TermError::Io)?;
-        remote_file.flush().await.map_err(|e| TermError::Sftp(e.to_string()))?;
+        remote_file
+            .flush()
+            .await
+            .map_err(|e| TermError::Sftp(e.to_string()))?;
         Ok(n)
     }
 }

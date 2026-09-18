@@ -64,7 +64,8 @@ fn scan_estimate_matches_reclaimed_within_10_percent() {
     let (deleted_files, est_bytes) = execute_target(&t, now(), false, &|_| Ok(0)).unwrap();
     assert_eq!(deleted_files, 5);
     // 实际删除 = est（同一白名单集合）；误差 = |est - est| = 0 < 10%
-    let error_pct = (est_bytes as f64 - scan.reclaim_bytes as f64).abs() / scan.reclaim_bytes as f64 * 100.0;
+    let error_pct =
+        (est_bytes as f64 - scan.reclaim_bytes as f64).abs() / scan.reclaim_bytes as f64 * 100.0;
     assert!(error_pct < 10.0, "误差 {error_pct:.2}% ≥ 10%");
     // 白名单文件未被误删
     assert!(fresh.exists());
@@ -79,7 +80,7 @@ fn recycle_mode_collects_exact_paths_for_recovery() {
     let mut expect_paths = Vec::new();
     for i in 0..3usize {
         let p = d.join(format!("r{i}.bin"));
-        std::fs::write(&p, vec![0u8; 100 + i]);
+        std::fs::write(&p, vec![0u8; 100 + i]).unwrap();
         age_file(&p, 2);
         expect_paths.push(p);
     }
@@ -96,7 +97,10 @@ fn recycle_mode_collects_exact_paths_for_recovery() {
     let mut got = deleted.into_inner().unwrap();
     got.sort();
     expect_paths.sort();
-    assert_eq!(got, expect_paths, "回收站删除列表与白名单文件不符（不可恢复风险）");
+    assert_eq!(
+        got, expect_paths,
+        "回收站删除列表与白名单文件不符（不可恢复风险）"
+    );
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -112,13 +116,12 @@ fn recycle_bin_real_delete_and_restore_via_port() {
     // 用 RecycleBinPort 的真实实现验证（SHFileOperationW FOF_ALLOWUNDO）
     use host_core::ports::RecycleBinPort;
     let recycle = win_integration::shell::RecycleBin;
-    let (deleted, _) =
-        execute_target(&t, now(), true, &|paths: &[PathBuf]| {
-            recycle
-                .delete(paths)
-                .map_err(|e| sys_core::SysError::CleanTarget(e.to_string()))
-        })
-        .unwrap();
+    let (deleted, _) = execute_target(&t, now(), true, &|paths: &[PathBuf]| {
+        recycle
+            .delete(paths)
+            .map_err(|e| sys_core::SysError::CleanTarget(e.to_string()))
+    })
+    .unwrap();
     assert_eq!(deleted, 1);
     assert!(!victim.exists(), "回收站删除后文件应离开原位");
     // 恢复语义：由 OS 回收站承载（手动可还原），此处验证删除成功即验收线

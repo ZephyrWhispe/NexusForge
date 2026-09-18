@@ -29,12 +29,10 @@ use windows::Win32::System::Pipes::{
     WaitNamedPipeW, NAMED_PIPE_MODE,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, GetProcessId, PROCESS_NAME_WIN32,
+    GetProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::Shell::{
-    ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-};
+use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 /// helper 可执行文件名（与主 exe 同目录交付）
 pub const HELPER_EXE_NAME: &str = "nexusforge-sys-helper.exe";
@@ -60,23 +58,41 @@ pub fn pipe_name_for(parent_pid: u32) -> String {
 
 /// UTF-16 宽字符串（NUL 结尾）
 pub(crate) fn to_wide(s: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 查询进程镜像路径（OpenProcess + QueryFullProcessImageNameW）
 pub fn query_image_path(pid: u32) -> Result<PathBuf, AppError> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|e| {
-            AppError::module("SYS_HELPER_001", format!("OpenProcess({pid}) 失败: {e}"), None)
+            AppError::module(
+                "SYS_HELPER_001",
+                format!("OpenProcess({pid}) 失败: {e}"),
+                None,
+            )
         })?;
         let mut buf = [0u16; 1024];
         let mut size = buf.len() as u32;
-        let r = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut size);
+        let r = QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        );
         let _ = CloseHandle(h);
         r.map_err(|e| {
-            AppError::module("SYS_HELPER_001", format!("QueryFullProcessImageNameW({pid}) 失败: {e}"), None)
+            AppError::module(
+                "SYS_HELPER_001",
+                format!("QueryFullProcessImageNameW({pid}) 失败: {e}"),
+                None,
+            )
         })?;
-        Ok(PathBuf::from(String::from_utf16_lossy(&buf[..size as usize])))
+        Ok(PathBuf::from(String::from_utf16_lossy(
+            &buf[..size as usize],
+        )))
     }
 }
 
@@ -113,7 +129,10 @@ impl HelperSpawnPort for HelperSpawnWin {
     fn spawn(&self, spec: &HelperSpec) -> Result<u32, AppError> {
         let verb = to_wide("runas");
         let file = to_wide(spec.helper_exe.to_string_lossy().as_ref());
-        let params = format!("--parent-pid {} --idle-exit {}", spec.parent_pid, spec.idle_exit_secs);
+        let params = format!(
+            "--parent-pid {} --idle-exit {}",
+            spec.parent_pid, spec.idle_exit_secs
+        );
         let params_w = to_wide(&params);
         // token 注入：提权进程继承调用方环境块；spawn 调用结束立即清除
         std::env::set_var(TOKEN_ENV, &spec.token);
@@ -130,7 +149,11 @@ impl HelperSpawnPort for HelperSpawnWin {
             let r = ShellExecuteExW(&mut sei);
             std::env::remove_var(TOKEN_ENV);
             r.map_err(|e| {
-                AppError::module("SYS_HELPER_002", format!("提权拉起 Helper 失败（UAC 取消或被策略拦截）: {e}"), None)
+                AppError::module(
+                    "SYS_HELPER_002",
+                    format!("提权拉起 Helper 失败（UAC 取消或被策略拦截）: {e}"),
+                    None,
+                )
             })?;
             if sei.hProcess.is_invalid() || sei.hProcess == HANDLE::default() {
                 return Ok(0); // NOCLOSEPROCESS 未回传句柄——握手重试兜底
@@ -145,8 +168,13 @@ impl HelperSpawnPort for HelperSpawnWin {
                 &mut size,
             )
             .map(|_| {
-                PathBuf::from(String::from_utf16_lossy(&buf[..size as usize]))
-                    == spec.helper_exe.canonicalize().unwrap_or_else(|_| spec.helper_exe.clone())
+                // PathBuf 语义比较（大小写/分隔符归一），两侧都必须是有类型路径
+                let image = PathBuf::from(String::from_utf16_lossy(&buf[..size as usize]));
+                image
+                    == spec
+                        .helper_exe
+                        .canonicalize()
+                        .unwrap_or_else(|_| spec.helper_exe.clone())
             })
             .unwrap_or(false);
             let pid = GetProcessId(sei.hProcess);
@@ -182,7 +210,7 @@ pub fn pipe_connect(pipe_name: &str, timeout_ms: u32) -> Result<HANDLE, AppError
         unsafe {
             match CreateFileW(
                 PCWSTR::from_raw(wide.as_ptr()),
-                (GENERIC_READ.0 | GENERIC_WRITE.0) as u32,
+                GENERIC_READ.0 | GENERIC_WRITE.0,
                 FILE_SHARE_NONE,
                 None,
                 OPEN_EXISTING,
@@ -193,7 +221,9 @@ pub fn pipe_connect(pipe_name: &str, timeout_ms: u32) -> Result<HANDLE, AppError
                 Err(e) if e.code() == ERROR_PIPE_BUSY.to_hresult() => {
                     let _ = WaitNamedPipeW(PCWSTR::from_raw(wide.as_ptr()), 500);
                 }
-                Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(80)),
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(80))
+                }
                 Err(e) => {
                     return Err(AppError::module(
                         "SYS_HELPER_003",
@@ -210,8 +240,9 @@ fn write_all(h: HANDLE, mut data: &[u8]) -> Result<(), AppError> {
     unsafe {
         while !data.is_empty() {
             let mut n: u32 = 0;
-            WriteFile(h, Some(data), Some(&mut n), None)
-                .map_err(|e| AppError::module("SYS_HELPER_004", format!("写管道失败: {e}"), None))?;
+            WriteFile(h, Some(data), Some(&mut n), None).map_err(|e| {
+                AppError::module("SYS_HELPER_004", format!("写管道失败: {e}"), None)
+            })?;
             if n == 0 {
                 return Err(AppError::module("SYS_HELPER_004", "写管道零字节", None));
             }
@@ -225,10 +256,15 @@ fn read_exact(h: HANDLE, mut buf: &mut [u8]) -> Result<(), AppError> {
     unsafe {
         while !buf.is_empty() {
             let mut n: u32 = 0;
-            ReadFile(h, Some(buf), Some(&mut n), None)
-                .map_err(|e| AppError::module("SYS_HELPER_004", format!("读管道失败: {e}"), None))?;
+            ReadFile(h, Some(buf), Some(&mut n), None).map_err(|e| {
+                AppError::module("SYS_HELPER_004", format!("读管道失败: {e}"), None)
+            })?;
             if n == 0 {
-                return Err(AppError::module("SYS_HELPER_004", "连接已关闭（EOF）", None));
+                return Err(AppError::module(
+                    "SYS_HELPER_004",
+                    "连接已关闭（EOF）",
+                    None,
+                ));
             }
             let written = n as usize;
             buf = &mut buf[written..];
@@ -251,7 +287,11 @@ pub fn read_frame(h: HANDLE) -> Result<Vec<u8>, AppError> {
     read_exact(h, &mut head)?;
     let len = u32::from_be_bytes(head) as usize;
     if len > MAX_FRAME {
-        return Err(AppError::module("SYS_HELPER_004", format!("帧超上限: {len}"), None));
+        return Err(AppError::module(
+            "SYS_HELPER_004",
+            format!("帧超上限: {len}"),
+            None,
+        ));
     }
     let mut out = vec![0u8; len];
     read_exact(h, &mut out)?;
@@ -300,7 +340,11 @@ pub fn pipe_accept(server: HANDLE) -> Result<(), AppError> {
         match ConnectNamedPipe(server, None) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == ERROR_PIPE_CONNECTED.to_hresult() => Ok(()),
-            Err(e) => Err(AppError::module("SYS_HELPER_005", format!("ConnectNamedPipe 失败: {e}"), None)),
+            Err(e) => Err(AppError::module(
+                "SYS_HELPER_005",
+                format!("ConnectNamedPipe 失败: {e}"),
+                None,
+            )),
         }
     }
 }
@@ -316,8 +360,13 @@ pub fn pipe_disconnect(server: HANDLE) {
 pub fn client_pid(h: HANDLE) -> Result<u32, AppError> {
     unsafe {
         let mut pid = 0u32;
-        GetNamedPipeClientProcessId(h, &mut pid)
-            .map_err(|e| AppError::module("SYS_HELPER_005", format!("GetNamedPipeClientProcessId 失败: {e}"), None))?;
+        GetNamedPipeClientProcessId(h, &mut pid).map_err(|e| {
+            AppError::module(
+                "SYS_HELPER_005",
+                format!("GetNamedPipeClientProcessId 失败: {e}"),
+                None,
+            )
+        })?;
         Ok(pid)
     }
 }
@@ -345,6 +394,9 @@ mod tests {
     /// 管道名派生格式（规格 §4.1）
     #[test]
     fn pipe_name_format() {
-        assert_eq!(pipe_name_for(1234), r"\\.\pipe\nexusforge-sys-helper-v1-1234");
+        assert_eq!(
+            pipe_name_for(1234),
+            r"\\.\pipe\nexusforge-sys-helper-v1-1234"
+        );
     }
 }

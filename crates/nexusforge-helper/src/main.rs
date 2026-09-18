@@ -21,12 +21,18 @@ use serde_json::{json, Value};
 use win_integration::helper::{self as h, PipeHandle};
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 命令行参数解析（--flag value 形式）
 fn arg_value(args: &[String], flag: &str) -> Option<u32> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
 }
 
 fn run() -> Result<(), String> {
@@ -34,7 +40,8 @@ fn run() -> Result<(), String> {
     let parent_pid = arg_value(&args, "--parent-pid").ok_or("缺少 --parent-pid 参数")?;
     let idle_secs = arg_value(&args, "--idle-exit").unwrap_or(120);
     // token：spawn 时环境变量注入；缺失即拒绝（非主进程拉起/调试直启）
-    let token = std::env::var(h::TOKEN_ENV).map_err(|_| format!("{} 缺失（拒绝启动）", h::TOKEN_ENV))?;
+    let token =
+        std::env::var(h::TOKEN_ENV).map_err(|_| format!("{} 缺失（拒绝启动）", h::TOKEN_ENV))?;
     let self_exe = std::env::current_exe().map_err(|e| format!("current_exe 失败: {e}"))?;
     // 调用方预校验（纵深防御，token 是主要防线）：parent 镜像必须与本 helper 同目录
     if let Ok(parent_image) = h::query_image_path(parent_pid) {
@@ -101,7 +108,12 @@ fn serve_connection(
         let _ = h::read_frame(hnd);
         return Err("握手失败（token 或调用方校验不通过）".into());
     }
-    let _ = h::write_frame(hnd, json!({"jsonrpc":"2.0","id":0,"result":{"ready":true}}).to_string().as_bytes());
+    let _ = h::write_frame(
+        hnd,
+        json!({"jsonrpc":"2.0","id":0,"result":{"ready":true}})
+            .to_string()
+            .as_bytes(),
+    );
     // 2. 请求循环：read → dispatch → write；对端断开即结束本连接
     loop {
         let frame = match h::read_frame(hnd) {
@@ -115,10 +127,16 @@ fn serve_connection(
         // serde_json 索引缺失返回 Value::Null，无需 unwrap_or
         let id = msg["id"].clone();
         let method = msg["method"].as_str().unwrap_or("").to_string();
-        let params = if msg["params"].is_null() { json!({}) } else { msg["params"].clone() };
+        let params = if msg["params"].is_null() {
+            json!({})
+        } else {
+            msg["params"].clone()
+        };
         let resp = match dispatch::handle_request(ops, &method, params) {
             Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-            Err(message) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message}}),
+            Err(message) => {
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message}})
+            }
         };
         h::write_frame(hnd, resp.to_string().as_bytes()).map_err(|e| e.to_string())?;
     }
@@ -140,7 +158,10 @@ mod tests {
     #[test]
     fn pipe_protocol_roundtrip() {
         let token = "test-token-0123456789abcdef0123456789abcdef".to_string();
-        let pipe = format!(r"\\.\pipe\nexusforge-sys-helper-test-{}", std::process::id());
+        let pipe = format!(
+            r"\\.\pipe\nexusforge-sys-helper-test-{}",
+            std::process::id()
+        );
         let self_exe = std::env::current_exe().unwrap();
         let ops = dispatch::Ops::new();
         // server：线程内创建管道（HANDLE 非 Send 不跨线程），accept 一次并服务一个连接
@@ -158,20 +179,28 @@ mod tests {
         let hnd = wh::pipe_connect(&pipe, 3000).unwrap();
         wh::write_frame(
             hnd,
-            json!({"jsonrpc":"2.0","id":0,"method":"hello","params":{"token": token}}).to_string().as_bytes(),
+            json!({"jsonrpc":"2.0","id":0,"method":"hello","params":{"token": token}})
+                .to_string()
+                .as_bytes(),
         )
         .unwrap();
         let resp = wh::read_frame(hnd).unwrap();
         let v: Value = serde_json::from_slice(&resp).unwrap();
-        assert_eq!(v["result"]["ready"], true, "握手应通过（测试进程与自身同目录）");
+        assert_eq!(
+            v["result"]["ready"], true,
+            "握手应通过（测试进程与自身同目录）"
+        );
         // 写 → 读（HKCU 测试键）
-        let key = format!(r"HKCU\Software\NexusForgeHelperPipeTest\{}", std::process::id());
+        let key = format!(
+            r"HKCU\Software\NexusForgeHelperPipeTest\{}",
+            std::process::id()
+        );
         wh::write_frame(
             hnd,
             json!({"jsonrpc":"2.0","id":1,"method":"registry.write",
                    "params":{"key": key, "value_name":"v","value":{"dword":42}}})
-                .to_string()
-                .as_bytes(),
+            .to_string()
+            .as_bytes(),
         )
         .unwrap();
         let resp = wh::read_frame(hnd).unwrap();
@@ -181,8 +210,8 @@ mod tests {
             hnd,
             json!({"jsonrpc":"2.0","id":2,"method":"registry.read",
                    "params":{"key": key, "value_name":"v"}})
-                .to_string()
-                .as_bytes(),
+            .to_string()
+            .as_bytes(),
         )
         .unwrap();
         let resp = wh::read_frame(hnd).unwrap();
@@ -200,7 +229,13 @@ mod tests {
         let resp = wh::read_frame(hnd).unwrap();
         let v: Value = serde_json::from_slice(&resp).unwrap();
         assert!(v.get("error").is_some(), "白名单外程序必须拒绝: {v}");
-        wh::write_frame(hnd, json!({"jsonrpc":"2.0","id":5,"method":"dns.set","params":{}}).to_string().as_bytes()).unwrap();
+        wh::write_frame(
+            hnd,
+            json!({"jsonrpc":"2.0","id":5,"method":"dns.set","params":{}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
         let resp = wh::read_frame(hnd).unwrap();
         let v: Value = serde_json::from_slice(&resp).unwrap();
         assert!(v.get("error").is_some(), "白名单外方法必须拒绝");
@@ -209,15 +244,18 @@ mod tests {
             hnd,
             json!({"jsonrpc":"2.0","id":4,"method":"registry.delete",
                    "params":{"key": key, "value_name":"v"}})
-                .to_string()
-                .as_bytes(),
+            .to_string()
+            .as_bytes(),
         )
         .unwrap();
         let _ = wh::read_frame(hnd);
         wh::close_handle(hnd);
         server_thread.join().unwrap();
         // 错误 token → 拒绝（独立连接 + 独立 server 实例）
-        let pipe2 = format!(r"\\.\pipe\nexusforge-sys-helper-test-bad-{}", std::process::id());
+        let pipe2 = format!(
+            r"\\.\pipe\nexusforge-sys-helper-test-bad-{}",
+            std::process::id()
+        );
         let tok = "real-token".to_string();
         let exe2 = self_exe.clone();
         let ops2 = dispatch::Ops::new();
@@ -232,7 +270,9 @@ mod tests {
         let hnd2 = wh::pipe_connect(&pipe2, 3000).unwrap();
         wh::write_frame(
             hnd2,
-            json!({"jsonrpc":"2.0","id":0,"method":"hello","params":{"token":"wrong"}}).to_string().as_bytes(),
+            json!({"jsonrpc":"2.0","id":0,"method":"hello","params":{"token":"wrong"}})
+                .to_string()
+                .as_bytes(),
         )
         .unwrap();
         let resp = wh::read_frame(hnd2).unwrap();

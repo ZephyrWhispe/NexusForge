@@ -6,25 +6,26 @@
 use std::sync::{Arc, Mutex};
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HGLOBAL, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
     GetClipboardOwner, OpenClipboard, RegisterClipboardFormatW, RemoveClipboardFormatListener,
     SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::DragQueryFileW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetWindowLongPtrW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, HWND_MESSAGE, WM_APP, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CLIPBOARDUPDATE, WNDCLASSW,
+    SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, HWND_MESSAGE, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
 use host_core::error::AppError;
@@ -65,12 +66,7 @@ unsafe fn release_cb(hwnd: HWND) {
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
 }
 
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_STOP_LISTENER {
         // 结束本线程消息循环：GetMessageW 返回 0 → 循环退出 → 线程收尾清理
         PostQuitMessage(0);
@@ -115,7 +111,9 @@ unsafe fn read_clipboard_content() -> Option<ClipContent> {
         if let Ok(h) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
             if let Some(c) = with_global(HGLOBAL(h.0), |bytes| {
                 let wide: Vec<u16> = bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .take_while(|p| p[0] != 0)
                     .map(|p| u16::from_le_bytes([p[0], p[1]]))
                     .collect();
@@ -165,7 +163,9 @@ unsafe fn read_clipboard_content() -> Option<ClipContent> {
                     let mut buf = vec![0u16; len];
                     DragQueryFileW(hdrop, i, Some(&mut buf));
                     paths.push(std::path::PathBuf::from(
-                        String::from_utf16_lossy(&buf).trim_end_matches('\0').to_string(),
+                        String::from_utf16_lossy(&buf)
+                            .trim_end_matches('\0')
+                            .to_string(),
                     ));
                 }
                 return Some(ClipContent::Files { paths });
@@ -214,7 +214,9 @@ pub struct WindowsClipboard {
 
 impl WindowsClipboard {
     pub fn new() -> Self {
-        Self { listener: Arc::new(Mutex::new(None)) }
+        Self {
+            listener: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -234,7 +236,11 @@ impl ClipboardPort for WindowsClipboard {
     ) -> Result<(), AppError> {
         let cb: Cb = Arc::new(Mutex::new(Some(cb)));
         let err = |m: &str| {
-            AppError::module("CLIPBOARD_LISTENER_001", format!("剪贴板监听启动失败: {m}"), None)
+            AppError::module(
+                "CLIPBOARD_LISTENER_001",
+                format!("剪贴板监听启动失败: {m}"),
+                None,
+            )
         };
         // 握手：消息循环线程建窗 + 注册监听成功后才返回，确保 self.listener 就绪、
         // 后续 stop_listener 随时可拆（S3 生命周期对称）
@@ -311,15 +317,16 @@ impl ClipboardPort for WindowsClipboard {
     }
 
     fn stop_listener(&self) -> Result<(), AppError> {
-        let raw = self
-            .listener
-            .lock()
-            .ok()
-            .and_then(|mut g| g.take());
+        let raw = self.listener.lock().ok().and_then(|mut g| g.take());
         if let Some(raw) = raw {
             unsafe {
                 // 异步投递：目标线程 wndproc 收到后 PostQuitMessage，消息循环退出并自行收尾
-                let _ = PostMessageW(HWND(raw as *mut core::ffi::c_void), WM_STOP_LISTENER, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(
+                    HWND(raw as *mut core::ffi::c_void),
+                    WM_STOP_LISTENER,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
             }
         }
         Ok(())
@@ -327,13 +334,20 @@ impl ClipboardPort for WindowsClipboard {
 
     fn write(&self, content: &ClipContent) -> Result<(), AppError> {
         unsafe {
-            OpenClipboard(HWND::default())
-                .map_err(|e| AppError::module("CLIPBOARD_WRITE_002", format!("OpenClipboard 失败: {e}"), None))?;
+            OpenClipboard(HWND::default()).map_err(|e| {
+                AppError::module(
+                    "CLIPBOARD_WRITE_002",
+                    format!("OpenClipboard 失败: {e}"),
+                    None,
+                )
+            })?;
             let r = match content {
                 ClipContent::Text { text, .. } => write_text(text),
                 ClipContent::Files { paths } => write_files(paths),
                 ClipContent::Image { format, bytes, .. } if format == "dib" => write_dib(bytes),
-                ClipContent::Image { format: _, bytes, .. } => {
+                ClipContent::Image {
+                    format: _, bytes, ..
+                } => {
                     // Port 契约：png 等编码由 win-integration 转为系统 DIB（CF_DIB 32bpp）
                     match png_to_dib(bytes) {
                         Ok(dib) => write_dib(&dib),
@@ -366,7 +380,7 @@ fn png_to_dib(png: &[u8]) -> Result<Vec<u8>, AppError> {
     out.extend_from_slice(&0u32.to_le_bytes()); // biYPelsPerMeter
     out.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     out.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
-    // bottom-up：从最后一行开始；BGRA 字节序 + alpha 强制 255（GDI DIB 无有效 alpha）
+                                                // bottom-up：从最后一行开始；BGRA 字节序 + alpha 强制 255（GDI DIB 无有效 alpha）
     for row in (0..h).rev() {
         for px in 0..w {
             let off = (row * w + px) * 4;
@@ -379,45 +393,39 @@ fn png_to_dib(png: &[u8]) -> Result<Vec<u8>, AppError> {
     Ok(out)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn png_to_dib_header_and_pixel_layout() {
-        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
-        // 2x1 的 PNG：单行两像素
-        let mut buf = std::io::Cursor::new(Vec::new());
-        PngEncoder::new(&mut buf)
-            .write_image(&[1, 2, 3, 255, 4, 5, 6, 255], 2, 1, ExtendedColorType::Rgba8)
-            .unwrap();
-        let dib = png_to_dib(&buf.into_inner()).unwrap();
-        assert_eq!(&dib[0..16], &[
-            40, 0, 0, 0, // biSize=40
-            2, 0, 0, 0, // width=2
-            1, 0, 0, 0, // height=1
-            1, 0, // planes
-            32, 0, // bpp
-        ]);
-        // 唯一一行像素：BGR + alpha 255（GDI 无有效 alpha）
-        assert_eq!(&dib[40..44], &[3, 2, 1, 255]);
-        assert_eq!(&dib[44..48], &[6, 5, 4, 255]);
-    }
-}
-
 unsafe fn write_text(text: &str) -> Result<(), AppError> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2)
-        .map_err(|e| AppError::module("CLIPBOARD_WRITE_004", format!("GlobalAlloc 失败: {e}"), None))?;
+    let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_004",
+            format!("GlobalAlloc 失败: {e}"),
+            None,
+        )
+    })?;
     let ptr = GlobalLock(h) as *mut u16;
     if ptr.is_null() {
-        return Err(AppError::module("CLIPBOARD_WRITE_005", "GlobalLock 失败", None));
+        return Err(AppError::module(
+            "CLIPBOARD_WRITE_005",
+            "GlobalLock 失败",
+            None,
+        ));
     }
     std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
     let _ = GlobalUnlock(h);
-    EmptyClipboard().map_err(|e| AppError::module("CLIPBOARD_WRITE_003", format!("EmptyClipboard 失败: {e}"), None))?;
-    SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(h.0))
-        .map_err(|e| AppError::module("CLIPBOARD_WRITE_006", format!("SetClipboardData 失败: {e}"), None))?;
+    EmptyClipboard().map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_003",
+            format!("EmptyClipboard 失败: {e}"),
+            None,
+        )
+    })?;
+    SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(h.0)).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_006",
+            format!("SetClipboardData 失败: {e}"),
+            None,
+        )
+    })?;
     Ok(())
 }
 
@@ -429,11 +437,20 @@ unsafe fn write_files(paths: &[std::path::PathBuf]) -> Result<(), AppError> {
     }
     wide.push(0); // 双 null 结尾
     let total = DROPFILES_SIZE + wide.len() * 2;
-    let h = GlobalAlloc(GMEM_MOVEABLE, total)
-        .map_err(|e| AppError::module("CLIPBOARD_WRITE_004", format!("GlobalAlloc 失败: {e}"), None))?;
+    let h = GlobalAlloc(GMEM_MOVEABLE, total).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_004",
+            format!("GlobalAlloc 失败: {e}"),
+            None,
+        )
+    })?;
     let ptr = GlobalLock(h) as *mut u8;
     if ptr.is_null() {
-        return Err(AppError::module("CLIPBOARD_WRITE_005", "GlobalLock 失败", None));
+        return Err(AppError::module(
+            "CLIPBOARD_WRITE_005",
+            "GlobalLock 失败",
+            None,
+        ));
     }
     let slice = std::slice::from_raw_parts_mut(ptr, total);
     std::ptr::write_bytes(ptr, 0, total);
@@ -441,27 +458,61 @@ unsafe fn write_files(paths: &[std::path::PathBuf]) -> Result<(), AppError> {
     slice[0..4].copy_from_slice(&(DROPFILES_SIZE as u32).to_le_bytes());
     slice[16..20].copy_from_slice(&1u32.to_le_bytes());
     for (i, w) in wide.iter().enumerate() {
-        std::ptr::write_unaligned(slice.as_mut_ptr().add(DROPFILES_SIZE + i * 2) as *mut u16, *w);
+        std::ptr::write_unaligned(
+            slice.as_mut_ptr().add(DROPFILES_SIZE + i * 2) as *mut u16,
+            *w,
+        );
     }
     let _ = GlobalUnlock(h);
-    EmptyClipboard().map_err(|e| AppError::module("CLIPBOARD_WRITE_003", format!("EmptyClipboard 失败: {e}"), None))?;
-    SetClipboardData(CF_HDROP.0 as u32, HANDLE(h.0))
-        .map_err(|e| AppError::module("CLIPBOARD_WRITE_006", format!("SetClipboardData 失败: {e}"), None))?;
+    EmptyClipboard().map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_003",
+            format!("EmptyClipboard 失败: {e}"),
+            None,
+        )
+    })?;
+    SetClipboardData(CF_HDROP.0 as u32, HANDLE(h.0)).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_006",
+            format!("SetClipboardData 失败: {e}"),
+            None,
+        )
+    })?;
     Ok(())
 }
 
 unsafe fn write_dib(bytes: &[u8]) -> Result<(), AppError> {
-    let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len())
-        .map_err(|e| AppError::module("CLIPBOARD_WRITE_004", format!("GlobalAlloc 失败: {e}"), None))?;
+    let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_004",
+            format!("GlobalAlloc 失败: {e}"),
+            None,
+        )
+    })?;
     let ptr = GlobalLock(h) as *mut u8;
     if ptr.is_null() {
-        return Err(AppError::module("CLIPBOARD_WRITE_005", "GlobalLock 失败", None));
+        return Err(AppError::module(
+            "CLIPBOARD_WRITE_005",
+            "GlobalLock 失败",
+            None,
+        ));
     }
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
     let _ = GlobalUnlock(h);
-    EmptyClipboard().map_err(|e| AppError::module("CLIPBOARD_WRITE_003", format!("EmptyClipboard 失败: {e}"), None))?;
-    SetClipboardData(CF_DIB.0 as u32, HANDLE(h.0))
-        .map_err(|e| AppError::module("CLIPBOARD_WRITE_006", format!("SetClipboardData 失败: {e}"), None))?;
+    EmptyClipboard().map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_003",
+            format!("EmptyClipboard 失败: {e}"),
+            None,
+        )
+    })?;
+    SetClipboardData(CF_DIB.0 as u32, HANDLE(h.0)).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_006",
+            format!("SetClipboardData 失败: {e}"),
+            None,
+        )
+    })?;
     Ok(())
 }
 
@@ -469,4 +520,38 @@ unsafe fn write_dib(bytes: &[u8]) -> Result<(), AppError> {
 pub fn register_custom_format(name: &str) -> Option<u32> {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) }.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_to_dib_header_and_pixel_layout() {
+        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+        // 2x1 的 PNG：单行两像素
+        let mut buf = std::io::Cursor::new(Vec::new());
+        PngEncoder::new(&mut buf)
+            .write_image(
+                &[1, 2, 3, 255, 4, 5, 6, 255],
+                2,
+                1,
+                ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        let dib = png_to_dib(&buf.into_inner()).unwrap();
+        assert_eq!(
+            &dib[0..16],
+            &[
+                40, 0, 0, 0, // biSize=40
+                2, 0, 0, 0, // width=2
+                1, 0, 0, 0, // height=1
+                1, 0, // planes
+                32, 0, // bpp
+            ]
+        );
+        // 唯一一行像素：BGR + alpha 255（GDI 无有效 alpha）
+        assert_eq!(&dib[40..44], &[3, 2, 1, 255]);
+        assert_eq!(&dib[44..48], &[6, 5, 4, 255]);
+    }
 }

@@ -19,7 +19,10 @@ pub struct FileModule {
 
 impl FileModule {
     pub fn new() -> Self {
-        Self { service: RwLock::new(None), state: AtomicU8::new(0) }
+        Self {
+            service: RwLock::new(None),
+            state: AtomicU8::new(0),
+        }
     }
 
     /// IPC 层入口（全部命令经此取服务；未 init 返回 None）
@@ -48,8 +51,10 @@ impl Module for FileModule {
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
         let svc = FileService::open(&ctx.app_data_dir, ctx.event_bus.clone(), ctx.ports.clone())
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
-        *self.service.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(Arc::new(svc));
+        *self
+            .service
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(svc));
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -70,7 +75,8 @@ impl Module for FileModule {
         // worker 随服务句柄存活到进程退出；暂停全部活跃操作保证断点落盘
         if let Some(svc) = self.service() {
             for p in svc.ops_active() {
-                if p.state == crate::ops::OpState::Running || p.state == crate::ops::OpState::Queued {
+                if p.state == crate::ops::OpState::Running || p.state == crate::ops::OpState::Queued
+                {
                     let _ = svc.op_pause(&p.op_id);
                 }
             }

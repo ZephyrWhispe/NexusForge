@@ -64,9 +64,7 @@ fn entry_from_metadata(path: PathBuf, md: &std::fs::Metadata) -> FileEntry {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let hidden = md
-        .file_attributes()
-        & 0x2 != 0; // FILE_ATTRIBUTE_HIDDEN
+    let hidden = md.file_attributes() & 0x2 != 0; // FILE_ATTRIBUTE_HIDDEN
     FileEntry {
         name,
         path: display_path(&path),
@@ -97,7 +95,11 @@ pub fn list_dir(path: &Path, sort: SortKey, asc: bool) -> Result<Vec<FileEntry>,
     entries.sort_by(|a, b| {
         dir_rank(a).cmp(&dir_rank(b)).then_with(|| match sort {
             SortKey::Size => {
-                if asc { a.size.cmp(&b.size) } else { b.size.cmp(&a.size) }
+                if asc {
+                    a.size.cmp(&b.size)
+                } else {
+                    b.size.cmp(&a.size)
+                }
             }
             SortKey::Modified => {
                 if asc {
@@ -109,7 +111,11 @@ pub fn list_dir(path: &Path, sort: SortKey, asc: bool) -> Result<Vec<FileEntry>,
             // Name / Type 都按名称排（Type v1 简化为扩展名聚在名称序内）
             _ => {
                 let (an, bn) = (&a.name.to_lowercase(), &b.name.to_lowercase());
-                if asc { an.cmp(bn) } else { bn.cmp(an) }
+                if asc {
+                    an.cmp(bn)
+                } else {
+                    bn.cmp(an)
+                }
             }
         })
     });

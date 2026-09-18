@@ -20,13 +20,15 @@ pub struct ClipStore {
 }
 
 fn err(code: &str, e: impl std::fmt::Display) -> AppError {
-    AppError::Storage { code: code.into(), message: e.to_string() }
+    AppError::Storage {
+        code: code.into(),
+        message: e.to_string(),
+    }
 }
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
-        M::up(
-            r#"CREATE TABLE clip_entries (
+    Migrations::new(vec![M::up(
+        r#"CREATE TABLE clip_entries (
                 id TEXT PRIMARY KEY,
                 content_type TEXT NOT NULL,
                 content TEXT,
@@ -57,8 +59,7 @@ fn migrations() -> Migrations<'static> {
                 position INTEGER NOT NULL,
                 FOREIGN KEY (entry_id) REFERENCES clip_entries(id) ON DELETE CASCADE
             );"#,
-        ),
-    ])
+    )])
 }
 
 impl ClipStore {
@@ -76,11 +77,20 @@ impl ClipStore {
         migrations()
             .to_latest(&mut conn)
             .map_err(|e| err("CLIPBOARD_STORAGE_003", e))?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)), blob_dir })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            blob_dir,
+        })
     }
 
     /// 去重插入（docs/impl/02 C2 算法）；命中 hash → 置顶并返回既有 id
-    pub fn insert(&self, text: &str, group: Option<&'static str>, secret: bool, source_app: Option<&str>) -> Result<String, AppError> {
+    pub fn insert(
+        &self,
+        text: &str,
+        group: Option<&'static str>,
+        secret: bool,
+        source_app: Option<&str>,
+    ) -> Result<String, AppError> {
         let hash = content_hash(text);
         let now = now_ms();
         let conn = self.conn.lock().expect("clipboard db 锁");
@@ -103,17 +113,16 @@ impl ClipStore {
         }
 
         let id = uuid::Uuid::now_v7().to_string();
-        let (content_col, blob_path): (String, Option<String>) =
-            if text.len() > BLOB_THRESHOLD {
-                let name = format!("{}.txt", hash);
-                let blob = self.blob_dir.join(&name);
-                std::fs::write(&blob, text).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
-                (String::new(), Some(name))
-            } else if secret {
-                (String::new(), None) // 密文由管线层写入前替换 content
-            } else {
-                (text.to_string(), None)
-            };
+        let (content_col, blob_path): (String, Option<String>) = if text.len() > BLOB_THRESHOLD {
+            let name = format!("{}.txt", hash);
+            let blob = self.blob_dir.join(&name);
+            std::fs::write(&blob, text).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
+            (String::new(), Some(name))
+        } else if secret {
+            (String::new(), None) // 密文由管线层写入前替换 content
+        } else {
+            (text.to_string(), None)
+        };
         conn.execute(
             r#"INSERT INTO clip_entries
                (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at)
@@ -125,7 +134,12 @@ impl ClipStore {
     }
 
     /// 写入加密后的密文（secret 条目专用；密文为信封格式（D-04），Base64 由调用方处理）
-    pub fn insert_encrypted(&self, encrypted_b64: &str, group: Option<&'static str>, source_app: Option<&str>) -> Result<String, AppError> {
+    pub fn insert_encrypted(
+        &self,
+        encrypted_b64: &str,
+        group: Option<&'static str>,
+        source_app: Option<&str>,
+    ) -> Result<String, AppError> {
         let hash = content_hash(encrypted_b64);
         let id = uuid::Uuid::now_v7().to_string();
         let conn = self.conn.lock().expect("clipboard db 锁");
@@ -140,7 +154,11 @@ impl ClipStore {
     }
 
     /// 解密读取（clipboard_get 专用；secret 条目需信封解密还原）
-    pub fn get_content(&self, id: &str, unprotect: impl Fn(&[u8]) -> Result<Vec<u8>, AppError>) -> Result<Option<String>, AppError> {
+    pub fn get_content(
+        &self,
+        id: &str,
+        unprotect: impl Fn(&[u8]) -> Result<Vec<u8>, AppError>,
+    ) -> Result<Option<String>, AppError> {
         let conn = self.conn.lock().expect("clipboard db 锁");
         let row: Option<(String, Option<String>, i64)> = conn
             .query_row(
@@ -181,7 +199,11 @@ impl ClipStore {
             format!("WHERE {}", where_parts.join(" AND "))
         };
 
-        let use_fts = q.text.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+        let use_fts = q
+            .text
+            .as_deref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
         let (sql, fts_query) = if use_fts {
             let fts_query = fts_escape(q.text.as_deref().unwrap());
             (
@@ -245,26 +267,45 @@ impl ClipStore {
         };
 
         let items: Vec<ClipEntry> = if use_fts {
-            let mut stmt = conn.prepare(&sql).map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-            let rows = stmt.query_map(params![fts_query], mapper).map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let rows = stmt
+                .query_map(params![fts_query], mapper)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             rows.filter_map(|r| r.ok()).collect()
         } else if let Some(g) = &q.group {
-            let mut stmt = conn.prepare(&sql).map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-            let rows = stmt.query_map(params![g], mapper).map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let rows = stmt
+                .query_map(params![g], mapper)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             rows.filter_map(|r| r.ok()).collect()
         } else {
-            let mut stmt = conn.prepare(&sql).map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-            let rows = stmt.query_map([], mapper).map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let rows = stmt
+                .query_map([], mapper)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             rows.filter_map(|r| r.ok()).collect()
         };
         let has_more = items.len() as i64 == size;
-        Ok(Page { items, has_more, total: None })
+        Ok(Page {
+            items,
+            has_more,
+            total: None,
+        })
     }
 
     pub fn pin(&self, id: &str, pinned: bool) -> Result<(), AppError> {
         let conn = self.conn.lock().expect("clipboard db 锁");
-        conn.execute("UPDATE clip_entries SET pinned = ?2 WHERE id = ?1", params![id, pinned as i64])
-            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        conn.execute(
+            "UPDATE clip_entries SET pinned = ?2 WHERE id = ?1",
+            params![id, pinned as i64],
+        )
+        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(())
     }
 
@@ -325,10 +366,17 @@ impl ClipStore {
     pub fn push_stack(&self, id: &str) -> Result<(), AppError> {
         let conn = self.conn.lock().expect("clipboard db 锁");
         let pos: i64 = conn
-            .query_row("SELECT COALESCE(MAX(position), 0) + 1 FROM paste_stack", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(position), 0) + 1 FROM paste_stack",
+                [],
+                |r| r.get(0),
+            )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-        conn.execute("INSERT INTO paste_stack (entry_id, position) VALUES (?1, ?2)", params![id, pos])
-            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        conn.execute(
+            "INSERT INTO paste_stack (entry_id, position) VALUES (?1, ?2)",
+            params![id, pos],
+        )
+        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(())
     }
 
@@ -342,7 +390,7 @@ impl ClipStore {
             )
             .optional()
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-        if let Some(id) = &id {
+        if let Some(_id) = &id {
             conn.execute(
                 "DELETE FROM paste_stack WHERE id = (SELECT id FROM paste_stack ORDER BY position DESC LIMIT 1)",
                 [],
@@ -353,11 +401,22 @@ impl ClipStore {
     }
 
     /// 图片入库：字节写 blob（{hash}.dib），主表存引用
-    pub fn insert_image(&self, format: &str, width: u32, height: u32, bytes: &[u8], source_app: Option<&str>) -> Result<String, AppError> {
+    pub fn insert_image(
+        &self,
+        format: &str,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+        source_app: Option<&str>,
+    ) -> Result<String, AppError> {
         let hash = content_hash_bytes(bytes);
         let conn = self.conn.lock().expect("clipboard db 锁");
         let existing: Option<String> = conn
-            .query_row("SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1", params![hash], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1",
+                params![hash],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         if let Some(id) = existing {
@@ -370,7 +429,8 @@ impl ClipStore {
         }
         let id = uuid::Uuid::now_v7().to_string();
         let blob = format!("{hash}.{format}");
-        std::fs::write(self.blob_dir.join(&blob), bytes).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
+        std::fs::write(self.blob_dir.join(&blob), bytes)
+            .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
         conn.execute(
             r#"INSERT INTO clip_entries
                (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at)
@@ -382,7 +442,11 @@ impl ClipStore {
     }
 
     /// 文件列表入库：路径列表拼接为 content（去重键）
-    pub fn insert_files(&self, paths: &[std::path::PathBuf], source_app: Option<&str>) -> Result<String, AppError> {
+    pub fn insert_files(
+        &self,
+        paths: &[std::path::PathBuf],
+        source_app: Option<&str>,
+    ) -> Result<String, AppError> {
         let content = paths
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -391,12 +455,21 @@ impl ClipStore {
         self.insert_typed(&content, "files", source_app)
     }
 
-    fn insert_typed(&self, content: &str, content_type: &'static str, source_app: Option<&str>) -> Result<String, AppError> {
+    fn insert_typed(
+        &self,
+        content: &str,
+        content_type: &'static str,
+        source_app: Option<&str>,
+    ) -> Result<String, AppError> {
         let hash = content_hash(content);
         let now = now_ms();
         let conn = self.conn.lock().expect("clipboard db 锁");
         let existing: Option<String> = conn
-            .query_row("SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1", params![hash], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1",
+                params![hash],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         if let Some(id) = existing {
@@ -434,14 +507,12 @@ impl ClipStore {
         };
         match content_type.as_str() {
             "image" => {
-                let Some(blob) = blob_path else { return Ok(None) };
+                let Some(blob) = blob_path else {
+                    return Ok(None);
+                };
                 let bytes = std::fs::read(self.blob_dir.join(&blob))
                     .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
-                let format = blob
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("dib")
-                    .to_string();
+                let format = blob.rsplit('.').next().unwrap_or("dib").to_string();
                 Ok(Some(Payload::Image { format, bytes }))
             }
             "files" => Ok(Some(Payload::Files(
@@ -522,15 +593,18 @@ impl ClipStore {
         let cutoff = now_ms() - (retention_days as i64) * 86_400_000;
         let (blobs_a, blobs_b, n_expired, n_overflow) = {
             let conn = self.conn.lock().expect("clipboard db 锁");
-            let collect = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Result<Vec<String>, AppError> {
-                Ok(conn
-                    .prepare(sql)
-                    .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
-                    .query_map(rusqlite::params_from_iter(args.iter()), |r| r.get::<_, String>(0))
-                    .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
-                    .filter_map(|r| r.ok())
-                    .collect())
-            };
+            let collect =
+                |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Result<Vec<String>, AppError> {
+                    Ok(conn
+                        .prepare(sql)
+                        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                            r.get::<_, String>(0)
+                        })
+                        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                        .filter_map(|r| r.ok())
+                        .collect())
+                };
             let blobs_a = if retention_days > 0 {
                 collect(
                     "SELECT blob_path FROM clip_entries WHERE pinned = 0 AND created_at < ?1 AND blob_path IS NOT NULL",
@@ -586,8 +660,8 @@ impl ClipStore {
             rows
         };
         let mut removed = 0;
-        for entry in std::fs::read_dir(&self.blob_dir)
-            .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?
+        for entry in
+            std::fs::read_dir(&self.blob_dir).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?
         {
             let path = entry.map_err(|e| err("CLIPBOARD_STORAGE_002", e))?.path();
             if !path.is_file() {
@@ -643,7 +717,10 @@ impl ClipStore {
 pub enum Payload {
     Text(String),
     Files(Vec<std::path::PathBuf>),
-    Image { format: String, bytes: Vec<u8> },
+    Image {
+        format: String,
+        bytes: Vec<u8>,
+    },
     /// 加密文本（Base64），由调用方经 CryptoPort 解密
     SecretB64(String),
 }
@@ -734,14 +811,22 @@ mod tests {
     #[test]
     fn fts_search_finds_text() {
         let s = open_temp("fts");
-        s.insert("设计原则：Windows 原生优先", None, false, None).unwrap();
-        s.insert("cargo build --release", Some("code"), false, None).unwrap();
-        let q = SearchQuery { text: Some("原生".into()), ..Default::default() };
+        s.insert("设计原则：Windows 原生优先", None, false, None)
+            .unwrap();
+        s.insert("cargo build --release", Some("code"), false, None)
+            .unwrap();
+        let q = SearchQuery {
+            text: Some("原生".into()),
+            ..Default::default()
+        };
         let page = s.search(&q).unwrap();
         assert_eq!(page.items.len(), 1);
         assert!(page.items[0].preview.contains("原生"));
         // FTS 语法注入防护
-        let q2 = SearchQuery { text: Some("原\"生".into()), ..Default::default() };
+        let q2 = SearchQuery {
+            text: Some("原\"生".into()),
+            ..Default::default()
+        };
         let _ = s.search(&q2).unwrap();
     }
 
@@ -775,7 +860,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nf_clip_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let blobs = dir.join("blobs");
-        (ClipStore::open(&dir.join("clipboard.db"), blobs.clone()).unwrap(), blobs)
+        (
+            ClipStore::open(&dir.join("clipboard.db"), blobs.clone()).unwrap(),
+            blobs,
+        )
     }
 
     fn blob_files(dir: &Path) -> Vec<String> {
@@ -812,7 +900,11 @@ mod tests {
         s.pin(&a, true).unwrap();
         let removed = s.clear(true).unwrap();
         assert_eq!(removed, 1);
-        assert_eq!(blob_files(&blobs).len(), 1, "keep_pinned：仅存置顶条目的 blob");
+        assert_eq!(
+            blob_files(&blobs).len(),
+            1,
+            "keep_pinned：仅存置顶条目的 blob"
+        );
         let retained = blob_files(&blobs)[0].clone();
         s.clear(false).unwrap();
         assert!(
@@ -845,7 +937,11 @@ mod tests {
         assert_eq!(blob_files(&blobs).len(), 5);
         let n = s.purge(0, 2).unwrap();
         assert_eq!(n, 3);
-        assert_eq!(blob_files(&blobs).len(), 2, "上限淘汰必须同步删 blob（共用实现）");
+        assert_eq!(
+            blob_files(&blobs).len(),
+            2,
+            "上限淘汰必须同步删 blob（共用实现）"
+        );
         assert_eq!(s.group_counts().unwrap()["all"].as_i64(), Some(2));
     }
 }

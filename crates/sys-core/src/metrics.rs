@@ -40,7 +40,9 @@ pub struct MetricsBuffer {
 
 impl MetricsBuffer {
     pub fn new() -> Self {
-        Self { buf: Mutex::new(VecDeque::with_capacity(BUFFER_CAP)) }
+        Self {
+            buf: Mutex::new(VecDeque::with_capacity(BUFFER_CAP)),
+        }
     }
 
     /// 一次采样（失败静默跳过——PDH 个别计数器不可用时不应打断监控）
@@ -58,7 +60,14 @@ impl MetricsBuffer {
                 total: d.total,
             })
             .collect();
-        let point = MetricsPoint { ts_ms: now_ms, cpu, mem_used, mem_total, net_bps, disks };
+        let point = MetricsPoint {
+            ts_ms: now_ms,
+            cpu,
+            mem_used,
+            mem_total,
+            net_bps,
+            disks,
+        };
         let mut buf = self.buf.lock().expect("metrics 锁污染");
         if buf.len() >= BUFFER_CAP {
             buf.pop_front();
@@ -69,7 +78,12 @@ impl MetricsBuffer {
 
     /// 全部历史（旧 → 新）
     pub fn history(&self) -> Vec<MetricsPoint> {
-        self.buf.lock().expect("metrics 锁污染").iter().cloned().collect()
+        self.buf
+            .lock()
+            .expect("metrics 锁污染")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -101,7 +115,9 @@ mod tests {
     }
     impl FakePerf {
         fn new() -> Self {
-            Self { calls: std::sync::atomic::AtomicU32::new(0) }
+            Self {
+                calls: std::sync::atomic::AtomicU32::new(0),
+            }
         }
     }
     impl PerfPort for FakePerf {
@@ -113,7 +129,11 @@ mod tests {
             Ok((4_000_000_000, 16_000_000_000))
         }
         fn disk_spaces(&self) -> R<Vec<DiskSpace>> {
-            Ok(vec![DiskSpace { mount: "C:\\".into(), free: 10, total: 100 }])
+            Ok(vec![DiskSpace {
+                mount: "C:\\".into(),
+                free: 10,
+                total: 100,
+            }])
         }
         fn net_bps(&self) -> R<f64> {
             Ok(1024.0)

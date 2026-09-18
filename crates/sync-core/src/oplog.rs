@@ -31,7 +31,10 @@ pub struct OpEntry {
 
 impl OpEntry {
     pub fn is_delete(&self) -> bool {
-        self.value.get(DELETED_KEY).and_then(|v| v.as_bool()).unwrap_or(false)
+        self.value
+            .get(DELETED_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 }
 
@@ -65,8 +68,11 @@ impl OpLog {
         let conn = Connection::open(db_path).map_err(|e| SyncError::Db(e.to_string()))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| SyncError::Db(e.to_string()))?;
-        conn.execute_batch(SCHEMA).map_err(|e| SyncError::Db(e.to_string()))?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| SyncError::Db(e.to_string()))?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// 追加变更（op_id 主键 → INSERT OR IGNORE 幂等；重复推送无副作用）
@@ -100,7 +106,8 @@ impl OpLog {
         let rows = stmt
             .query_map(rusqlite::params![device, since_ts, limit as i64], row_to_op)
             .map_err(|e| SyncError::Db(e.to_string()))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| SyncError::Db(e.to_string()))
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| SyncError::Db(e.to_string()))
     }
 
     /// 实体当前最新变更（LWW 对比用）
@@ -115,7 +122,9 @@ impl OpLog {
         let mut rows = stmt
             .query_map(rusqlite::params![entity, entity_id], row_to_op)
             .map_err(|e| SyncError::Db(e.to_string()))?;
-        rows.next().transpose().map_err(|e| SyncError::Db(e.to_string()))
+        rows.next()
+            .transpose()
+            .map_err(|e| SyncError::Db(e.to_string()))
     }
 
     /// 设备游标（从该设备已收到的最大 ts）
@@ -178,16 +187,20 @@ mod tests {
     }
 
     fn log(tag: &str) -> OpLog {
-        OpLog::open(&std::env::temp_dir().join(format!("nf_sync_{tag}_{}.db", std::process::id()))).unwrap()
+        OpLog::open(&std::env::temp_dir().join(format!("nf_sync_{tag}_{}.db", std::process::id())))
+            .unwrap()
     }
 
     #[test]
     fn append_idempotent_and_latest() {
         let l = log("append");
-        l.append(&op("a1", "note", "x.md", 100, "devA", "v1")).unwrap();
-        l.append(&op("a2", "note", "x.md", 200, "devA", "v2")).unwrap();
+        l.append(&op("a1", "note", "x.md", 100, "devA", "v1"))
+            .unwrap();
+        l.append(&op("a2", "note", "x.md", 200, "devA", "v2"))
+            .unwrap();
         // 同 op_id 重放幂等
-        l.append(&op("a1", "note", "x.md", 100, "devA", "v1")).unwrap();
+        l.append(&op("a1", "note", "x.md", 100, "devA", "v1"))
+            .unwrap();
         assert_eq!(l.count(), 2);
 
         let latest = l.latest_for("note", "x.md").unwrap().unwrap();
@@ -199,8 +212,10 @@ mod tests {
     #[test]
     fn since_and_cursor_monotonic() {
         let l = log("cursor");
-        l.append(&op("b1", "note", "1.md", 100, "devB", "a")).unwrap();
-        l.append(&op("b2", "note", "2.md", 200, "devB", "b")).unwrap();
+        l.append(&op("b1", "note", "1.md", 100, "devB", "a"))
+            .unwrap();
+        l.append(&op("b2", "note", "2.md", 200, "devB", "b"))
+            .unwrap();
         // 自产过滤：device 不符不返回
         assert!(l.ops_of_device("devA", 0, 100).unwrap().is_empty());
         let ops = l.ops_of_device("devB", 100, 100).unwrap();

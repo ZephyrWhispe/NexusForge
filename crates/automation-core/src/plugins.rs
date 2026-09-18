@@ -53,8 +53,10 @@ fn manifest_tmp_path(dir: &Path) -> PathBuf {
 /// 清单校验（docs/impl/07 A6：api_version 兼容矩阵 + 权限逐一映射 + sha256）
 pub fn validate_manifest(m: &PluginManifest, wasm: &[u8]) -> Result<()> {
     // id：目录名安全（防穿越/防绝对路径）
-    let id_ok =
-        !m.id.is_empty() && m.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let id_ok = !m.id.is_empty()
+        && m.id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !id_ok {
         return Err(AutomationError::BadRule(format!(
             "插件 id 只允许字母数字_-：{}",
@@ -67,9 +69,15 @@ pub fn validate_manifest(m: &PluginManifest, wasm: &[u8]) -> Result<()> {
             m.api_version, PLUGIN_API_VERSION
         )));
     }
-    if m.entry.contains("..") || m.entry.contains('\\') || m.entry.contains(':') || Path::new(&m.entry).is_absolute()
+    if m.entry.contains("..")
+        || m.entry.contains('\\')
+        || m.entry.contains(':')
+        || Path::new(&m.entry).is_absolute()
     {
-        return Err(AutomationError::BadRule(format!("entry 非法（防路径穿越）: {}", m.entry)));
+        return Err(AutomationError::BadRule(format!(
+            "entry 非法（防路径穿越）: {}",
+            m.entry
+        )));
     }
     for p in &m.permissions {
         if !PLUGIN_PERMISSIONS.contains(&p.as_str()) {
@@ -117,7 +125,9 @@ pub struct PluginStore {
 
 impl PluginStore {
     pub fn new(app_data_dir: &Path) -> Self {
-        Self { root: app_data_dir.join("automation").join("plugins") }
+        Self {
+            root: app_data_dir.join("automation").join("plugins"),
+        }
     }
 
     pub fn plugin_dir(&self, id: &str) -> PathBuf {
@@ -136,13 +146,18 @@ impl PluginStore {
                 continue;
             }
             let manifest_path = dir.join("manifest.json");
-            let Ok(raw) = std::fs::read(&manifest_path) else { continue };
+            let Ok(raw) = std::fs::read(&manifest_path) else {
+                continue;
+            };
             let Ok(m) = serde_json::from_slice::<PluginManifest>(&raw) else {
                 tracing::warn!(dir = %dir.display(), "插件 manifest 损坏，跳过");
                 continue;
             };
             let installed = dir.join(&m.entry).is_file();
-            out.push(PluginInfo { manifest: m, installed });
+            out.push(PluginInfo {
+                manifest: m,
+                installed,
+            });
         }
         out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
         out
@@ -158,7 +173,9 @@ impl PluginStore {
             .map_err(|e| AutomationError::BadRule(format!("manifest.json 解析失败: {e}")))?;
         let wasm = std::fs::read(src.join(&manifest.entry))
             .map_err(AutomationError::Io)
-            .map_err(|e| AutomationError::BadRule(format!("entry {} 读取失败: {e}", manifest.entry)))?;
+            .map_err(|e| {
+                AutomationError::BadRule(format!("entry {} 读取失败: {e}", manifest.entry))
+            })?;
         self.install(manifest, &wasm)
     }
 
@@ -173,12 +190,13 @@ impl PluginStore {
         std::fs::write(&entry_tmp, wasm).map_err(AutomationError::Io)?;
         let manifest_data = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| AutomationError::BadRule(format!("manifest 序列化失败: {e}")))?;
-        std::fs::write(&manifest_tmp_path(&dir), manifest_data).map_err(AutomationError::Io)?;
+        std::fs::write(manifest_tmp_path(&dir), manifest_data).map_err(AutomationError::Io)?;
         if entry_dst.exists() && entry_dst != entry_tmp {
             std::fs::remove_file(&entry_dst).map_err(AutomationError::Io)?;
         }
         std::fs::rename(&entry_tmp, &entry_dst).map_err(AutomationError::Io)?;
-        std::fs::rename(manifest_tmp_path(&dir), dir.join("manifest.json")).map_err(AutomationError::Io)?;
+        std::fs::rename(manifest_tmp_path(&dir), dir.join("manifest.json"))
+            .map_err(AutomationError::Io)?;
         Ok(manifest)
     }
 
@@ -195,7 +213,8 @@ impl PluginStore {
     /// 加载 entry wasm 字节（sha256 复验——库内文件可能被篡改）
     pub fn wasm_bytes(&self, id: &str) -> Result<Vec<u8>> {
         let m = self.manifest_of(id)?;
-        let wasm = std::fs::read(self.plugin_dir(id).join(&m.entry)).map_err(AutomationError::Io)?;
+        let wasm =
+            std::fs::read(self.plugin_dir(id).join(&m.entry)).map_err(AutomationError::Io)?;
         validate_manifest(&m, &wasm)?;
         Ok(wasm)
     }
@@ -205,7 +224,8 @@ impl PluginStore {
         if id.contains("..") || id.contains('/') || id.contains('\\') {
             return Err(AutomationError::BadRule(format!("插件 id 非法: {id}")));
         }
-        let raw = std::fs::read(self.plugin_dir(id).join("manifest.json")).map_err(AutomationError::Io)?;
+        let raw = std::fs::read(self.plugin_dir(id).join("manifest.json"))
+            .map_err(AutomationError::Io)?;
         serde_json::from_slice(&raw)
             .map_err(|e| AutomationError::BadRule(format!("插件 {id} manifest 解析失败: {e}")))
     }
@@ -254,7 +274,13 @@ mod tests {
         let loaded = store.wasm_bytes("demo").unwrap();
         assert_eq!(loaded, wasm);
         // 权限映射
-        assert_eq!(m.caps(), WasmCaps { allow_open: false, allow_notify: true });
+        assert_eq!(
+            m.caps(),
+            WasmCaps {
+                allow_open: false,
+                allow_notify: true
+            }
+        );
 
         assert!(store.remove("demo").unwrap());
         assert!(!store.remove("demo").unwrap());

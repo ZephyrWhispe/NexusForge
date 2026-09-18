@@ -94,11 +94,16 @@ impl OcrPort for WinOcr {
             if let Ok(words) = line.Words() {
                 for word in words.into_iter() {
                     if let Ok(r) = word.BoundingRect() {
-                        let WinRect { X, Y, Width, Height } = r;
-                        min_x = min_x.min(X as f32);
-                        min_y = min_y.min(Y as f32);
-                        max_x = max_x.max((X + Width) as f32);
-                        max_y = max_y.max((Y + Height) as f32);
+                        let WinRect {
+                            X,
+                            Y,
+                            Width,
+                            Height,
+                        } = r;
+                        min_x = min_x.min(X);
+                        min_y = min_y.min(Y);
+                        max_x = max_x.max(X + Width);
+                        max_y = max_y.max(Y + Height);
                     }
                 }
             }
@@ -110,7 +115,12 @@ impl OcrPort for WinOcr {
                     h: ((max_y - min_y) / ih).clamp(0.0, 1.0),
                 }
             } else {
-                Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                }
             };
             out.push(OcrLine {
                 text: text.to_string(),

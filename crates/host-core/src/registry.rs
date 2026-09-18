@@ -92,7 +92,10 @@ impl ModuleRegistry {
     }
 
     /// 按注册顺序初始化全部模块。单个失败不阻断其余模块。
-    pub async fn init_all(&self, ctx: Arc<ModuleContext>) -> Vec<(String, Result<(), ModuleError>)> {
+    pub async fn init_all(
+        &self,
+        ctx: Arc<ModuleContext>,
+    ) -> Vec<(String, Result<(), ModuleError>)> {
         *self.ctx.write().expect("上下文写锁") = Some(ctx.clone());
         let modules = self.ordered();
         let mut results = Vec::with_capacity(modules.len());
@@ -102,11 +105,21 @@ impl ModuleRegistry {
             let r = match tokio::task::spawn_blocking(move || m.init(c)).await {
                 Ok(r) => r,
                 Err(je) if je.is_panic() => Err(ModuleError::Panicked(
-                    je.into_panic().downcast_ref::<String>().cloned().unwrap_or_else(|| "init panic".into()),
+                    je.into_panic()
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .unwrap_or_else(|| "init panic".into()),
                 )),
                 Err(je) => Err(ModuleError::Init(je.to_string())),
             };
-            self.set_state(&id, if r.is_ok() { ModuleState::Stopped } else { ModuleState::Error });
+            self.set_state(
+                &id,
+                if r.is_ok() {
+                    ModuleState::Stopped
+                } else {
+                    ModuleState::Error
+                },
+            );
             if let Err(e) = &r {
                 self.report_failure(&id, e).await;
             }
@@ -160,7 +173,7 @@ impl ModuleRegistry {
         // restart 中 stop 失败不阻断：继续 init/start 重建该模块
         let _ = self.stop_one(id, module.clone()).await;
         self.init_one(id, module.clone(), ctx).await?;
-        self.start_one(id, module).await.map_err(|e| AppError::from(e))?;
+        self.start_one(id, module).await.map_err(AppError::from)?;
         Ok(())
     }
 
@@ -221,11 +234,21 @@ impl ModuleRegistry {
         let r = match tokio::task::spawn_blocking(move || module.init(ctx)).await {
             Ok(r) => r,
             Err(je) if je.is_panic() => Err(ModuleError::Panicked(
-                je.into_panic().downcast_ref::<String>().cloned().unwrap_or_else(|| "init panic".into()),
+                je.into_panic()
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "init panic".into()),
             )),
             Err(je) => Err(ModuleError::Init(je.to_string())),
         };
-        self.set_state(id, if r.is_ok() { ModuleState::Stopped } else { ModuleState::Error });
+        self.set_state(
+            id,
+            if r.is_ok() {
+                ModuleState::Stopped
+            } else {
+                ModuleState::Error
+            },
+        );
         if let Err(e) = &r {
             self.report_failure(id, e).await;
         }
@@ -236,11 +259,21 @@ impl ModuleRegistry {
         let r = match tokio::task::spawn_blocking(move || module.start()).await {
             Ok(r) => r,
             Err(je) if je.is_panic() => Err(ModuleError::Panicked(
-                je.into_panic().downcast_ref::<String>().cloned().unwrap_or_else(|| "start panic".into()),
+                je.into_panic()
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "start panic".into()),
             )),
             Err(je) => Err(ModuleError::Start(je.to_string())),
         };
-        self.set_state(id, if r.is_ok() { ModuleState::Running } else { ModuleState::Error });
+        self.set_state(
+            id,
+            if r.is_ok() {
+                ModuleState::Running
+            } else {
+                ModuleState::Error
+            },
+        );
         self.publish_state(id).await;
         if let Err(e) = &r {
             self.report_failure(id, e).await;
@@ -250,17 +283,31 @@ impl ModuleRegistry {
 
     async fn stop_one(&self, id: &str, module: Arc<dyn Module>) -> Result<(), ModuleError> {
         // 三层嵌套：timeout(Elapsed) → JoinHandle(JoinError) → 模块返回值(Result<(), ModuleError>)
-        let r = match timeout(STOP_TIMEOUT, tokio::task::spawn_blocking(move || module.stop())).await
+        let r = match timeout(
+            STOP_TIMEOUT,
+            tokio::task::spawn_blocking(move || module.stop()),
+        )
+        .await
         {
             Err(_elapsed) => Err(ModuleError::Stop("stop 超时 5s，已强制返回".into())),
             Ok(Err(je)) if je.is_panic() => Err(ModuleError::Panicked(
-                je.into_panic().downcast_ref::<String>().cloned().unwrap_or_else(|| "stop panic".into()),
+                je.into_panic()
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "stop panic".into()),
             )),
             Ok(Err(je)) => Err(ModuleError::Stop(je.to_string())),
             Ok(Ok(Err(me))) => Err(me),
             Ok(Ok(Ok(()))) => Ok(()),
         };
-        self.set_state(id, if r.is_ok() { ModuleState::Stopped } else { ModuleState::Error });
+        self.set_state(
+            id,
+            if r.is_ok() {
+                ModuleState::Stopped
+            } else {
+                ModuleState::Error
+            },
+        );
         r
     }
 
@@ -291,7 +338,11 @@ mod tests {
     }
     impl FakeModule {
         fn new(panic_on_start: bool) -> Self {
-            Self { state: AtomicU8::new(0), panic_on_start, panicked_once: AtomicU8::new(0) }
+            Self {
+                state: AtomicU8::new(0),
+                panic_on_start,
+                panicked_once: AtomicU8::new(0),
+            }
         }
     }
     impl Module for FakeModule {
@@ -329,7 +380,9 @@ mod tests {
         }
     }
 
-    fn registry_with(modules: Vec<FakeModule>) -> (Arc<ModuleRegistry>, Arc<EventBus>, Vec<Arc<FakeModule>>) {
+    fn registry_with(
+        modules: Vec<FakeModule>,
+    ) -> (Arc<ModuleRegistry>, Arc<EventBus>, Vec<Arc<FakeModule>>) {
         let bus = Arc::new(EventBus::new());
         let reg = Arc::new(ModuleRegistry::new(bus.clone()));
         let mut arcs = Vec::new();

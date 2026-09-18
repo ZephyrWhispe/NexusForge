@@ -1,0 +1,31 @@
+# DESIGN §9.3 nightly.yml：夜间构建供尝鲜（不发布 GitHub Release，仅 artifact 保留 14 天）。
+# 与 release.yml 同配置口径（updater 产物暂关）。
+name: Nightly
+
+on:
+  schedule:
+    - cron: "30 18 * * *" # UTC 18:30 ≈ 北京时间次日 02:30
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - name: tauri build
+        run: npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bundle
+          path: src-tauri/target/release/bundle/**
+          retention-days: 14

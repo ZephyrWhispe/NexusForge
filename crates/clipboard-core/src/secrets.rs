@@ -47,7 +47,10 @@ impl SecretFilter {
                 SecretKind::PrivateKey,
                 r"-----BEGIN [A-Z ]*PRIVATE KEY-----".to_string(),
             ),
-            (SecretKind::Jwt, r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.".to_string()),
+            (
+                SecretKind::Jwt,
+                r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.".to_string(),
+            ),
             (SecretKind::ApiKey, r"sk-[A-Za-z0-9]{20,}".to_string()),
             (SecretKind::ApiKey, r"ghp_[A-Za-z0-9]{36}".to_string()),
             (SecretKind::ApiKey, r"AKIA[0-9A-Z]{16}".to_string()),
@@ -67,8 +70,9 @@ impl SecretFilter {
     pub fn inspect(&self, text: &str) -> Option<SecretKind> {
         let trimmed = text.trim();
         for (kind, re) in &self.rules {
-            let strong = matches!(kind, SecretKind::PrivateKey | SecretKind::Jwt | SecretKind::ApiKey);
-            let hit = if strong { re.is_match(trimmed) } else { re.is_match(trimmed) };
+            // 强特征规则（PEM/JWT/sk-/ghp_/AKIA）与锚定的数字规则统一 is_match：
+            // 数字规则的 ^…$ 锚点本身即"整条内容才算"，无需分支
+            let hit = re.is_match(trimmed);
             if hit {
                 // 数字类需二次校验（Luhn / 身份证校验位），防误伤
                 match kind {
@@ -143,8 +147,14 @@ mod tests {
 
     #[test]
     fn detects_api_key() {
-        assert_eq!(global().inspect("sk-abcdefghijklmnopqrstuvwxyz123456"), Some(SecretKind::ApiKey));
-        assert_eq!(global().inspect("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), Some(SecretKind::ApiKey));
+        assert_eq!(
+            global().inspect("sk-abcdefghijklmnopqrstuvwxyz123456"),
+            Some(SecretKind::ApiKey)
+        );
+        assert_eq!(
+            global().inspect("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+            Some(SecretKind::ApiKey)
+        );
     }
 
     #[test]
@@ -162,20 +172,32 @@ mod tests {
     #[test]
     fn luhn_guards_credit_card() {
         // Luhn 合法卡号（测试号段）
-        assert_eq!(global().inspect("4111111111111111"), Some(SecretKind::CreditCard));
+        assert_eq!(
+            global().inspect("4111111111111111"),
+            Some(SecretKind::CreditCard)
+        );
         // 数字串但 Luhn 不合法 → 非敏感
         assert_eq!(global().inspect("1234567890123456"), None);
     }
 
     #[test]
     fn phone_only_exact_match() {
-        assert_eq!(global().inspect("13812345678"), Some(SecretKind::PhoneNumber));
+        assert_eq!(
+            global().inspect("13812345678"),
+            Some(SecretKind::PhoneNumber)
+        );
         assert_eq!(global().inspect("电话 13812345678 记录"), None);
     }
 
     #[test]
     fn normal_text_not_sensitive() {
-        assert_eq!(global().inspect("设计原则：能用 Windows API 就不用跨平台抽象"), None);
-        assert_eq!(global().inspect("https://learn.microsoft.com/windows/"), None);
+        assert_eq!(
+            global().inspect("设计原则：能用 Windows API 就不用跨平台抽象"),
+            None
+        );
+        assert_eq!(
+            global().inspect("https://learn.microsoft.com/windows/"),
+            None
+        );
     }
 }

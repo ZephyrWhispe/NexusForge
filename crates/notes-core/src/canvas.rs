@@ -12,7 +12,11 @@ use crate::model::CanvasDoc;
 pub const CANVAS_FILE: &str = ".nforge-canvas.json";
 
 pub fn canvas_path(root: &Path, dir_rel: &str) -> PathBuf {
-    let dir = if dir_rel.is_empty() { root.to_path_buf() } else { root.join(dir_rel.replace('/', "\\")) };
+    let dir = if dir_rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(dir_rel.replace('/', "\\"))
+    };
     dir.join(CANVAS_FILE)
 }
 
@@ -67,7 +71,12 @@ mod tests {
                 src: None,
                 label: None,
             }],
-            edges: vec![CanvasEdge { id: "e1".into(), from: "n1".into(), to: "n2".into(), label: None }],
+            edges: vec![CanvasEdge {
+                id: "e1".into(),
+                from: "n1".into(),
+                to: "n2".into(),
+                label: None,
+            }],
         };
         save(&root, "sub", &doc).unwrap();
         assert!(root.join("sub").join(CANVAS_FILE).exists());

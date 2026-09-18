@@ -5,7 +5,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use host_core::ports::{AppxPort, MaintenancePort, RegValue, RegistryOps, ServiceCtlPort, StartType, TaskTogglePort};
+use host_core::ports::{
+    AppxPort, MaintenancePort, RegValue, RegistryOps, ServiceCtlPort, StartType, TaskTogglePort,
+};
 use serde_json::{json, Value};
 use win_integration::appx::AppxOps;
 use win_integration::maintenance::MaintenanceWin;
@@ -56,7 +58,11 @@ const CLEAN_DIR_ALLOWLIST: &[&str] = &["C:\\Windows\\SoftwareDistribution\\Downl
 
 fn clean_dir_allowed(path: &str) -> bool {
     // Windows 路径大小写不敏感；统一 / → \ 后精确比较
-    let norm = |s: &str| s.trim_start_matches(r"\\?\").replace('/', "\\").to_ascii_lowercase();
+    let norm = |s: &str| {
+        s.trim_start_matches(r"\\?\")
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
     let p = norm(path);
     CLEAN_DIR_ALLOWLIST.iter().any(|a| p == norm(a))
 }
@@ -77,8 +83,8 @@ pub fn handle_request(ops: &Ops, method: &str, p: Value) -> Result<Value, String
             Ok(json!({ "existed": existed, "value": if existed { Some(v) } else { None } }))
         }
         "registry.write" => {
-            let value: RegValue =
-                serde_json::from_value(p["value"].clone()).map_err(|e| format!("value 解析失败: {e}"))?;
+            let value: RegValue = serde_json::from_value(p["value"].clone())
+                .map_err(|e| format!("value 解析失败: {e}"))?;
             ops.registry
                 .write_value(req_str(&p, "key")?, req_str(&p, "value_name")?, &value)
                 .map_err(|e| e.to_string())?;
@@ -91,21 +97,30 @@ pub fn handle_request(ops: &Ops, method: &str, p: Value) -> Result<Value, String
             Ok(json!({}))
         }
         "service.query" => {
-            let info = ops.services.query(req_str(&p, "name")?).map_err(|e| e.to_string())?;
+            let info = ops
+                .services
+                .query(req_str(&p, "name")?)
+                .map_err(|e| e.to_string())?;
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "service.set_start" => {
-            let st: StartType =
-                serde_json::from_value(p["start_type"].clone()).map_err(|e| format!("start_type 解析失败: {e}"))?;
-            ops.services.set_start_type(req_str(&p, "name")?, st).map_err(|e| e.to_string())?;
+            let st: StartType = serde_json::from_value(p["start_type"].clone())
+                .map_err(|e| format!("start_type 解析失败: {e}"))?;
+            ops.services
+                .set_start_type(req_str(&p, "name")?, st)
+                .map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         "service.stop" => {
-            ops.services.stop(req_str(&p, "name")?).map_err(|e| e.to_string())?;
+            ops.services
+                .stop(req_str(&p, "name")?)
+                .map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         "service.start" => {
-            ops.services.start(req_str(&p, "name")?).map_err(|e| e.to_string())?;
+            ops.services
+                .start(req_str(&p, "name")?)
+                .map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         "file.clean_dir" => {
@@ -115,26 +130,40 @@ pub fn handle_request(ops: &Ops, method: &str, p: Value) -> Result<Value, String
             }
             let recursive = p["recursive"].as_bool().unwrap_or(true);
             let skip = p["skip_recent_hours"].as_u64().unwrap_or(24) as u32;
-            let removed = ops.maintenance.clean_dir(path, recursive, skip).map_err(|e| e.to_string())?;
+            let removed = ops
+                .maintenance
+                .clean_dir(path, recursive, skip)
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "removed": removed }))
         }
         "task.query_enabled" => {
-            let enabled = ops.tasks.query_enabled(req_str(&p, "path")?).map_err(|e| e.to_string())?;
+            let enabled = ops
+                .tasks
+                .query_enabled(req_str(&p, "path")?)
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "enabled": enabled }))
         }
         "task.set_enabled" => {
             let enabled = p["enabled"].as_bool().ok_or("缺少参数 enabled")?;
-            ops.tasks.set_enabled(req_str(&p, "path")?, enabled).map_err(|e| e.to_string())?;
+            ops.tasks
+                .set_enabled(req_str(&p, "path")?, enabled)
+                .map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         // Appx：名称校验在 win-integration 层（[A-Za-z0-9._] 防注入）；当前用户移除偏离 §4.3
         // 白名单补充收录（helper 与主进程同用户，WinRT 当前用户移除等价）
         "appx.remove_current_user" => {
-            let n = ops.appx.remove_current_user(req_str(&p, "name")?).map_err(|e| e.to_string())?;
+            let n = ops
+                .appx
+                .remove_current_user(req_str(&p, "name")?)
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "removed": n }))
         }
         "appx.remove_provisioned" => {
-            let n = ops.appx.remove_provisioned(req_str(&p, "name")?).map_err(|e| e.to_string())?;
+            let n = ops
+                .appx
+                .remove_provisioned(req_str(&p, "name")?)
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "removed": n }))
         }
         // Exec 白名单执行（spec §4.3 单一 exec 方法 + 程序白名单的偏离设计——
@@ -144,25 +173,44 @@ pub fn handle_request(ops: &Ops, method: &str, p: Value) -> Result<Value, String
             let program = req_str(&p, "program")?.to_string();
             let args: Vec<String> = p["args"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let timeout = p["timeout_ms"].as_u64().unwrap_or(30_000) as u32;
-            let out = with_busy(|| ops.maintenance.exec(&program, &args, timeout).map_err(|e| e.to_string()))?;
+            let out = with_busy(|| {
+                ops.maintenance
+                    .exec(&program, &args, timeout)
+                    .map_err(|e| e.to_string())
+            })?;
             Ok(json!({ "output": out }))
         }
         "maintenance.restore_point" => {
             let desc = req_str(&p, "description")?;
-            with_busy(|| ops.maintenance.restore_point(desc).map_err(|e| e.to_string()))?;
+            with_busy(|| {
+                ops.maintenance
+                    .restore_point(desc)
+                    .map_err(|e| e.to_string())
+            })?;
             Ok(json!({}))
         }
         "maintenance.empty_working_set" => {
-            let n = ops.maintenance.empty_working_set().map_err(|e| e.to_string())?;
+            let n = ops
+                .maintenance
+                .empty_working_set()
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "processed": n }))
         }
         // Defender 实时保护开关（W7 高风险族；固定 PS 模板无用户输入）
         "defender.set_realtime" => {
             let disable = p["disable"].as_bool().ok_or("缺少参数 disable")?;
-            with_busy(|| ops.maintenance.defender_realtime(disable).map_err(|e| e.to_string()))?;
+            with_busy(|| {
+                ops.maintenance
+                    .defender_realtime(disable)
+                    .map_err(|e| e.to_string())
+            })?;
             Ok(json!({}))
         }
         other => Err(format!("未知方法（白名单外）: {other}")),
@@ -195,12 +243,24 @@ mod tests {
     #[test]
     fn registry_whitelist_roundtrip() {
         let ops = Ops::new();
-        handle_request(&ops, "registry.write", json!({"key": K, "value_name": "v", "value": {"dword": 7}})).unwrap();
-        let r = handle_request(&ops, "registry.read", json!({"key": K, "value_name": "v"})).unwrap();
+        handle_request(
+            &ops,
+            "registry.write",
+            json!({"key": K, "value_name": "v", "value": {"dword": 7}}),
+        )
+        .unwrap();
+        let r =
+            handle_request(&ops, "registry.read", json!({"key": K, "value_name": "v"})).unwrap();
         assert_eq!(r["existed"], true);
         assert_eq!(r["value"]["dword"], 7);
-        handle_request(&ops, "registry.delete", json!({"key": K, "value_name": "v"})).unwrap();
-        let r = handle_request(&ops, "registry.read", json!({"key": K, "value_name": "v"})).unwrap();
+        handle_request(
+            &ops,
+            "registry.delete",
+            json!({"key": K, "value_name": "v"}),
+        )
+        .unwrap();
+        let r =
+            handle_request(&ops, "registry.read", json!({"key": K, "value_name": "v"})).unwrap();
         assert_eq!(r["existed"], false);
     }
 
@@ -215,23 +275,47 @@ mod tests {
     /// file.clean_dir 路径白名单：白名单内放行、任意路径/遍历/大小写变体按语义判定
     #[test]
     fn clean_dir_allowlist() {
-        assert!(clean_dir_allowed(r"C:\Windows\SoftwareDistribution\Download"));
-        assert!(clean_dir_allowed(r"c:/windows/softwaredistribution/download"), "大小写与斜杠方向不敏感");
-        assert!(!clean_dir_allowed(r"C:\Users\86151\Documents"), "任意路径拒绝");
+        assert!(clean_dir_allowed(
+            r"C:\Windows\SoftwareDistribution\Download"
+        ));
+        assert!(
+            clean_dir_allowed(r"c:/windows/softwaredistribution/download"),
+            "大小写与斜杠方向不敏感"
+        );
+        assert!(
+            !clean_dir_allowed(r"C:\Users\86151\Documents"),
+            "任意路径拒绝"
+        );
         assert!(!clean_dir_allowed(r"C:\Windows\System32"), "系统目录拒绝");
-        assert!(!clean_dir_allowed(r"C:\Windows\SoftwareDistribution\Download\..\.."), "遍历拒绝（精确匹配）");
-        assert!(!clean_dir_allowed(r"C:\Windows\SoftwareDistribution"), "前缀目录拒绝（只允许精确路径）");
+        assert!(
+            !clean_dir_allowed(r"C:\Windows\SoftwareDistribution\Download\..\.."),
+            "遍历拒绝（精确匹配）"
+        );
+        assert!(
+            !clean_dir_allowed(r"C:\Windows\SoftwareDistribution"),
+            "前缀目录拒绝（只允许精确路径）"
+        );
         // 白名单外路径经 handle_request 一律拒绝（不触达数据面）
         let ops = Ops::new();
-        assert!(handle_request(&ops, "file.clean_dir", json!({"path": r"C:\Users\86151\Documents"})).is_err());
+        assert!(handle_request(
+            &ops,
+            "file.clean_dir",
+            json!({"path": r"C:\Users\86151\Documents"})
+        )
+        .is_err());
     }
 
     /// appx 方法：非法包名（注入载荷）在数据面校验层拒绝；未知方法仍拒绝
     #[test]
     fn appx_name_validation() {
         let ops = Ops::new();
-        assert!(handle_request(&ops, "appx.remove_current_user", json!({"name": "a'; rm"})).is_err());
+        assert!(
+            handle_request(&ops, "appx.remove_current_user", json!({"name": "a'; rm"})).is_err()
+        );
         assert!(handle_request(&ops, "appx.remove_provisioned", json!({"name": ""})).is_err());
-        assert!(handle_request(&ops, "appx.drop_all", json!({})).is_err(), "白名单外方法拒绝");
+        assert!(
+            handle_request(&ops, "appx.drop_all", json!({})).is_err(),
+            "白名单外方法拒绝"
+        );
     }
 }

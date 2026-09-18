@@ -42,7 +42,10 @@ async fn conpty_10k_lines_throughput_and_integrity() {
     assert_eq!(line_count, 10000, "行数不符：{line_count}（掉字）");
 
     let lines_per_sec = 10_000.0 / elapsed.as_secs_f64().max(0.001);
-    assert!(lines_per_sec >= 1_000.0, "吞吐过低：{lines_per_sec:.0} 行/秒（耗时 {elapsed:?}）");
+    assert!(
+        lines_per_sec >= 1_000.0,
+        "吞吐过低：{lines_per_sec:.0} 行/秒（耗时 {elapsed:?}）"
+    );
     eprintln!("验收1：{line_count} 行 / {elapsed:?} = {lines_per_sec:.0} 行/秒");
 }
 

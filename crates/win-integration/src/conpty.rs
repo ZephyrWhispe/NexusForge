@@ -16,22 +16,21 @@ use host_core::error::AppError;
 use host_core::ports::{ConptyPort, PtyHandle, TermCfg};
 use tokio::sync::mpsc;
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, WAIT_OBJECT_0,
-};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::Console::{
-    ClosePseudoConsole, COORD, CreatePseudoConsole, ResizePseudoConsole, HPCON,
+    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList,
-    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
+    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    STARTUPINFOEXW,
 };
 /// 单会话资源（Arc 共享；kill 闭包与最后一次 Drop 幂等触发关闭）
-struct SessionInner {
+pub(crate) struct SessionInner {
     hpc: HPCON,
     h_process: HANDLE,
     h_thread: HANDLE,
@@ -126,10 +125,18 @@ impl ConptyPort for ConptyWin {
         let (out_read, out_write) = make_pipe()?;
 
         // 2. CreatePseudoConsole（PTY 取走 in_read / out_write）
-        let size = COORD { X: cfg.cols.max(1) as i16, Y: cfg.rows.max(1) as i16 };
+        let size = COORD {
+            X: cfg.cols.max(1) as i16,
+            Y: cfg.rows.max(1) as i16,
+        };
         let hpc = unsafe {
-            CreatePseudoConsole(size, in_read, out_write, 0)
-                .map_err(|e| AppError::module("TERM_PTY_002", format!("CreatePseudoConsole 失败: {e}"), None))?
+            CreatePseudoConsole(size, in_read, out_write, 0).map_err(|e| {
+                AppError::module(
+                    "TERM_PTY_002",
+                    format!("CreatePseudoConsole 失败: {e}"),
+                    None,
+                )
+            })?
         };
 
         // 3. 子进程（shell 为完整命令行）
@@ -164,10 +171,10 @@ impl ConptyPort for ConptyWin {
         std::thread::Builder::new()
             .name("nf-pty-watch".into())
             .spawn(move || {
-                // Arc 降级持有：inner 被 kill/reader 回收后监视线程自动结束
-                while let Some(arc) = watcher.upgrade() {
-                    let wr = unsafe { WaitForSingleObject(arc.h_process, INFINITE) };
-                    let _ = wr;
+                // Arc 降级持有：inner 被 kill/reader 回收后无事可做（if let 单次，不存在循环）
+                if let Some(arc) = watcher.upgrade() {
+                    // 阻塞至子进程真正退出，之后 conhost 才有最终渲染可 flush
+                    unsafe { WaitForSingleObject(arc.h_process, INFINITE) };
                     // 等读线程 EOF（conhost flush 完成；兜底 5s 防挂死）
                     for _ in 0..100 {
                         if done_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -176,7 +183,6 @@ impl ConptyPort for ConptyWin {
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     arc.shutdown();
-                    return;
                 }
             })
             .ok();
@@ -241,32 +247,24 @@ impl ConptyPort for ConptyWin {
                         Some(_) => {}
                         None => break,
                     },
-                    r = resize_rx.recv() => match r {
-                        Some((c, rows)) => {
-                            let inner3 = worker_inner.clone();
-                            let _ = tokio::task::spawn_blocking(move || unsafe {
-                                ResizePseudoConsole(
-                                    inner3.hpc,
-                                    COORD { X: c.max(1) as i16, Y: rows.max(1) as i16 },
-                                )
-                            })
-                            .await;
-                        }
-                        None => {}
+                    r = resize_rx.recv() => if let Some((c, rows)) = r {
+                        let inner3 = worker_inner.clone();
+                        let _ = tokio::task::spawn_blocking(move || unsafe {
+                            ResizePseudoConsole(
+                                inner3.hpc,
+                                COORD { X: c.max(1) as i16, Y: rows.max(1) as i16 },
+                            )
+                        })
+                        .await;
                     },
                 }
             }
         });
 
-        Ok(PtyHandle::new(
-            input_tx,
-            output_rx,
-            resize_tx,
-            {
-                let inner = inner.clone();
-                Box::new(move || inner.shutdown())
-            },
-        ))
+        Ok(PtyHandle::new(input_tx, output_rx, resize_tx, {
+            let inner = inner.clone();
+            Box::new(move || inner.shutdown())
+        }))
     }
 }
 
@@ -282,12 +280,14 @@ fn build_env_block(env: &HashMap<String, String>) -> Option<Vec<u16>> {
     if env.is_empty() {
         return None; // CreateProcessW lpenvironment=None = 继承
     }
-    let mut merged: HashMap<String, String> = std::env::vars().filter(|(k, _)| !k.starts_with('=')).collect();
+    let mut merged: HashMap<String, String> = std::env::vars()
+        .filter(|(k, _)| !k.starts_with('='))
+        .collect();
     for (k, v) in env {
         merged.insert(k.clone(), v.clone());
     }
     let mut pairs: Vec<(String, String)> = merged.into_iter().collect();
-    pairs.sort_by(|a, b| a.0.to_uppercase().cmp(&b.0.to_uppercase()));
+    pairs.sort_by_key(|a| a.0.to_uppercase());
     let mut block = Vec::new();
     for (k, v) in pairs {
         block.extend(k.encode_utf16());
@@ -310,7 +310,12 @@ unsafe fn spawn_child(
 ) -> Result<(HANDLE, HANDLE), AppError> {
     // 属性列表（1 项：PSEUDOCONSOLE）；先取尺寸（null 调用返回错误但写回 size）
     let mut list_size: usize = 0;
-    let _ = InitializeProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST(std::ptr::null_mut()), 1, 0, &mut list_size);
+    let _ = InitializeProcThreadAttributeList(
+        LPPROC_THREAD_ATTRIBUTE_LIST(std::ptr::null_mut()),
+        1,
+        0,
+        &mut list_size,
+    );
     let mut list_buf = vec![0u8; list_size];
     let list = LPPROC_THREAD_ATTRIBUTE_LIST(list_buf.as_mut_ptr().cast());
     InitializeProcThreadAttributeList(list, 1, 0, &mut list_size)
@@ -328,7 +333,11 @@ unsafe fn spawn_child(
     );
     if let Err(e) = update {
         DeleteProcThreadAttributeList(list);
-        return Err(AppError::module("TERM_PTY_004", format!("设置 PSEUDOCONSOLE 属性失败: {e}"), None));
+        return Err(AppError::module(
+            "TERM_PTY_004",
+            format!("设置 PSEUDOCONSOLE 属性失败: {e}"),
+            None,
+        ));
     }
 
     // 命令行（可变 UTF-16 缓冲）
@@ -349,7 +358,11 @@ unsafe fn spawn_child(
     // env=None（继承父环境）时不设 CREATE_UNICODE_ENVIRONMENT——
     // 实测：NULL 环境块 + UNICODE flag 会导致 console 子进程 0xC0000142 初始化失败
     let flags = EXTENDED_STARTUPINFO_PRESENT
-        | if env_block.is_some() { CREATE_UNICODE_ENVIRONMENT } else { Default::default() };
+        | if env_block.is_some() {
+            CREATE_UNICODE_ENVIRONMENT
+        } else {
+            Default::default()
+        };
 
     let ok = CreateProcessW(
         PCWSTR::null(),
@@ -362,7 +375,7 @@ unsafe fn spawn_child(
         cwd_wide
             .as_ref()
             .map(|v| PCWSTR::from_raw(v.as_ptr()))
-            .unwrap_or_else(|| PCWSTR::null()),
+            .unwrap_or_else(PCWSTR::null),
         &si.StartupInfo,
         &mut pi,
     );

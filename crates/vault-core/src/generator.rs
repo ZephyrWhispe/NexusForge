@@ -33,7 +33,14 @@ pub struct PasswordPolicy {
 
 impl Default for PasswordPolicy {
     fn default() -> Self {
-        Self { length: 16, upper: true, lower: true, digits: true, symbols: true, avoid_ambiguous: false }
+        Self {
+            length: 16,
+            upper: true,
+            lower: true,
+            digits: true,
+            symbols: true,
+            avoid_ambiguous: false,
+        }
     }
 }
 
@@ -41,7 +48,10 @@ impl PasswordPolicy {
     fn pools(&self) -> Vec<Vec<u8>> {
         let strip = |pool: &'static [u8]| -> Vec<u8> {
             if self.avoid_ambiguous {
-                pool.iter().copied().filter(|c| !AMBIGUOUS.contains(c)).collect()
+                pool.iter()
+                    .copied()
+                    .filter(|c| !AMBIGUOUS.contains(c))
+                    .collect()
             } else {
                 pool.to_vec()
             }
@@ -71,7 +81,11 @@ pub fn generate_password(policy: &PasswordPolicy) -> Result<String, AppError> {
         return Err(err("至少启用一个字符类"));
     }
     if policy.length < pools.len() as u8 {
-        return Err(err(format!("长度 {} 小于字符类数 {}", policy.length, pools.len())));
+        return Err(err(format!(
+            "长度 {} 小于字符类数 {}",
+            policy.length,
+            pools.len()
+        )));
     }
     let mut rng = OsRng;
     let mut chars: Vec<u8> = Vec::with_capacity(policy.length as usize);
@@ -104,38 +118,62 @@ mod tests {
 
     #[test]
     fn covers_all_classes_and_respects_length() {
-        let policy = PasswordPolicy { length: 64, ..Default::default() };
+        let policy = PasswordPolicy {
+            length: 64,
+            ..Default::default()
+        };
         let pw = generate_password(&policy).unwrap();
         assert_eq!(pw.len(), 64);
         for want in ["upper", "lower", "digit", "symbol"] {
-            assert!(
-                pw.bytes().any(|c| class_of(c) == want),
-                "必须覆盖 {want}"
-            );
+            assert!(pw.bytes().any(|c| class_of(c) == want), "必须覆盖 {want}");
         }
     }
 
     #[test]
     fn avoid_ambiguous_excludes_confusables() {
-        let policy = PasswordPolicy { length: 200, avoid_ambiguous: true, ..Default::default() };
+        let policy = PasswordPolicy {
+            length: 200,
+            avoid_ambiguous: true,
+            ..Default::default()
+        };
         for _ in 0..10 {
             let pw = generate_password(&policy).unwrap();
-            assert!(!pw.bytes().any(|c| AMBIGUOUS.contains(&c)), "不得出现易混淆字符: {pw}");
+            assert!(
+                !pw.bytes().any(|c| AMBIGUOUS.contains(&c)),
+                "不得出现易混淆字符: {pw}"
+            );
         }
     }
 
     #[test]
     fn rejects_empty_pool_and_too_short() {
-        let p = PasswordPolicy { length: 16, upper: false, lower: false, digits: false, symbols: false, avoid_ambiguous: false };
+        let p = PasswordPolicy {
+            length: 16,
+            upper: false,
+            lower: false,
+            digits: false,
+            symbols: false,
+            avoid_ambiguous: false,
+        };
         assert!(generate_password(&p).is_err());
         // 4 类但长度 3：放不下每类 1 个
-        let p = PasswordPolicy { length: 3, ..Default::default() };
+        let p = PasswordPolicy {
+            length: 3,
+            ..Default::default()
+        };
         assert!(generate_password(&p).is_err());
     }
 
     #[test]
     fn single_class_works() {
-        let p = PasswordPolicy { length: 32, upper: false, lower: true, digits: false, symbols: false, avoid_ambiguous: false };
+        let p = PasswordPolicy {
+            length: 32,
+            upper: false,
+            lower: true,
+            digits: false,
+            symbols: false,
+            avoid_ambiguous: false,
+        };
         let pw = generate_password(&p).unwrap();
         assert_eq!(pw.len(), 32);
         assert!(pw.bytes().all(|c| c.is_ascii_lowercase()));

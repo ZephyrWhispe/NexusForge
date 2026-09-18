@@ -20,18 +20,27 @@ pub enum Preview {
     /// 文本片段（truncated 截断提示）
     Text { content: String, truncated: bool },
     /// 图片缩略图（PNG data URL）
-    Image { data_url: String, width: u32, height: u32 },
+    Image {
+        data_url: String,
+        width: u32,
+        height: u32,
+    },
     /// 系统 Shell 缩略图（视频/PDF 等）
-    Shell { data_url: String, width: u32, height: u32 },
+    Shell {
+        data_url: String,
+        width: u32,
+        height: u32,
+    },
     /// 无法预览（原因展示）
     Unsupported { reason: String },
 }
 
-const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff"];
+const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff",
+];
 /// 系统缩略图渠道优先的扩展名（视频/办公文档/PDF）
 const SHELL_EXTS: &[&str] = &[
-    "mp4", "mkv", "avi", "mov", "webm", "wmv", "flv", "m4v",
-    "mp3", "wav", "flac", "ogg", "m4a",
+    "mp4", "mkv", "avi", "mov", "webm", "wmv", "flv", "m4v", "mp3", "wav", "flac", "ogg", "m4a",
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
 ];
 
@@ -44,7 +53,9 @@ pub fn preview_file(
     let long = to_long_path(path);
     if !long.exists() {
         return Err(FileError::NotFound(
-            crate::browse::display_path(path).to_string_lossy().into_owned(),
+            crate::browse::display_path(path)
+                .to_string_lossy()
+                .into_owned(),
         ));
     }
     let ext = path
@@ -59,7 +70,9 @@ pub fn preview_file(
         if let Some(port) = thumb {
             return shell_preview(port, path);
         }
-        return Ok(Preview::Unsupported { reason: "系统缩略图服务未就绪".into() });
+        return Ok(Preview::Unsupported {
+            reason: "系统缩略图服务未就绪".into(),
+        });
     }
     // 其余按文本尝试（含无扩展名；目录已由上层过滤）
     text_preview(&long, max_text)
@@ -68,7 +81,11 @@ pub fn preview_file(
 fn image_preview(long: &Path, thumb_px: u32) -> Result<Preview, FileError> {
     let img = image::open(long).map_err(|e| FileError::Preview(e.to_string()))?;
     let (w, h) = (img.width(), img.height());
-    let thumb = if w.max(h) > thumb_px { img.thumbnail(thumb_px, thumb_px) } else { img };
+    let thumb = if w.max(h) > thumb_px {
+        img.thumbnail(thumb_px, thumb_px)
+    } else {
+        img
+    };
     let mut png = std::io::Cursor::new(Vec::new());
     thumb
         .write_to(&mut png, image::ImageFormat::Png)
@@ -84,7 +101,11 @@ fn shell_preview(port: &dyn ThumbPort, path: &Path) -> Result<Preview, FileError
     let (w, h, png) = port
         .thumbnail(&crate::browse::display_path(path), 256)
         .map_err(|e| FileError::Preview(e.to_string()))?;
-    Ok(Preview::Shell { data_url: to_data_url(&png), width: w, height: h })
+    Ok(Preview::Shell {
+        data_url: to_data_url(&png),
+        width: w,
+        height: h,
+    })
 }
 
 fn text_preview(long: &Path, max_text: usize) -> Result<Preview, FileError> {
@@ -93,9 +114,12 @@ fn text_preview(long: &Path, max_text: usize) -> Result<Preview, FileError> {
     let mut f = std::fs::File::open(long)?;
     use std::io::Read;
     let mut buf = vec![0u8; take];
-    f.read_exact(&mut buf).map_err(|e| FileError::Preview(e.to_string()))?;
+    f.read_exact(&mut buf)
+        .map_err(|e| FileError::Preview(e.to_string()))?;
     if buf.contains(&0) {
-        return Ok(Preview::Unsupported { reason: "二进制文件不支持文本预览".into() });
+        return Ok(Preview::Unsupported {
+            reason: "二进制文件不支持文本预览".into(),
+        });
     }
     let content = String::from_utf8_lossy(&buf).to_string();
     let truncated = size > buf.len() as u64;
@@ -110,7 +134,10 @@ fn text_preview(long: &Path, max_text: usize) -> Result<Preview, FileError> {
 }
 
 fn to_data_url(png: &[u8]) -> String {
-    format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png)
+    )
 }
 
 #[cfg(test)]
@@ -166,7 +193,11 @@ mod tests {
         let img = image::DynamicImage::new_rgb8(1024, 512);
         img.save(d.join("pic.png")).unwrap();
         match preview_file(&d.join("pic.png"), None, 256, 64).unwrap() {
-            Preview::Image { data_url, width, height } => {
+            Preview::Image {
+                data_url,
+                width,
+                height,
+            } => {
                 assert_eq!(width, 1024);
                 assert_eq!(height, 512);
                 assert!(data_url.starts_with("data:image/png;base64,"));

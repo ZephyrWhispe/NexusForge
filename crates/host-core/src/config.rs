@@ -48,32 +48,41 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new(dir: PathBuf, bus: Arc<EventBus>) -> Self {
-        Self { dir, bus, schemas: RwLock::new(std::collections::HashMap::new()) }
+        Self {
+            dir,
+            bus,
+            schemas: RwLock::new(std::collections::HashMap::new()),
+        }
     }
 
     // ---------------- 生命周期 ----------------
 
     /// 启动加载：缺失则写默认；版本落后则备份 + 迁移
     pub fn load(&self) -> Result<GlobalConfig, AppError> {
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| AppError::Storage { code: codes::host::HOST_CONFIG_002.into(), message: format!("创建配置目录失败: {e}") })?;
+        std::fs::create_dir_all(&self.dir).map_err(|e| AppError::Storage {
+            code: codes::host::HOST_CONFIG_002.into(),
+            message: format!("创建配置目录失败: {e}"),
+        })?;
         let path = self.global_path();
         if !path.exists() {
             let cfg = GlobalConfig::default();
-            let v = serde_json::to_value(&cfg)
-                .map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
+            let v =
+                serde_json::to_value(&cfg).map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
             write_atomic(&path, &v)?;
             return Ok(cfg);
         }
         let mut v = read_json(&path)?;
-        let ver = v.get("schema_version").and_then(|x| x.as_u64()).unwrap_or(0);
+        let ver = v
+            .get("schema_version")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
         if ver < GLOBAL_SCHEMA_VERSION as u64 {
             backup(&path)?;
         }
         migrate_global(&mut v)?;
         write_atomic(&path, &v)?;
-        let cfg: GlobalConfig = serde_json::from_value(v)
-            .map_err(|e| cfg_err(codes::host::HOST_CONFIG_001, e))?;
+        let cfg: GlobalConfig =
+            serde_json::from_value(v).map_err(|e| cfg_err(codes::host::HOST_CONFIG_001, e))?;
         Ok(cfg)
     }
 
@@ -106,7 +115,11 @@ impl ConfigStore {
     }
 
     pub fn schema_of(&self, module: &str) -> Option<serde_json::Value> {
-        self.schemas.read().expect("schema 表读锁").get(module).cloned()
+        self.schemas
+            .read()
+            .expect("schema 表读锁")
+            .get(module)
+            .cloned()
     }
 
     pub fn get_module(&self, id: &str) -> Result<serde_json::Value, AppError> {
@@ -155,13 +168,19 @@ impl ConfigStore {
 // ---------------- 校验 / 迁移 / IO ----------------
 
 fn cfg_err(code: &str, e: impl std::fmt::Display) -> AppError {
-    AppError::Config { code: code.into(), message: e.to_string() }
+    AppError::Config {
+        code: code.into(),
+        message: e.to_string(),
+    }
 }
 
 fn validate(schema: &serde_json::Value, instance: &serde_json::Value) -> Result<(), AppError> {
-    let validator = jsonschema::validator_for(schema)
-        .map_err(|e| cfg_err(codes::host::HOST_CONFIG_001, e))?;
-    let errs: Vec<String> = validator.iter_errors(instance).map(|e| e.to_string()).collect();
+    let validator =
+        jsonschema::validator_for(schema).map_err(|e| cfg_err(codes::host::HOST_CONFIG_001, e))?;
+    let errs: Vec<String> = validator
+        .iter_errors(instance)
+        .map(|e| e.to_string())
+        .collect();
     if errs.is_empty() {
         Ok(())
     } else {
@@ -175,7 +194,10 @@ fn validate(schema: &serde_json::Value, instance: &serde_json::Value) -> Result<
 /// 全局配置迁移链：逐版本推进到 [`GLOBAL_SCHEMA_VERSION`]。
 /// 新版本在此追加 match 分支（docs/impl/01 S6.1 迁移算法）。
 fn migrate_global(v: &mut serde_json::Value) -> Result<(), AppError> {
-    let mut version = v.get("schema_version").and_then(|x| x.as_u64()).unwrap_or(0);
+    let mut version = v
+        .get("schema_version")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
     while version < GLOBAL_SCHEMA_VERSION as u64 {
         match version {
             0 => {
@@ -199,19 +221,18 @@ fn migrate_global(v: &mut serde_json::Value) -> Result<(), AppError> {
 }
 
 fn read_json(path: &Path) -> Result<serde_json::Value, AppError> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
     serde_json::from_str(&raw).map_err(|e| cfg_err(codes::host::HOST_CONFIG_001, e))
 }
 
 fn write_atomic(path: &Path, v: &serde_json::Value) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
+        std::fs::create_dir_all(parent).map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
     }
     let tmp = path.with_extension("json.tmp");
-    let raw = serde_json::to_string_pretty(v)
-        .map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
+    let raw =
+        serde_json::to_string_pretty(v).map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
     std::fs::write(&tmp, raw).map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
     std::fs::rename(&tmp, path).map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?;
     Ok(())
@@ -238,7 +259,12 @@ fn backup(path: &Path) -> Result<(), AppError> {
     let mut backups: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|e| cfg_err(codes::host::HOST_CONFIG_002, e))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.file_stem().and_then(|s| s.to_str()).unwrap_or("").starts_with(name))
+        .filter(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .starts_with(name)
+        })
         .collect();
     backups.sort();
     while backups.len() > BACKUP_KEEP {

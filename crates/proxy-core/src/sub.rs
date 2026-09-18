@@ -154,8 +154,8 @@ fn parse_ss(rest: &str, sub_id: &str) -> Result<Node> {
 /// vmess://（v2ray JSON：{v,ps,add,port,id,aid,net,type,host,path,tls}）
 fn parse_vmess(rest: &str, sub_id: &str) -> Result<Node> {
     let raw = b64_decode(rest)?;
-    let v: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| ProxyError::Subscription(format!("vmess JSON: {e}")))?;
+    let v: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| ProxyError::Subscription(format!("vmess JSON: {e}")))?;
     let server = v["add"].as_str().unwrap_or_default().to_string();
     let port = match &v["port"] {
         serde_json::Value::Number(n) => n.as_u64().unwrap_or(0) as u16,
@@ -203,12 +203,7 @@ fn parse_authority(rest: &str, sub_id: &str, kind: NodeKind) -> Result<Node> {
     };
     let (host, port) = split_host_port(hostport)?;
     let params: std::collections::HashMap<&str, &str> = query
-        .map(|q| {
-            q.split('&')
-                .filter_map(|kv| kv.split_once('='))
-                .map(|(k, v)| (k, v))
-                .collect()
-        })
+        .map(|q| q.split('&').filter_map(|kv| kv.split_once('=')).collect())
         .unwrap_or_default();
 
     let extra = match kind {
@@ -231,7 +226,14 @@ fn parse_authority(rest: &str, sub_id: &str, kind: NodeKind) -> Result<Node> {
         }
         _ => serde_json::json!({}),
     };
-    Ok(Node { tag, kind, server: host, port, sub_id: sub_id.into(), extra })
+    Ok(Node {
+        tag,
+        kind,
+        server: host,
+        port,
+        sub_id: sub_id.into(),
+        extra,
+    })
 }
 
 fn split_fragment(rest: &str) -> (&str, Option<String>) {
@@ -379,7 +381,8 @@ mod tests {
 
     #[test]
     fn parses_whole_b64_subscription() {
-        let lines = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#a1\ntrojan://p@5.5.5.5:443#a2";
+        let lines =
+            "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#a1\ntrojan://p@5.5.5.5:443#a2";
         let b64 = base64::engine::general_purpose::STANDARD.encode(lines);
         let nodes = parse_subscription(&b64, SUB).unwrap();
         assert_eq!(nodes.len(), 2);
@@ -391,13 +394,21 @@ mod tests {
     fn rejects_empty_and_unknown() {
         assert!(parse_subscription("dGV4dA==", SUB).is_err()); // "text" 无 URI
         assert!(parse_share_uri("unknown://x", SUB).is_err());
-        let nodes = parse_subscription("unknown://x\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#a", SUB).unwrap();
+        let nodes = parse_subscription(
+            "unknown://x\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#a",
+            SUB,
+        )
+        .unwrap();
         assert_eq!(nodes.len(), 1, "未知行跳过不致命");
     }
 
     #[test]
     fn outbound_tag_prefixes_sub() {
-        let n = parse_share_uri("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#x", "abcdefgh12345678").unwrap();
+        let n = parse_share_uri(
+            "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#x",
+            "abcdefgh12345678",
+        )
+        .unwrap();
         assert_eq!(n.outbound_tag(), "abcdefgh:x");
     }
 }

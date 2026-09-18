@@ -30,8 +30,14 @@ const BACKPRESSURE_LIMIT: i64 = 4 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum TermKind {
     Local,
-    Wsl { distro: String },
-    Ssh { host: String, port: u16, user: String },
+    Wsl {
+        distro: String,
+    },
+    Ssh {
+        host: String,
+        port: u16,
+        user: String,
+    },
 }
 
 /// 会话元信息（IPC DTO）
@@ -198,7 +204,9 @@ impl TermSessions {
     pub async fn spawn_wsl(&self, distro: &str, cols: u16, rows: u16) -> Result<SessionInfo> {
         let shell = format!("wsl.exe -d {}", distro);
         self.spawn_pty(
-            TermKind::Wsl { distro: distro.to_string() },
+            TermKind::Wsl {
+                distro: distro.to_string(),
+            },
             format!("WSL: {distro}"),
             shell,
             None,
@@ -244,7 +252,7 @@ impl TermSessions {
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(16);
 
         // 输入转发：统一入口 input_tx → transport input
-        let mut pty_input = handle.input_tx.clone();
+        let pty_input = handle.input_tx.clone();
         tokio::spawn(async move {
             while let Some(data) = input_rx.recv().await {
                 if pty_input.send(data).await.is_err() {
@@ -253,7 +261,7 @@ impl TermSessions {
             }
         });
         // resize 转发
-        let mut pty_resize = handle.resize_tx.clone();
+        let pty_resize = handle.resize_tx.clone();
         tokio::spawn(async move {
             while let Some(sz) = resize_rx.recv().await {
                 if pty_resize.send(sz).await.is_err() {
@@ -279,7 +287,9 @@ impl TermSessions {
         });
 
         // kill 闭包最后取（into_kill 消耗 handle；output_rx 先行 move）
-        let PtyHandle { output_rx, kill, .. } = handle;
+        let PtyHandle {
+            output_rx, kill, ..
+        } = handle;
         let mut out_rx = output_rx;
         state
             .kill
@@ -291,7 +301,8 @@ impl TermSessions {
         let reader_state = state.clone();
         tokio::spawn(async move {
             let mut window: Vec<u8> = Vec::with_capacity(BATCH_MAX);
-            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(BATCH_WINDOW_MS));
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_millis(BATCH_WINDOW_MS));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             ticker.tick().await; // 首跳立即返回
             loop {
@@ -421,10 +432,7 @@ mod tests {
     fn list_and_missing_session() {
         let s = TermSessions::new();
         assert!(s.list().is_empty());
-        assert!(matches!(
-            s.get("nope"),
-            Err(TermError::NoSuchSession(_))
-        ));
+        assert!(matches!(s.get("nope"), Err(TermError::NoSuchSession(_))));
         assert!(matches!(
             s.kill_session("nope"),
             Err(TermError::NoSuchSession(_))

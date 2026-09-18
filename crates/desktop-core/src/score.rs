@@ -27,7 +27,10 @@ impl FuzzyHit {
 pub fn fuzzy_match(query: &str, name: &str) -> Option<FuzzyHit> {
     let q: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
     if q.is_empty() {
-        return Some(FuzzyHit { prefix: 0.0, contiguity: 1.0 });
+        return Some(FuzzyHit {
+            prefix: 0.0,
+            contiguity: 1.0,
+        });
     }
     let n: Vec<char> = name.chars().flat_map(|c| c.to_lowercase()).collect();
     if n.is_empty() {
@@ -36,8 +39,8 @@ pub fn fuzzy_match(query: &str, name: &str) -> Option<FuzzyHit> {
 
     // 前缀/词首判定
     let is_full_prefix = n.len() >= q.len() && n[..q.len()].iter().eq(q.iter());
-    let word_start = !is_full_prefix
-        && (is_boundary_start(&q, name) || is_acronym_prefix(&q, name));
+    let word_start =
+        !is_full_prefix && (is_boundary_start(&q, name) || is_acronym_prefix(&q, name));
     let prefix = if is_full_prefix {
         1.0
     } else if word_start {
@@ -74,9 +77,8 @@ pub fn fuzzy_match(query: &str, name: &str) -> Option<FuzzyHit> {
 fn is_boundary_start(q: &[char], name: &str) -> bool {
     let raw: Vec<char> = name.chars().collect();
     for i in 0..raw.len() {
-        let boundary = i == 0
-            || matches!(raw[i - 1], ' ' | '-' | '_' | '.')
-            || raw[i].is_uppercase();
+        let boundary =
+            i == 0 || matches!(raw[i - 1], ' ' | '-' | '_' | '.') || raw[i].is_uppercase();
         if boundary {
             let rest: Vec<char> = raw[i..].iter().flat_map(|c| c.to_lowercase()).collect();
             if rest.starts_with(q) {

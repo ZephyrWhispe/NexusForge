@@ -1,9 +1,7 @@
 //! 当前进程提权状态（docs/impl/08 WinOps W2：Tweak requires_admin 扫描三态）
 
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Security::{
-    GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 当前进程是否以管理员（提升的 token）运行

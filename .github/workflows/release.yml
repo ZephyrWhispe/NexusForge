@@ -1,0 +1,33 @@
+# DESIGN §9.3 release.yml：tag 触发，NSIS 安装包 + GitHub Release。
+# 待办（不阻塞门禁先行）： updater 签名密钥（TAURI_SIGNING_PRIVATE_KEY secret，
+# 需恢复 createUpdaterArtifacts）与 SignPath/自签代码证书接入后在下方补 env。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      # updater 私钥尚未配置：临时关闭 updater 产物，其余按 tauri.conf（NSIS currentUser）
+      - name: tauri build
+        run: npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/bundle/**/*-setup.exe
+          generate_release_notes: true

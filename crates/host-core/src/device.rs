@@ -76,7 +76,10 @@ impl DeviceIdentity {
     }
 
     /// 加载或创建身份文件（{appData}/kvm/identity.json）
-    pub fn load_or_create(dir: &PathBuf, crypto: Option<Arc<dyn CryptoPort>>) -> Result<Self, ModuleError> {
+    pub fn load_or_create(
+        dir: &PathBuf,
+        crypto: Option<Arc<dyn CryptoPort>>,
+    ) -> Result<Self, ModuleError> {
         let path = dir.join("identity.json");
         if let Ok(bytes) = std::fs::read(&path) {
             if let Ok(id) = deserialize_identity(&bytes, crypto.clone()) {
@@ -104,7 +107,10 @@ fn fingerprint(pubkey: &[u8; KEY_LEN]) -> String {
         .to_string()
 }
 
-fn serialize_identity(id: &DeviceIdentity, crypto: Option<Arc<dyn CryptoPort>>) -> Result<Vec<u8>, ModuleError> {
+fn serialize_identity(
+    id: &DeviceIdentity,
+    crypto: Option<Arc<dyn CryptoPort>>,
+) -> Result<Vec<u8>, ModuleError> {
     let secret_bytes = id.secret.to_bytes();
     let (secret_b64, protected) = match &crypto {
         Some(port) => {
@@ -124,7 +130,10 @@ fn serialize_identity(id: &DeviceIdentity, crypto: Option<Arc<dyn CryptoPort>>) 
     serde_json::to_vec_pretty(&persisted).map_err(|e| ModuleError::Init(e.to_string()))
 }
 
-fn deserialize_identity(bytes: &[u8], crypto: Option<Arc<dyn CryptoPort>>) -> Result<DeviceIdentity, String> {
+fn deserialize_identity(
+    bytes: &[u8],
+    crypto: Option<Arc<dyn CryptoPort>>,
+) -> Result<DeviceIdentity, String> {
     let persisted: PersistedIdentity = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     let raw = b64_decode(&persisted.secret_b64).ok_or("私钥 base64 非法")?;
     let secret_bytes: [u8; KEY_LEN] = if persisted.protected {
@@ -173,18 +182,23 @@ pub struct PairStore {
 
 impl PairStore {
     pub fn load_or_default(dir: &PathBuf) -> Result<Self, AppError> {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| AppError::module("KVM_PAIR_002", format!("创建 kvm 目录失败: {e}"), None))?;
+        std::fs::create_dir_all(dir).map_err(|e| {
+            AppError::module("KVM_PAIR_002", format!("创建 kvm 目录失败: {e}"), None)
+        })?;
         let path = dir.join("paired.json");
         let mut map = HashMap::new();
         if let Ok(bytes) = std::fs::read(&path) {
-            let persisted: PersistedPeers = serde_json::from_slice(&bytes)
-                .map_err(|e| AppError::module("KVM_PAIR_001", format!("paired.json 损坏: {e}"), None))?;
+            let persisted: PersistedPeers = serde_json::from_slice(&bytes).map_err(|e| {
+                AppError::module("KVM_PAIR_001", format!("paired.json 损坏: {e}"), None)
+            })?;
             for p in persisted.peers {
                 map.insert(p.device_id.clone(), p);
             }
         }
-        Ok(Self { path, peers: RwLock::new(map) })
+        Ok(Self {
+            path,
+            peers: RwLock::new(map),
+        })
     }
 
     pub fn is_paired(&self, device_id: &str) -> bool {
@@ -206,7 +220,13 @@ impl PairStore {
     }
 
     pub fn all(&self) -> Vec<PairedPeer> {
-        let mut list: Vec<PairedPeer> = self.peers.read().expect("peers 锁").values().cloned().collect();
+        let mut list: Vec<PairedPeer> = self
+            .peers
+            .read()
+            .expect("peers 锁")
+            .values()
+            .cloned()
+            .collect();
         list.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         list
     }
@@ -221,7 +241,12 @@ impl PairStore {
     }
 
     pub fn remove(&self, device_id: &str) -> Result<bool, AppError> {
-        let removed = self.peers.write().expect("peers 锁").remove(device_id).is_some();
+        let removed = self
+            .peers
+            .write()
+            .expect("peers 锁")
+            .remove(device_id)
+            .is_some();
         if removed {
             self.persist()?;
         }
@@ -233,7 +258,8 @@ impl PairStore {
         let json = serde_json::to_vec_pretty(&snapshot)
             .map_err(|e| AppError::module("KVM_PAIR_002", e.to_string(), None))?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| AppError::module("KVM_PAIR_002", e.to_string(), None))?;
+        std::fs::write(&tmp, json)
+            .map_err(|e| AppError::module("KVM_PAIR_002", e.to_string(), None))?;
         std::fs::rename(&tmp, &self.path)
             .map_err(|e| AppError::module("KVM_PAIR_002", e.to_string(), None))?;
         Ok(())
@@ -281,7 +307,8 @@ mod tests {
 
     #[test]
     fn pair_store_roundtrip_persists() {
-        let dir = std::env::temp_dir().join(format!("nf-device-pair-test-{}", uuid::Uuid::now_v7()));
+        let dir =
+            std::env::temp_dir().join(format!("nf-device-pair-test-{}", uuid::Uuid::now_v7()));
         let store = PairStore::load_or_default(&dir).unwrap();
         assert!(store.all().is_empty());
         let peer = PairedPeer {

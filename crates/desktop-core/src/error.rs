@@ -31,17 +31,13 @@ impl From<DesktopError> for AppError {
             DesktopError::NotIndexed => (
                 "DESKTOP_STATE_001",
                 "启动器索引尚未构建完成".into(),
-                Some("等待索引构建完成后重试".into()),
+                Some("等待索引构建完成后重试"),
             ),
-            DesktopError::NotFound(id) => (
-                "DESKTOP_QUERY_001",
-                format!("条目 {id} 不存在"),
-                None,
-            ),
+            DesktopError::NotFound(id) => ("DESKTOP_QUERY_001", format!("条目 {id} 不存在"), None),
             DesktopError::Launch(m) => (
                 "DESKTOP_LAUNCH_001",
                 format!("启动失败: {m}"),
-                Some("检查目标程序是否存在；管理员目标需在 UAC 弹窗确认".into()),
+                Some("检查目标程序是否存在；管理员目标需在 UAC 弹窗确认"),
             ),
             DesktopError::Tidy(m) => ("DESKTOP_TIDY_001", m.clone(), None),
             DesktopError::Db(m) => ("DESKTOP_DB_001", m.clone(), None),

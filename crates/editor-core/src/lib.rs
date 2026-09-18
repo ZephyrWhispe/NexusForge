@@ -14,4 +14,4 @@ pub mod session;
 pub use error::{EditorError, Result};
 pub use module::EditorModule;
 pub use pdf::{PdfInfo, PdfOpResult};
-pub use session::{EditorSessions, Eol, EncodingKind, SessionInfo};
+pub use session::{EditorSessions, EncodingKind, Eol, SessionInfo};

@@ -43,6 +43,7 @@ import {
   type VaultStatusDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { keyActivate } from "../../a11y";
 
 /**
  * 密码库面板（docs/impl/05 V7，M5 v1）三态渲染：
@@ -526,6 +527,9 @@ export default function VaultPanel() {
           <div
             className={`${styles.folderItem} ${activeFolder === "all" ? styles.folderActive : ""}`}
             onClick={() => setActiveFolder("all")}
+            role="button"
+            tabIndex={0}
+            onKeyDown={keyActivate(() => setActiveFolder("all"))}
           >
             <Text>全部条目</Text>
           </div>
@@ -534,6 +538,9 @@ export default function VaultPanel() {
               key={f.id}
               className={`${styles.folderItem} ${activeFolder === f.id ? styles.folderActive : ""}`}
               onClick={() => setActiveFolder(f.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={keyActivate(() => setActiveFolder(f.id))}
               title="再次点击删除文件夹（条目保留）"
               onDoubleClick={() => void vaultFolderDelete(f.id).then(() => refresh())}
             >
@@ -612,8 +619,9 @@ export default function VaultPanel() {
       </div>
 
       {editor && (
-        <div className={styles.dialogScrim} onClick={() => setEditor(null)}>
-          <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
+        // 遮罩点击关闭：role=presentation 声明纯装饰容器，键盘等价（Esc 关窗）随 D-18 ConfirmDialog 基线统一落地
+        <div className={styles.dialogScrim} role="presentation" onClick={() => setEditor(null)}>
+          <div className={styles.dialog} role="presentation" onClick={(e) => e.stopPropagation()}>
             <Text size={400} weight="semibold">
               {editor.entry ? "编辑条目" : "新建条目"}
             </Text>

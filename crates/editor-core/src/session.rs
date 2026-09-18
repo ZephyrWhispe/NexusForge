@@ -62,15 +62,6 @@ pub enum Eol {
     Lf,
 }
 
-impl Eol {
-    fn sep(&self) -> &'static str {
-        match self {
-            Self::Crlf => "\r\n",
-            Self::Lf => "\n",
-        }
-    }
-}
-
 /// 会话元信息（IPC 返回；content 不回传——前端按需拉取）
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SessionInfo {
@@ -114,7 +105,9 @@ impl Default for EditorSessions {
 
 impl EditorSessions {
     pub fn new() -> Self {
-        Self { sessions: RwLock::new(HashMap::new()) }
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+        }
     }
 
     /// 打开文件：读原始字节 → 编码检测 → 解码 → EOL 检测（不统一，仅标记）
@@ -144,7 +137,18 @@ impl EditorSessions {
         self.sessions
             .write()
             .map_err(|_| EditorError::Encoding("会话锁污染".into()))?
-            .insert(id, Session { path: path.to_path_buf(), encoding, eol, eol_mixed, dirty: false, size, content });
+            .insert(
+                id,
+                Session {
+                    path: path.to_path_buf(),
+                    encoding,
+                    eol,
+                    eol_mixed,
+                    dirty: false,
+                    size,
+                    content,
+                },
+            );
         Ok(info)
     }
 
@@ -270,9 +274,7 @@ impl EditorSessions {
     }
 
     fn lock(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Session>> {
-        self.sessions
-            .write()
-            .expect("会话锁污染")
+        self.sessions.write().expect("会话锁污染")
     }
 }
 
@@ -350,9 +352,8 @@ pub fn decode(raw: &[u8]) -> Result<(EncodingKind, String)> {
     }
 
     // ② UTF-8 严格校验
-    match std::str::from_utf8(raw) {
-        Ok(text) => return Ok((EncodingKind::Utf8, text.to_string())),
-        Err(_) => {}
+    if let Ok(text) = std::str::from_utf8(raw) {
+        return Ok((EncodingKind::Utf8, text.to_string()));
     }
 
     // ③ chardetng 猜测（GBK 为主）
@@ -425,7 +426,15 @@ mod tests {
         assert_eq!(k, EncodingKind::Utf8);
         assert_eq!(t, "hello 世界");
 
-        let (k, t) = decode([0xEF, 0xBB, 0xBF].iter().chain("BOM文本".as_bytes()).copied().collect::<Vec<u8>>().as_slice()).unwrap();
+        let (k, t) = decode(
+            [0xEF, 0xBB, 0xBF]
+                .iter()
+                .chain("BOM文本".as_bytes())
+                .copied()
+                .collect::<Vec<u8>>()
+                .as_slice(),
+        )
+        .unwrap();
         assert_eq!(k, EncodingKind::Utf8Bom);
         assert_eq!(t, "BOM文本");
     }
@@ -443,7 +452,7 @@ mod tests {
     fn open_update_save_roundtrip_keeps_encoding() {
         let dir = tmpdir("roundtrip");
         let path = dir.join("gbk.txt");
-        std::fs::write(&path, encoding_rs::GBK.encode("你好\r\n世界").0.into_owned()).unwrap();
+        std::fs::write(&path, &encoding_rs::GBK.encode("你好\r\n世界").0).unwrap();
 
         let sessions = EditorSessions::new();
         let info = sessions.open(&path).unwrap();
@@ -455,7 +464,9 @@ mod tests {
         // 更新置脏
         let content = sessions.content(&info.id).unwrap();
         assert_eq!(content, "你好\r\n世界");
-        sessions.update(&info.id, "你好\r\n世界\r\n新增一行").unwrap();
+        sessions
+            .update(&info.id, "你好\r\n世界\r\n新增一行")
+            .unwrap();
         assert!(sessions.list()[0].dirty);
 
         // 保存保持 GBK 编码
@@ -502,7 +513,10 @@ mod tests {
         assert!(!path.with_file_name("note.md.nforge-autosave").exists());
 
         // 关闭
-        assert!(!sessions.close(&info.id).unwrap(), "已保存的会话关闭不提示脏");
+        assert!(
+            !sessions.close(&info.id).unwrap(),
+            "已保存的会话关闭不提示脏"
+        );
         assert!(sessions.close(&info.id).is_err(), "重复关闭报 NotFound");
     }
 

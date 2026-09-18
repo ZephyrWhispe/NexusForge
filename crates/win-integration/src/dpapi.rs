@@ -20,18 +20,9 @@ impl host_core::ports::CryptoPort for Dpapi {
     fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
         let mut out = CRYPT_INTEGER_BLOB::default();
         unsafe {
-            CryptProtectData(
-                &to_blob(plaintext),
-                None,
-                None,
-                None,
-                None,
-                0,
-                &mut out,
-            )
-            .map_err(|e| {
-                AppError::module("CLIPBOARD_CRYPTO_001", format!("DPAPI 加密失败: {e}"), None)
-            })?;
+            CryptProtectData(&to_blob(plaintext), None, None, None, None, 0, &mut out).map_err(
+                |e| AppError::module("CLIPBOARD_CRYPTO_001", format!("DPAPI 加密失败: {e}"), None),
+            )?;
         }
         // 接管 out.pbData 指针的所有权（LocalFree 由 Vec 回收策略替代：Rust 侧复制后立即释放）
         let slice = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) };
@@ -43,10 +34,9 @@ impl host_core::ports::CryptoPort for Dpapi {
     fn unprotect(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
         let mut out = CRYPT_INTEGER_BLOB::default();
         unsafe {
-            CryptUnprotectData(&to_blob(ciphertext), None, None, None, None, 0, &mut out)
-                .map_err(|e| {
-                    AppError::module("CLIPBOARD_CRYPTO_002", format!("DPAPI 解密失败: {e}"), None)
-                })?;
+            CryptUnprotectData(&to_blob(ciphertext), None, None, None, None, 0, &mut out).map_err(
+                |e| AppError::module("CLIPBOARD_CRYPTO_002", format!("DPAPI 解密失败: {e}"), None),
+            )?;
         }
         let slice = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) };
         let v = slice.to_vec();

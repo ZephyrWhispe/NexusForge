@@ -37,7 +37,9 @@ pub fn list_distros() -> Result<Vec<String>> {
 /// 解析 wsl.exe 的 UTF-16LE 行列表
 fn decode_utf16_list(bytes: &[u8]) -> Vec<String> {
     let u16s: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     String::from_utf16_lossy(&u16s)

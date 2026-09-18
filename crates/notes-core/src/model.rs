@@ -103,7 +103,11 @@ fn default_version() -> u32 {
 
 impl Default for CanvasDoc {
     fn default() -> Self {
-        Self { version: 1, nodes: vec![], edges: vec![] }
+        Self {
+            version: 1,
+            nodes: vec![],
+            edges: vec![],
+        }
     }
 }
 

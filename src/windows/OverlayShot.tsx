@@ -329,6 +329,8 @@ export default function OverlayShot() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // undo/redo/confirmSelection 为 ref-only 普通函数（每次渲染新身份），入依赖表
+    // 会导致每帧重挂监听且行为不变；stage/rect/cancel 已在表内保证语义快照
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, rect, cancel]);
 
@@ -354,6 +356,7 @@ export default function OverlayShot() {
     } catch (e) {
       setError(fmtErr(e));
     }
+    // runOcr 是本回调之后的 const（TDZ 无法入依赖表）；其只读 ref/setter，快照无害
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task, rect]);
 
@@ -385,8 +388,7 @@ export default function OverlayShot() {
 
   useEffect(() => {
     if (crop && stage === "edit") setupCanvas(crop);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [crop, stage]);
+  }, [crop, stage, setupCanvas]);
 
   /** CSS → canvas 像素坐标 */
   const toCanvas = (e: { clientX: number; clientY: number }) => {
@@ -816,7 +818,6 @@ export default function OverlayShot() {
     } finally {
       setOcrBusy(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [crop, task]);
 
   // ---------------- 渲染 ----------------
@@ -850,6 +851,8 @@ export default function OverlayShot() {
     return (
       <div
         className={styles.root}
+        // 全屏取色框选面：纯绘图画布容器，交互语义由内部工具条按钮承担（jsx-a11y: presentation）
+        role="presentation"
         style={{ cursor: "crosshair" }}
         onMouseDown={(e) => {
           if (e.button !== 0) return;

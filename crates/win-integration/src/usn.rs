@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use host_core::error::AppError;
 use host_core::ports::{FileHit, UsnIndexPort};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, ERROR_HANDLE_EOF};
+use windows::Win32::Foundation::{CloseHandle, ERROR_HANDLE_EOF, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
@@ -37,7 +37,9 @@ pub struct UsnIndex {
 
 impl UsnIndex {
     pub fn new() -> Self {
-        Self { cache: Mutex::new(None) }
+        Self {
+            cache: Mutex::new(None),
+        }
     }
 }
 
@@ -71,7 +73,11 @@ impl UsnIndexPort for UsnIndex {
                 score,
             });
         }
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit as usize);
         Ok(hits)
     }
@@ -94,7 +100,11 @@ impl UsnIndex {
 /// 打开卷句柄（需管理员；权限不足映射 Permission 错误）
 fn open_volume(drive: &str) -> Result<HANDLE, AppError> {
     // "C:\" → "\\.\C:"
-    let letter = drive.trim_end_matches(['\\', '/']).chars().next().unwrap_or('C');
+    let letter = drive
+        .trim_end_matches(['\\', '/'])
+        .chars()
+        .next()
+        .unwrap_or('C');
     let path = format!(r"\\.\{letter}:");
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -116,7 +126,11 @@ fn open_volume(drive: &str) -> Result<HANDLE, AppError> {
                     hint: "以管理员身份运行，或由系统自动降级为目录遍历".into(),
                 }
             } else {
-                AppError::Network { code: "FILE_SEARCH_003".into(), message: e.to_string(), retryable: false }
+                AppError::Network {
+                    code: "FILE_SEARCH_003".into(),
+                    message: e.to_string(),
+                    retryable: false,
+                }
             }
         })
     }
@@ -164,21 +178,23 @@ fn enumerate_mft(drive: &str) -> Result<FrnMap, AppError> {
                 break;
             }
             // 输出头部 u64 = 下一次枚举的起始 FileReferenceNumber（内核推进游标）
-            let next_start =
-                u64::from_le_bytes(buffer[..8].try_into().expect("USN 头部长度固定"));
+            let next_start = u64::from_le_bytes(buffer[..8].try_into().expect("USN 头部长度固定"));
             let chunk = &buffer[..returned as usize];
             let mut offset = 8usize;
             while offset + 20 <= chunk.len() {
                 let frn = u64::from_le_bytes(chunk[offset..offset + 8].try_into().unwrap());
                 let pfrn = u64::from_le_bytes(chunk[offset + 8..offset + 16].try_into().unwrap());
                 let name_len =
-                    u32::from_le_bytes(chunk[offset + 16..offset + 20].try_into().unwrap()) as usize;
+                    u32::from_le_bytes(chunk[offset + 16..offset + 20].try_into().unwrap())
+                        as usize;
                 if name_len == 0 || offset + 20 + name_len > chunk.len() {
                     break; // 记录被缓冲边界截断（内核保证不会，防御性）
                 }
                 let name_utf16: Vec<u16> = chunk[offset + 20..offset + 20 + name_len]
-                    .chunks_exact(2)
-                    .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| u16::from_le_bytes(*b))
                     .collect();
                 let name = String::from_utf16_lossy(&name_utf16);
                 offset += (20 + name_len + 7) & !7; // 8 字节对齐

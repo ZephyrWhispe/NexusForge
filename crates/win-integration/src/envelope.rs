@@ -66,7 +66,10 @@ impl CryptoPort for EnvelopeCrypto {
         let ct = cipher
             .encrypt(
                 Nonce::from_slice(&nonce_bytes),
-                Payload { msg: plaintext, aad: MAGIC },
+                Payload {
+                    msg: plaintext,
+                    aad: MAGIC,
+                },
             )
             .map_err(|_| {
                 AppError::module(
@@ -118,7 +121,10 @@ impl CryptoPort for EnvelopeCrypto {
         cipher
             .decrypt(
                 Nonce::from_slice(nonce),
-                Payload { msg: ct, aad: MAGIC },
+                Payload {
+                    msg: ct,
+                    aad: MAGIC,
+                },
             )
             .map_err(|_| {
                 AppError::module(
@@ -140,10 +146,18 @@ mod tests {
     }
     impl KeyWrap for MemWrap {
         fn wrap(&self, key: &[u8]) -> Result<Vec<u8>, AppError> {
-            Ok(key.iter().enumerate().map(|(i, b)| b ^ self.kek[i % self.kek.len()]).collect())
+            Ok(key
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ self.kek[i % self.kek.len()])
+                .collect())
         }
         fn unwrap(&self, wrapped: &[u8]) -> Result<Vec<u8>, AppError> {
-            Ok(wrapped.iter().enumerate().map(|(i, b)| b ^ self.kek[i % self.kek.len()]).collect())
+            Ok(wrapped
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ self.kek[i % self.kek.len()])
+                .collect())
         }
     }
 
@@ -222,9 +236,19 @@ mod tests {
         let nonce = [3u8; NONCE_LEN];
         let cipher = Aes256Gcm::new_from_slice(&dek).unwrap();
         let ct = cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: b"hi".as_slice(), aad: b"EVIL" })
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: b"hi".as_slice(),
+                    aad: b"EVIL",
+                },
+            )
             .unwrap();
-        let wrapped = dek.iter().enumerate().map(|(i, b)| b ^ b"kek-A"[i % 5]).collect::<Vec<_>>();
+        let wrapped = dek
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ b"kek-A"[i % 5])
+            .collect::<Vec<_>>();
         let mut blob = Vec::new();
         blob.extend_from_slice(MAGIC);
         blob.extend_from_slice(&(wrapped.len() as u16).to_le_bytes());

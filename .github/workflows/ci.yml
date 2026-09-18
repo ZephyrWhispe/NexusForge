@@ -1,0 +1,44 @@
+# D-01 门禁先行：全量静态门禁 + 测试（DESIGN §9.3 ci.yml 口径）
+# rustfmt/clippy/cargo test 走 Windows runner（win-integration 等 crate 为 windows-cfg 代码）；
+# 前端门禁（tsc/ESLint/Vitest）平台无关，走 ubuntu 提速。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt check
+        run: cargo fmt --all --check
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: typecheck
+        run: npx tsc --noEmit
+      - name: eslint
+        run: npm run lint
+      - name: vitest
+        run: npm run test

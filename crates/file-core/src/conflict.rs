@@ -61,7 +61,7 @@ pub fn unique_target(dst: &Path) -> PathBuf {
     let parent = dst.parent().unwrap_or(Path::new("."));
     let stem = dst
         .file_stem()
-        .map(|s| s.to_string_lossy().to_owned())
+        .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let ext = dst
         .extension()
@@ -96,7 +96,9 @@ pub fn scan_conflicts(srcs: &[PathBuf], dst_dir: &Path) -> Vec<ConflictItem> {
         .filter_map(|src| {
             let name = src.file_name()?.to_string_lossy().into_owned();
             let target = dst_dir.join(&name);
-            target.exists().then(|| ConflictItem { name, dst: target })
+            target
+                .exists()
+                .then_some(ConflictItem { name, dst: target })
         })
         .collect()
 }
@@ -124,7 +126,10 @@ mod tests {
             resolve_target(&src, &dst, ConflictPolicy::Rename),
             Some(d.join("g (2).txt"))
         );
-        assert_eq!(resolve_target(&src, &dst, ConflictPolicy::Overwrite), Some(dst.clone()));
+        assert_eq!(
+            resolve_target(&src, &dst, ConflictPolicy::Overwrite),
+            Some(dst.clone())
+        );
         assert_eq!(resolve_target(&src, &dst, ConflictPolicy::Skip), None);
         assert_eq!(resolve_target(&src, &dst, ConflictPolicy::Ask), None);
         let _ = std::fs::remove_dir_all(&d);
@@ -134,7 +139,10 @@ mod tests {
     fn no_conflict_ask_passthrough() {
         let d = tmpdir("noconflict");
         let dst = d.join("new.txt");
-        assert_eq!(resolve_target(&d.join("a"), &dst, ConflictPolicy::Ask), Some(dst.clone()));
+        assert_eq!(
+            resolve_target(&d.join("a"), &dst, ConflictPolicy::Ask),
+            Some(dst.clone())
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

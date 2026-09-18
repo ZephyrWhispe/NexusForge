@@ -54,7 +54,9 @@ impl NoteStore {
             CREATE INDEX IF NOT EXISTS idx_notes_remind ON notes(reminded, done, remind_at);",
         )
         .map_err(|e| DesktopError::Db(format!("建表失败: {e}")))?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// 新增随记：提取 #标签 + 解析提醒时间
@@ -74,7 +76,10 @@ impl NoteStore {
             done: false,
             created_ms: now_ms,
         };
-        let conn = self.conn.lock().map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Db("锁污染".into()))?;
         conn.execute(
             "INSERT INTO notes (id, content, tags, remind_at, reminded, done, created_ms)
              VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
@@ -92,7 +97,10 @@ impl NoteStore {
 
     /// 列表（新→旧；include_done=false 排除已完成）
     pub fn list(&self, include_done: bool) -> Result<Vec<Note>> {
-        let conn = self.conn.lock().map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Db("锁污染".into()))?;
         let mut stmt = conn
             .prepare(if include_done {
                 "SELECT id, content, tags, remind_at, reminded, done, created_ms FROM notes ORDER BY created_ms DESC"
@@ -109,15 +117,24 @@ impl NoteStore {
     }
 
     pub fn set_done(&self, id: &str, done: bool) -> Result<bool> {
-        let conn = self.conn.lock().map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Db("锁污染".into()))?;
         let n = conn
-            .execute("UPDATE notes SET done = ?2 WHERE id = ?1", params![id, done])
+            .execute(
+                "UPDATE notes SET done = ?2 WHERE id = ?1",
+                params![id, done],
+            )
             .map_err(|e| DesktopError::Db(e.to_string()))?;
         Ok(n > 0)
     }
 
     pub fn remove(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Db("锁污染".into()))?;
         let n = conn
             .execute("DELETE FROM notes WHERE id = ?1", params![id])
             .map_err(|e| DesktopError::Db(e.to_string()))?;
@@ -127,7 +144,10 @@ impl NoteStore {
     /// 取走全部到期提醒（remind_at <= now 且未提醒未完成），并标记已提醒。
     /// 供后台轮询调用（模块层串行调用，无并发竞争）。
     pub fn take_due(&self, now_ms: i64) -> Result<Vec<Note>> {
-        let conn = self.conn.lock().map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Db("锁污染".into()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, content, tags, remind_at, reminded, done, created_ms FROM notes
@@ -140,18 +160,18 @@ impl NoteStore {
             .filter_map(|r| r.ok())
             .collect();
         for n in &notes {
-            conn.execute(
-                "UPDATE notes SET reminded = 1 WHERE id = ?1",
-                params![n.id],
-            )
-            .map_err(|e| DesktopError::Db(e.to_string()))?;
+            conn.execute("UPDATE notes SET reminded = 1 WHERE id = ?1", params![n.id])
+                .map_err(|e| DesktopError::Db(e.to_string()))?;
         }
         Ok(notes)
     }
 
     /// 提醒时间（单条查询，测试/展示用）
     pub fn get(&self, id: &str) -> Result<Option<Note>> {
-        let conn = self.conn.lock().map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| DesktopError::Db("锁污染".into()))?;
         conn.query_row(
             "SELECT id, content, tags, remind_at, reminded, done, created_ms FROM notes WHERE id = ?1",
             params![id],
@@ -218,8 +238,13 @@ pub fn parse_remind(content: &str, now_ms: i64) -> Option<i64> {
 /// 解析日期部分：今天(0)/明天(1)/后天(2)/周X(1..7)/大后天(3)/大前天(-2)/昨天(-1)
 fn parse_day(content: &str, _now_ms: i64) -> Option<(i64, &str)> {
     const WEEK: [(&str, i64); 7] = [
-        ("周一", 1), ("周二", 2), ("周三", 3), ("周四", 4),
-        ("周五", 5), ("周六", 6), ("周日", 0),
+        ("周一", 1),
+        ("周二", 2),
+        ("周三", 3),
+        ("周四", 4),
+        ("周五", 5),
+        ("周六", 6),
+        ("周日", 0),
     ];
     // 裸 HH:MM（无日期词）
     if !contains_any(content, &["今天", "明天", "后天", "昨天", "大后天", "周"])
@@ -292,7 +317,12 @@ fn parse_time(s: &str) -> Option<(u32, u32)> {
     // X点半 / X点XX分 / X点
     if let Some(hpos) = s.find('点') {
         let head = &s[..hpos];
-        let h: u32 = head.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
+        let h: u32 = head
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok()?;
         if h > 23 {
             return None;
         }
@@ -300,10 +330,7 @@ fn parse_time(s: &str) -> Option<(u32, u32)> {
         if rest.starts_with('半') {
             return Some((normalize_hour(h + pm_offset, pm_offset), 30));
         }
-        let mins: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
+        let mins: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if let Ok(m) = mins.parse::<u32>() {
             if m < 60 {
                 return Some((normalize_hour(h + pm_offset, pm_offset), m));
@@ -316,8 +343,22 @@ fn parse_time(s: &str) -> Option<(u32, u32)> {
     let chars: Vec<char> = s.chars().collect();
     for (ci, &c) in chars.iter().enumerate() {
         if c == ':' || c == '：' {
-            let h: u32 = chars[..ci].iter().rev().take_while(|d| d.is_ascii_digit()).collect::<String>().chars().rev().collect::<String>().parse().ok()?;
-            let m: u32 = chars[ci + 1..].iter().take_while(|d| d.is_ascii_digit()).collect::<String>().parse().ok()?;
+            let h: u32 = chars[..ci]
+                .iter()
+                .rev()
+                .take_while(|d| d.is_ascii_digit())
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+                .parse()
+                .ok()?;
+            let m: u32 = chars[ci + 1..]
+                .iter()
+                .take_while(|d| d.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()?;
             if h <= 23 && m < 60 {
                 return Some((h, m));
             }
@@ -452,7 +493,10 @@ mod tests {
         let due = store.take_due(tomorrow9 + 1000).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].content, "明天 9:00 到期任务");
-        assert!(store.take_due(tomorrow9 + 2000).unwrap().is_empty(), "不重复提醒");
+        assert!(
+            store.take_due(tomorrow9 + 2000).unwrap().is_empty(),
+            "不重复提醒"
+        );
 
         // 完成的不再提醒
         let done_note = store.add("明天 9:00 已完成任务", n).unwrap();

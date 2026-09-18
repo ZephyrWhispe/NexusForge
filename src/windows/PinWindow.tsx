@@ -150,6 +150,8 @@ export default function PinWindow() {
   return (
     <div
       className={styles.root}
+      // 贴图窗体本身仅承载滚轮缩放/Alt 滚轮透明度（窗口级手势），按钮语义在工具条上（jsx-a11y: presentation）
+      role="presentation"
       onWheel={(e) => {
         e.preventDefault();
         if (e.altKey) {

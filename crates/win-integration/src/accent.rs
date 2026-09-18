@@ -3,7 +3,7 @@
 //! 主路径：`DwmGetColorizationColor`（COLORREF 0x00BBGGRR）；
 //! 失败（DWM 关闭 / 会话未就绪）返回 Err，由前端回退默认 Windows 蓝。
 
-use windows::Win32::Foundation::{FALSE, BOOL};
+use windows::Win32::Foundation::{BOOL, FALSE};
 use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
 
 use host_core::error::AppError;
@@ -29,14 +29,13 @@ pub fn system_accent_color() -> Result<AccentColor, AppError> {
     unsafe {
         let mut colorref: u32 = 0;
         let mut opaque: BOOL = FALSE;
-        DwmGetColorizationColor(&mut colorref, &mut opaque)
-            .map_err(|e| {
-                AppError::module(
-                    "HOST_SYSTEM_001",
-                    format!("读取系统强调色失败: {e}"),
-                    Some("将使用默认 Windows 蓝"),
-                )
-            })?;
+        DwmGetColorizationColor(&mut colorref, &mut opaque).map_err(|e| {
+            AppError::module(
+                "HOST_SYSTEM_001",
+                format!("读取系统强调色失败: {e}"),
+                Some("将使用默认 Windows 蓝"),
+            )
+        })?;
         // COLORREF = 0x00BBGGRR
         Ok(AccentColor {
             r: (colorref & 0xFF) as u8,
@@ -52,13 +51,21 @@ mod tests {
 
     #[test]
     fn to_hex_format() {
-        assert_eq!(AccentColor { r: 0, g: 0x78, b: 0xd4 }.to_hex(), "#0078d4");
+        assert_eq!(
+            AccentColor {
+                r: 0,
+                g: 0x78,
+                b: 0xd4
+            }
+            .to_hex(),
+            "#0078d4"
+        );
     }
 
     #[test]
     fn colorref_channel_order() {
         // COLORREF 0x00BBGGRR：低 8 位是 R
-        let c: u32 = 0x00D4_78_00; // r=0x00, g=0x78, b=0xd4
+        let c: u32 = 0x00D4_7800; // r=0x00, g=0x78, b=0xd4
         let a = AccentColor {
             r: (c & 0xFF) as u8,
             g: ((c >> 8) & 0xFF) as u8,

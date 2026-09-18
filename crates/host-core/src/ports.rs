@@ -122,7 +122,12 @@ impl PtyHandle {
         resize_tx: tokio::sync::mpsc::Sender<(u16, u16)>,
         kill: Box<dyn FnOnce() + Send>,
     ) -> Self {
-        Self { input_tx, output_rx, resize_tx, kill }
+        Self {
+            input_tx,
+            output_rx,
+            resize_tx,
+            kill,
+        }
     }
 
     /// 显式终止会话（幂等：Drop 亦会调用）
@@ -143,8 +148,10 @@ impl PtyHandle {
 /// 剪贴板（win-integration：AddClipboardFormatListener + 消息循环线程）
 pub trait ClipboardPort: Port {
     /// 启动监听；变更时回调 (内容, 来源应用进程名)。回调在专用 OS 消息循环线程触发。
-    fn start_listener(&self, cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>)
-        -> Result<(), AppError>;
+    fn start_listener(
+        &self,
+        cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>,
+    ) -> Result<(), AppError>;
     /// 卸载监听（S3）：移除系统格式监听、结束消息循环线程、释放回调（进而释放其持有的 Sender）。
     /// 无活动监听时应为无害 no-op。默认空实现，允许无监听能力的测试替身沿用。
     fn stop_listener(&self) -> Result<(), AppError> {
@@ -225,7 +232,13 @@ pub trait ShellPort: Port {
 /// 注册任务以当前用户运行（v1 不用 /RL HIGHEST——需要最高权限的任务才标 UAC 盾）
 pub trait TaskSchdPort: Port {
     /// 注册每日任务（存在则 /F 覆盖）；time 格式 HH:MM
-    fn ensure_daily(&self, task_name: &str, exe: &str, args: &str, time: &str) -> Result<(), AppError>;
+    fn ensure_daily(
+        &self,
+        task_name: &str,
+        exe: &str,
+        args: &str,
+        time: &str,
+    ) -> Result<(), AppError>;
     /// 删除任务（不存在视为成功——幂等）
     fn remove(&self, task_name: &str) -> Result<(), AppError>;
     /// 列出本应用注册的任务名（按前缀过滤）
@@ -306,7 +319,12 @@ pub enum RepairKind {
 /// 系统维护（docs/impl/08 W4–W6：clean_dir/Exec 白名单/还原点/内存清理/DISM-SFC）
 pub trait MaintenancePort: Port {
     /// 清空目录内容（保留目录本身）；skip_recent_hours 内的新文件跳过；返回删除条目数
-    fn clean_dir(&self, path: &str, recursive: bool, skip_recent_hours: u32) -> Result<u32, AppError>;
+    fn clean_dir(
+        &self,
+        path: &str,
+        recursive: bool,
+        skip_recent_hours: u32,
+    ) -> Result<u32, AppError>;
     /// 执行白名单程序（powercfg|dism|sfc|netsh|onedrive_uninstall；args 参数模板拼接，
     /// 禁止透传任意字符串）；返回合并输出（截断到 256KB）；超时强杀
     fn exec(&self, program: &str, args: &[String], timeout_ms: u32) -> Result<String, AppError>;
@@ -419,23 +437,46 @@ pub trait CryptoPort: Port {
 /// 底层输入事件（捕获与注入共用投影；可跨网络序列化）
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RawInput {
-    KeyDown { vk: u16, scan: u32 },
-    KeyUp { vk: u16, scan: u32 },
+    KeyDown {
+        vk: u16,
+        scan: u32,
+    },
+    KeyUp {
+        vk: u16,
+        scan: u32,
+    },
     /// 虚拟桌面物理像素绝对坐标
-    MouseMove { x: i32, y: i32 },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
     /// button: 0 左 1 右 2 中
-    MouseDown { button: u8, x: i32, y: i32 },
-    MouseUp { button: u8, x: i32, y: i32 },
+    MouseDown {
+        button: u8,
+        x: i32,
+        y: i32,
+    },
+    MouseUp {
+        button: u8,
+        x: i32,
+        y: i32,
+    },
     /// delta: 正=上/右滚
-    Wheel { delta: i32, x: i32, y: i32 },
+    Wheel {
+        delta: i32,
+        x: i32,
+        y: i32,
+    },
 }
 
 /// 低级输入捕获（win-integration：WH_KEYBOARD_LL/WH_MOUSE_LL 专用线程）
 pub trait InputHookPort: Port {
     /// 启动捕获；回调在钩子专用线程触发，必须快（<5ms），慢逻辑自行入队。
     /// 返回 false 表示事件被抑制（接管模式下不交还 OS，docs/impl/05 K4）。
-    fn start_capture(&self, cb: Box<dyn Fn(&RawInput) -> bool + Send + Sync>)
-        -> Result<(), AppError>;
+    fn start_capture(
+        &self,
+        cb: Box<dyn Fn(&RawInput) -> bool + Send + Sync>,
+    ) -> Result<(), AppError>;
     /// 停止捕获并卸载钩子
     fn stop_capture(&self) -> Result<(), AppError>;
 }
@@ -548,14 +589,24 @@ mod tests {
         let ports = Ports::new();
         assert!(ports.get::<dyn ClipboardPort>().is_none());
 
-        let fake = Arc::new(FakeClipboard { writes: AtomicU32::new(0) });
+        let fake = Arc::new(FakeClipboard {
+            writes: AtomicU32::new(0),
+        });
         ports.register::<dyn ClipboardPort>(fake.clone());
 
-        let got = ports.get::<dyn ClipboardPort>().expect("应能取回注册的实现");
-        got.write(&ClipContent::Text { text: "hi".into(), html: None })
-            .unwrap();
-        got.write(&ClipContent::Text { text: "hi2".into(), html: None })
-            .unwrap();
+        let got = ports
+            .get::<dyn ClipboardPort>()
+            .expect("应能取回注册的实现");
+        got.write(&ClipContent::Text {
+            text: "hi".into(),
+            html: None,
+        })
+        .unwrap();
+        got.write(&ClipContent::Text {
+            text: "hi2".into(),
+            html: None,
+        })
+        .unwrap();
         assert_eq!(fake.writes.load(Ordering::SeqCst), 2);
 
         // 未注册的 Port 返回 None

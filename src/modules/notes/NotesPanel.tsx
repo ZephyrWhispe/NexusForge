@@ -39,6 +39,7 @@ import {
   type NoteMetaDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { keyActivate } from "../../a11y";
 
 /**
  * 笔记与知识面板（docs/impl/06 N1–N5，M10 v1）：
@@ -572,6 +573,9 @@ export default function NotesPanel() {
                   key={n.path}
                   className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
                   onClick={() => void openNote(n.path)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={keyActivate(() => void openNote(n.path))}
                 >
                   <Text size={300} weight="semibold">
                     {n.title}

@@ -67,7 +67,7 @@ pub trait Module: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{Ports, Port};
+    use crate::ports::Ports;
     use std::sync::atomic::{AtomicU8, Ordering};
 
     struct FakePort;
@@ -110,7 +110,9 @@ mod tests {
 
     #[test]
     fn mock_module_lifecycle_transitions() {
-        let m = MockModule { state: AtomicU8::new(0) };
+        let m = MockModule {
+            state: AtomicU8::new(0),
+        };
         assert_eq!(m.status(), ModuleState::Uninitialized);
 
         let ctx = Arc::new(ModuleContext {

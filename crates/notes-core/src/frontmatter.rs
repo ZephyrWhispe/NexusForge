@@ -87,7 +87,9 @@ fn link_re() -> &'static Regex {
 
 fn tag_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?:^|[\s(（【])#([^\s#。，、！？：；""')）】]+)"#).expect("标签正则"))
+    RE.get_or_init(|| {
+        Regex::new(r#"(?:^|[\s(（【])#([^\s#。，、！？：；""')）】]+)"#).expect("标签正则")
+    })
 }
 
 /// 提取双链目标（trim 后；空目标忽略）
@@ -158,10 +160,7 @@ mod tests {
     #[test]
     fn links_and_alias() {
         let text = "见 [[目标]] 与 [[目标|别名]] 及 [[sub/note.md]]，[[ ]] 空忽略";
-        assert_eq!(
-            extract_links(text),
-            vec!["目标", "sub/note.md"]
-        );
+        assert_eq!(extract_links(text), vec!["目标", "sub/note.md"]);
     }
 
     #[test]

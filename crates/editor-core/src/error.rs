@@ -30,12 +30,12 @@ impl From<EditorError> for AppError {
             EditorError::Encoding(m) => (
                 "EDITOR_ENC_001",
                 m.clone(),
-                Some("可尝试以其他编码重新打开，或文件为二进制格式".into()),
+                Some("可尝试以其他编码重新打开，或文件为二进制格式"),
             ),
             EditorError::Pdf(m) => (
                 "EDITOR_PDF_001",
                 m.clone(),
-                Some("文件可能已损坏、加密或不是有效 PDF".into()),
+                Some("文件可能已损坏、加密或不是有效 PDF"),
             ),
             EditorError::BadParam(m) => ("EDITOR_PARAM_001", m.clone(), None),
         };

@@ -51,8 +51,12 @@ pub fn totp_at(secret_b32: &str, unix_secs: u64) -> Result<(String, u64), AppErr
     let digest = mac.finalize().into_bytes();
     // RFC 4226 动态截断
     let offset = (digest[19] & 0x0f) as usize;
-    let code = u32::from_be_bytes([digest[offset], digest[offset + 1], digest[offset + 2], digest[offset + 3]])
-        & 0x7fff_ffff;
+    let code = u32::from_be_bytes([
+        digest[offset],
+        digest[offset + 1],
+        digest[offset + 2],
+        digest[offset + 3],
+    ]) & 0x7fff_ffff;
     let otp = format!("{:06}", code % 1_000_000);
     let remaining = STEP_SECS - unix_secs % STEP_SECS;
     Ok((otp, remaining))

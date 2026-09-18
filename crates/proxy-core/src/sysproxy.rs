@@ -47,7 +47,10 @@ pub fn backup_before_enable(proxy_dir: &Path, sp: &dyn SysProxyPort) -> Result<(
     let current = sp
         .read()
         .map_err(|e| ProxyError::SysProxy(format!("读取当前系统代理失败: {e}")))?;
-    let backup = Backup { ts_ms: now_ms(), state: current };
+    let backup = Backup {
+        ts_ms: now_ms(),
+        state: current,
+    };
     let tmp = backup_path(proxy_dir).with_extension("json.tmp");
     std::fs::create_dir_all(proxy_dir)?;
     std::fs::write(&tmp, serde_json::to_vec(&backup)?)?;
@@ -73,15 +76,18 @@ pub fn enable(proxy_dir: &Path, sp: &dyn SysProxyPort, mixed_port: u16) -> Resul
 
 /// 关闭/还原：恢复用户原值并广播，成功后删除备份。无备份时仅关闭开关（保守）。
 pub fn restore(proxy_dir: &Path, sp: &dyn SysProxyPort) -> Result<()> {
-    let backup = std::fs::read(backup_path(proxy_dir)).ok().and_then(|raw| {
-        serde_json::from_slice::<Backup>(&raw).ok()
-    });
+    let backup = std::fs::read(backup_path(proxy_dir))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Backup>(&raw).ok());
     let target = match backup {
         Some(b) => {
             // 用户原始设置原样恢复（含原本就没开代理的情形：enable=false）
             b.state
         }
-        None => SysProxyState { enable: false, ..Default::default() },
+        None => SysProxyState {
+            enable: false,
+            ..Default::default()
+        },
     };
     sp.write(&target)
         .map_err(|e| ProxyError::SysProxy(format!("还原系统代理失败: {e}")))?;
@@ -152,7 +158,10 @@ mod tests {
         fn read(&self) -> std::result::Result<SysProxyState, host_core::error::AppError> {
             Ok(self.state.lock().unwrap().clone())
         }
-        fn write(&self, state: &SysProxyState) -> std::result::Result<(), host_core::error::AppError> {
+        fn write(
+            &self,
+            state: &SysProxyState,
+        ) -> std::result::Result<(), host_core::error::AppError> {
             *self.state.lock().unwrap() = state.clone();
             Ok(())
         }
@@ -214,7 +223,12 @@ mod tests {
     fn restore_without_backup_disables() {
         let dir = tmpdir("restore-nb");
         let sp = MockSp::new();
-        sp.write(&SysProxyState { enable: true, server: "x:1".into(), bypass: String::new() }).unwrap();
+        sp.write(&SysProxyState {
+            enable: true,
+            server: "x:1".into(),
+            bypass: String::new(),
+        })
+        .unwrap();
         restore(&dir, &sp).unwrap();
         assert!(!sp.read().unwrap().enable);
         let _ = std::fs::remove_dir_all(&dir);
@@ -232,7 +246,11 @@ mod tests {
         enable(&dir, &sp, 7890).unwrap();
         enable(&dir, &sp, 7890).unwrap(); // 二次开启不得覆盖备份
         restore(&dir, &sp).unwrap();
-        assert_eq!(sp.read().unwrap().server, "orig:1", "备份不应被第二次 enable 刷掉");
+        assert_eq!(
+            sp.read().unwrap().server,
+            "orig:1",
+            "备份不应被第二次 enable 刷掉"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -256,7 +274,12 @@ mod tests {
         let sp = MockSp::new();
         enable(&dir, &sp, 7890).unwrap();
         // 用户后来自己改了系统代理
-        sp.write(&SysProxyState { enable: true, server: "8.8.8.8:3128".into(), bypass: String::new() }).unwrap();
+        sp.write(&SysProxyState {
+            enable: true,
+            server: "8.8.8.8:3128".into(),
+            bypass: String::new(),
+        })
+        .unwrap();
         assert!(!restore_if_ours(&dir, &sp, 7890).unwrap());
         assert_eq!(sp.read().unwrap().server, "8.8.8.8:3128");
         assert!(!has_backup(&dir), "失效备份应清理");

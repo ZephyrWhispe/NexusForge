@@ -81,14 +81,26 @@ where
     stream.read_exact(&mut len_buf).await.map_err(io_err)?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if !(HEADER_LEN..=HEADER_LEN + MAX_PAYLOAD).contains(&len) {
-        return Err(AppError::module("KVM_SESSION_002", "帧载荷超限或长度非法", None));
+        return Err(AppError::module(
+            "KVM_SESSION_002",
+            "帧载荷超限或长度非法",
+            None,
+        ));
     }
     let mut rest = vec![0u8; len];
     stream.read_exact(&mut rest).await.map_err(io_err)?;
     let msg_type = MsgType::from_u8(rest[0]).ok_or_else(|| {
-        AppError::module("KVM_SESSION_003", format!("未知消息类型 0x{:02x}", rest[0]), None)
+        AppError::module(
+            "KVM_SESSION_003",
+            format!("未知消息类型 0x{:02x}", rest[0]),
+            None,
+        )
     })?;
-    Ok(Frame { msg_type, flags: rest[1], payload: rest[2..].to_vec() })
+    Ok(Frame {
+        msg_type,
+        flags: rest[1],
+        payload: rest[2..].to_vec(),
+    })
 }
 
 /// 向流写一帧
@@ -132,11 +144,23 @@ pub fn decode_frame(buf: &[u8]) -> Result<Option<(Frame, usize)>, AppError> {
     if buf.len() < total {
         return Ok(None); // 半帧，等待更多数据
     }
-    let msg_type = MsgType::from_u8(buf[4])
-        .ok_or_else(|| AppError::module("KVM_SESSION_003", format!("未知消息类型 0x{:02x}", buf[4]), None))?;
+    let msg_type = MsgType::from_u8(buf[4]).ok_or_else(|| {
+        AppError::module(
+            "KVM_SESSION_003",
+            format!("未知消息类型 0x{:02x}", buf[4]),
+            None,
+        )
+    })?;
     let flags = buf[5];
     let payload = buf[6..total].to_vec();
-    Ok(Some((Frame { msg_type, flags, payload }, total)))
+    Ok(Some((
+        Frame {
+            msg_type,
+            flags,
+            payload,
+        },
+        total,
+    )))
 }
 
 /// 由 X25519 共享密钥派生 ChaCha20-Poly1305 会话密钥
@@ -147,7 +171,8 @@ pub fn derive_session_key(shared: &[u8], salt_material: &[u8]) -> [u8; 32] {
     let salt: [u8; 32] = Sha256::digest(salt_material).into();
     let hk = Hkdf::<Sha256>::new(Some(&salt), shared);
     let mut okm = [0u8; 32];
-    hk.expand(b"nexusforge-kvm-v1", &mut okm).expect("HKDF 扩展长度合法");
+    hk.expand(b"nexusforge-kvm-v1", &mut okm)
+        .expect("HKDF 扩展长度合法");
     okm
 }
 
@@ -166,7 +191,10 @@ impl FrameCipher {
     }
 
     /// 加密一帧 payload；nonce = 8B 计数器（小端）+ 4B 零前缀，随密文返回
-    pub fn seal(&mut self, plaintext: &[u8]) -> Result<(chacha20poly1305::Nonce, Vec<u8>), AppError> {
+    pub fn seal(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<(chacha20poly1305::Nonce, Vec<u8>), AppError> {
         use chacha20poly1305::aead::Aead;
         let n = self.next_nonce();
         let nonce = chacha20poly1305::Nonce::from_slice(&n);
@@ -181,7 +209,9 @@ impl FrameCipher {
         use chacha20poly1305::aead::Aead;
         self.cipher
             .decrypt(chacha20poly1305::Nonce::from_slice(nonce), ciphertext)
-            .map_err(|_| AppError::module("KVM_SESSION_005", "帧解密失败（密钥或序号不匹配）", None))
+            .map_err(|_| {
+                AppError::module("KVM_SESSION_005", "帧解密失败（密钥或序号不匹配）", None)
+            })
     }
 
     fn next_nonce(&mut self) -> [u8; 12] {
@@ -198,7 +228,11 @@ mod tests {
 
     #[test]
     fn frame_codec_roundtrip_and_guards() {
-        let f = Frame { msg_type: MsgType::Hello, flags: 3, payload: b"hi".to_vec() };
+        let f = Frame {
+            msg_type: MsgType::Hello,
+            flags: 3,
+            payload: b"hi".to_vec(),
+        };
         let wire = encode_frame(&f);
         let (d, consumed) = decode_frame(&wire).unwrap().unwrap();
         assert_eq!(consumed, wire.len());
@@ -221,9 +255,16 @@ mod tests {
     async fn read_write_frame_over_duplex() {
         let (mut a, mut b) = tokio::io::duplex(64);
         let write = tokio::spawn(async move {
-            write_frame(&mut b, &Frame { msg_type: MsgType::Ping, flags: 0, payload: vec![42] })
-                .await
-                .unwrap();
+            write_frame(
+                &mut b,
+                &Frame {
+                    msg_type: MsgType::Ping,
+                    flags: 0,
+                    payload: vec![42],
+                },
+            )
+            .await
+            .unwrap();
         });
         let f = read_frame(&mut a).await.unwrap();
         assert_eq!(f.msg_type, MsgType::Ping);

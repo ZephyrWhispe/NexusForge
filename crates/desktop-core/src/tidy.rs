@@ -49,8 +49,8 @@ pub struct TidyManifest {
 /// 分类判定：返回中文分类名
 pub fn categorize(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
-        "doc" | "docx" | "pdf" | "txt" | "md" | "xls" | "xlsx" | "ppt" | "pptx" | "csv"
-        | "rtf" | "epub" => "文档",
+        "doc" | "docx" | "pdf" | "txt" | "md" | "xls" | "xlsx" | "ppt" | "pptx" | "csv" | "rtf"
+        | "epub" => "文档",
         "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "ico" | "heic" | "tif"
         | "tiff" => "图片",
         "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "cab" | "iso" => "压缩包",
@@ -160,7 +160,10 @@ impl TidyPlanner {
         if remaining.is_empty() {
             let _ = std::fs::remove_file(&self.manifest_path);
         } else {
-            let m = TidyManifest { moves: remaining, applied_ms: manifest.applied_ms };
+            let m = TidyManifest {
+                moves: remaining,
+                applied_ms: manifest.applied_ms,
+            };
             std::fs::write(&self.manifest_path, serde_json::to_vec(&m)?)?;
         }
         Ok(restored)
@@ -193,10 +196,7 @@ fn scan_desktop(desktop: &Path) -> Result<Vec<DesktopItem>> {
         if lower.ends_with(".lnk") || lower.ends_with(".url") {
             continue; // 快捷方式是软件入口，v1 一律不动
         }
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         items.push(DesktopItem {
             name: name.to_string(),
             path: path.display().to_string(),
@@ -301,7 +301,10 @@ mod tests {
         assert_eq!(moved, 5);
         assert_eq!(skipped, 1);
         // 原文件未被覆盖
-        assert_eq!(std::fs::read(desktop.join("文档").join("报告.docx")).unwrap(), b"existing");
+        assert_eq!(
+            std::fs::read(desktop.join("文档").join("报告.docx")).unwrap(),
+            b"existing"
+        );
         assert!(desktop.join("报告.docx").is_file(), "桌面原文件保留");
         // manifest 只含成功条目
         let manifest: TidyManifest =

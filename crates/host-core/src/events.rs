@@ -69,7 +69,10 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
 
 /// 按名取静态主题（仅编译期登记主题可发布——总线契约；模块层发布入口）
 pub fn topic(name: &str) -> Option<&'static str> {
-    TOPIC_REGISTRY.iter().find(|(t, _)| *t == name).map(|(t, _)| *t)
+    TOPIC_REGISTRY
+        .iter()
+        .find(|(t, _)| *t == name)
+        .map(|(t, _)| *t)
 }
 
 /// 统一事件信封（前端收到格式与此一致，M1 冻结契约）
@@ -179,7 +182,11 @@ impl EventBus {
     /// 去抖订阅：同 (topic, payload["key"]) 在 window 内只投递最后一条。
     /// payload 无 "key" 字段时使用固定键 "default"。
     /// 必须在 tokio 运行时内调用；返回的接收器供单消费者使用。
-    pub fn subscribe_debounced(&self, topic: &str, window: std::time::Duration) -> Result<DebouncedReceiver, AppError> {
+    pub fn subscribe_debounced(
+        &self,
+        topic: &str,
+        window: std::time::Duration,
+    ) -> Result<DebouncedReceiver, AppError> {
         let mut rx = self.subscribe(topic)?;
         let (tx, out) = mpsc::channel::<Event>(16);
         tokio::spawn(async move {
@@ -368,8 +375,12 @@ mod tests {
         let mut rx = bus
             .subscribe_debounced("host.module_state", std::time::Duration::from_millis(10))
             .unwrap();
-        bus.publish(Event::new("host.module_state", "host", json!({"key": "m1", "state": "Running"})))
-            .unwrap();
+        bus.publish(Event::new(
+            "host.module_state",
+            "host",
+            json!({"key": "m1", "state": "Running"}),
+        ))
+        .unwrap();
         let ev = rx.recv().await.expect("单条事件应透传");
         assert_eq!(ev.payload["state"], "Running");
     }

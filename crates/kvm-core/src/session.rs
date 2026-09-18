@@ -48,9 +48,18 @@ pub struct HelloPayload {
 /// 会话事件（模块层消费：发布 kvm.session_state / 交付输入帧）
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
-    Established { device_id: String, device_name: String },
-    Closed { device_id: String, reason: String },
-    Frame { device_id: String, frame: Frame },
+    Established {
+        device_id: String,
+        device_name: String,
+    },
+    Closed {
+        device_id: String,
+        reason: String,
+    },
+    Frame {
+        device_id: String,
+        frame: Frame,
+    },
 }
 
 /// 单条会话句柄：send 排队给 writer 任务；close() 或句柄 drop 即关断会话
@@ -90,11 +99,15 @@ impl Drop for SessionHandle {
 }
 
 type SessionRegistry = Arc<Mutex<HashMap<String, SessionHandle>>>;
-/// 注册表语义：**仅服务端会话**（manager 持有句柄保活；reader 退出时移除）。
-/// 客户端会话句柄唯一归调用方，不入注册表——drop 即关断。
+// 注册表语义：**仅服务端会话**（manager 持有句柄保活；reader 退出时移除）。
+// 客户端会话句柄唯一归调用方，不入注册表——drop 即关断。
 
 /// 加密帧写出：payload = nonce || ciphertext
-pub async fn write_encrypted_frame<S>(stream: &mut S, cipher: &mut FrameCipher, frame: &Frame) -> Result<(), AppError>
+pub async fn write_encrypted_frame<S>(
+    stream: &mut S,
+    cipher: &mut FrameCipher,
+    frame: &Frame,
+) -> Result<(), AppError>
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
@@ -102,11 +115,22 @@ where
     let mut payload = Vec::with_capacity(NONCE_LEN + ct.len());
     payload.extend_from_slice(nonce.as_slice());
     payload.extend_from_slice(&ct);
-    write_frame(stream, &Frame { msg_type: frame.msg_type, flags: frame.flags, payload }).await
+    write_frame(
+        stream,
+        &Frame {
+            msg_type: frame.msg_type,
+            flags: frame.flags,
+            payload,
+        },
+    )
+    .await
 }
 
 /// 加密帧读取：解析 nonce 前缀并解密
-pub async fn read_encrypted_frame<S>(stream: &mut S, cipher: &mut FrameCipher) -> Result<Frame, AppError>
+pub async fn read_encrypted_frame<S>(
+    stream: &mut S,
+    cipher: &mut FrameCipher,
+) -> Result<Frame, AppError>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
@@ -118,24 +142,43 @@ where
     let mut n = [0u8; NONCE_LEN];
     n.copy_from_slice(nonce);
     let payload = cipher.open(&n, ct)?;
-    Ok(Frame { msg_type: frame.msg_type, flags: frame.flags, payload })
+    Ok(Frame {
+        msg_type: frame.msg_type,
+        flags: frame.flags,
+        payload,
+    })
 }
 
 fn parse_hello(frame: Frame) -> Result<HelloPayload, AppError> {
     if frame.msg_type != MsgType::Hello {
-        return Err(AppError::module("KVM_SESSION_010", format!("非 Hello 帧: {:?}", frame.msg_type), None));
+        return Err(AppError::module(
+            "KVM_SESSION_010",
+            format!("非 Hello 帧: {:?}", frame.msg_type),
+            None,
+        ));
     }
     serde_json::from_slice(&frame.payload)
         .map_err(|e| AppError::module("KVM_SESSION_010", format!("Hello 载荷非法: {e}"), None))
 }
 
 /// 白名单准入：device_id 必须已配对且指纹一致；返回配对记录与对端静态公钥
-fn verify_peer(store: &PairStore, hello: &HelloPayload) -> Result<(PairedPeer, [u8; 32]), AppError> {
-    let peer = store
-        .get(&hello.device_id)
-        .ok_or_else(|| AppError::module("KVM_SESSION_007", format!("设备 {} 未配对", hello.device_id), None))?;
+fn verify_peer(
+    store: &PairStore,
+    hello: &HelloPayload,
+) -> Result<(PairedPeer, [u8; 32]), AppError> {
+    let peer = store.get(&hello.device_id).ok_or_else(|| {
+        AppError::module(
+            "KVM_SESSION_007",
+            format!("设备 {} 未配对", hello.device_id),
+            None,
+        )
+    })?;
     if peer.fingerprint != hello.fingerprint {
-        return Err(AppError::module("KVM_SESSION_008", "指纹与配对记录不符", None));
+        return Err(AppError::module(
+            "KVM_SESSION_008",
+            "指纹与配对记录不符",
+            None,
+        ));
     }
     let raw = b64_decode(&peer.pubkey_b64)
         .ok_or_else(|| AppError::module("KVM_SESSION_011", "配对记录公钥 base64 非法", None))?;
@@ -180,7 +223,10 @@ fn session_key_from(
     let mut shared = Vec::with_capacity(64);
     shared.extend_from_slice(&dh1);
     shared.extend_from_slice(&dh2);
-    let mut salt = [identity.pubkey_fingerprint.as_bytes(), peer_fingerprint.as_bytes()];
+    let mut salt = [
+        identity.pubkey_fingerprint.as_bytes(),
+        peer_fingerprint.as_bytes(),
+    ];
     salt.sort();
     Ok(derive_session_key(&shared, &salt.concat()))
 }
@@ -188,7 +234,11 @@ fn session_key_from(
 async fn ephemeral_dh2(eph: EphemeralSecret, peer_eph: [u8; 32]) -> Result<[u8; 32], AppError> {
     let shared = eph.diffie_hellman(&X25519PublicKey::from(peer_eph));
     if !shared.was_contributory() {
-        return Err(AppError::module("KVM_SESSION_011", "临时 DH 共享密钥非法（全零）", None));
+        return Err(AppError::module(
+            "KVM_SESSION_011",
+            "临时 DH 共享密钥非法（全零）",
+            None,
+        ));
     }
     Ok(shared.to_bytes())
 }
@@ -199,7 +249,16 @@ async fn server_handshake(
     identity: &Arc<DeviceIdentity>,
     store: &PairStore,
     first: Frame,
-) -> Result<(OwnedReadHalf, OwnedWriteHalf, FrameCipher, FrameCipher, PairedPeer), AppError> {
+) -> Result<
+    (
+        OwnedReadHalf,
+        OwnedWriteHalf,
+        FrameCipher,
+        FrameCipher,
+        PairedPeer,
+    ),
+    AppError,
+> {
     let hello = parse_hello(first)?;
     let (peer, peer_static) = verify_peer(store, &hello)?;
     let peer_eph = peer_eph_pubkey(&hello)?;
@@ -219,7 +278,16 @@ async fn client_handshake(
     mut stream: TcpStream,
     identity: &Arc<DeviceIdentity>,
     store: &PairStore,
-) -> Result<(OwnedReadHalf, OwnedWriteHalf, FrameCipher, FrameCipher, PairedPeer), AppError> {
+) -> Result<
+    (
+        OwnedReadHalf,
+        OwnedWriteHalf,
+        FrameCipher,
+        FrameCipher,
+        PairedPeer,
+    ),
+    AppError,
+> {
     let eph = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
     let eph_pub = X25519PublicKey::from(&eph);
     write_frame(&mut stream, &own_hello(identity, &eph_pub)).await?;
@@ -313,12 +381,23 @@ fn spawn_session(
                     },
                 }
             };
-            registry_reader.lock().expect("会话注册表锁").remove(&device_id_reader);
-            let _ = events_reader.send(SessionEvent::Closed { device_id: device_id_reader, reason: reason.into() });
+            registry_reader
+                .lock()
+                .expect("会话注册表锁")
+                .remove(&device_id_reader);
+            let _ = events_reader.send(SessionEvent::Closed {
+                device_id: device_id_reader,
+                reason: reason.into(),
+            });
         });
     }
 
-    SessionHandle { device_id, device_name, tx, close_tx: Arc::new(close_tx) }
+    SessionHandle {
+        device_id,
+        device_name,
+        tx,
+        close_tx: Arc::new(close_tx),
+    }
 }
 
 /// 服务端总入口：SESSION_PORT 单监听按首帧分流（PairRequest→K2 配对；Hello→K3 会话）
@@ -353,8 +432,17 @@ impl Drop for SessionServeHandle {
 }
 
 impl SessionManager {
-    pub fn new(identity: Arc<DeviceIdentity>, pairing: Arc<PairingService>, store: Arc<PairStore>) -> Arc<Self> {
-        Arc::new(Self { identity, pairing, store, registry: Arc::new(Mutex::new(HashMap::new())) })
+    pub fn new(
+        identity: Arc<DeviceIdentity>,
+        pairing: Arc<PairingService>,
+        store: Arc<PairStore>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            identity,
+            pairing,
+            store,
+            registry: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     /// 活跃会话快照（仅服务端接入的会话；device_id, device_name）
@@ -443,7 +531,10 @@ impl SessionManager {
                         events.clone(),
                     );
                     // 服务端持有句柄保活；reader 退出时自动移除
-                    mgr.registry.lock().expect("会话注册表锁").insert(peer.device_id.clone(), handle);
+                    mgr.registry
+                        .lock()
+                        .expect("会话注册表锁")
+                        .insert(peer.device_id.clone(), handle);
                     let _ = events.send(SessionEvent::Established {
                         device_id: peer.device_id.clone(),
                         device_name: peer.device_name.clone(),
@@ -475,7 +566,8 @@ impl SessionManager {
             let stream = TcpStream::connect(addr)
                 .await
                 .map_err(|e| AppError::module("KVM_SESSION_006", e.to_string(), None))?;
-            let (rd, wr, rx_cipher, tx_cipher, peer) = client_handshake(stream, &identity, &store).await?;
+            let (rd, wr, rx_cipher, tx_cipher, peer) =
+                client_handshake(stream, &identity, &store).await?;
             let handle = spawn_session(
                 peer.device_id.clone(),
                 peer.device_name.clone(),
@@ -523,7 +615,11 @@ mod tests {
 
     #[test]
     fn partial_frame_returns_none() {
-        let frame = Frame { msg_type: MsgType::Ping, flags: 0, payload: vec![9; 100] };
+        let frame = Frame {
+            msg_type: MsgType::Ping,
+            flags: 0,
+            payload: vec![9; 100],
+        };
         let wire = encode_frame(&frame);
         let half = decode_frame(&wire[..50]).unwrap();
         assert!(half.is_none());
@@ -534,7 +630,11 @@ mod tests {
 
     #[test]
     fn unknown_type_rejected() {
-        let mut wire = encode_frame(&Frame { msg_type: MsgType::Ping, flags: 0, payload: vec![] });
+        let mut wire = encode_frame(&Frame {
+            msg_type: MsgType::Ping,
+            flags: 0,
+            payload: vec![],
+        });
         wire[4] = 0xEE;
         assert!(decode_frame(&wire).is_err());
     }
@@ -567,8 +667,13 @@ mod tests {
         let key = [9u8; 32];
         let mut tx = FrameCipher::new(key);
         let mut rx = FrameCipher::new(key);
-        let frame = Frame { msg_type: MsgType::InputEvent, flags: 0, payload: vec![5; 40] };
-        let writer = tokio::spawn(async move { write_encrypted_frame(&mut a, &mut tx, &frame).await });
+        let frame = Frame {
+            msg_type: MsgType::InputEvent,
+            flags: 0,
+            payload: vec![5; 40],
+        };
+        let writer =
+            tokio::spawn(async move { write_encrypted_frame(&mut a, &mut tx, &frame).await });
         let reader = tokio::spawn(async move { read_encrypted_frame(&mut b, &mut rx).await });
         writer.await.unwrap().unwrap();
         let got = reader.await.unwrap().unwrap();
@@ -606,13 +711,24 @@ mod tests {
         seed_peer(&store_a, &id_b);
         seed_peer(&store_b, &id_a);
 
-        let pairing_a = PairingService::new(id_a.clone(), Arc::new(PairCodeManager::new()), store_a.clone());
-        let pairing_b = PairingService::new(id_b.clone(), Arc::new(PairCodeManager::new()), store_b.clone());
+        let pairing_a = PairingService::new(
+            id_a.clone(),
+            Arc::new(PairCodeManager::new()),
+            store_a.clone(),
+        );
+        let pairing_b = PairingService::new(
+            id_b.clone(),
+            Arc::new(PairCodeManager::new()),
+            store_b.clone(),
+        );
         let mgr_b = SessionManager::new(id_b.clone(), pairing_b, store_b.clone());
         let (ev_tx_b, mut ev_rx_b) = mpsc::unbounded_channel();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let _serve = mgr_b.clone().serve(listener, ev_tx_b, Arc::new(Mutex::new(None))).await;
+        let _serve = mgr_b
+            .clone()
+            .serve(listener, ev_tx_b, Arc::new(Mutex::new(None)))
+            .await;
 
         let mgr_a = SessionManager::new(id_a.clone(), pairing_a, store_a.clone());
         let (ev_tx_a, mut ev_rx_a) = mpsc::unbounded_channel();
@@ -623,18 +739,37 @@ mod tests {
         assert_eq!(handle.device_id, id_b.device_id);
 
         // 服务端收到 Established（对端 = A）
-        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_b.recv()).await.unwrap().unwrap();
+        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             matches!(ev, SessionEvent::Established { ref device_id, .. } if *device_id == id_a.device_id),
             "服务端应收到 Established: {ev:?}"
         );
         // 客户端同样收到 Established（对端 = B）
-        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_a.recv()).await.unwrap().unwrap();
-        assert!(matches!(ev, SessionEvent::Established { .. }), "客户端应收到 Established: {ev:?}");
+        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_a.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(ev, SessionEvent::Established { .. }),
+            "客户端应收到 Established: {ev:?}"
+        );
 
         // InputEvent 加密送达服务端
-        handle.send(Frame { msg_type: MsgType::InputEvent, flags: 0, payload: vec![1, 2, 3] }).await.unwrap();
-        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_b.recv()).await.unwrap().unwrap();
+        handle
+            .send(Frame {
+                msg_type: MsgType::InputEvent,
+                flags: 0,
+                payload: vec![1, 2, 3],
+            })
+            .await
+            .unwrap();
+        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
         match ev {
             SessionEvent::Frame { device_id, frame } => {
                 assert_eq!(device_id, id_a.device_id);
@@ -645,8 +780,18 @@ mod tests {
         }
 
         // Ping 空载荷探测 → 服务端自动回 pong（载荷 [1]，送达客户端）
-        handle.send(Frame { msg_type: MsgType::Ping, flags: 0, payload: vec![] }).await.unwrap();
-        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_a.recv()).await.unwrap().unwrap();
+        handle
+            .send(Frame {
+                msg_type: MsgType::Ping,
+                flags: 0,
+                payload: vec![],
+            })
+            .await
+            .unwrap();
+        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_a.recv())
+            .await
+            .unwrap()
+            .unwrap();
         match ev {
             SessionEvent::Frame { frame, .. } => {
                 assert_eq!(frame.msg_type, MsgType::Ping);
@@ -657,8 +802,13 @@ mod tests {
 
         // 关闭客户端 → 服务端 Closed + 注册表清空
         drop(handle);
-        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_b.recv()).await.unwrap().unwrap();
-        assert!(matches!(ev, SessionEvent::Closed { ref device_id, .. } if *device_id == id_a.device_id));
+        let ev = tokio::time::timeout(HANDSHAKE_TIMEOUT, ev_rx_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(ev, SessionEvent::Closed { ref device_id, .. } if *device_id == id_a.device_id)
+        );
         assert!(mgr_b.active_sessions().is_empty());
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
@@ -669,21 +819,34 @@ mod tests {
         let dir_b = temp_dir("ub");
         let id_b = Arc::new(DeviceIdentity::generate("PC-B".into()));
         let store_b = Arc::new(PairStore::load_or_default(&dir_b).unwrap()); // 空白名单
-        let pairing_b = PairingService::new(id_b.clone(), Arc::new(PairCodeManager::new()), store_b.clone());
+        let pairing_b = PairingService::new(
+            id_b.clone(),
+            Arc::new(PairCodeManager::new()),
+            store_b.clone(),
+        );
         let mgr_b = SessionManager::new(id_b, pairing_b, store_b);
         let (ev_tx_b, _ev_rx_b) = mpsc::unbounded_channel();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let _serve = mgr_b.clone().serve(listener, ev_tx_b, Arc::new(Mutex::new(None))).await;
+        let _serve = mgr_b
+            .clone()
+            .serve(listener, ev_tx_b, Arc::new(Mutex::new(None)))
+            .await;
 
         // 未配对设备 X：本端白名单无 B → 客户端握手也过不了
         let dir_x = temp_dir("ux");
         let id_x = Arc::new(DeviceIdentity::generate("PC-X".into()));
         let store_x = Arc::new(PairStore::load_or_default(&dir_x).unwrap());
-        let pairing_x = PairingService::new(id_x.clone(), Arc::new(PairCodeManager::new()), store_x.clone());
+        let pairing_x = PairingService::new(
+            id_x.clone(),
+            Arc::new(PairCodeManager::new()),
+            store_x.clone(),
+        );
         let mgr_x = SessionManager::new(id_x.clone(), pairing_x, store_x.clone());
         let (ev_tx_x, _ev_rx_x) = mpsc::unbounded_channel();
-        let res = tokio::time::timeout(HANDSHAKE_TIMEOUT, mgr_x.connect(addr, ev_tx_x)).await.unwrap();
+        let res = tokio::time::timeout(HANDSHAKE_TIMEOUT, mgr_x.connect(addr, ev_tx_x))
+            .await
+            .unwrap();
         assert!(res.is_err(), "未配对设备必须被拒绝");
 
         // 服务端未建立任何会话

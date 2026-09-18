@@ -134,15 +134,42 @@ mod tests {
     #[test]
     fn crop_clamps_and_swizzles() {
         let f = painted(4, 4, 1, 1, [10, 20, 30]);
-        let (w, h, rgba) = crop_bgra(&f, Rect { x: 1, y: 1, w: 2, h: 2 }).unwrap();
+        let (w, h, rgba) = crop_bgra(
+            &f,
+            Rect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            },
+        )
+        .unwrap();
         assert_eq!((w, h), (2, 2));
         assert_eq!(&rgba[0..3], &[10, 20, 30]);
         assert_eq!(rgba[3], 255);
         // 越界裁剪：与帧边界求交
-        let (w, h, _) = crop_bgra(&f, Rect { x: 3, y: 3, w: 10, h: 10 }).unwrap();
+        let (w, h, _) = crop_bgra(
+            &f,
+            Rect {
+                x: 3,
+                y: 3,
+                w: 10,
+                h: 10,
+            },
+        )
+        .unwrap();
         assert_eq!((w, h), (1, 1));
         // 空区域报错
-        assert!(crop_bgra(&f, Rect { x: 0, y: 0, w: 0, h: 5 }).is_err());
+        assert!(crop_bgra(
+            &f,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 5
+            }
+        )
+        .is_err());
     }
 
     #[test]

@@ -103,7 +103,11 @@ impl StoragePort for TestStoragePort {
         (id == "local").then(|| self.driver.clone())
     }
     fn list_drivers(&self) -> Vec<DriverInfo> {
-        vec![DriverInfo { id: "local".into(), label: "本地磁盘(测试)".into(), roots: vec![] }]
+        vec![DriverInfo {
+            id: "local".into(),
+            label: "本地磁盘(测试)".into(),
+            roots: vec![],
+        }]
     }
 }
 
@@ -117,12 +121,17 @@ fn external_edit_syncs_within_10s_and_rename_never_fails() {
     let l = lib("main");
 
     // 初始库：两篇笔记 + 双链
-    l.create("index.md", "# 索引\n见 [[guide]] 与 [[todo]]\n").unwrap();
+    l.create("index.md", "# 索引\n见 [[guide]] 与 [[todo]]\n")
+        .unwrap();
     l.create("guide.md", "# 指南\n内容\n").unwrap();
     l.create("todo.md", "# 待办\n内容\n").unwrap();
 
     // --- 场景 A：外部编辑器修改 todo.md（新增内容与标签）+ 新建新笔记 ---
-    std::fs::write(l.root().join("todo.md"), "# 待办\n改过 #urgent\n见 [[index]]\n").unwrap();
+    std::fs::write(
+        l.root().join("todo.md"),
+        "# 待办\n改过 #urgent\n见 [[index]]\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(l.root().join("sub")).unwrap();
     std::fs::write(l.root().join("sub/new-note.md"), "# 新笔记\n[[guide]]\n").unwrap();
 
@@ -139,7 +148,10 @@ fn external_edit_syncs_within_10s_and_rename_never_fails() {
     let todo = l.index().get("todo.md").unwrap().unwrap();
     assert!(todo.tags.contains(&"urgent".to_string()));
     let back = l.backlinks("index.md").unwrap();
-    assert!(back.iter().any(|b| b.src == "todo.md"), "外部新增链接未入反链");
+    assert!(
+        back.iter().any(|b| b.src == "todo.md"),
+        "外部新增链接未入反链"
+    );
 
     // --- 场景 B：重命名引用改写循环（10 轮 × 4 处引用，零失败）---
     // 外部再改一次内容，确保改写面对真实磁盘状态
@@ -157,15 +169,26 @@ fn external_edit_syncs_within_10s_and_rename_never_fails() {
         l.sync().unwrap();
         // index.md 增加指向 old 的链接
         let content = std::fs::read_to_string(l.root().join("index.md")).unwrap();
-        std::fs::write(l.root().join("index.md"), format!("{content}\n[[{}]]\n", stem_of(&old))).unwrap();
+        std::fs::write(
+            l.root().join("index.md"),
+            format!("{content}\n[[{}]]\n", stem_of(&old)),
+        )
+        .unwrap();
         l.sync().unwrap();
 
-        l.rename(&old, &new).unwrap_or_else(|e| panic!("第 {round} 轮重命名失败: {e}"));
+        l.rename(&old, &new)
+            .unwrap_or_else(|e| panic!("第 {round} 轮重命名失败: {e}"));
 
         // 引用已改写
         let after = std::fs::read_to_string(l.root().join("index.md")).unwrap();
-        assert!(after.contains(&format!("[[{}]]", stem_of(&new))), "第 {round} 轮引用未改写");
-        assert!(!after.contains(&format!("[[{}]]", stem_of(&old))), "第 {round} 轮残留旧引用");
+        assert!(
+            after.contains(&format!("[[{}]]", stem_of(&new))),
+            "第 {round} 轮引用未改写"
+        );
+        assert!(
+            !after.contains(&format!("[[{}]]", stem_of(&old))),
+            "第 {round} 轮残留旧引用"
+        );
         // 磁盘状态
         assert!(!l.root().join(&old).exists());
         assert!(l.root().join(&new).exists());
@@ -200,7 +223,9 @@ fn rename_conflict_and_missing_are_clean_errors() {
 fn module_init_resolves_driver_via_storage_port() {
     let dir = tmpdir("init");
     let ports = Arc::new(Ports::new());
-    ports.register::<dyn StoragePort>(Arc::new(TestStoragePort { driver: Arc::new(FsDriver) }));
+    ports.register::<dyn StoragePort>(Arc::new(TestStoragePort {
+        driver: Arc::new(FsDriver),
+    }));
     let ctx = Arc::new(ModuleContext {
         app_data_dir: dir.clone(),
         ports,

@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,11 @@ pub fn encode_chunk(sha: [u8; 32], index: u64, data: &[u8]) -> Vec<u8> {
 /// 解码 FileChunk；返回 (sha256, 块索引, 数据切片)
 pub fn decode_chunk(payload: &[u8]) -> Result<([u8; 32], u64, &[u8]), AppError> {
     if payload.len() < CHUNK_HEADER {
-        return Err(AppError::module("KVM_TRANSFER_001", "FileChunk 头长度非法", None));
+        return Err(AppError::module(
+            "KVM_TRANSFER_001",
+            "FileChunk 头长度非法",
+            None,
+        ));
     }
     let mut sha = [0u8; 32];
     sha.copy_from_slice(&payload[..32]);
@@ -84,28 +88,42 @@ pub fn decode_chunk(payload: &[u8]) -> Result<([u8; 32], u64, &[u8]), AppError> 
 }
 
 fn clip_frame(payload: Vec<u8>) -> Frame {
-    Frame { msg_type: MsgType::ClipData, flags: 0, payload }
+    Frame {
+        msg_type: MsgType::ClipData,
+        flags: 0,
+        payload,
+    }
 }
 
 fn meta_frame(meta: &FileMetaPayload) -> Result<Frame, AppError> {
     Ok(Frame {
         msg_type: MsgType::FileMeta,
         flags: 0,
-        payload: serde_json::to_vec(meta)
-            .map_err(|e| AppError::module("KVM_TRANSFER_002", format!("FileMeta 序列化失败: {e}"), None))?,
+        payload: serde_json::to_vec(meta).map_err(|e| {
+            AppError::module(
+                "KVM_TRANSFER_002",
+                format!("FileMeta 序列化失败: {e}"),
+                None,
+            )
+        })?,
     })
 }
 
 fn chunk_frame(sha: [u8; 32], index: u64, data: &[u8]) -> Frame {
-    Frame { msg_type: MsgType::FileChunk, flags: 0, payload: encode_chunk(sha, index, data) }
+    Frame {
+        msg_type: MsgType::FileChunk,
+        flags: 0,
+        payload: encode_chunk(sha, index, data),
+    }
 }
 
 pub(crate) fn ack_frame(ack: &AckPayload) -> Result<Frame, AppError> {
     Ok(Frame {
         msg_type: MsgType::Ack,
         flags: 0,
-        payload: serde_json::to_vec(ack)
-            .map_err(|e| AppError::module("KVM_TRANSFER_003", format!("Ack 序列化失败: {e}"), None))?,
+        payload: serde_json::to_vec(ack).map_err(|e| {
+            AppError::module("KVM_TRANSFER_003", format!("Ack 序列化失败: {e}"), None)
+        })?,
     })
 }
 
@@ -123,12 +141,20 @@ pub struct FileProgress {
 
 /// 发送剪贴板内容（单帧；超限报错——超大图片应走文件通道）
 pub async fn send_clip(handle: &SessionHandle, content: &ClipContent) -> Result<(), AppError> {
-    let payload = serde_json::to_vec(content)
-        .map_err(|e| AppError::module("KVM_TRANSFER_005", format!("ClipContent 序列化失败: {e}"), None))?;
+    let payload = serde_json::to_vec(content).map_err(|e| {
+        AppError::module(
+            "KVM_TRANSFER_005",
+            format!("ClipContent 序列化失败: {e}"),
+            None,
+        )
+    })?;
     if payload.len() > CLIP_MAX {
         return Err(AppError::module(
             "KVM_TRANSFER_006",
-            format!("剪贴板内容 {} 字节超单帧预算 {CLIP_MAX}，请走文件通道", payload.len()),
+            format!(
+                "剪贴板内容 {} 字节超单帧预算 {CLIP_MAX}，请走文件通道",
+                payload.len()
+            ),
             None,
         ));
     }
@@ -157,15 +183,16 @@ pub async fn send_file(
     let size = file
         .metadata()
         .await
-        .map_err(|e| AppError::module("KVM_TRANSFER_008", format!("读取文件元数据失败: {e}"), None))?
+        .map_err(|e| {
+            AppError::module("KVM_TRANSFER_008", format!("读取文件元数据失败: {e}"), None)
+        })?
         .len();
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK_SIZE];
     loop {
-        let n = file
-            .read(&mut buf)
-            .await
-            .map_err(|e| AppError::module("KVM_TRANSFER_008", format!("读取文件失败: {e}"), None))?;
+        let n = file.read(&mut buf).await.map_err(|e| {
+            AppError::module("KVM_TRANSFER_008", format!("读取文件失败: {e}"), None)
+        })?;
         if n == 0 {
             break;
         }
@@ -187,39 +214,50 @@ pub async fn send_file(
 
     // 首次进度立即上报（调用方由此获得 transfer_id，无需等待首块）
     if let Some(cb) = progress.as_ref() {
-        cb(FileProgress { transfer_id: sha_hex.clone(), sent_chunks: 0, total_chunks });
+        cb(FileProgress {
+            transfer_id: sha_hex.clone(),
+            sent_chunks: 0,
+            total_chunks,
+        });
     }
 
     // ② 逐块顺序发送（复用句柄上的有序队列；每块 await 保证背压）
     if size > 0 {
-        let mut file = tokio::fs::File::open(path)
-            .await
-            .map_err(|e| AppError::module("KVM_TRANSFER_008", format!("打开文件失败: {e}"), None))?;
+        let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+            AppError::module("KVM_TRANSFER_008", format!("打开文件失败: {e}"), None)
+        })?;
         let mut last_report = Instant::now();
         for index in 0..total_chunks {
             // 非末块必须读满：AsyncReadExt::read 允许部分读取，短块会让接收端
             // 按 index*chunk_size 定位出现零洞，SHA256 终验必然不符（K9 环回实测踩坑）
             let is_last = index + 1 == total_chunks;
             let n = if is_last {
-                file.read(&mut buf)
-                    .await
-                    .map_err(|e| AppError::module("KVM_TRANSFER_008", format!("读取文件失败: {e}"), None))?
+                file.read(&mut buf).await.map_err(|e| {
+                    AppError::module("KVM_TRANSFER_008", format!("读取文件失败: {e}"), None)
+                })?
             } else {
-                file.read_exact(&mut buf)
-                    .await
-                    .map_err(|e| AppError::module("KVM_TRANSFER_008", format!("读取文件失败: {e}"), None))?;
+                file.read_exact(&mut buf).await.map_err(|e| {
+                    AppError::module("KVM_TRANSFER_008", format!("读取文件失败: {e}"), None)
+                })?;
                 buf.len()
             };
             if n == 0 {
-                return Err(AppError::module("KVM_TRANSFER_009", "文件在发送中途被截断", None));
+                return Err(AppError::module(
+                    "KVM_TRANSFER_009",
+                    "文件在发送中途被截断",
+                    None,
+                ));
             }
             handle.send(chunk_frame(sha, index, &buf[..n])).await?;
             if let Some(cb) = progress.as_ref() {
-                let due = index + 1 == total_chunks
-                    || last_report.elapsed() >= PROGRESS_INTERVAL;
+                let due = index + 1 == total_chunks || last_report.elapsed() >= PROGRESS_INTERVAL;
                 if due {
                     last_report = Instant::now();
-                    cb(FileProgress { transfer_id: sha_hex.clone(), sent_chunks: index + 1, total_chunks });
+                    cb(FileProgress {
+                        transfer_id: sha_hex.clone(),
+                        sent_chunks: index + 1,
+                        total_chunks,
+                    });
                 }
             }
         }
@@ -273,7 +311,10 @@ pub struct TransferManager {
 
 impl TransferManager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), transfers: Mutex::new(HashMap::new()) }
+        Self {
+            root: root.into(),
+            transfers: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn incoming_root(&self) -> &Path {
@@ -287,15 +328,21 @@ impl TransferManager {
     /// FileMeta：建档 / 续传重入 / 空文件直通
     pub fn on_meta(&self, meta: FileMetaPayload) -> Result<MetaOutcome, AppError> {
         if meta.sha256 != meta.transfer_id {
-            return Err(AppError::module("KVM_TRANSFER_010", "transfer_id 与 sha256 不一致", None));
+            return Err(AppError::module(
+                "KVM_TRANSFER_010",
+                "transfer_id 与 sha256 不一致",
+                None,
+            ));
         }
-        std::fs::create_dir_all(&self.root)
-            .map_err(|e| AppError::module("KVM_TRANSFER_011", format!("创建接收目录失败: {e}"), None))?;
+        std::fs::create_dir_all(&self.root).map_err(|e| {
+            AppError::module("KVM_TRANSFER_011", format!("创建接收目录失败: {e}"), None)
+        })?;
 
         if meta.size == 0 {
             let final_path = self.claim_final_path(&meta.name)?;
-            std::fs::File::create(&final_path)
-                .map_err(|e| AppError::module("KVM_TRANSFER_011", format!("创建空文件失败: {e}"), None))?;
+            std::fs::File::create(&final_path).map_err(|e| {
+                AppError::module("KVM_TRANSFER_011", format!("创建空文件失败: {e}"), None)
+            })?;
             return Ok(MetaOutcome::Completed { final_path });
         }
 
@@ -303,19 +350,36 @@ impl TransferManager {
         if let Some(incoming) = transfers.get(&meta.transfer_id) {
             // 重入：同哈希续传，仅更新位图快照返回
             let received = incoming.received.len() as u64;
-            return Ok(MetaOutcome::Accepted { received, total_chunks: incoming.meta.total_chunks });
+            return Ok(MetaOutcome::Accepted {
+                received,
+                total_chunks: incoming.meta.total_chunks,
+            });
         }
         // 预分配：create 不截断（保留既有部分数据），set_len 对齐到声明大小
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(self.part_path(&meta.transfer_id))
-            .map_err(|e| AppError::module("KVM_TRANSFER_011", format!("创建 part 文件失败: {e}"), None))?;
-        file.set_len(meta.size)
-            .map_err(|e| AppError::module("KVM_TRANSFER_011", format!("预分配文件失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("KVM_TRANSFER_011", format!("创建 part 文件失败: {e}"), None)
+            })?;
+        file.set_len(meta.size).map_err(|e| {
+            AppError::module("KVM_TRANSFER_011", format!("预分配文件失败: {e}"), None)
+        })?;
         let total_chunks = meta.total_chunks;
-        transfers.insert(meta.transfer_id.clone(), Incoming { meta, file, received: HashSet::new() });
-        Ok(MetaOutcome::Accepted { received: 0, total_chunks })
+        transfers.insert(
+            meta.transfer_id.clone(),
+            Incoming {
+                meta,
+                file,
+                received: HashSet::new(),
+            },
+        );
+        Ok(MetaOutcome::Accepted {
+            received: 0,
+            total_chunks,
+        })
     }
 
     /// FileChunk：seek 写入 + 位图；集齐即终验改名。
@@ -325,14 +389,18 @@ impl TransferManager {
         let transfer_id = hex_str(&sha);
         let done = {
             let mut transfers = self.transfers.lock().expect("传输表锁");
-            let incoming = transfers
-                .get_mut(&transfer_id)
-                .ok_or_else(|| AppError::module("KVM_TRANSFER_012", "收到未建档的 FileChunk", None))?;
+            let incoming = transfers.get_mut(&transfer_id).ok_or_else(|| {
+                AppError::module("KVM_TRANSFER_012", "收到未建档的 FileChunk", None)
+            })?;
             if !incoming.received.insert(index) {
                 // 重复块（续传重发）：已落盘，跳过写入
             } else {
                 if data.len() > incoming.meta.chunk_size as usize {
-                    return Err(AppError::module("KVM_TRANSFER_013", "块数据超过声明 chunk_size", None));
+                    return Err(AppError::module(
+                        "KVM_TRANSFER_013",
+                        "块数据超过声明 chunk_size",
+                        None,
+                    ));
                 }
                 let offset = index * incoming.meta.chunk_size as u64;
                 use std::io::{Seek, Write};
@@ -340,7 +408,9 @@ impl TransferManager {
                 f.seek(SeekFrom::Start(offset))
                     .and_then(|_| f.write_all(data))
                     .and_then(|_| f.flush())
-                    .map_err(|e| AppError::module("KVM_TRANSFER_014", format!("写入块失败: {e}"), None))?;
+                    .map_err(|e| {
+                        AppError::module("KVM_TRANSFER_014", format!("写入块失败: {e}"), None)
+                    })?;
             }
             incoming.received.len() as u64 == incoming.meta.total_chunks
         };
@@ -349,12 +419,20 @@ impl TransferManager {
                 let transfers = self.transfers.lock().expect("传输表锁");
                 match transfers.get(&transfer_id) {
                     Some(i) => (i.received.len() as u64, i.meta.total_chunks),
-                    None => return self.finalize(&transfer_id).map(|final_path| ChunkOutcome::Completed { final_path }),
+                    None => {
+                        return self
+                            .finalize(&transfer_id)
+                            .map(|final_path| ChunkOutcome::Completed { final_path })
+                    }
                 }
             };
-            return Ok(ChunkOutcome::InProgress { received, total_chunks: total });
+            return Ok(ChunkOutcome::InProgress {
+                received,
+                total_chunks: total,
+            });
         }
-        self.finalize(&transfer_id).map(|final_path| ChunkOutcome::Completed { final_path })
+        self.finalize(&transfer_id)
+            .map(|final_path| ChunkOutcome::Completed { final_path })
     }
 
     /// 终验 + 出表 + 改名（锁外慢操作；part 清理在终验失败时同步执行）
@@ -366,11 +444,13 @@ impl TransferManager {
             .remove(transfer_id)
             .ok_or_else(|| AppError::module("KVM_TRANSFER_012", "终验时传输条目缺失", None))?;
         let part = self.part_path(transfer_id);
-        let mut file = std::fs::File::open(&part)
-            .map_err(|e| AppError::module("KVM_TRANSFER_015", format!("打开 part 失败: {e}"), None))?;
+        let mut file = std::fs::File::open(&part).map_err(|e| {
+            AppError::module("KVM_TRANSFER_015", format!("打开 part 失败: {e}"), None)
+        })?;
         let mut hasher = Sha256::new();
-        std::io::copy(&mut file, &mut hasher)
-            .map_err(|e| AppError::module("KVM_TRANSFER_015", format!("终验读取失败: {e}"), None))?;
+        std::io::copy(&mut file, &mut hasher).map_err(|e| {
+            AppError::module("KVM_TRANSFER_015", format!("终验读取失败: {e}"), None)
+        })?;
         let actual = hex_str(&hasher.finalize());
         if actual != transfer_id {
             let _ = std::fs::remove_file(&part);
@@ -398,7 +478,10 @@ impl TransferManager {
         if !candidate.exists() {
             return Ok(candidate);
         }
-        let stem = Path::new(safe_name).file_stem().and_then(|s| s.to_str()).unwrap_or(safe_name);
+        let stem = Path::new(safe_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(safe_name);
         let ext = Path::new(safe_name).extension().and_then(|e| e.to_str());
         for n in 1..1000u32 {
             let dotted = match ext {
@@ -410,13 +493,18 @@ impl TransferManager {
                 return Ok(p);
             }
         }
-        Err(AppError::module("KVM_TRANSFER_018", "重名文件过多，无法命名", None))
+        Err(AppError::module(
+            "KVM_TRANSFER_018",
+            "重名文件过多，无法命名",
+            None,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn temp_root(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("kvm-transfer-{tag}-{}", uuid::Uuid::now_v7()));
@@ -462,12 +550,19 @@ mod tests {
             chunk_size: 300,
             total_chunks,
         };
-        assert!(matches!(mgr.on_meta(meta.clone()).unwrap(), MetaOutcome::Accepted { received: 0, .. }));
+        assert!(matches!(
+            mgr.on_meta(meta.clone()).unwrap(),
+            MetaOutcome::Accepted { received: 0, .. }
+        ));
 
         for (i, chunk) in body.chunks(300).enumerate() {
             let out = mgr.on_chunk(&encode_chunk(sha, i as u64, chunk)).unwrap();
             let done = i + 1 == total_chunks as usize;
-            assert_eq!(done, matches!(out, ChunkOutcome::Completed { .. }), "块 {i} 结果: {out:?}");
+            assert_eq!(
+                done,
+                matches!(out, ChunkOutcome::Completed { .. }),
+                "块 {i} 结果: {out:?}"
+            );
         }
         let final_path = root.join("hello.bin");
         assert!(final_path.exists());
@@ -529,10 +624,14 @@ mod tests {
         mgr.on_meta(meta.clone()).unwrap();
         // 收 2 块后中断
         mgr.on_chunk(&encode_chunk(sha, 0, &body[..200])).unwrap();
-        mgr.on_chunk(&encode_chunk(sha, 1, &body[200..400])).unwrap();
+        mgr.on_chunk(&encode_chunk(sha, 1, &body[200..400]))
+            .unwrap();
         // 重传 FileMeta（同哈希）→ 位图保留
         match mgr.on_meta(meta).unwrap() {
-            MetaOutcome::Accepted { received, total_chunks } => {
+            MetaOutcome::Accepted {
+                received,
+                total_chunks,
+            } => {
                 assert_eq!((received, total_chunks), (2, 3));
             }
             other => panic!("期望 Accepted，实际 {other:?}"),
@@ -581,7 +680,10 @@ mod tests {
     }
 
     fn hex_to_bytes(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     // ---- K6 端到端：真实加密会话上的文件传输环回 ----
@@ -630,17 +732,28 @@ mod tests {
 
         let mgr_b = SessionManager::new(
             id_b.clone(),
-            PairingService::new(id_b.clone(), Arc::new(PairCodeManager::new()), store_b.clone()),
+            PairingService::new(
+                id_b.clone(),
+                Arc::new(PairCodeManager::new()),
+                store_b.clone(),
+            ),
             store_b.clone(),
         );
         let (ev_tx_b, mut ev_rx_b) = mpsc::unbounded_channel();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let _serve = mgr_b.clone().serve(listener, ev_tx_b, Arc::new(StdMutex::new(None))).await;
+        let _serve = mgr_b
+            .clone()
+            .serve(listener, ev_tx_b, Arc::new(StdMutex::new(None)))
+            .await;
 
         let mgr_a = SessionManager::new(
             id_a.clone(),
-            PairingService::new(id_a.clone(), Arc::new(PairCodeManager::new()), store_a.clone()),
+            PairingService::new(
+                id_a.clone(),
+                Arc::new(PairCodeManager::new()),
+                store_a.clone(),
+            ),
             store_a.clone(),
         );
         let (ev_tx_a, mut ev_rx_a) = mpsc::unbounded_channel();
@@ -656,10 +769,13 @@ mod tests {
                 match ev {
                     SessionEvent::Frame { frame, .. } => match frame.msg_type {
                         MsgType::FileMeta => {
-                            let meta: FileMetaPayload = serde_json::from_slice(&frame.payload).unwrap();
+                            let meta: FileMetaPayload =
+                                serde_json::from_slice(&frame.payload).unwrap();
                             match recv_mgr.on_meta(meta).unwrap() {
                                 MetaOutcome::Accepted { .. } => {}
-                                MetaOutcome::Completed { final_path } => return Ok::<_, String>(final_path),
+                                MetaOutcome::Completed { final_path } => {
+                                    return Ok::<_, String>(final_path)
+                                }
                             }
                         }
                         MsgType::FileChunk => match recv_mgr.on_chunk(&frame.payload).unwrap() {
@@ -694,7 +810,9 @@ mod tests {
         let body: Vec<u8> = (0..700_000u32).map(|i| (i * 7 % 256) as u8).collect();
         std::fs::write(&src, &body).unwrap();
 
-        let transfer_id = send_file(&handle_a, &src, Some(Box::new(|_p| {}))).await.unwrap();
+        let transfer_id = send_file(&handle_a, &src, Some(Box::new(|_p| {})))
+            .await
+            .unwrap();
 
         // 接收完成 + 内容逐字节一致
         let final_path = tokio::time::timeout(std::time::Duration::from_secs(15), recv_task)

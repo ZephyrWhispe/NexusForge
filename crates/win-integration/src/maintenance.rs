@@ -51,7 +51,9 @@ impl MaintenanceWin {
         if !EXEC_ALLOWLIST.contains(&program) {
             return Err(AppError::module(
                 "SYS_MAINT_010",
-                format!("程序 {program} 不在执行白名单（powercfg/dism/sfc/netsh/onedrive_uninstall）"),
+                format!(
+                    "程序 {program} 不在执行白名单（powercfg/dism/sfc/netsh/onedrive_uninstall）"
+                ),
                 None,
             ));
         }
@@ -61,7 +63,11 @@ impl MaintenanceWin {
             let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
             let sys32 = format!(r"{sysroot}\System32\OneDriveSetup.exe");
             let wow64 = format!(r"{sysroot}\SysWOW64\OneDriveSetup.exe");
-            let path = if std::path::Path::new(&sys32).exists() { sys32 } else { wow64 };
+            let path = if std::path::Path::new(&sys32).exists() {
+                sys32
+            } else {
+                wow64
+            };
             (path, vec!["/uninstall".to_string()])
         } else {
             (program.to_string(), args.to_vec())
@@ -72,7 +78,9 @@ impl MaintenanceWin {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| AppError::module("SYS_MAINT_011", format!("{program} 启动失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("SYS_MAINT_011", format!("{program} 启动失败: {e}"), None)
+            })?;
         // 管道读线程（try_wait 收割后 wait_with_output 不可用——标准坑）
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
@@ -111,7 +119,13 @@ impl MaintenanceWin {
                     }
                     std::thread::sleep(Duration::from_millis(120));
                 }
-                Err(e) => return Err(AppError::module("SYS_MAINT_013", format!("{program} 等待失败: {e}"), None)),
+                Err(e) => {
+                    return Err(AppError::module(
+                        "SYS_MAINT_013",
+                        format!("{program} 等待失败: {e}"),
+                        None,
+                    ))
+                }
             }
         };
         let out_buf = out_reader.join().unwrap_or_default();
@@ -125,7 +139,11 @@ impl MaintenanceWin {
         if !status.success() {
             return Err(AppError::module(
                 "SYS_MAINT_014",
-                format!("{program} 退出码 {}：{}", status.code().unwrap_or(-1), cap_output(text)),
+                format!(
+                    "{program} 退出码 {}：{}",
+                    status.code().unwrap_or(-1),
+                    cap_output(text)
+                ),
                 None,
             ));
         }
@@ -148,7 +166,10 @@ impl MaintenanceWin {
         }
         #[link(name = "srclient")]
         extern "system" {
-            fn SRSetRestorePointW(p_restore_pt_spec: *mut RestorePointInfoW, p_smgr_status: *mut SmgrStatus) -> i32;
+            fn SRSetRestorePointW(
+                p_restore_pt_spec: *mut RestorePointInfoW,
+                p_smgr_status: *mut SmgrStatus,
+            ) -> i32;
         }
         const BEGIN_SYSTEM_CHANGE: u32 = 100;
         const END_SYSTEM_CHANGE: u32 = 101;
@@ -164,7 +185,10 @@ impl MaintenanceWin {
             ll_sequence_number: 0,
             sz_description: desc,
         };
-        let mut status = SmgrStatus { n_status: 0, ll_sequence_number: 0 };
+        let mut status = SmgrStatus {
+            n_status: 0,
+            ll_sequence_number: 0,
+        };
         // SAFETY：两个结构体均为合法栈上 FFI 参数；srclient 仅写 status/begin
         let ok = unsafe { SRSetRestorePointW(&mut begin, &mut status) };
         if ok == 0 {
@@ -174,7 +198,11 @@ impl MaintenanceWin {
                 1055 => Some("还原点创建被策略禁用"),
                 _ => None,
             };
-            return Err(AppError::module("SYS_MAINT_020", format!("创建还原点失败（错误码 {code}）"), hint));
+            return Err(AppError::module(
+                "SYS_MAINT_020",
+                format!("创建还原点失败（错误码 {code}）"),
+                hint,
+            ));
         }
         let seq = status.ll_sequence_number;
         let mut end = RestorePointInfoW {
@@ -183,7 +211,10 @@ impl MaintenanceWin {
             ll_sequence_number: seq,
             sz_description: desc,
         };
-        let mut status2 = SmgrStatus { n_status: 0, ll_sequence_number: 0 };
+        let mut status2 = SmgrStatus {
+            n_status: 0,
+            ll_sequence_number: 0,
+        };
         // SAFETY：同上
         let ok2 = unsafe { SRSetRestorePointW(&mut end, &mut status2) };
         if ok2 == 0 {
@@ -201,16 +232,36 @@ impl MaintenanceWin {
         // DISM/SFC 常规 10–30 分钟；超时 30 分钟
         const REPAIR_TIMEOUT_MS: u32 = 30 * 60 * 1000;
         match kind {
-            RepairKind::DismScanHealth => {
-                Self::run_exec("dism", &["/Online".into(), "/Cleanup-Image".into(), "/ScanHealth".into()], REPAIR_TIMEOUT_MS)
+            RepairKind::DismScanHealth => Self::run_exec(
+                "dism",
+                &[
+                    "/Online".into(),
+                    "/Cleanup-Image".into(),
+                    "/ScanHealth".into(),
+                ],
+                REPAIR_TIMEOUT_MS,
+            ),
+            RepairKind::DismRestoreHealth => Self::run_exec(
+                "dism",
+                &[
+                    "/Online".into(),
+                    "/Cleanup-Image".into(),
+                    "/RestoreHealth".into(),
+                ],
+                REPAIR_TIMEOUT_MS,
+            ),
+            RepairKind::DismComponentCleanup => Self::run_exec(
+                "dism",
+                &[
+                    "/Online".into(),
+                    "/Cleanup-Image".into(),
+                    "/StartComponentCleanup".into(),
+                ],
+                REPAIR_TIMEOUT_MS,
+            ),
+            RepairKind::SfcScanNow => {
+                Self::run_exec("sfc", &["/scannow".into()], REPAIR_TIMEOUT_MS)
             }
-            RepairKind::DismRestoreHealth => {
-                Self::run_exec("dism", &["/Online".into(), "/Cleanup-Image".into(), "/RestoreHealth".into()], REPAIR_TIMEOUT_MS)
-            }
-            RepairKind::DismComponentCleanup => {
-                Self::run_exec("dism", &["/Online".into(), "/Cleanup-Image".into(), "/StartComponentCleanup".into()], REPAIR_TIMEOUT_MS)
-            }
-            RepairKind::SfcScanNow => Self::run_exec("sfc", &["/scannow".into()], REPAIR_TIMEOUT_MS),
         }
     }
 
@@ -220,10 +271,19 @@ impl MaintenanceWin {
         let flag = if disable { "$true" } else { "$false" };
         let script = format!("Set-MpPreference -DisableRealtimeMonitoring {flag}");
         let out = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| AppError::module("SYS_MAINT_030", format!("PowerShell 启动失败: {e}"), None))?;
+            .map_err(|e| {
+                AppError::module("SYS_MAINT_030", format!("PowerShell 启动失败: {e}"), None)
+            })?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             // 篡改保护拦截 / 非管理员 / Defender 服务被第三方接管 → 统一如实报错 + 官方指引
@@ -245,7 +305,12 @@ impl Default for MaintenanceWin {
 }
 
 impl MaintenancePort for MaintenanceWin {
-    fn clean_dir(&self, path: &str, recursive: bool, skip_recent_hours: u32) -> Result<u32, AppError> {
+    fn clean_dir(
+        &self,
+        path: &str,
+        recursive: bool,
+        skip_recent_hours: u32,
+    ) -> Result<u32, AppError> {
         let dir = std::path::Path::new(path);
         if !dir.is_dir() {
             // 目录不存在 → 视为已清理（幂等）
@@ -254,8 +319,9 @@ impl MaintenancePort for MaintenanceWin {
         let skip = Duration::from_secs(skip_recent_hours as u64 * 3600);
         let now = std::time::SystemTime::now();
         let mut removed = 0u32;
-        let entries =
-            std::fs::read_dir(dir).map_err(|e| AppError::module("SYS_MAINT_001", format!("读取 {path} 失败: {e}"), None))?;
+        let entries = std::fs::read_dir(dir).map_err(|e| {
+            AppError::module("SYS_MAINT_001", format!("读取 {path} 失败: {e}"), None)
+        })?;
         for e in entries.flatten() {
             let p = e.path();
             // 占用/权限失败逐条容忍（部分清理优于全盘报错）；24h 内新文件跳过（在用缓存保护）
@@ -296,13 +362,19 @@ impl MaintenancePort for MaintenanceWin {
     fn empty_working_set(&self) -> Result<u32, AppError> {
         use windows::Win32::Foundation::{CloseHandle, HANDLE};
         use windows::Win32::System::ProcessStatus::{EmptyWorkingSet, EnumProcesses};
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA};
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA,
+        };
         const MAX_PIDS: usize = 4096;
         let mut pids = [0u32; MAX_PIDS];
         let mut bytes_returned = 0u32;
         // SAFETY：固定容量缓冲区 + 长度传入；EnumProcesses 只写 bytes_returned 内
         unsafe {
-            EnumProcesses(pids.as_mut_ptr(), (MAX_PIDS * 4) as u32, &mut bytes_returned);
+            let _ = EnumProcesses(
+                pids.as_mut_ptr(),
+                (MAX_PIDS * 4) as u32,
+                &mut bytes_returned,
+            );
         }
         let count = (bytes_returned as usize / 4).min(MAX_PIDS);
         let self_pid = std::process::id();
@@ -317,7 +389,9 @@ impl MaintenancePort for MaintenanceWin {
                     PROCESS_ACCESS_RIGHTS(PROCESS_SET_QUOTA.0 | PROCESS_QUERY_INFORMATION.0),
                     false,
                     pid,
-                ) else { continue };
+                ) else {
+                    continue;
+                };
                 if !h.is_invalid() && EmptyWorkingSet(h).is_ok() {
                     ok_count += 1;
                 }
@@ -344,9 +418,16 @@ mod tests {
     #[test]
     fn exec_allowlist_rejects_unknown_program() {
         let m = MaintenanceWin::new();
-        let err = m.exec("powershell", &["-Command".into(), "whoami".into()], 1000).unwrap_err();
-        assert!(err.to_string().contains("白名单"), "任意程序必须拒绝: {err}");
-        let err2 = m.exec("cmd", &["/c".into(), "echo hi".into()], 1000).unwrap_err();
+        let err = m
+            .exec("powershell", &["-Command".into(), "whoami".into()], 1000)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("白名单"),
+            "任意程序必须拒绝: {err}"
+        );
+        let err2 = m
+            .exec("cmd", &["/c".into(), "echo hi".into()], 1000)
+            .unwrap_err();
         assert!(err2.to_string().contains("白名单"));
     }
 
@@ -393,7 +474,10 @@ mod tests {
             .write(true)
             .open(&old)
             .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(3 * 86400)))
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::now() - Duration::from_secs(3 * 86400)),
+            )
             .unwrap();
         // "新"文件：mtime 为当前时刻 → 24h 白名单命中
         let fresh = base.join("fresh.txt");
@@ -401,7 +485,10 @@ mod tests {
         let m = MaintenanceWin::new();
         let n = m.clean_dir(base.to_str().unwrap(), true, 24).unwrap();
         // old.txt（旧）删除；fresh.txt 与刚创建的 sub 目录（mtime 24h 内）→ 白名单跳过
-        assert_eq!(n, 1, "仅 old.txt 删除；fresh.txt 与刚创建的 sub 目录被白名单跳过");
+        assert_eq!(
+            n, 1,
+            "仅 old.txt 删除；fresh.txt 与刚创建的 sub 目录被白名单跳过"
+        );
         assert!(base.is_dir(), "目录本身保留");
         assert!(fresh.exists(), "24h 内新文件不删");
         assert!(sub.exists(), "24h 内新建目录不删");
@@ -415,7 +502,9 @@ mod tests {
         assert!(!sub.exists());
         assert!(!sub2.exists());
         // 幂等：目录不存在返回 0
-        let n3 = m.clean_dir(base.join("no_such").to_str().unwrap(), true, 24).unwrap();
+        let n3 = m
+            .clean_dir(base.join("no_such").to_str().unwrap(), true, 24)
+            .unwrap();
         assert_eq!(n3, 0);
         let _ = std::fs::remove_dir_all(&base);
     }

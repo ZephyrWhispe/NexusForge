@@ -35,7 +35,12 @@ pub trait PkgManager: Send + Sync {
     /// 变更命令行预览（UI 确认展示）
     fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String>;
     /// 变更操作（emit 逐行输出；docs/impl/06 SY1：输出流式回传 UI）
-    fn run_action(&self, action: &str, package_id: &str, emit: &mut dyn FnMut(String)) -> Result<Vec<String>>;
+    fn run_action(
+        &self,
+        action: &str,
+        package_id: &str,
+        emit: &mut dyn FnMut(String),
+    ) -> Result<Vec<String>>;
 }
 
 /// PATH 查找（Windows where.exe）
@@ -57,7 +62,10 @@ fn run_lines(exe: &str, args: &[&str], mut emit: impl FnMut(String)) -> Result<V
         .stderr(Stdio::null())
         .spawn()
         .map_err(SysError::Io)?;
-    let stdout = child.stdout.take().ok_or_else(|| SysError::PkgCmd("无 stdout".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SysError::PkgCmd("无 stdout".into()))?;
     let mut lines = Vec::new();
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
@@ -81,7 +89,9 @@ fn run_lines(exe: &str, args: &[&str], mut emit: impl FnMut(String)) -> Result<V
 fn parse_winget_table(lines: &[String]) -> Vec<PkgEntry> {
     let mut out = Vec::new();
     // 跳过到表头行
-    let header_idx = lines.iter().position(|l| l.contains("Id") && l.contains("Version"));
+    let header_idx = lines
+        .iter()
+        .position(|l| l.contains("Id") && l.contains("Version"));
     let Some(hi) = header_idx else { return out };
     let header = &lines[hi];
     let cols = split_columns(header);
@@ -99,7 +109,9 @@ fn parse_winget_table(lines: &[String]) -> Vec<PkgEntry> {
         let cells = split_columns(line);
         // 行结构：Name / Id / Version / [Available /] Source——winget 对空白列不产生 cell，
         // 故用尾部对齐：末列恒为 Source（有 Source 列时），Available 取倒数第二列
-        let Some(id) = cells.get(1).cloned() else { continue };
+        let Some(id) = cells.get(1).cloned() else {
+            continue;
+        };
         if id.is_empty() {
             continue;
         }
@@ -177,12 +189,20 @@ impl PkgManager for WingetManager {
         }
         let lines = run_lines(
             "winget.exe",
-            &["list", "--accept-source-agreements", "--disable-interactivity"],
+            &[
+                "list",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ],
             |_| {},
         )?;
         let mut pkgs = parse_winget_table(&lines);
         for p in &mut pkgs {
-            p.source = if p.source.is_empty() { "winget".into() } else { p.source.clone() };
+            p.source = if p.source.is_empty() {
+                "winget".into()
+            } else {
+                p.source.clone()
+            };
         }
         Ok(pkgs)
     }
@@ -198,7 +218,12 @@ impl PkgManager for WingetManager {
         }
     }
 
-    fn run_action(&self, action: &str, package_id: &str, emit: &mut dyn FnMut(String)) -> Result<Vec<String>> {
+    fn run_action(
+        &self,
+        action: &str,
+        package_id: &str,
+        emit: &mut dyn FnMut(String),
+    ) -> Result<Vec<String>> {
         let (exe, args): (&str, Vec<String>) = match action {
             "install" => (
                 "winget.exe",
@@ -237,7 +262,7 @@ impl PkgManager for WingetManager {
             _ => return Err(SysError::BadParam(format!("未知操作: {action}"))),
         };
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let lines = run_lines(exe, &refs, |l| emit(l))?;
+        let lines = run_lines(exe, &refs, emit)?;
         Ok(lines)
     }
 }
@@ -294,15 +319,29 @@ impl PkgManager for ScoopManager {
         }
     }
 
-    fn run_action(&self, action: &str, package_id: &str, emit: &mut dyn FnMut(String)) -> Result<Vec<String>> {
+    fn run_action(
+        &self,
+        action: &str,
+        package_id: &str,
+        emit: &mut dyn FnMut(String),
+    ) -> Result<Vec<String>> {
         let args: Vec<String> = match action {
-            "install" => vec!["/C", "scoop", "install", package_id].into_iter().map(String::from).collect(),
-            "uninstall" => vec!["/C", "scoop", "uninstall", package_id].into_iter().map(String::from).collect(),
-            "upgrade_all" => vec!["/C", "scoop", "update", "*"].into_iter().map(String::from).collect(),
+            "install" => vec!["/C", "scoop", "install", package_id]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            "uninstall" => vec!["/C", "scoop", "uninstall", package_id]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            "upgrade_all" => vec!["/C", "scoop", "update", "*"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
             _ => return Err(SysError::BadParam(format!("未知操作: {action}"))),
         };
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_lines("cmd", &refs, |l| emit(l))
+        run_lines("cmd", &refs, emit)
     }
 }
 
@@ -356,21 +395,39 @@ impl PkgManager for ChocoManager {
         }
     }
 
-    fn run_action(&self, action: &str, package_id: &str, emit: &mut dyn FnMut(String)) -> Result<Vec<String>> {
+    fn run_action(
+        &self,
+        action: &str,
+        package_id: &str,
+        emit: &mut dyn FnMut(String),
+    ) -> Result<Vec<String>> {
         let args: Vec<String> = match action {
-            "install" => vec!["install", package_id, "-y", "--no-progress"].into_iter().map(String::from).collect(),
-            "uninstall" => vec!["uninstall", package_id, "-y", "--no-progress"].into_iter().map(String::from).collect(),
-            "upgrade_all" => vec!["upgrade", "all", "-y", "--no-progress"].into_iter().map(String::from).collect(),
+            "install" => vec!["install", package_id, "-y", "--no-progress"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            "uninstall" => vec!["uninstall", package_id, "-y", "--no-progress"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            "upgrade_all" => vec!["upgrade", "all", "-y", "--no-progress"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
             _ => return Err(SysError::BadParam(format!("未知操作: {action}"))),
         };
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_lines("choco.exe", &refs, |l| emit(l))
+        run_lines("choco.exe", &refs, emit)
     }
 }
 
 /// 默认管理器集合（winget / scoop / choco）
 pub fn builtin_managers() -> Vec<Box<dyn PkgManager>> {
-    vec![Box::new(WingetManager), Box::new(ScoopManager), Box::new(ChocoManager)]
+    vec![
+        Box::new(WingetManager),
+        Box::new(ScoopManager),
+        Box::new(ChocoManager),
+    ]
 }
 
 /// SY2 合并视图：多源去重，winget 优先（同 name 小写 key 首个胜出）
@@ -385,7 +442,7 @@ pub fn merge_installed(sources: Vec<(&'static str, Vec<PkgEntry>)>) -> Vec<PkgEn
             }
         }
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 
@@ -433,7 +490,10 @@ mod tests {
             source: src.into(),
         };
         let a = vec![pkg("git", "Git", "2.1", "winget")];
-        let b = vec![pkg("git", "Git", "9.9", "scoop"), pkg("ripgrep", "ripgrep", "14", "scoop")];
+        let b = vec![
+            pkg("git", "Git", "9.9", "scoop"),
+            pkg("ripgrep", "ripgrep", "14", "scoop"),
+        ];
         let merged = merge_installed(vec![("winget", a), ("scoop", b)]);
         // 排序按 name 小写："git" < "ripgrep"
         assert_eq!(merged.len(), 2);
@@ -445,9 +505,18 @@ mod tests {
     #[test]
     fn cmd_previews_show_exact_command() {
         let w = WingetManager;
-        assert!(w.cmd_preview("install", "Git.Git").unwrap().contains("winget install --id Git.Git --exact --silent"));
-        assert!(w.cmd_preview("uninstall", "Git.Git").unwrap().contains("winget uninstall"));
-        assert!(w.cmd_preview("upgrade_all", "").unwrap().contains("winget upgrade --all"));
+        assert!(w
+            .cmd_preview("install", "Git.Git")
+            .unwrap()
+            .contains("winget install --id Git.Git --exact --silent"));
+        assert!(w
+            .cmd_preview("uninstall", "Git.Git")
+            .unwrap()
+            .contains("winget uninstall"));
+        assert!(w
+            .cmd_preview("upgrade_all", "")
+            .unwrap()
+            .contains("winget upgrade --all"));
         assert!(w.cmd_preview("bad", "").is_err());
     }
 

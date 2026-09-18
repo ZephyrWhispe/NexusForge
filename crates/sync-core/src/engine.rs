@@ -88,8 +88,8 @@ impl SyncEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     /// 内存数据集（HashMap 投影）
     #[derive(Default)]
@@ -101,7 +101,10 @@ mod tests {
             Ok(self.data.lock().unwrap().get(id).cloned())
         }
         fn apply_upsert(&self, _entity: &str, id: &str, value: &serde_json::Value) -> Result<()> {
-            self.data.lock().unwrap().insert(id.to_string(), value.clone());
+            self.data
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), value.clone());
             Ok(())
         }
         fn apply_delete(&self, _entity: &str, id: &str) -> Result<()> {
@@ -111,7 +114,10 @@ mod tests {
     }
 
     fn log(tag: &str) -> OpLog {
-        OpLog::open(&std::env::temp_dir().join(format!("nf_sync_eng_{tag}_{}.db", std::process::id()))).unwrap()
+        OpLog::open(
+            &std::env::temp_dir().join(format!("nf_sync_eng_{tag}_{}.db", std::process::id())),
+        )
+        .unwrap()
     }
 
     fn op(id: &str, eid: &str, ts: i64, device: &str, content: &str) -> OpEntry {
@@ -131,18 +137,30 @@ mod tests {
         let store = FakeStore::default();
         // 新实体直接应用
         let o1 = op("r1", "a.md", 100, "devB", "v1");
-        assert_eq!(SyncEngine::apply_remote(&l, &store, &o1).unwrap(), ApplyOutcome::Applied);
+        assert_eq!(
+            SyncEngine::apply_remote(&l, &store, &o1).unwrap(),
+            ApplyOutcome::Applied
+        );
         assert_eq!(store.data.lock().unwrap()["a.md"]["content"], "v1");
         // 旧 ts 到达 → LostLww，数据集不动
         let o0 = op("r0", "a.md", 50, "devB", "old");
-        assert_eq!(SyncEngine::apply_remote(&l, &store, &o0).unwrap(), ApplyOutcome::LostLww);
+        assert_eq!(
+            SyncEngine::apply_remote(&l, &store, &o0).unwrap(),
+            ApplyOutcome::LostLww
+        );
         assert_eq!(store.data.lock().unwrap()["a.md"]["content"], "v1");
         // 更新 ts → 覆盖
         let o2 = op("r2", "a.md", 200, "devB", "v2");
-        assert_eq!(SyncEngine::apply_remote(&l, &store, &o2).unwrap(), ApplyOutcome::Applied);
+        assert_eq!(
+            SyncEngine::apply_remote(&l, &store, &o2).unwrap(),
+            ApplyOutcome::Applied
+        );
         assert_eq!(store.data.lock().unwrap()["a.md"]["content"], "v2");
         // 重放同 op → Noop
-        assert_eq!(SyncEngine::apply_remote(&l, &store, &o2).unwrap(), ApplyOutcome::Noop);
+        assert_eq!(
+            SyncEngine::apply_remote(&l, &store, &o2).unwrap(),
+            ApplyOutcome::Noop
+        );
     }
 
     #[test]
@@ -152,15 +170,24 @@ mod tests {
         // 同 ts："devB" > "devA" → devB 胜
         l.append(&op("t1", "b.md", 100, "devA", "from-a")).unwrap();
         let incoming = op("t2", "b.md", 100, "devB", "from-b");
-        assert_eq!(SyncEngine::apply_remote(&l, &store, &incoming).unwrap(), ApplyOutcome::Applied);
+        assert_eq!(
+            SyncEngine::apply_remote(&l, &store, &incoming).unwrap(),
+            ApplyOutcome::Applied
+        );
         assert_eq!(store.data.lock().unwrap()["b.md"]["content"], "from-b");
         // 反向：本地 device 字典序更大 → incoming 输
         let l2 = log("tie2");
         let store2 = FakeStore::default();
-        l2.append(&op("t3", "c.md", 100, "devZ", "local-z")).unwrap();
-        store2.apply_upsert("note", "c.md", &json!({ "content": "local-z" })).unwrap();
+        l2.append(&op("t3", "c.md", 100, "devZ", "local-z"))
+            .unwrap();
+        store2
+            .apply_upsert("note", "c.md", &json!({ "content": "local-z" }))
+            .unwrap();
         let incoming = op("t4", "c.md", 100, "devA", "from-a");
-        assert_eq!(SyncEngine::apply_remote(&l2, &store2, &incoming).unwrap(), ApplyOutcome::LostLww);
+        assert_eq!(
+            SyncEngine::apply_remote(&l2, &store2, &incoming).unwrap(),
+            ApplyOutcome::LostLww
+        );
         assert_eq!(store2.data.lock().unwrap()["c.md"]["content"], "local-z");
     }
 
@@ -168,7 +195,9 @@ mod tests {
     fn delete_propagates() {
         let l = log("del");
         let store = FakeStore::default();
-        store.apply_upsert("note", "d.md", &json!({ "content": "x" })).unwrap();
+        store
+            .apply_upsert("note", "d.md", &json!({ "content": "x" }))
+            .unwrap();
         let del = OpEntry {
             op_id: "d1".into(),
             entity: "note".into(),
@@ -177,14 +206,18 @@ mod tests {
             device: "devB".into(),
             value: json!({ "deleted": true }),
         };
-        assert_eq!(SyncEngine::apply_remote(&l, &store, &del).unwrap(), ApplyOutcome::Applied);
+        assert_eq!(
+            SyncEngine::apply_remote(&l, &store, &del).unwrap(),
+            ApplyOutcome::Applied
+        );
         assert!(store.data.lock().unwrap().get("d.md").is_none());
     }
 
     #[test]
     fn record_local_appends_with_device() {
         let l = log("rec");
-        let op = SyncEngine::record_local(&l, "note", "n.md", json!({"content": "hi"}), "self", 42).unwrap();
+        let op = SyncEngine::record_local(&l, "note", "n.md", json!({"content": "hi"}), "self", 42)
+            .unwrap();
         assert_eq!(op.device, "self");
         assert_eq!(l.count(), 1);
         assert_eq!(l.latest_for("note", "n.md").unwrap().unwrap().ts, 42);

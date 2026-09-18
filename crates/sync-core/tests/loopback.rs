@@ -6,10 +6,10 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use host_core::device::{b64_encode, DeviceIdentity, PairStore, PairedPeer};
 use host_core::events::EventBus;
 use host_core::module::{Module, ModuleContext};
 use host_core::ports::Ports;
-use host_core::device::{b64_encode, DeviceIdentity, PairStore, PairedPeer};
 use sync_core::engine::ChangeApplier;
 use sync_core::SyncModule;
 
@@ -23,7 +23,10 @@ struct FakeStore {
 }
 impl FakeStore {
     fn put(&self, id: &str, content: &str) {
-        self.data.lock().unwrap().insert(id.to_string(), serde_json::json!({ "content": content }));
+        self.data
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), serde_json::json!({ "content": content }));
     }
     fn get(&self, id: &str) -> Option<serde_json::Value> {
         self.data.lock().unwrap().get(id).cloned()
@@ -33,8 +36,16 @@ impl ChangeApplier for FakeStore {
     fn snapshot(&self, _entity: &str, id: &str) -> sync_core::Result<Option<serde_json::Value>> {
         Ok(self.get(id))
     }
-    fn apply_upsert(&self, _entity: &str, id: &str, value: &serde_json::Value) -> sync_core::Result<()> {
-        self.data.lock().unwrap().insert(id.to_string(), value.clone());
+    fn apply_upsert(
+        &self,
+        _entity: &str,
+        id: &str,
+        value: &serde_json::Value,
+    ) -> sync_core::Result<()> {
+        self.data
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), value.clone());
         Ok(())
     }
     fn apply_delete(&self, _entity: &str, id: &str) -> sync_core::Result<()> {
@@ -50,12 +61,18 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 /// 装配一台可同步的实例：预置身份 + 互配记录 → init + start；返回真实身份供配对
-fn setup(tag: &str, peer_record: Option<PairedPeer>) -> (Arc<SyncModule>, Arc<FakeStore>, Arc<DeviceIdentity>) {
+fn setup(
+    tag: &str,
+    peer_record: Option<PairedPeer>,
+) -> (Arc<SyncModule>, Arc<FakeStore>, Arc<DeviceIdentity>) {
     let dir = temp_dir(tag);
     let kvm_dir = dir.join("kvm");
     let identity = Arc::new(DeviceIdentity::load_or_create(&kvm_dir, None).unwrap());
     if let Some(p) = peer_record {
-        PairStore::load_or_default(&kvm_dir).unwrap().upsert(p).unwrap();
+        PairStore::load_or_default(&kvm_dir)
+            .unwrap()
+            .upsert(p)
+            .unwrap();
     }
     let module = Arc::new(SyncModule::new(&dir));
     let store = Arc::new(FakeStore::default());
@@ -74,7 +91,10 @@ fn setup(tag: &str, peer_record: Option<PairedPeer>) -> (Arc<SyncModule>, Arc<Fa
 /// 等待 B 的监听就绪（accept_loop 异步 bind；探测连接会被握手超时丢弃，无副作用）
 async fn wait_port(port: u16) {
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

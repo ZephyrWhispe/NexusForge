@@ -53,7 +53,9 @@ impl StorageDriver for LocalDriver {
             std::fs::remove_file(&long).map_err(io_err)?;
         } else {
             return Err(crate::error::FileError::NotFound(
-                crate::browse::display_path(path).to_string_lossy().into_owned(),
+                crate::browse::display_path(path)
+                    .to_string_lossy()
+                    .into_owned(),
             )
             .into());
         }
@@ -63,8 +65,11 @@ impl StorageDriver for LocalDriver {
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(crate::browse::to_long_path(parent)).map_err(io_err)?;
         }
-        std::fs::rename(crate::browse::to_long_path(from), crate::browse::to_long_path(to))
-            .map_err(io_err)?;
+        std::fs::rename(
+            crate::browse::to_long_path(from),
+            crate::browse::to_long_path(to),
+        )
+        .map_err(io_err)?;
         Ok(())
     }
     fn read_file(&self, path: &Path) -> Result<Vec<u8>, AppError> {
@@ -96,7 +101,9 @@ impl Default for DriverRegistry {
 
 impl DriverRegistry {
     pub fn new() -> Self {
-        Self { drivers: RwLock::new(vec![Arc::new(LocalDriver)]) }
+        Self {
+            drivers: RwLock::new(vec![Arc::new(LocalDriver)]),
+        }
     }
 
     /// 注册驱动（同 id 重复注册以最后者为准）
@@ -174,7 +181,9 @@ mod tests {
         let entries = local.list(&d.join("a/b")).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "f.txt");
-        local.rename(&d.join("a/b/f.txt"), &d.join("a/b/g.txt")).unwrap();
+        local
+            .rename(&d.join("a/b/f.txt"), &d.join("a/b/g.txt"))
+            .unwrap();
         assert!(d.join("a/b/g.txt").exists());
         local.remove(&d.join("a/b/g.txt"), false).unwrap();
         assert!(!d.join("a/b/g.txt").exists());

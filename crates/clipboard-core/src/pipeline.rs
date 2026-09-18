@@ -111,7 +111,8 @@ impl CapturePipeline {
                 return;
             }
             let _ = tx_cb.send((content, source_app));
-        }) as Box<dyn Fn(host_core::ports::ClipContent, Option<String>) + Send + Sync>)?;
+        })
+            as Box<dyn Fn(host_core::ports::ClipContent, Option<String>) + Send + Sync>)?;
 
         // worker：批量落库；cancel 置位后一个 WORKER_TICK 内退出，释放持有的 Arc<ClipStore>
         std::thread::Builder::new()
@@ -129,7 +130,10 @@ impl CapturePipeline {
             .map_err(|e| AppError::module("CLIPBOARD_PIPELINE_001", e.to_string(), None))?;
         // 启动期临时引用就地释放；worker 那份随线程结束 drop → store 连接随之回收
         drop(pipeline);
-        Ok(PipelineHandle { cancel, live_workers: live })
+        Ok(PipelineHandle {
+            cancel,
+            live_workers: live,
+        })
     }
 
     /// write 前调用：记录回写窗口起点
@@ -191,8 +195,15 @@ impl CapturePipeline {
 
         // ② 按类型分流（图片/文件受开关控制）
         match content {
-            host_core::ports::ClipContent::Text { text, .. } => self.process_text(text, source_app, &config),
-            host_core::ports::ClipContent::Image { format, width, height, bytes } => {
+            host_core::ports::ClipContent::Text { text, .. } => {
+                self.process_text(text, source_app, &config)
+            }
+            host_core::ports::ClipContent::Image {
+                format,
+                width,
+                height,
+                bytes,
+            } => {
                 if !config.capture_images {
                     return;
                 }
@@ -235,16 +246,23 @@ impl CapturePipeline {
                     }
                 };
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&cipher);
-                self.store.insert_encrypted(&b64, group, source_app.as_deref())
+                self.store
+                    .insert_encrypted(&b64, group, source_app.as_deref())
             }
-            None => self.store.insert(&text, group, false, source_app.as_deref()),
+            None => self
+                .store
+                .insert(&text, group, false, source_app.as_deref()),
         };
         let Ok(id) = result else {
             return;
         };
 
         // ⑥ 清理：每 50 条插入执行一次保留期/上限淘汰（避免逐条 DELETE）
-        if self.insert_counter.fetch_add(1, Ordering::Relaxed) % 50 == 0 {
+        if self
+            .insert_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(50)
+        {
             let _ = self.store.purge(config.retention_days, config.max_entries);
         }
 
@@ -258,8 +276,18 @@ impl CapturePipeline {
             .ok();
     }
 
-    fn process_image(&self, format: &str, width: u32, height: u32, bytes: &[u8], source_app: Option<String>) {
-        let Ok(id) = self.store.insert_image(format, width, height, bytes, source_app.as_deref()) else {
+    fn process_image(
+        &self,
+        format: &str,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+        source_app: Option<String>,
+    ) {
+        let Ok(id) = self
+            .store
+            .insert_image(format, width, height, bytes, source_app.as_deref())
+        else {
             return;
         };
         self.bus
@@ -303,10 +331,12 @@ mod tests {
 
     use host_core::ports::ClipContent;
 
+    type FakeCb = Arc<Mutex<Option<Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>>>>;
+
     /// 替身端口：start_listener 仅捕获回调（stop_listener 沿用默认 no-op，
     /// 因此回调及其持有的 Sender 全程存活——正是旧实现 worker 永不退出的根因场景）
     struct FakeClipboard {
-        cb: Arc<Mutex<Option<Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>>>>,
+        cb: FakeCb,
     }
     impl ClipboardPort for FakeClipboard {
         fn start_listener(
@@ -351,19 +381,15 @@ mod tests {
     fn start_with_fake(tag: &str) -> (PipelineHandle, Arc<ClipStore>, Arc<FakeClipboard>) {
         let store = temp_store(tag);
         let bus = Arc::new(EventBus::new());
-        let port = Arc::new(FakeClipboard { cb: Arc::new(Mutex::new(None)) });
+        let port = Arc::new(FakeClipboard {
+            cb: Arc::new(Mutex::new(None)),
+        });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
         let write_back = Arc::new(Mutex::new(None));
-        let handle = CapturePipeline::start(
-            port.clone(),
-            store.clone(),
-            bus,
-            crypto,
-            config,
-            write_back,
-        )
-        .unwrap();
+        let handle =
+            CapturePipeline::start(port.clone(), store.clone(), bus, crypto, config, write_back)
+                .unwrap();
         (handle, store, port)
     }
 
@@ -371,7 +397,10 @@ mod tests {
         let cb = port.cb.lock().unwrap();
         let Some(f) = cb.as_ref() else { return };
         f(
-            ClipContent::Text { text: text.into(), html: None },
+            ClipContent::Text {
+                text: text.into(),
+                html: None,
+            },
             Some("tester".into()),
         );
     }
@@ -384,7 +413,12 @@ mod tests {
         fire(&port, "hello-s3-pipeline");
         assert!(
             wait_until(
-                || store.search(&crate::types::SearchQuery::default()).unwrap().items.len() == 1,
+                || store
+                    .search(&crate::types::SearchQuery::default())
+                    .unwrap()
+                    .items
+                    .len()
+                    == 1,
                 Duration::from_secs(2)
             ),
             "worker 应在运行期间处理入队事件"
@@ -412,7 +446,10 @@ mod tests {
             h.shutdown();
         }
         for h in &handles {
-            assert!(h.wait_idle(Duration::from_secs(3)), "存在未退出的 worker 线程");
+            assert!(
+                h.wait_idle(Duration::from_secs(3)),
+                "存在未退出的 worker 线程"
+            );
         }
         let total: usize = handles.iter().map(|h| h.live_workers()).sum();
         assert_eq!(total, 0, "5 轮启停后存活 worker 总数应为 0，实际 {total}");
@@ -424,7 +461,9 @@ mod tests {
         // 生成新历史条目；窗口过期后的正常捕获不受影响。
         let store = temp_store("wb");
         let bus = Arc::new(EventBus::new());
-        let port = Arc::new(FakeClipboard { cb: Arc::new(Mutex::new(None)) });
+        let port = Arc::new(FakeClipboard {
+            cb: Arc::new(Mutex::new(None)),
+        });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
         let write_back = Arc::new(Mutex::new(None));
@@ -445,14 +484,23 @@ mod tests {
 
         assert!(
             wait_until(
-                || store.search(&crate::types::SearchQuery::default()).unwrap().items.len() == 1,
+                || store
+                    .search(&crate::types::SearchQuery::default())
+                    .unwrap()
+                    .items
+                    .len()
+                    == 1,
                 Duration::from_secs(2)
             ),
             "窗口外事件应恰生成 1 条记录"
         );
         std::thread::sleep(WRITE_BACK_WINDOW + Duration::from_millis(300));
         assert_eq!(
-            store.search(&crate::types::SearchQuery::default()).unwrap().items.len(),
+            store
+                .search(&crate::types::SearchQuery::default())
+                .unwrap()
+                .items
+                .len(),
             1,
             "窗口内事件不得入库（OCR 复制全部产生重复记录的根因）"
         );

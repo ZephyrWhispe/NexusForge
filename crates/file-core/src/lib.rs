@@ -15,12 +15,16 @@ pub mod rename;
 pub mod search;
 pub mod service;
 
-pub use browse::{breadcrumbs, drives, list_dir, to_long_path, display_path, DriveInfo, FileEntry, SortKey};
+pub use browse::{
+    breadcrumbs, display_path, drives, list_dir, to_long_path, DriveInfo, FileEntry, SortKey,
+};
 pub use conflict::{scan_conflicts, ConflictAction, ConflictItem, ConflictPolicy};
 pub use driver::{DriverInfo, DriverRegistry, FileStoragePort, LocalDriver, StorageDriver};
 pub use error::FileError;
 pub use module::FileModule;
-pub use ops::{OpKind, OpProgress, OpQueue, OpSpec, OpState, PendingOp, Checkpoint, CHUNK, PROGRESS_INTERVAL};
+pub use ops::{
+    Checkpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState, PendingOp, CHUNK, PROGRESS_INTERVAL,
+};
 pub use preview::Preview;
 pub use rename::{apply_plan, build_plan, CaseMode, RenamePlan, RenameRule};
 pub use search::{SearchOpts, SearchResult};

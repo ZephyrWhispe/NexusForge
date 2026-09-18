@@ -80,8 +80,13 @@ fn call_once(pipe: &str, token: &str, method: &str, params: &Value) -> Result<Va
     let send = |msg: &Value| h::write_frame(hnd, msg.to_string().as_bytes());
     let read = || -> Result<Value, CallErr> {
         let resp = h::read_frame(hnd).map_err(CallErr::Unreachable)?;
-        serde_json::from_slice(&resp)
-            .map_err(|e| CallErr::Unreachable(AppError::module("SYS_HELPER_007", format!("响应解析失败: {e}"), None)))
+        serde_json::from_slice(&resp).map_err(|e| {
+            CallErr::Unreachable(AppError::module(
+                "SYS_HELPER_007",
+                format!("响应解析失败: {e}"),
+                None,
+            ))
+        })
     };
     if let Err(e) = send(&hello) {
         h::close_handle(hnd);
@@ -111,36 +116,24 @@ fn call_once(pipe: &str, token: &str, method: &str, params: &Value) -> Result<Va
     let resp = h::read_frame(hnd);
     h::close_handle(hnd);
     let resp = resp.map_err(CallErr::Unreachable)?;
-    let v: Value = serde_json::from_slice(&resp)
-        .map_err(|e| CallErr::Unreachable(AppError::module("SYS_HELPER_007", format!("响应解析失败: {e}"), None)))?;
+    let v: Value = serde_json::from_slice(&resp).map_err(|e| {
+        CallErr::Unreachable(AppError::module(
+            "SYS_HELPER_007",
+            format!("响应解析失败: {e}"),
+            None,
+        ))
+    })?;
     if let Some(err) = v.get("error") {
         return Err(CallErr::Rejected(AppError::module(
             "SYS_HELPER_009",
-            format!("Helper 执行失败: {}", err["message"].as_str().unwrap_or("?")),
+            format!(
+                "Helper 执行失败: {}",
+                err["message"].as_str().unwrap_or("?")
+            ),
             None,
         )));
     }
     Ok(v["result"].clone())
-}
-
-/// 带自愈的调用：helper 不在 → 重新 spawn（UAC）→ 重试一次；明确拒绝则直接报错
-fn call_with_recovery(spawner: &dyn HelperSpawnPort, method: &str, params: &Value) -> Result<Value, AppError> {
-    let pipe = h::pipe_name_for(std::process::id());
-    if let Some(token) = token_cell().lock().unwrap().clone() {
-        match call_once(&pipe, &token, method, params) {
-            Ok(v) => return Ok(v),
-            Err(CallErr::Rejected(e)) => return Err(e),
-            Err(CallErr::Unreachable(e)) => {
-                tracing::warn!("Helper 调用不可达（将重新拉起）: {e}");
-            }
-        }
-    }
-    spawn_new(spawner)?;
-    let token = token_cell().lock().unwrap().clone().unwrap_or_default();
-    match call_once(&pipe, &token, method, params) {
-        Ok(v) => Ok(v),
-        Err(CallErr::Rejected(e)) | Err(CallErr::Unreachable(e)) => Err(e),
-    }
 }
 
 /// 直连调用（不重 spawn——适配器内部用；调用方须先 ensure_up）
@@ -169,7 +162,10 @@ pub struct RoutingRegistry {
 
 impl RoutingRegistry {
     pub fn new(local: std::sync::Arc<dyn RegistryOps>) -> Self {
-        Self { local, helper: HelperRegistry }
+        Self {
+            local,
+            helper: HelperRegistry,
+        }
     }
 }
 
@@ -202,17 +198,26 @@ pub struct HelperRegistry;
 
 impl RegistryOps for HelperRegistry {
     fn read_value(&self, key: &str, value_name: &str) -> Result<(RegValue, bool), AppError> {
-        let v = helper_call("registry.read", json!({"key": key, "value_name": value_name}))?;
+        let v = helper_call(
+            "registry.read",
+            json!({"key": key, "value_name": value_name}),
+        )?;
         let existed = v["existed"].as_bool().unwrap_or(false);
         let value: Option<RegValue> = serde_json::from_value(v["value"].clone()).unwrap_or(None);
         Ok((value.unwrap_or(RegValue::Dword(0)), existed))
     }
     fn write_value(&self, key: &str, value_name: &str, value: &RegValue) -> Result<(), AppError> {
-        helper_call("registry.write", json!({"key": key, "value_name": value_name, "value": value}))?;
+        helper_call(
+            "registry.write",
+            json!({"key": key, "value_name": value_name, "value": value}),
+        )?;
         Ok(())
     }
     fn delete_value(&self, key: &str, value_name: &str) -> Result<(), AppError> {
-        helper_call("registry.delete", json!({"key": key, "value_name": value_name}))?;
+        helper_call(
+            "registry.delete",
+            json!({"key": key, "value_name": value_name}),
+        )?;
         Ok(())
     }
 }
@@ -230,7 +235,10 @@ impl TaskTogglePort for HelperTasks {
         })
     }
     fn set_enabled(&self, path: &str, enabled: bool) -> Result<(), AppError> {
-        helper_call("task.set_enabled", json!({ "path": path, "enabled": enabled }))?;
+        helper_call(
+            "task.set_enabled",
+            json!({ "path": path, "enabled": enabled }),
+        )?;
         Ok(())
     }
 }
@@ -241,10 +249,15 @@ pub struct HelperServices;
 impl ServiceCtlPort for HelperServices {
     fn query(&self, name: &str) -> Result<ServiceInfo, AppError> {
         let v = helper_call("service.query", json!({ "name": name }))?;
-        serde_json::from_value(v).map_err(|e| AppError::module("SYS_HELPER_007", format!("ServiceInfo 解析失败: {e}"), None))
+        serde_json::from_value(v).map_err(|e| {
+            AppError::module("SYS_HELPER_007", format!("ServiceInfo 解析失败: {e}"), None)
+        })
     }
     fn set_start_type(&self, name: &str, st: StartType) -> Result<(), AppError> {
-        helper_call("service.set_start", json!({ "name": name, "start_type": st }))?;
+        helper_call(
+            "service.set_start",
+            json!({ "name": name, "start_type": st }),
+        )?;
         Ok(())
     }
     fn stop(&self, name: &str) -> Result<(), AppError> {
@@ -261,7 +274,12 @@ impl ServiceCtlPort for HelperServices {
 pub struct HelperMaintenance;
 
 impl host_core::ports::MaintenancePort for HelperMaintenance {
-    fn clean_dir(&self, path: &str, recursive: bool, skip_recent_hours: u32) -> Result<u32, AppError> {
+    fn clean_dir(
+        &self,
+        path: &str,
+        recursive: bool,
+        skip_recent_hours: u32,
+    ) -> Result<u32, AppError> {
         let v = helper_call(
             "file.clean_dir",
             json!({ "path": path, "recursive": recursive, "skip_recent_hours": skip_recent_hours }),
@@ -269,11 +287,17 @@ impl host_core::ports::MaintenancePort for HelperMaintenance {
         Ok(v["removed"].as_u64().unwrap_or(0) as u32)
     }
     fn exec(&self, program: &str, args: &[String], timeout_ms: u32) -> Result<String, AppError> {
-        let v = helper_call("exec", json!({ "program": program, "args": args, "timeout_ms": timeout_ms }))?;
+        let v = helper_call(
+            "exec",
+            json!({ "program": program, "args": args, "timeout_ms": timeout_ms }),
+        )?;
         Ok(v["output"].as_str().unwrap_or_default().to_string())
     }
     fn restore_point(&self, description: &str) -> Result<(), AppError> {
-        helper_call("maintenance.restore_point", json!({ "description": description }))?;
+        helper_call(
+            "maintenance.restore_point",
+            json!({ "description": description }),
+        )?;
         Ok(())
     }
     fn empty_working_set(&self) -> Result<u32, AppError> {
@@ -284,16 +308,36 @@ impl host_core::ports::MaintenancePort for HelperMaintenance {
         use host_core::ports::RepairKind;
         // RepairKind → 白名单固定参数模板（与 win-integration run_repair 一致）；长超时 30min
         let (program, args): (&str, Vec<String>) = match kind {
-            RepairKind::DismScanHealth => ("dism", vec!["/Online".into(), "/Cleanup-Image".into(), "/ScanHealth".into()]),
-            RepairKind::DismRestoreHealth => {
-                ("dism", vec!["/Online".into(), "/Cleanup-Image".into(), "/RestoreHealth".into()])
-            }
-            RepairKind::DismComponentCleanup => {
-                ("dism", vec!["/Online".into(), "/Cleanup-Image".into(), "/StartComponentCleanup".into()])
-            }
+            RepairKind::DismScanHealth => (
+                "dism",
+                vec![
+                    "/Online".into(),
+                    "/Cleanup-Image".into(),
+                    "/ScanHealth".into(),
+                ],
+            ),
+            RepairKind::DismRestoreHealth => (
+                "dism",
+                vec![
+                    "/Online".into(),
+                    "/Cleanup-Image".into(),
+                    "/RestoreHealth".into(),
+                ],
+            ),
+            RepairKind::DismComponentCleanup => (
+                "dism",
+                vec![
+                    "/Online".into(),
+                    "/Cleanup-Image".into(),
+                    "/StartComponentCleanup".into(),
+                ],
+            ),
             RepairKind::SfcScanNow => ("sfc", vec!["/scannow".into()]),
         };
-        let v = helper_call("exec", json!({ "program": program, "args": args, "timeout_ms": 30 * 60 * 1000 }))?;
+        let v = helper_call(
+            "exec",
+            json!({ "program": program, "args": args, "timeout_ms": 30 * 60 * 1000 }),
+        )?;
         Ok(v["output"].as_str().unwrap_or_default().to_string())
     }
     fn defender_realtime(&self, disable: bool) -> Result<(), AppError> {
@@ -330,8 +374,16 @@ pub fn backup_needs_elevation(items: &[sys_core::winops::BackupItem]) -> bool {
     use sys_core::winops::BackupItem;
     items.iter().any(|b| match b {
         BackupItem::Registry(rb) => rb.key.starts_with("HKLM"),
-        BackupItem::Service { .. } | BackupItem::Task { .. } | BackupItem::Exec | BackupItem::DefenderRealtime => true,
-        BackupItem::Appx { all_users: true, .. } => true,
-        BackupItem::FileClean | BackupItem::Appx { all_users: false, .. } => false,
+        BackupItem::Service { .. }
+        | BackupItem::Task { .. }
+        | BackupItem::Exec
+        | BackupItem::DefenderRealtime => true,
+        BackupItem::Appx {
+            all_users: true, ..
+        } => true,
+        BackupItem::FileClean
+        | BackupItem::Appx {
+            all_users: false, ..
+        } => false,
     })
 }

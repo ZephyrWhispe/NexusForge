@@ -28,10 +28,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, GetSystemMetrics, PostThreadMessageW, SetWindowsHookExW,
     UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, LLKHF_INJECTED,
-    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use host_core::error::AppError;
@@ -71,7 +71,7 @@ struct Shared {
 
 // 钩子过程运行在安装线程（即本模块专属线程），经 thread_local 取 Shared。
 thread_local! {
-    static SHARED: std::cell::RefCell<Option<Arc<Shared>>> = std::cell::RefCell::new(None);
+    static SHARED: std::cell::RefCell<Option<Arc<Shared>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// HIWORD(mouseData) → 有符号滚轮增量（正=上滚）
@@ -101,10 +101,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 return;
             }
             let ev = match wparam.0 as u32 {
-                WM_KEYDOWN | WM_SYSKEYDOWN => {
-                    RawInput::KeyDown { vk: kb.vkCode as u16, scan: kb.scanCode }
-                }
-                WM_KEYUP | WM_SYSKEYUP => RawInput::KeyUp { vk: kb.vkCode as u16, scan: kb.scanCode },
+                WM_KEYDOWN | WM_SYSKEYDOWN => RawInput::KeyDown {
+                    vk: kb.vkCode as u16,
+                    scan: kb.scanCode,
+                },
+                WM_KEYUP | WM_SYSKEYUP => RawInput::KeyUp {
+                    vk: kb.vkCode as u16,
+                    scan: kb.scanCode,
+                },
                 _ => return,
             };
             // 临时守卫显式绑定（if-let 判定式临时值存活到块尾，会压长 borrow 生命周期）
@@ -142,17 +146,46 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         return;
                     }
                     shared.last_move_ms.store(now, Ordering::Relaxed);
-                    RawInput::MouseMove { x: ms.pt.x, y: ms.pt.y }
+                    RawInput::MouseMove {
+                        x: ms.pt.x,
+                        y: ms.pt.y,
+                    }
                 }
-                WM_LBUTTONDOWN => RawInput::MouseDown { button: 0, x: ms.pt.x, y: ms.pt.y },
-                WM_LBUTTONUP => RawInput::MouseUp { button: 0, x: ms.pt.x, y: ms.pt.y },
-                WM_RBUTTONDOWN => RawInput::MouseDown { button: 1, x: ms.pt.x, y: ms.pt.y },
-                WM_RBUTTONUP => RawInput::MouseUp { button: 1, x: ms.pt.x, y: ms.pt.y },
-                WM_MBUTTONDOWN => RawInput::MouseDown { button: 2, x: ms.pt.x, y: ms.pt.y },
-                WM_MBUTTONUP => RawInput::MouseUp { button: 2, x: ms.pt.x, y: ms.pt.y },
-                WM_MOUSEWHEEL => {
-                    RawInput::Wheel { delta: wheel_delta(ms.mouseData), x: ms.pt.x, y: ms.pt.y }
-                }
+                WM_LBUTTONDOWN => RawInput::MouseDown {
+                    button: 0,
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                },
+                WM_LBUTTONUP => RawInput::MouseUp {
+                    button: 0,
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                },
+                WM_RBUTTONDOWN => RawInput::MouseDown {
+                    button: 1,
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                },
+                WM_RBUTTONUP => RawInput::MouseUp {
+                    button: 1,
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                },
+                WM_MBUTTONDOWN => RawInput::MouseDown {
+                    button: 2,
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                },
+                WM_MBUTTONUP => RawInput::MouseUp {
+                    button: 2,
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                },
+                WM_MOUSEWHEEL => RawInput::Wheel {
+                    delta: wheel_delta(ms.mouseData),
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                },
                 // 水平滚轮等 v1 不捕获（透传）
                 _ => return,
             };
@@ -183,7 +216,8 @@ fn hook_thread(shared: Arc<Shared>) {
                 let reqs: Vec<Req> = {
                     let mut guard = shared.req_rx.lock().expect("req 锁");
                     let mut v = Vec::new();
-                    while let Ok(req) = guard.as_mut().expect("req_rx 已被线程取走").try_recv() {
+                    while let Ok(req) = guard.as_mut().expect("req_rx 已被线程取走").try_recv()
+                    {
                         v.push(req);
                     }
                     v
@@ -202,7 +236,11 @@ fn handle_req(shared: &Shared, req: Req) {
         Req::Start { resp } => {
             let mut hooks = shared.hooks.lock().expect("hooks 锁");
             if hooks[0].is_some() || hooks[1].is_some() {
-                let _ = resp.send(Err(AppError::module("WIN_INPUT_001", "输入捕获已启动", None)));
+                let _ = resp.send(Err(AppError::module(
+                    "WIN_INPUT_001",
+                    "输入捕获已启动",
+                    None,
+                )));
                 return;
             }
             let hmod: HINSTANCE = unsafe { GetModuleHandleW(None).unwrap_or_default().into() };
@@ -223,7 +261,11 @@ fn handle_req(shared: &Shared, req: Req) {
                     if let Ok(h) = m {
                         let _ = unsafe { UnhookWindowsHookEx(h) };
                     }
-                    let err = k.err().or_else(|| m.err()).map(|e| e.to_string()).unwrap_or_default();
+                    let err = k
+                        .err()
+                        .or_else(|| m.err())
+                        .map(|e| e.to_string())
+                        .unwrap_or_default();
                     let _ = resp.send(Err(AppError::module(
                         "WIN_INPUT_002",
                         format!("安装低级钩子失败: {err}"),
@@ -278,7 +320,10 @@ impl InputHookWin {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        Ok(Self { shared, _req_tx: req_tx })
+        Ok(Self {
+            shared,
+            _req_tx: req_tx,
+        })
     }
 
     fn call(&self, make: impl FnOnce(Sender<Result<(), AppError>>) -> Req) -> Result<(), AppError> {
@@ -300,7 +345,10 @@ impl InputHookWin {
 }
 
 impl InputHookPort for InputHookWin {
-    fn start_capture(&self, cb: Box<dyn Fn(&RawInput) -> bool + Send + Sync>) -> Result<(), AppError> {
+    fn start_capture(
+        &self,
+        cb: Box<dyn Fn(&RawInput) -> bool + Send + Sync>,
+    ) -> Result<(), AppError> {
         // 先挂回调再启动（首帧即有回调）
         *self.shared.cb.lock().expect("输入回调锁") = Some(Arc::from(cb));
         self.call(|resp| Req::Start { resp })
@@ -337,7 +385,11 @@ impl InputInjectPort for InputInjectWin {
             // windows 0.58：SendInput(&[INPUT], cbsize) 两参数签名，返回已注入数
             let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
             if sent != 1 {
-                return Err(AppError::module("WIN_INPUT_007", "SendInput 被系统拦截", None));
+                return Err(AppError::module(
+                    "WIN_INPUT_007",
+                    "SendInput 被系统拦截",
+                    None,
+                ));
             }
         }
         Ok(())
@@ -406,12 +458,25 @@ fn mouse_button(button: u8, down: bool) -> Result<INPUT, AppError> {
         (1, false) => MOUSEEVENTF_RIGHTUP,
         (2, true) => MOUSEEVENTF_MIDDLEDOWN,
         (2, false) => MOUSEEVENTF_MIDDLEUP,
-        _ => return Err(AppError::module("WIN_INPUT_006", format!("未知鼠标键 {button}"), None)),
+        _ => {
+            return Err(AppError::module(
+                "WIN_INPUT_006",
+                format!("未知鼠标键 {button}"),
+                None,
+            ))
+        }
     };
     Ok(INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
         },
     })
 }
@@ -462,7 +527,11 @@ impl ScreenInfoPort for ScreenInfoWin {
             )
         };
         if w <= 0 || h <= 0 {
-            return Err(AppError::module("WIN_SCREEN_001", format!("虚拟桌面尺寸非法: {w}x{h}"), None));
+            return Err(AppError::module(
+                "WIN_SCREEN_001",
+                format!("虚拟桌面尺寸非法: {w}x{h}"),
+                None,
+            ));
         }
         Ok(ScreenRect { x, y, w, h })
     }

@@ -22,10 +22,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 /// 起一个完整实例：独立数据目录 + 独立事件总线，init + start
-fn spawn_instance(
-    tag: &str,
-    tcp_port: u16,
-) -> (Arc<KvmModule>, Arc<EventBus>, PathBuf) {
+fn spawn_instance(tag: &str, tcp_port: u16) -> (Arc<KvmModule>, Arc<EventBus>, PathBuf) {
     let dir = temp_dir(tag);
     let bus = Arc::new(EventBus::new());
     let m = Arc::new(KvmModule::new());
@@ -99,11 +96,19 @@ fn two_instances_loopback_pair_session_transfer() {
     let addr_a: std::net::SocketAddr = format!("127.0.0.1:{TCP_A}").parse().unwrap();
     let peer = b.pair_with(addr_a, &code).expect("配对握手");
     // pair_with 返回对端（A）身份，应与 B 发现的 A 一致
-    assert_eq!(peer.device_id, peer_a.device_id, "配对到的设备应与发现的 A 一致");
+    assert_eq!(
+        peer.device_id, peer_a.device_id,
+        "配对到的设备应与发现的 A 一致"
+    );
     // A 侧被配对事件里的 peer 应是 B
-    let ev = paired_rx.recv_timeout(Duration::from_secs(5)).expect("A 侧 kvm.paired 事件");
+    let ev = paired_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("A 侧 kvm.paired 事件");
     assert_eq!(ev.payload["paired"], serde_json::json!(true));
-    assert_eq!(ev.payload["peer"]["device_id"], serde_json::json!(peer_b.device_id));
+    assert_eq!(
+        ev.payload["peer"]["device_id"],
+        serde_json::json!(peer_b.device_id)
+    );
     assert_eq!(a.paired_peers().unwrap().len(), 1);
     assert_eq!(b.paired_peers().unwrap().len(), 1);
 
@@ -112,7 +117,9 @@ fn two_instances_loopback_pair_session_transfer() {
     let est_b = watch(&bus_b, "kvm.session_state");
     let a_id = b.connect_to(addr_a).expect("建立会话");
     for rx in [&est_a, &est_b] {
-        let ev = rx.recv_timeout(Duration::from_secs(5)).expect("会话建立事件");
+        let ev = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("会话建立事件");
         assert_eq!(ev.payload["state"], serde_json::json!("established"));
     }
     assert_eq!(a.session_list().len(), 1);
@@ -122,10 +129,15 @@ fn two_instances_loopback_pair_session_transfer() {
     let clip_rx = watch(&bus_a, "kvm.clip_received");
     b.send_clip(
         &a_id,
-        ClipContent::Text { text: "nexusforge-kvm-loopback".into(), html: None },
+        ClipContent::Text {
+            text: "nexusforge-kvm-loopback".into(),
+            html: None,
+        },
     )
     .expect("发送剪贴板");
-    let ev = clip_rx.recv_timeout(Duration::from_secs(5)).expect("A 收到剪贴板");
+    let ev = clip_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("A 收到剪贴板");
     assert_eq!(ev.payload["device_id"], serde_json::json!(peer_b.device_id));
     assert!(ev.payload.to_string().contains("nexusforge-kvm-loopback"));
 
@@ -135,16 +147,21 @@ fn two_instances_loopback_pair_session_transfer() {
     let src = dir_a.join("loop-payload.bin");
     let payload: Vec<u8> = (0..9 * 1024 * 1024).map(|i| (i * 31 + 7) as u8).collect();
     std::fs::write(&src, &payload).expect("写测试文件");
-    b.send_file(&a_id, src.to_string_lossy().into()).expect("发起文件发送");
+    b.send_file(&a_id, src.to_string_lossy().into())
+        .expect("发起文件发送");
 
-    let ev = file_rx.recv_timeout(Duration::from_secs(15)).expect("A 收到文件完成事件");
+    let ev = file_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("A 收到文件完成事件");
     assert_eq!(ev.payload["name"], serde_json::json!("loop-payload.bin"));
     let final_path = ev.payload["path"].as_str().expect("完成事件含最终路径");
     let received = std::fs::read(final_path).expect("读取接收文件");
     assert_eq!(received.len(), payload.len(), "接收文件大小一致");
     assert!(received == payload, "SHA256 终验后字节一致");
 
-    let ev = ack_b_rx.recv_timeout(Duration::from_secs(5)).expect("B 收到 Ack");
+    let ev = ack_b_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("B 收到 Ack");
     assert_eq!(ev.payload["ok"], serde_json::json!(true));
 
     // ⑥ 收尾：stop 收割任务不悬挂

@@ -9,7 +9,13 @@
 fn portable_pty_echo_reference() {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize { rows: 40, cols: 120, ..Default::default() }).expect("openpty");
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 40,
+            cols: 120,
+            ..Default::default()
+        })
+        .expect("openpty");
     let mut cmd = CommandBuilder::new("cmd.exe");
     cmd.args(["/c", "echo PORTABLE_OK"]);
     let mut child = pair.slave.spawn_command(cmd).expect("spawn");
@@ -31,5 +37,9 @@ fn portable_pty_echo_reference() {
     let text = String::from_utf8_lossy(&collected).to_string();
     println!("[portable] 共 {} 字节: {:?}", collected.len(), text);
     let _ = child.wait();
-    assert!(text.contains("PORTABLE_OK"), "portable-pty 也读不到输出（环境问题）—— {} 字节", collected.len());
+    assert!(
+        text.contains("PORTABLE_OK"),
+        "portable-pty 也读不到输出（环境问题）—— {} 字节",
+        collected.len()
+    );
 }

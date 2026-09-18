@@ -86,10 +86,12 @@ impl ScreenshotModule {
 
     /// pins.json 原子写（临时文件 + rename，规约 5）
     fn persist_pins(&self, pins: &[PinRecord]) -> Result<(), ModuleError> {
-        let Some(dir) = self.app_data() else { return Ok(()) };
+        let Some(dir) = self.app_data() else {
+            return Ok(());
+        };
         let path = dir.join("pins.json");
-        let json = serde_json::to_vec_pretty(pins)
-            .map_err(|e| ModuleError::Storage(e.to_string()))?;
+        let json =
+            serde_json::to_vec_pretty(pins).map_err(|e| ModuleError::Storage(e.to_string()))?;
         let tmp = dir.join("pins.json.tmp");
         std::fs::write(&tmp, json).map_err(|e| ModuleError::Storage(e.to_string()))?;
         std::fs::rename(&tmp, &path).map_err(|e| ModuleError::Storage(e.to_string()))?;
@@ -99,7 +101,9 @@ impl ScreenshotModule {
     /// init 时恢复 pins：文件已丢失的记录直接丢弃（docs/impl/03 P6）
     fn restore_pins(&self) {
         let Some(dir) = self.app_data() else { return };
-        let Ok(bytes) = std::fs::read(dir.join("pins.json")) else { return };
+        let Ok(bytes) = std::fs::read(dir.join("pins.json")) else {
+            return;
+        };
         let pins: Vec<PinRecord> = serde_json::from_slice(&bytes).unwrap_or_default();
         let alive: Vec<PinRecord> = pins
             .into_iter()
@@ -136,22 +140,34 @@ impl Module for ScreenshotModule {
             ShotStore::open(&ctx.app_data_dir.join("db").join("screenshot.db"))
                 .map_err(|e| ModuleError::Storage(e.to_string()))?,
         );
-        let capture = ctx
-            .ports
-            .get::<dyn CapturePort>()
-            .ok_or_else(|| ModuleError::Init("CapturePort 未注册（win-integration 缺失）".into()))?;
+        let capture = ctx.ports.get::<dyn CapturePort>().ok_or_else(|| {
+            ModuleError::Init("CapturePort 未注册（win-integration 缺失）".into())
+        })?;
         let clipboard = ctx
             .ports
             .get::<dyn ClipboardPort>()
             .ok_or_else(|| ModuleError::Init("ClipboardPort 未注册".into()))?;
 
-        *self.app_data_dir.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(ctx.app_data_dir.clone());
-        *self.store.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(store);
-        *self.capture.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(capture);
-        *self.clipboard.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(clipboard);
-        *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(ctx.event_bus.clone());
+        *self
+            .app_data_dir
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.app_data_dir.clone());
+        *self
+            .store
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(store);
+        *self
+            .capture
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(capture);
+        *self
+            .clipboard
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(clipboard);
+        *self
+            .bus
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
         self.restore_pins();
         self.state.store(1, Ordering::SeqCst);
         Ok(())
@@ -268,16 +284,29 @@ impl ScreenshotModule {
         let (vx, vy, vw, vh) = capture
             .enumerate_monitors()
             .ok()
-            .and_then(|m| m.first().map(|i| (i.x, i.y, i.width as i32, i.height as i32)))
+            .and_then(|m| {
+                m.first()
+                    .map(|i| (i.x, i.y, i.width as i32, i.height as i32))
+            })
             .unwrap_or((0, 0, frame.width as i32, frame.height as i32));
         let task_id = uuid::Uuid::now_v7().to_string();
         let mut pending = self.pending.lock().expect("pending 锁");
         pending.clear(); // 单任务模型：替换遗留任务，释放旧帧内存
         pending.insert(
             task_id.clone(),
-            PendingTask { frame, mode: mode.to_owned(), info_b64: None },
+            PendingTask {
+                frame,
+                mode: mode.to_owned(),
+                info_b64: None,
+            },
         );
-        Ok(TaskStartDto { task_id, x: vx, y: vy, width: vw, height: vh })
+        Ok(TaskStartDto {
+            task_id,
+            x: vx,
+            y: vy,
+            width: vw,
+            height: vh,
+        })
     }
 
     /// 覆盖层取背景帧（PNG Base64，编码一次后缓存）
@@ -290,8 +319,7 @@ impl ScreenshotModule {
             Some(b) => b.clone(),
             None => {
                 let rgba = util::bgra_to_rgba(&task.frame);
-                let b64 =
-                    util::encode_png_b64(task.frame.width, task.frame.height, &rgba)?;
+                let b64 = util::encode_png_b64(task.frame.width, task.frame.height, &rgba)?;
                 task.info_b64 = Some(b64.clone());
                 b64
             }
@@ -313,10 +341,19 @@ impl ScreenshotModule {
             .ok_or_else(|| mod_err("SCREENSHOT_STATE_002", "任务不存在或已结束"))?;
         let (w, h, rgba) = util::crop_bgra(
             &task.frame,
-            host_core::ports::Rect { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+            host_core::ports::Rect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+            },
         )?;
         let png_b64 = util::encode_png_b64(w, h, &rgba)?;
-        Ok(CropDto { png_b64, width: w, height: h })
+        Ok(CropDto {
+            png_b64,
+            width: w,
+            height: h,
+        })
     }
 
     pub fn discard(&self, task_id: &str) {
@@ -324,16 +361,16 @@ impl ScreenshotModule {
     }
 
     /// 完成：解码前端合成图 → 执行动作（copy/save/pin）→ 入历史 → 发事件
-    pub fn finish(
-        &self,
-        task_id: &str,
-        req: &FinishRequest,
-    ) -> Result<FinishDto, AppError> {
+    pub fn finish(&self, task_id: &str, req: &FinishRequest) -> Result<FinishDto, AppError> {
         let (w, h, rgba) = util::decode_png_b64(&req.image_b64)?;
 
         // 配置动作 = 显式 actions + auto_* 兜底（前端总是显式传；auto_* 用于面板默认行为）
         let mut actions = req.actions.clone();
-        let cfg = self.config.try_lock().map(|g| g.clone()).unwrap_or_default();
+        let cfg = self
+            .config
+            .try_lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         if actions.is_empty() {
             if cfg.auto_save {
                 actions.push("save".into());
@@ -422,7 +459,11 @@ impl ScreenshotModule {
     }
 
     fn action_save(&self, w: u32, h: u32, rgba: &[u8]) -> Result<String, AppError> {
-        let cfg = self.config.try_lock().map(|g| g.clone()).unwrap_or_default();
+        let cfg = self
+            .config
+            .try_lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         let dir = self.resolve_save_dir(&cfg);
         std::fs::create_dir_all(&dir)
             .map_err(|e| mod_err("SCREENSHOT_SAVE_001", format!("创建目录失败: {e}")))?;
@@ -438,7 +479,10 @@ impl ScreenshotModule {
         }
 
         // 临时文件 + rename（规约 5）
-        let tmp = dir.join(format!(".{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
+        let tmp = dir.join(format!(
+            ".{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
         {
             let f = std::fs::File::create(&tmp)
                 .map_err(|e| mod_err("SCREENSHOT_SAVE_002", format!("创建文件失败: {e}")))?;
@@ -485,9 +529,8 @@ impl ScreenshotModule {
             pins.push(record);
             let snapshot = pins.clone();
             drop(pins);
-            self.persist_pins(&snapshot).map_err(|e| {
-                mod_err("SCREENSHOT_PIN_005", e.to_string())
-            })?;
+            self.persist_pins(&snapshot)
+                .map_err(|e| mod_err("SCREENSHOT_PIN_005", e.to_string()))?;
         }
         Ok(id)
     }
@@ -524,10 +567,7 @@ impl ScreenshotModule {
             .map_err(|e| mod_err("SCREENSHOT_PIN_007", format!("读取贴图失败: {e}")))?;
         Ok(PinDataDto {
             id: record.id.clone(),
-            png_b64: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                bytes,
-            ),
+            png_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
             x: record.x,
             y: record.y,
             width: record.width,
@@ -547,7 +587,8 @@ impl ScreenshotModule {
         record.opacity = opacity.clamp(0.2, 1.0);
         let snapshot = pins.clone();
         drop(pins);
-        self.persist_pins(&snapshot).map_err(|e| mod_err("SCREENSHOT_PIN_005", e.to_string()))?;
+        self.persist_pins(&snapshot)
+            .map_err(|e| mod_err("SCREENSHOT_PIN_005", e.to_string()))?;
         Ok(())
     }
 

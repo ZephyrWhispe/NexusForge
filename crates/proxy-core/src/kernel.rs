@@ -124,7 +124,12 @@ pub(super) fn spawn_kernel(
         spawn_log_reader("proxy-kernel-log-out", logs.clone(), cb_slot.clone(), out);
     }
     if let Some(err_pipe) = child.stderr.take() {
-        spawn_log_reader("proxy-kernel-log-err", logs.clone(), cb_slot.clone(), err_pipe);
+        spawn_log_reader(
+            "proxy-kernel-log-err",
+            logs.clone(),
+            cb_slot.clone(),
+            err_pipe,
+        );
     }
 
     // 守护线程：持有 Child 唯一所有权，50ms 轮询（stop 置位 → kill；自行退出 → on_exit）
@@ -172,22 +177,24 @@ fn spawn_log_reader(
     cb_slot: Arc<Mutex<Option<LogCb>>>,
     pipe: impl std::io::Read + Send + 'static,
 ) {
-    let _ = std::thread::Builder::new().name(name.into()).spawn(move || {
-        use std::io::BufRead;
-        let reader = std::io::BufReader::new(pipe);
-        for line in reader.lines().map_while(std::result::Result::ok) {
-            {
-                let mut buf = logs.lock().expect("日志缓冲锁");
-                if buf.len() >= LOG_CAP {
-                    buf.pop_front();
+    let _ = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(pipe);
+            for line in reader.lines().map_while(std::result::Result::ok) {
+                {
+                    let mut buf = logs.lock().expect("日志缓冲锁");
+                    if buf.len() >= LOG_CAP {
+                        buf.pop_front();
+                    }
+                    buf.push_back(LogLine::now(line.clone()));
                 }
-                buf.push_back(LogLine::now(line.clone()));
+                if let Some(cb) = cb_slot.lock().expect("日志回调槽锁").clone() {
+                    cb(&line);
+                }
             }
-            if let Some(cb) = cb_slot.lock().expect("日志回调槽锁").clone() {
-                cb(&line);
-            }
-        }
-    });
+        });
 }
 
 /// sing-box 内核驱动（PR1 首选实现）。exe 由 PR2 Sidecar 安装到 `{appData}/proxy/bin/`。
@@ -249,8 +256,7 @@ mod tests {
     fn cmd_driver(args: &[&str]) -> CmdDriver {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         CmdDriver(Arc::new(move || {
-            let mut c =
-                Command::new(std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()));
+            let mut c = Command::new(std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()));
             c.arg("/C").args(&args);
             c
         }))
@@ -261,9 +267,12 @@ mod tests {
         let fired = Arc::new(Mutex::new(None::<i32>));
         let fired2 = fired.clone();
         let h = cmd_driver(&["exit 7"])
-            .start(Path::new("unused"), Arc::new(move |code| {
-                *fired2.lock().unwrap() = Some(code);
-            }))
+            .start(
+                Path::new("unused"),
+                Arc::new(move |code| {
+                    *fired2.lock().unwrap() = Some(code);
+                }),
+            )
             .unwrap();
         // 轮询等待守护线程观察到退出（cmd /C exit 7 立即结束）
         for _ in 0..100 {
@@ -282,9 +291,12 @@ mod tests {
         let fired = Arc::new(Mutex::new(false));
         let fired2 = fired.clone();
         let h = cmd_driver(&["ping", "-n", "3", "127.0.0.1"])
-            .start(Path::new("unused"), Arc::new(move |_| {
-                *fired2.lock().unwrap() = true;
-            }))
+            .start(
+                Path::new("unused"),
+                Arc::new(move |_| {
+                    *fired2.lock().unwrap() = true;
+                }),
+            )
             .unwrap();
         assert!(h.alive());
         h.stop();

@@ -125,7 +125,10 @@ fn vault_err(code: &str, msg: impl Into<String>) -> AppError {
 /// Argon2id 派生 32B KEK
 pub fn derive_kek(password: &str, kdf: &KdfParams) -> Result<SecretKey, AppError> {
     if kdf.algo != "argon2id" {
-        return Err(vault_err("VAULT_CRYPTO_005", format!("未知 KDF 算法 {}", kdf.algo)));
+        return Err(vault_err(
+            "VAULT_CRYPTO_005",
+            format!("未知 KDF 算法 {}", kdf.algo),
+        ));
     }
     let salt = unb64(&kdf.salt_b64)?;
     let params = Params::new(kdf.m_cost_kib, kdf.t_cost, kdf.p_cost, Some(KEY_LEN))
@@ -139,21 +142,39 @@ pub fn derive_kek(password: &str, kdf: &KdfParams) -> Result<SecretKey, AppError
 }
 
 /// AES-256-GCM 原语：随机 nonce 加密，返回 (nonce, ct)
-fn seal_raw(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<([u8; NONCE_LEN], Vec<u8>), AppError> {
+fn seal_raw(
+    key: &SecretKey,
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<([u8; NONCE_LEN], Vec<u8>), AppError> {
     let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose()));
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
     let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), aes_gcm::aead::Payload { msg: plaintext, aad })
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            aes_gcm::aead::Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| vault_err("VAULT_CRYPTO_002", "字段加密失败"))?;
     Ok((nonce, ct))
 }
 
 /// AES-256-GCM 解密（tag 校验失败 = 密钥错/密文被篡改）
-fn open_raw(key: &SecretKey, nonce: &[u8; NONCE_LEN], ct: &[u8], aad: &[u8]) -> Result<Vec<u8>, AppError> {
+fn open_raw(
+    key: &SecretKey,
+    nonce: &[u8; NONCE_LEN],
+    ct: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, AppError> {
     let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key.expose()));
     cipher
-        .decrypt(Nonce::from_slice(nonce), aes_gcm::aead::Payload { msg: ct, aad })
+        .decrypt(
+            Nonce::from_slice(nonce),
+            aes_gcm::aead::Payload { msg: ct, aad },
+        )
         .map_err(|_| vault_err("VAULT_UNLOCK_001", "解密失败：密码错误或数据被篡改"))
 }
 
@@ -172,7 +193,10 @@ pub fn create_vault(master_password: &str) -> Result<(VaultHeader, SecretKey), A
 }
 
 /// 指定 KDF 参数的新建（测试/未来策略调整入口）；salt_b64 留空则随机
-pub fn create_vault_with(master_password: &str, mut kdf: KdfParams) -> Result<(VaultHeader, SecretKey), AppError> {
+pub fn create_vault_with(
+    master_password: &str,
+    mut kdf: KdfParams,
+) -> Result<(VaultHeader, SecretKey), AppError> {
     if kdf.salt_b64.is_empty() {
         let mut salt = [0u8; SALT_LEN];
         OsRng.fill_bytes(&mut salt);
@@ -186,7 +210,10 @@ pub fn create_vault_with(master_password: &str, mut kdf: KdfParams) -> Result<(V
         version: VaultHeader::current_version(),
         vault_id,
         kdf,
-        wrapped_dek: WrappedKey { nonce_b64: b64(&nonce), ct_b64: b64(&ct) },
+        wrapped_dek: WrappedKey {
+            nonce_b64: b64(&nonce),
+            ct_b64: b64(&ct),
+        },
     };
     Ok((header, dek))
 }
@@ -223,7 +250,10 @@ pub fn change_master_password(
         version: header.version,
         vault_id: header.vault_id.clone(),
         kdf,
-        wrapped_dek: WrappedKey { nonce_b64: b64(&nonce), ct_b64: b64(&ct) },
+        wrapped_dek: WrappedKey {
+            nonce_b64: b64(&nonce),
+            ct_b64: b64(&ct),
+        },
     })
 }
 

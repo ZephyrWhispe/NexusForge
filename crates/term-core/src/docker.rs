@@ -71,9 +71,7 @@ pub fn container_lifecycle(docker: &dyn DockerPipePort, id: &str, start: bool) -
     } else {
         format!("/containers/{id}/stop")
     };
-    let resp = docker
-        .request("POST", &path, None)
-        .map_err(map_err)?;
+    let resp = docker.request("POST", &path, None).map_err(map_err)?;
     // 204 成功；304 已是目标状态
     if resp.status == 204 || resp.status == 304 {
         Ok(())
@@ -88,9 +86,7 @@ pub fn container_lifecycle(docker: &dyn DockerPipePort, id: &str, start: bool) -
 
 /// 日志（tail 最近 N 行；解析 multiplexed 帧，TTY 回退原文）
 pub fn container_logs(docker: &dyn DockerPipePort, id: &str, tail: u32) -> Result<String> {
-    let path = format!(
-        "/containers/{id}/logs?stdout=1&stderr=1&tail={tail}&timestamps=0"
-    );
+    let path = format!("/containers/{id}/logs?stdout=1&stderr=1&tail={tail}&timestamps=0");
     let resp = docker.request("GET", &path, None).map_err(map_err)?;
     if resp.status != 200 {
         return Err(TermError::Docker(format!("logs 返回 {}", resp.status)));
@@ -140,13 +136,21 @@ mod tests {
     impl FakeDocker {
         fn new(status: u16, body: &[u8]) -> Self {
             Self {
-                responses: Mutex::new(vec![HttpResp { status, body: body.to_vec() }]),
+                responses: Mutex::new(vec![HttpResp {
+                    status,
+                    body: body.to_vec(),
+                }]),
                 last_path: std::sync::Mutex::new(String::new()),
             }
         }
     }
     impl DockerPipePort for FakeDocker {
-        fn request(&self, _method: &str, path: &str, _body: Option<&str>) -> std::result::Result<HttpResp, AppError> {
+        fn request(
+            &self,
+            _method: &str,
+            path: &str,
+            _body: Option<&str>,
+        ) -> std::result::Result<HttpResp, AppError> {
             *self.last_path.lock().unwrap() = path.to_string();
             self.responses
                 .lock()

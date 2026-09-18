@@ -58,7 +58,9 @@ pub enum CodeError {
 
 impl PairCodeManager {
     pub fn new() -> Self {
-        Self { active: Mutex::new(None) }
+        Self {
+            active: Mutex::new(None),
+        }
     }
 
     /// 签发新码：6 位数字（CSPRNG）。返回 (码, 有效期毫秒)
@@ -191,12 +193,24 @@ impl Drop for PairingHandle {
 }
 
 impl PairingService {
-    pub fn new(identity: Arc<DeviceIdentity>, codes: Arc<PairCodeManager>, store: Arc<PairStore>) -> Arc<Self> {
-        Arc::new(Self { identity, codes, store })
+    pub fn new(
+        identity: Arc<DeviceIdentity>,
+        codes: Arc<PairCodeManager>,
+        store: Arc<PairStore>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            identity,
+            codes,
+            store,
+        })
     }
 
     /// 配对请求接入循环（被配对端）：仅处理 PairRequest 帧
-    pub async fn accept_loop(self: Arc<Self>, listener: TcpListener, on_paired: PairedCb) -> PairingHandle {
+    pub async fn accept_loop(
+        self: Arc<Self>,
+        listener: TcpListener,
+        on_paired: PairedCb,
+    ) -> PairingHandle {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut tasks = Vec::new();
         let mut accept_shutdown = shutdown_rx.clone();
@@ -233,44 +247,50 @@ impl PairingService {
 
     /// 服务端单连接处理：首帧已由调用方读出并分流（PairRequest）→
     /// 校验 → 持久化 → 应答。pub 供 SessionManager 分流调用。
-    pub async fn handle_pair_conn(&self, mut stream: tokio::net::TcpStream, first: Frame) -> Option<PairedPeer> {
+    pub async fn handle_pair_conn(
+        &self,
+        mut stream: tokio::net::TcpStream,
+        first: Frame,
+    ) -> Option<PairedPeer> {
         let handshake = async {
             if first.msg_type != MsgType::PairRequest {
                 return None;
             }
             let req: PairRequestPayload = serde_json::from_slice(&first.payload).ok()?;
 
-            let mut reject = |reason: &str| {
-                let reply = PairReplyPayload {
-                    device_id: self.identity.device_id.clone(),
-                    device_name: self.identity.device_name.clone(),
-                    pubkey_b64: b64_encode(&self.identity.public_key()),
-                    fingerprint: self.identity.pubkey_fingerprint.clone(),
-                    reason: Some(reason.into()),
-                };
-                let _ = write_frame(
-                    &mut stream,
-                    &Frame {
-                        msg_type: MsgType::PairReject,
-                        flags: 0,
-                        payload: serde_json::to_vec(&reply).unwrap_or_default(),
-                    },
-                );
-            };
+            // 闭包无法 .await（曾导致 PairReject 永远发不出去），用宏内联 await + return
+            macro_rules! reject {
+                ($reason:expr) => {{
+                    let reply = PairReplyPayload {
+                        device_id: self.identity.device_id.clone(),
+                        device_name: self.identity.device_name.clone(),
+                        pubkey_b64: b64_encode(&self.identity.public_key()),
+                        fingerprint: self.identity.pubkey_fingerprint.clone(),
+                        reason: Some($reason.into()),
+                    };
+                    let _ = write_frame(
+                        &mut stream,
+                        &Frame {
+                            msg_type: MsgType::PairReject,
+                            flags: 0,
+                            payload: serde_json::to_vec(&reply).unwrap_or_default(),
+                        },
+                    )
+                    .await;
+                    return None;
+                }};
+            }
 
             // ① 防自配对
             if req.device_id == self.identity.device_id {
-                reject("self");
-                return None;
+                reject!("self");
             }
             // ② 公钥/指纹绑定校验（防伪造组合）
             let Some(pubkey) = b64_decode(&req.pubkey_b64) else {
-                reject("fingerprint");
-                return None;
+                reject!("fingerprint");
             };
             if !verify_binding(&pubkey, &req.fingerprint) {
-                reject("fingerprint");
-                return None;
+                reject!("fingerprint");
             }
             // ③ 一次性码校验
             if let Err(e) = self.codes.validate(&req.code) {
@@ -280,8 +300,7 @@ impl PairingService {
                     CodeError::Consumed => "code",
                 };
                 tracing::warn!(from = %req.device_id, ?e, "KVM 配对码校验失败");
-                reject(reason);
-                return None;
+                reject!(reason);
             }
             // ④ 落盘 + 应答
             let peer = PairedPeer {
@@ -292,8 +311,7 @@ impl PairingService {
                 paired_at: unix_ms(),
             };
             if self.store.upsert(peer.clone()).is_err() {
-                reject("busy");
-                return None;
+                reject!("busy");
             }
             let reply = PairReplyPayload {
                 device_id: self.identity.device_id.clone(),
@@ -437,7 +455,12 @@ mod tests {
         let (code, _) = mgr.issue();
         // 前 4 次错误：Mismatch（码仍有效）
         for i in 0..4 {
-            assert_eq!(mgr.validate("000000"), Err(CodeError::Mismatch), "第 {} 次", i);
+            assert_eq!(
+                mgr.validate("000000"),
+                Err(CodeError::Mismatch),
+                "第 {} 次",
+                i
+            );
         }
         // 第 5 次错误：达到上限，作废当前码
         assert_eq!(mgr.validate("000000"), Err(CodeError::Consumed));
@@ -479,7 +502,11 @@ mod tests {
         let codes_b = Arc::new(PairCodeManager::new());
         let store_a = Arc::new(PairStore::load_or_default(&dir_a).unwrap());
         let store_b = Arc::new(PairStore::load_or_default(&dir_b).unwrap());
-        let svc_a = PairingService::new(id_a.clone(), Arc::new(PairCodeManager::new()), store_a.clone());
+        let svc_a = PairingService::new(
+            id_a.clone(),
+            Arc::new(PairCodeManager::new()),
+            store_a.clone(),
+        );
         let svc_b = PairingService::new(id_b.clone(), codes_b.clone(), store_b.clone());
 
         let (code, _) = codes_b.issue();
@@ -491,7 +518,9 @@ mod tests {
         let _handle = svc_b
             .accept_loop(
                 listener,
-                Arc::new(Mutex::new(Some(Box::new(move |p| sink.lock().unwrap().push(p))))),
+                Arc::new(Mutex::new(Some(Box::new(move |p| {
+                    sink.lock().unwrap().push(p)
+                })))),
             )
             .await;
 
@@ -532,7 +561,15 @@ mod tests {
         let result = svc_a
             .pair_with(format!("127.0.0.1:{port}").parse().unwrap(), "999999")
             .await;
-        assert!(result.is_err(), "错误码必须被拒绝");
+        // 回归（D-17 clippy let_underscore_futures 揪出）：reject 曾是闭包内未 await 的
+        // future → PairReject 帧永不发出，客户端只能拿到 EOF/超时（KVM_PAIR_003/006）。
+        // 必须收到协议层显式拒绝 KVM_PAIR_005（含 reason=code）。
+        let err = result.expect_err("错误码必须被拒绝");
+        assert!(
+            matches!(&err, AppError::Module { code, message, .. }
+                if code == "KVM_PAIR_005" && message.contains("code")),
+            "应收到 PairReject 帧（KVM_PAIR_005 + reason=code），实际: {err:?}"
+        );
         // 拒绝后不落盘
         assert!(store_a.all().is_empty());
         let _ = std::fs::remove_dir_all(&dir_a);

@@ -8,15 +8,15 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW,
-    PostMessageW, RegisterClassW, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA,
-    HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_HOTKEY, WNDCLASSW,
+    PostMessageW, RegisterClassW, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, HWND_MESSAGE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_HOTKEY, WNDCLASSW,
 };
 
 use host_core::error::AppError;
@@ -26,8 +26,16 @@ type Dispatcher = Arc<Mutex<Option<Arc<dyn Fn(i32) + Send + Sync>>>>;
 type Handlers = Arc<Mutex<HashMap<i32, Arc<dyn Fn() + Send + Sync>>>>;
 
 enum Req {
-    Register { id: i32, mods: u32, vk: u32, resp: Sender<Result<(), AppError>> },
-    Unregister { id: i32, resp: Sender<Result<(), AppError>> },
+    Register {
+        id: i32,
+        mods: u32,
+        vk: u32,
+        resp: Sender<Result<(), AppError>>,
+    },
+    Unregister {
+        id: i32,
+        resp: Sender<Result<(), AppError>>,
+    },
 }
 
 /// HWND 不是 Send（内含裸指针）；此处 HWND 由本模块专属线程独占创建/使用，
@@ -49,12 +57,7 @@ struct Shared {
     handlers: Handlers,
 }
 
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_HOTKEY {
         let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         if raw != 0 {
@@ -159,7 +162,11 @@ impl HotkeyWin {
                 if hwnd.is_invalid() {
                     return;
                 }
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(shared_thread.clone()) as isize);
+                SetWindowLongPtrW(
+                    hwnd,
+                    GWLP_USERDATA,
+                    Arc::into_raw(shared_thread.clone()) as isize,
+                );
                 // 就绪信号：hwnd 必须写回 shared（register 依赖它投递 WM_APP 唤醒消息循环）
                 if let Ok(mut g) = shared_thread.hwnd.lock() {
                     *g = Some(SendHwnd(hwnd.0 as usize));
@@ -179,7 +186,10 @@ impl HotkeyWin {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        Ok(Self { shared, _req_tx: req_tx })
+        Ok(Self {
+            shared,
+            _req_tx: req_tx,
+        })
     }
 }
 
@@ -193,7 +203,12 @@ impl HotkeyWinPort for HotkeyWin {
     fn register(&self, hotkey_id: i32, modifiers: u32, vk: u32) -> Result<(), AppError> {
         let (tx, rx) = channel();
         self._req_tx
-            .send(Req::Register { id: hotkey_id, mods: modifiers, vk, resp: tx })
+            .send(Req::Register {
+                id: hotkey_id,
+                mods: modifiers,
+                vk,
+                resp: tx,
+            })
             .map_err(|e| AppError::module("WIN_HOTKEY_004", e.to_string(), None))?;
         if let Some(h) = self.shared.hwnd.lock().unwrap().as_ref() {
             let _ = unsafe { PostMessageW(h.get(), WM_APP, WPARAM(0), LPARAM(0)) };
@@ -205,7 +220,10 @@ impl HotkeyWinPort for HotkeyWin {
     fn unregister(&self, hotkey_id: i32) -> Result<(), AppError> {
         let (tx, rx) = channel();
         self._req_tx
-            .send(Req::Unregister { id: hotkey_id, resp: tx })
+            .send(Req::Unregister {
+                id: hotkey_id,
+                resp: tx,
+            })
             .map_err(|e| AppError::module("WIN_HOTKEY_004", e.to_string(), None))?;
         if let Some(h) = self.shared.hwnd.lock().unwrap().as_ref() {
             let _ = unsafe { PostMessageW(h.get(), WM_APP, WPARAM(0), LPARAM(0)) };

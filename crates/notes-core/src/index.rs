@@ -57,7 +57,9 @@ impl NoteIndex {
             CREATE INDEX IF NOT EXISTS idx_links_dst ON links(dst_path);",
         )
         .map_err(|e| NoteError::Db(format!("建表失败: {e}")))?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// 卡片存储复用同一连接（N4）
@@ -75,7 +77,8 @@ impl NoteIndex {
             params!(row.path, row.title, row.mtime_ms, row.size as i64),
         )
         .map_err(db)?;
-        tx.execute("DELETE FROM tags WHERE note_path = ?1", params!(row.path)).map_err(db)?;
+        tx.execute("DELETE FROM tags WHERE note_path = ?1", params!(row.path))
+            .map_err(db)?;
         for tag in &row.tags {
             tx.execute(
                 "INSERT OR IGNORE INTO tags (note_path, tag) VALUES (?1, ?2)",
@@ -83,7 +86,8 @@ impl NoteIndex {
             )
             .map_err(db)?;
         }
-        tx.execute("DELETE FROM links WHERE src = ?1", params!(row.path)).map_err(db)?;
+        tx.execute("DELETE FROM links WHERE src = ?1", params!(row.path))
+            .map_err(db)?;
         for (dst, dst_path) in &row.links {
             tx.execute(
                 "INSERT OR REPLACE INTO links (src, dst, dst_path) VALUES (?1, ?2, ?3)",
@@ -99,9 +103,12 @@ impl NoteIndex {
     pub fn remove(&self, path: &str) -> Result<()> {
         let conn = self.lock();
         let tx = conn.unchecked_transaction().map_err(db)?;
-        tx.execute("DELETE FROM notes WHERE path = ?1", params!(path)).map_err(db)?;
-        tx.execute("DELETE FROM tags WHERE note_path = ?1", params!(path)).map_err(db)?;
-        tx.execute("DELETE FROM links WHERE src = ?1", params!(path)).map_err(db)?;
+        tx.execute("DELETE FROM notes WHERE path = ?1", params!(path))
+            .map_err(db)?;
+        tx.execute("DELETE FROM tags WHERE note_path = ?1", params!(path))
+            .map_err(db)?;
+        tx.execute("DELETE FROM links WHERE src = ?1", params!(path))
+            .map_err(db)?;
         tx.commit().map_err(db)?;
         Ok(())
     }
@@ -110,10 +117,21 @@ impl NoteIndex {
     pub fn rename_path(&self, old: &str, new: &str) -> Result<()> {
         let conn = self.lock();
         let tx = conn.unchecked_transaction().map_err(db)?;
-        tx.execute("UPDATE notes SET path = ?2 WHERE path = ?1", params!(old, new)).map_err(db)?;
-        tx.execute("UPDATE tags SET note_path = ?2 WHERE note_path = ?1", params!(old, new))
-            .map_err(db)?;
-        tx.execute("UPDATE links SET src = ?2 WHERE src = ?1", params!(old, new)).map_err(db)?;
+        tx.execute(
+            "UPDATE notes SET path = ?2 WHERE path = ?1",
+            params!(old, new),
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE tags SET note_path = ?2 WHERE note_path = ?1",
+            params!(old, new),
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE links SET src = ?2 WHERE src = ?1",
+            params!(old, new),
+        )
+        .map_err(db)?;
         tx.commit().map_err(db)?;
         Ok(())
     }
@@ -121,14 +139,17 @@ impl NoteIndex {
     /// 全量列表（tags 两步查询内存合并，避免 group_concat 解析）
     pub fn list(&self) -> Result<Vec<NoteMeta>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare("SELECT path, title, mtime_ms, size FROM notes ORDER BY path").map_err(db)?;
+        let mut stmt = conn
+            .prepare("SELECT path, title, mtime_ms, size FROM notes ORDER BY path")
+            .map_err(db)?;
         let rows: Vec<(String, String, i64, i64)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(db)?
             .collect::<std::result::Result<_, _>>()
             .map_err(db)?;
-        let mut stmt2 = conn.prepare("SELECT note_path, tag FROM tags").map_err(db)?;
+        let mut stmt2 = conn
+            .prepare("SELECT note_path, tag FROM tags")
+            .map_err(db)?;
         let tag_rows: Vec<(String, String)> = stmt2
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(db)?
@@ -170,8 +191,9 @@ impl NoteIndex {
     /// 反链来源（N2）：dst_path 命中即返回 (src, 链接原文)；snippet 由 library 层读文件补
     pub fn links_to(&self, dst_path: &str) -> Result<Vec<(String, String)>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare("SELECT src, dst FROM links WHERE dst_path = ?1 ORDER BY src").map_err(db)?;
+        let mut stmt = conn
+            .prepare("SELECT src, dst FROM links WHERE dst_path = ?1 ORDER BY src")
+            .map_err(db)?;
         let rows = stmt
             .query_map(params!(dst_path), |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(db)?
@@ -183,8 +205,9 @@ impl NoteIndex {
     /// 本文出链（N2 面板展示）
     pub fn links_from(&self, src: &str) -> Result<Vec<(String, String)>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare("SELECT dst, dst_path FROM links WHERE src = ?1 ORDER BY dst").map_err(db)?;
+        let mut stmt = conn
+            .prepare("SELECT dst, dst_path FROM links WHERE src = ?1 ORDER BY dst")
+            .map_err(db)?;
         let rows = stmt
             .query_map(params!(src), |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(db)?
@@ -198,7 +221,11 @@ impl NoteIndex {
         Ok(self
             .links_to(path)?
             .into_iter()
-            .map(|(src, _)| Backlink { src, title: String::new(), snippet: String::new() })
+            .map(|(src, _)| Backlink {
+                src,
+                title: String::new(),
+                snippet: String::new(),
+            })
             .collect())
     }
 
@@ -237,20 +264,27 @@ mod tests {
             mtime_ms: 1,
             size: 2,
             tags: vec!["a".into()],
-            links: links.into_iter().map(|(d, p)| (d.into(), p.into())).collect(),
+            links: links
+                .into_iter()
+                .map(|(d, p)| (d.into(), p.into()))
+                .collect(),
         }
     }
 
     #[test]
     fn upsert_list_remove_roundtrip() {
         let idx = NoteIndex::open(&tmpdb("round")).unwrap();
-        idx.upsert(row("a.md", vec![("b", "b.md"), ("x", "")])).unwrap();
+        idx.upsert(row("a.md", vec![("b", "b.md"), ("x", "")]))
+            .unwrap();
         idx.upsert(row("b.md", vec![])).unwrap();
         let list = idx.list().unwrap();
         assert_eq!(list.len(), 2);
         let a = list.iter().find(|n| n.path == "a.md").unwrap();
         assert_eq!(a.tags, vec!["a"]);
-        assert_eq!(idx.links_to("b.md").unwrap(), vec![("a.md".into(), "b".into())]);
+        assert_eq!(
+            idx.links_to("b.md").unwrap(),
+            vec![("a.md".into(), "b".into())]
+        );
         assert_eq!(idx.links_from("a.md").unwrap().len(), 2);
         idx.remove("a.md").unwrap();
         assert!(idx.links_to("b.md").unwrap().is_empty());

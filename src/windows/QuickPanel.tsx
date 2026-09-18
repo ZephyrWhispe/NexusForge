@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clipboardSearch, clipboardPaste, type ClipEntry } from "../ipc/client";
 import { reportError } from "../stores/notifications";
 import DibThumb from "../modules/clipboard/DibThumb";
+import { keyActivate } from "../a11y";
 
 /**
  * 剪切板快速面板（docs/UI-PLAN.md U3-5，审查 D-14）：独立置顶小窗。
@@ -142,6 +143,9 @@ export default function QuickPanel() {
             key={e.id}
             className={styles.item}
             onClick={() => clipboardPaste(e.id).finally(hideWindow)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={keyActivate(() => void clipboardPaste(e.id).finally(hideWindow))}
           >
             <span className={styles.num}>{i + 1}</span>
             {e.content_type === "image" && <DibThumb id={e.id} width={36} height={22} />}

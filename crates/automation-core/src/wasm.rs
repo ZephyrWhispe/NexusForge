@@ -7,7 +7,9 @@
 //!
 //! wat feature 用于测试直接写 wat 样本（恶意样本验收：无限循环/内存炸弹被限额终止）。
 
-use wasmtime::{Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{
+    Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
+};
 
 use crate::error::{AutomationError, Result};
 
@@ -89,9 +91,14 @@ impl WasmRuntime {
                 .func_wrap(
                     "nf",
                     "open_url",
-                    |mut caller: Caller<'_, HostCtx<'_>>, ptr: i32, len: i32| -> wasmtime::Result<()> {
+                    |mut caller: Caller<'_, HostCtx<'_>>,
+                     ptr: i32,
+                     len: i32|
+                     -> wasmtime::Result<()> {
                         let url = read_guest_str(&mut caller, ptr, len)?;
-                        (caller.data().host).open_url(&url).map_err(|e| wasmtime::Error::msg(e.to_string()))
+                        (caller.data().host)
+                            .open_url(&url)
+                            .map_err(|e| wasmtime::Error::msg(e.to_string()))
                     },
                 )
                 .map_err(wasm_err)?;
@@ -139,7 +146,11 @@ impl WasmRuntime {
 }
 
 /// 从 guest 线性内存读 (ptr, len) 字符串（lossy UTF-8）
-fn read_guest_str(caller: &mut Caller<'_, HostCtx<'_>>, ptr: i32, len: i32) -> wasmtime::Result<String> {
+fn read_guest_str(
+    caller: &mut Caller<'_, HostCtx<'_>>,
+    ptr: i32,
+    len: i32,
+) -> wasmtime::Result<String> {
     let mem: Memory = caller
         .get_export("memory")
         .and_then(|e| e.into_memory())
@@ -206,7 +217,8 @@ mod tests {
         let rt = WasmRuntime::new().unwrap();
         let host = FakeHost::default();
         // wat feature：Module::new 接受 wat 文本（以 \0asm 开头才按二进制解析）
-        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), &host).unwrap();
+        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), &host)
+            .unwrap();
         assert_eq!(*host.logs.lock().unwrap(), vec!["hello plugin".to_string()]);
     }
 
@@ -256,12 +268,28 @@ mod tests {
               (func (export "run") (call 0 (i32.const 0) (i32.const 0))))
         "#;
         let err = rt
-            .run(wat.as_bytes(), "run", WasmCaps { allow_open: false, allow_notify: false }, &host)
+            .run(
+                wat.as_bytes(),
+                "run",
+                WasmCaps {
+                    allow_open: false,
+                    allow_notify: false,
+                },
+                &host,
+            )
             .unwrap_err();
         assert!(err.to_string().contains("实例化失败"));
         // 允许 open → 链接成功，宿主回调（本测试宿主返回 Err → 执行 Err）
         let err = rt
-            .run(wat.as_bytes(), "run", WasmCaps { allow_open: true, allow_notify: false }, &host)
+            .run(
+                wat.as_bytes(),
+                "run",
+                WasmCaps {
+                    allow_open: true,
+                    allow_notify: false,
+                },
+                &host,
+            )
             .unwrap_err();
         assert!(err.to_string().contains("open 未授权"));
     }
@@ -271,6 +299,7 @@ mod tests {
     fn host_via_arc_object_safe() {
         let rt = WasmRuntime::new().unwrap();
         let host: Arc<dyn WasmHost> = Arc::new(FakeHost::default());
-        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), host.as_ref()).unwrap();
+        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), host.as_ref())
+            .unwrap();
     }
 }

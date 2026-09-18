@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 
 use host_core::error::ModuleError;
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
-use host_core::ports::{ConptyPort, DockerPipePort};
+use host_core::ports::ConptyPort;
 
 use crate::session::TermSessions;
 use crate::ssh::SshService;
@@ -63,7 +63,10 @@ impl Module for TermModule {
 
         let ssh = SshService::new(self.app_data_dir.join("term").join("known_hosts.json"))
             .map_err(|e| ModuleError::Init(e.to_string()))?;
-        *self.ssh.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(ssh));
+        *self
+            .ssh
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(ssh));
 
         self.state.store(1, Ordering::SeqCst);
         Ok(())

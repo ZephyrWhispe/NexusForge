@@ -11,8 +11,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, GetWindowRect, SM_CXSCREEN, SM_CYSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, PW_RENDERFULLCONTENT,
+    GetSystemMetrics, GetWindowRect, PW_RENDERFULLCONTENT, SM_CXSCREEN, SM_CYSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use host_core::error::AppError;
@@ -61,7 +61,10 @@ unsafe fn grab_region(x: i32, y: i32, w: i32, h: i32) -> Result<Frame, AppError>
     let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
     if screen_dc.is_invalid() {
         let gle = windows::Win32::Foundation::GetLastError();
-        return Err(err("SCREENSHOT_CAPTURE_001", format!("CreateDC 失败 (GetLastError={gle:?})")));
+        return Err(err(
+            "SCREENSHOT_CAPTURE_001",
+            format!("CreateDC 失败 (GetLastError={gle:?})"),
+        ));
     }
     let mem_dc = CreateCompatibleDC(screen_dc);
     let bitmap = CreateCompatibleBitmap(screen_dc, w, h);
@@ -70,15 +73,17 @@ unsafe fn grab_region(x: i32, y: i32, w: i32, h: i32) -> Result<Frame, AppError>
     let blit = BitBlt(mem_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY);
     let mut frame: Option<Frame> = None;
     if blit.is_ok() {
-        let mut bi = BITMAPINFO::default();
-        bi.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: w,
-            biHeight: -h, // top-down
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            biSizeImage: (w * h * 4) as u32,
+        let mut bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                biSizeImage: (w * h * 4) as u32,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -124,7 +129,10 @@ unsafe fn grab_window(hwnd: isize) -> Result<Frame, AppError> {
     let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
     if screen_dc.is_invalid() {
         let gle = windows::Win32::Foundation::GetLastError();
-        return Err(err("SCREENSHOT_CAPTURE_003", format!("CreateDC 失败 (GetLastError={gle:?})")));
+        return Err(err(
+            "SCREENSHOT_CAPTURE_003",
+            format!("CreateDC 失败 (GetLastError={gle:?})"),
+        ));
     }
     let mem_dc = CreateCompatibleDC(screen_dc);
     let bitmap = CreateCompatibleBitmap(screen_dc, w, h);
@@ -133,15 +141,17 @@ unsafe fn grab_window(hwnd: isize) -> Result<Frame, AppError> {
     let printed = PrintWindow(hwnd, mem_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT));
     let mut frame: Option<Frame> = None;
     if printed.as_bool() {
-        let mut bi = BITMAPINFO::default();
-        bi.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: w,
-            biHeight: -h,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            biSizeImage: (w * h * 4) as u32,
+        let mut bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                biSizeImage: (w * h * 4) as u32,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut pixels = vec![0u8; (w * h * 4) as usize];

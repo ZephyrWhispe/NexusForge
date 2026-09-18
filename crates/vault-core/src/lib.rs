@@ -19,4 +19,4 @@ pub use generator::{generate_password, PasswordPolicy};
 pub use model::{Entry, EntryField, Folder, VaultStore};
 pub use module::VaultModule;
 pub use totp::totp_now;
-pub use vault::{VaultService, VaultState, MAX_ATTEMPTS, LOCKOUT};
+pub use vault::{VaultService, VaultState, LOCKOUT, MAX_ATTEMPTS};

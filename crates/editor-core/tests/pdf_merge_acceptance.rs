@@ -3,8 +3,8 @@
 //! 自定义 global allocator 统计进程峰值内存（测试二进制独占进程，无干扰）。
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);

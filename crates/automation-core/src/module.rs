@@ -64,7 +64,11 @@ impl HostActionHandler {
     }
 
     /// RunScript path 解析："plugin:{id}" → 插件库加载（含 sha256 复验）；否则按文件路径直读
-    fn resolve_wasm(&self, path: &str, func: &str) -> crate::error::Result<(Vec<u8>, String, crate::wasm::WasmCaps)> {
+    fn resolve_wasm(
+        &self,
+        path: &str,
+        func: &str,
+    ) -> crate::error::Result<(Vec<u8>, String, crate::wasm::WasmCaps)> {
         if let Some(id) = path.strip_prefix("plugin:") {
             let store = self
                 .plugins
@@ -74,11 +78,19 @@ impl HostActionHandler {
                 .ok_or_else(|| AutomationError::Action("插件库未初始化".into()))?;
             let manifest = store.manifest_of(id)?;
             let wasm = store.wasm_bytes(id)?;
-            let func = if func.is_empty() { manifest.func.clone() } else { func.to_string() };
+            let func = if func.is_empty() {
+                manifest.func.clone()
+            } else {
+                func.to_string()
+            };
             Ok((wasm, func, manifest.caps()))
         } else {
             let wasm = std::fs::read(path).map_err(AutomationError::Io)?;
-            let func = if func.is_empty() { "run".into() } else { func.to_string() };
+            let func = if func.is_empty() {
+                "run".into()
+            } else {
+                func.to_string()
+            };
             // 散装 wasm 无 manifest：默认无权限（仅 nf.log）
             Ok((wasm, func, crate::wasm::WasmCaps::default()))
         }
@@ -95,7 +107,11 @@ impl WasmHost for HostActionHandler {
     }
 
     fn notify(&self, title: &str, body: &str) -> crate::error::Result<()> {
-        ActionHandler::publish(self, "automation.notify", serde_json::json!({ "title": title, "body": body }))
+        ActionHandler::publish(
+            self,
+            "automation.notify",
+            serde_json::json!({ "title": title, "body": body }),
+        )
     }
 }
 
@@ -126,7 +142,12 @@ impl ActionHandler for HostActionHandler {
             .map_err(|e| AutomationError::Action(e.to_string()))
     }
 
-    fn ipc_command(&self, module: &str, cmd: &str, _args: &serde_json::Value) -> crate::error::Result<()> {
+    fn ipc_command(
+        &self,
+        module: &str,
+        cmd: &str,
+        _args: &serde_json::Value,
+    ) -> crate::error::Result<()> {
         // v1 内置白名单映射；完整模块命令映射随插件/宿主注册表深化
         Err(AutomationError::Action(format!(
             "IpcCommand 暂未开放（{module}.{cmd}）；v1 请使用 publish/notify/open_url/run_script 动作"
@@ -261,15 +282,16 @@ impl AutomationModule {
     /// A4：规则 ↔ Windows 计划任务同步（enable+Schedule → ensure_daily；否则 remove）
     /// 失败仅告警不阻断规则保存（应用内定时仍生效）
     fn sync_task(&self, rule: &Rule) {
-        let Some(ts) = self.taskschd.read().expect("任务锁污染").clone() else { return };
+        let Some(ts) = self.taskschd.read().expect("任务锁污染").clone() else {
+            return;
+        };
         let name = task_name_for(&rule.id);
         if rule.enabled {
             if let crate::rule::Trigger::Schedule { time } = &rule.on {
                 match std::env::current_exe() {
                     Ok(exe) => {
                         let args = format!("--run-rule {}", rule.id);
-                        if let Err(e) =
-                            ts.ensure_daily(&name, &exe.to_string_lossy(), &args, time)
+                        if let Err(e) = ts.ensure_daily(&name, &exe.to_string_lossy(), &args, time)
                         {
                             tracing::warn!(rule = %rule.id, error = %e, "计划任务注册失败（应用内定时仍生效）");
                         }
@@ -315,7 +337,9 @@ impl AutomationModule {
 
     /// dispatcher：订阅全部主题 → 匹配规则 → 求值 → 执行（automation 自产事件跳过，防自环）
     fn start_dispatcher(&self) {
-        let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) else { return };
+        let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) else {
+            return;
+        };
         let Some(engine) = self.engine() else { return };
         let rules = self.rules.clone();
         // S4：本轮协作文档/停机信道重建；调度线程持"本次运行"取消令牌——
@@ -326,7 +350,9 @@ impl AutomationModule {
         *self.cancel.write().expect("取消令牌锁污染") = sched_token.clone();
         // 事件订阅任务（tokio——bootstrap 在 runtime 内 start）
         for (topic, _) in TOPIC_REGISTRY {
-            let Ok(mut rx) = bus.subscribe(topic) else { continue };
+            let Ok(mut rx) = bus.subscribe(topic) else {
+                continue;
+            };
             let engine = engine.clone();
             let rules = rules.clone();
             let topic_static: &'static str = topic;
@@ -484,16 +510,28 @@ impl Module for AutomationModule {
         let runtime = Arc::new(WasmRuntime::new().map_err(|e| ModuleError::Init(e.to_string()))?);
         let plugins = Arc::new(PluginStore::new(&ctx.app_data_dir));
         handler.attach_wasm(runtime, plugins.clone());
-        *self.plugins.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(plugins);
+        *self
+            .plugins
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(plugins);
         // A4：计划任务端口（未注册仅告警——应用内定时仍生效）
-        *self.taskschd.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
-            ctx.ports.get::<dyn TaskSchdPort>();
-        *self.handler.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(handler.clone());
+        *self
+            .taskschd
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = ctx.ports.get::<dyn TaskSchdPort>();
+        *self
+            .handler
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(handler.clone());
         *self
             .engine
             .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(RuleEngine::new(handler)));
-        *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+            .map_err(|_| ModuleError::Init("锁污染".into()))? =
+            Some(Arc::new(RuleEngine::new(handler)));
+        *self
+            .bus
+            .write()
+            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
         self.load_rules();
         self.state.store(1, Ordering::SeqCst);
         Ok(())
@@ -571,14 +609,22 @@ mod tests {
             while m.active_dispatchers() < total && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(m.active_dispatchers(), total, "第 {cycle} 轮：全部订阅任务应上线");
+            assert_eq!(
+                m.active_dispatchers(),
+                total,
+                "第 {cycle} 轮：全部订阅任务应上线"
+            );
 
             m.stop().unwrap();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             while m.active_dispatchers() > 0 && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(m.active_dispatchers(), 0, "第 {cycle} 轮：stop() 后订阅任务应全部退出");
+            assert_eq!(
+                m.active_dispatchers(),
+                0,
+                "第 {cycle} 轮：stop() 后订阅任务应全部退出"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

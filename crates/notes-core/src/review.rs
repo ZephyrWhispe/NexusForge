@@ -18,7 +18,9 @@ const DAY_MS: i64 = 86_400_000;
 /// SM-2 评分（纯函数，便于单测）
 pub fn grade(card: &Card, quality: u32, now_ms: i64) -> Result<Card> {
     if quality > 5 {
-        return Err(NoteError::Review(format!("quality 超范围: {quality}（0-5）")));
+        return Err(NoteError::Review(format!(
+            "quality 超范围: {quality}（0-5）"
+        )));
     }
     let q = f64::from(quality);
     let gap = 5.0 - q;
@@ -55,7 +57,9 @@ pub struct CardStore {
 impl CardStore {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Result<Self> {
         {
-            let c = conn.lock().map_err(|_| NoteError::Db("卡片连接锁污染".into()))?;
+            let c = conn
+                .lock()
+                .map_err(|_| NoteError::Db("卡片连接锁污染".into()))?;
             c.execute_batch(
                 "CREATE TABLE IF NOT EXISTS cards (
                     id TEXT PRIMARY KEY,
@@ -73,7 +77,13 @@ impl CardStore {
         Ok(Self { conn })
     }
 
-    pub fn create(&self, front: &str, back: &str, note_path: Option<String>, now_ms: i64) -> Result<Card> {
+    pub fn create(
+        &self,
+        front: &str,
+        back: &str,
+        note_path: Option<String>,
+        now_ms: i64,
+    ) -> Result<Card> {
         let front = front.trim();
         if front.is_empty() {
             return Err(NoteError::Review("卡片正面不能为空".into()));
@@ -109,7 +119,9 @@ impl CardStore {
 
     pub fn delete(&self, id: &str) -> Result<bool> {
         let c = self.lock();
-        let n = c.execute("DELETE FROM cards WHERE id = ?1", params!(id)).map_err(db)?;
+        let n = c
+            .execute("DELETE FROM cards WHERE id = ?1", params!(id))
+            .map_err(db)?;
         Ok(n > 0)
     }
 
@@ -185,7 +197,9 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
 }
 
 fn rows(
-    it: rusqlite::Result<rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<Card>>>,
+    it: rusqlite::Result<
+        rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<Card>>,
+    >,
 ) -> Result<Vec<Card>> {
     it.map_err(db)?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -277,7 +291,9 @@ mod tests {
         let idx = crate::index::NoteIndex::open(&tmpdb("store")).unwrap();
         let store = CardStore::new(idx.conn()).unwrap();
         let now = 10_000;
-        let c1 = store.create(" 正面 ", "背面", Some("a.md".into()), now).unwrap();
+        let c1 = store
+            .create(" 正面 ", "背面", Some("a.md".into()), now)
+            .unwrap();
         assert_eq!(c1.front, "正面");
         assert_eq!(c1.due_ms, now);
         store.create("卡二", "", None, now + 100).unwrap();
@@ -298,6 +314,6 @@ mod tests {
         store.detach_note("a.md").unwrap();
         assert!(store.get(&c1.id).unwrap().unwrap().note_path.is_none());
         assert!(store.delete(&c1.id).unwrap());
-        assert!(store.delete(&c1.id).unwrap() == false);
+        assert!(!store.delete(&c1.id).unwrap());
     }
 }

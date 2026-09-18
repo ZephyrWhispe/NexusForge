@@ -36,6 +36,7 @@ import {
   type TermSessionDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { keyActivate } from "../../a11y";
 
 /**
  * 终端与运维面板（docs/impl/06 T1–T6，M11 v1）：
@@ -446,6 +447,9 @@ export default function TerminalPanel() {
                     e.stopPropagation();
                     void killSession(s.id);
                   }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={keyActivate(() => void killSession(s.id))}
                 >
                   ✕
                 </span>
@@ -472,10 +476,17 @@ export default function TerminalPanel() {
                   key={e.name}
                   className={`${styles.item} ${styles.itemHover}`}
                   onClick={() => {
-                    const next = e.is_dir ? `${sftpPath.replace(/\/$/, "")}/${e.name}` : `${sftpPath.replace(/\/$/, "")}/${e.name}`;
+                    const next = `${sftpPath.replace(/\/$/, "")}/${e.name}`;
                     setSftpPath(next);
                     if (e.is_dir) void loadSftp();
                   }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={keyActivate(() => {
+                    const next = `${sftpPath.replace(/\/$/, "")}/${e.name}`;
+                    setSftpPath(next);
+                    if (e.is_dir) void loadSftp();
+                  })}
                 >
                   <Text size={200}>{e.is_dir ? "📁" : "📄"} {e.name}</Text>
                   {!e.is_dir && (

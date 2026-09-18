@@ -62,7 +62,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// 从官方 zip 安装 sing-box：解压包内 `sing-box.exe` 到 `bin_dir`，写 manifest。
 /// zip 结构完整性由 zip crate 校验（CRC32），exe SHA256 记录到 manifest。
-pub fn install_singbox_from_zip(bin_dir: &Path, zip_bytes: &[u8], version: &str) -> Result<Manifest> {
+pub fn install_singbox_from_zip(
+    bin_dir: &Path,
+    zip_bytes: &[u8],
+    version: &str,
+) -> Result<Manifest> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
         .map_err(|e| ProxyError::Download(format!("zip 打开失败（包不完整？）: {e}")))?;
     std::fs::create_dir_all(bin_dir).map_err(ProxyError::from)?;
@@ -146,8 +150,8 @@ mod tests {
     fn make_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
         let buf = std::io::Cursor::new(Vec::new());
         let mut w = zip::ZipWriter::new(buf);
-        let opts =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for (name, bytes) in entries {
             w.start_file(*name, opts).unwrap();
             std::io::Write::write_all(&mut w, bytes).unwrap();
@@ -161,8 +165,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let exe_payload = b"MZ-fake-singbox".to_vec();
         let zip = make_zip(&[
-            ("sing-box-1.10.7-windows-amd64/README.md", b"readme".to_vec()),
-            ("sing-box-1.10.7-windows-amd64/sing-box.exe", exe_payload.clone()),
+            (
+                "sing-box-1.10.7-windows-amd64/README.md",
+                b"readme".to_vec(),
+            ),
+            (
+                "sing-box-1.10.7-windows-amd64/sing-box.exe",
+                exe_payload.clone(),
+            ),
         ]);
         let m = install_singbox_from_zip(&dir, &zip, "1.10.7").unwrap();
         assert_eq!(m.kernel_version, "1.10.7");
@@ -197,7 +207,8 @@ mod tests {
 
     #[test]
     fn download_urls_are_official_endpoints() {
-        assert!(singbox_download_url("1.10.7").starts_with("https://github.com/SagerNet/sing-box/releases/download/v1.10.7/"));
+        assert!(singbox_download_url("1.10.7")
+            .starts_with("https://github.com/SagerNet/sing-box/releases/download/v1.10.7/"));
         assert!(wintun_download_url(DEFAULT_WINTUN_VERSION).contains("wintun.net"));
     }
 }

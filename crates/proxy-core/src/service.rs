@@ -123,7 +123,11 @@ pub struct ProxyService {
 
 impl ProxyService {
     /// 打开服务：加载持久化 + 启动扫描还原 kill -9 残留（验收项）
-    pub fn open(app_data_dir: &Path, bus: Arc<EventBus>, sp: Arc<dyn SysProxyPort>) -> Result<Arc<Self>> {
+    pub fn open(
+        app_data_dir: &Path,
+        bus: Arc<EventBus>,
+        sp: Arc<dyn SysProxyPort>,
+    ) -> Result<Arc<Self>> {
         let proxy_dir = app_data_dir.join("proxy");
         std::fs::create_dir_all(proxy_dir.join(SUBS_DIR))?;
         std::fs::create_dir_all(proxy_dir.join(BIN_DIR))?;
@@ -225,7 +229,9 @@ impl ProxyService {
                 tokio::time::sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
             }
         }
-        Err(ProxyError::Download(format!("下载失败（已重试 {FETCH_RETRIES} 次）: {last_err}")))
+        Err(ProxyError::Download(format!(
+            "下载失败（已重试 {FETCH_RETRIES} 次）: {last_err}"
+        )))
     }
 
     // ---------------- 订阅管理（PR3） ----------------
@@ -240,7 +246,11 @@ impl ProxyService {
         }
         let sub = Sub {
             id: uuid::Uuid::now_v7().to_string(),
-            name: if name.trim().is_empty() { "订阅".into() } else { name.trim().to_string() },
+            name: if name.trim().is_empty() {
+                "订阅".into()
+            } else {
+                name.trim().to_string()
+            },
             url: url.trim().to_string(),
             updated_ms: 0,
             node_count: 0,
@@ -319,7 +329,11 @@ impl ProxyService {
     // ---------------- 直连规则 ----------------
 
     pub fn direct_rules(&self) -> Vec<String> {
-        self.inner.read().expect("代理内部状态读锁").direct_domains.clone()
+        self.inner
+            .read()
+            .expect("代理内部状态读锁")
+            .direct_domains
+            .clone()
     }
 
     pub fn set_direct_rules(&self, rules: Vec<String>) -> Result<()> {
@@ -329,7 +343,10 @@ impl ProxyService {
             .filter(|r| !r.is_empty())
             .collect();
         cleaned.dedup();
-        std::fs::write(self.proxy_dir.join(RULES_FILE), serde_json::to_vec(&cleaned)?)?;
+        std::fs::write(
+            self.proxy_dir.join(RULES_FILE),
+            serde_json::to_vec(&cleaned)?,
+        )?;
         self.inner.write().expect("代理内部状态写锁").direct_domains = cleaned;
         Ok(())
     }
@@ -413,7 +430,11 @@ impl ProxyService {
     fn restart_with_config(self: &Arc<Self>, tun: bool) -> Result<()> {
         let (nodes, direct, port) = {
             let inner = self.inner.read().expect("代理内部状态读锁");
-            (inner.nodes.clone(), inner.direct_domains.clone(), inner.mixed_port)
+            (
+                inner.nodes.clone(),
+                inner.direct_domains.clone(),
+                inner.mixed_port,
+            )
         };
         // 停旧内核（模式切换）
         {
@@ -447,8 +468,12 @@ impl ProxyService {
         handle.set_log_cb({
             let bus = self.bus.clone();
             Arc::new(move |line: &str| {
-                bus.publish(Event::new("proxy.log_line", "proxy", serde_json::json!({ "line": line })))
-                    .ok();
+                bus.publish(Event::new(
+                    "proxy.log_line",
+                    "proxy",
+                    serde_json::json!({ "line": line }),
+                ))
+                .ok();
             })
         });
 
@@ -496,7 +521,9 @@ impl ProxyService {
         for n in nodes {
             tasks.push(tokio::spawn(async move {
                 let addr = std::net::SocketAddr::new(
-                    resolve_host(&n.server).await.unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                    resolve_host(&n.server)
+                        .await
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
                     n.port,
                 );
                 let start = std::time::Instant::now();
@@ -509,7 +536,11 @@ impl ProxyService {
                     Ok(Ok(_)) => Some(start.elapsed().as_millis() as u64),
                     _ => None,
                 };
-                NodeDelayDto { tag: n.tag, sub_id: n.sub_id, ms }
+                NodeDelayDto {
+                    tag: n.tag,
+                    sub_id: n.sub_id,
+                    ms,
+                }
             }));
         }
         let mut out = Vec::with_capacity(tasks.len());
@@ -523,7 +554,11 @@ impl ProxyService {
 
     pub fn logs(&self, limit: usize) -> Vec<LogLine> {
         let inner = self.inner.read().expect("代理内部状态读锁");
-        inner.handle.as_ref().map(|h| h.logs_snapshot(limit)).unwrap_or_default()
+        inner
+            .handle
+            .as_ref()
+            .map(|h| h.logs_snapshot(limit))
+            .unwrap_or_default()
     }
 
     // ---------------- 内部 ----------------
@@ -533,11 +568,16 @@ impl ProxyService {
     }
 
     fn sub_nodes_path(&self, id: &str) -> PathBuf {
-        self.proxy_dir.join(SUBS_DIR).join(format!("{id}.nodes.json"))
+        self.proxy_dir
+            .join(SUBS_DIR)
+            .join(format!("{id}.nodes.json"))
     }
 
     fn save_subs(&self, inner: &Inner) -> Result<()> {
-        std::fs::write(self.proxy_dir.join(SUBS_FILE), serde_json::to_vec(&inner.subs)?)?;
+        std::fs::write(
+            self.proxy_dir.join(SUBS_FILE),
+            serde_json::to_vec(&inner.subs)?,
+        )?;
         Ok(())
     }
 
@@ -577,9 +617,15 @@ fn load_subs(proxy_dir: &Path) -> Result<(Vec<Sub>, Vec<Node>)> {
         .unwrap_or_default();
     let mut nodes = Vec::new();
     for sub in &mut subs {
-        if let Ok(list) = std::fs::read(proxy_dir.join(SUBS_DIR).join(format!("{}.nodes.json", sub.id)))
-            .and_then(|raw| serde_json::from_slice::<Vec<Node>>(&raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
-        {
+        if let Ok(list) = std::fs::read(
+            proxy_dir
+                .join(SUBS_DIR)
+                .join(format!("{}.nodes.json", sub.id)),
+        )
+        .and_then(|raw| {
+            serde_json::from_slice::<Vec<Node>>(&raw)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        }) {
             sub.node_count = list.len();
             nodes.extend(list);
         }
@@ -590,11 +636,7 @@ fn load_subs(proxy_dir: &Path) -> Result<(Vec<Sub>, Vec<Node>)> {
 async fn resolve_host(host: &str) -> Option<std::net::IpAddr> {
     use std::net::ToSocketAddrs;
     // server:port → 第一个地址的 IP（v1 用同步解析；DNS 失败返回 None → 连接必失败 → None 延迟）
-    (host, 1u16)
-        .to_socket_addrs()
-        .ok()?
-        .next()
-        .map(|a| a.ip())
+    (host, 1u16).to_socket_addrs().ok()?.next().map(|a| a.ip())
 }
 
 fn now_ms() -> u64 {
@@ -617,7 +659,9 @@ mod tests {
 
     impl MockSp {
         fn new() -> Self {
-            Self { state: StdArc::new(Mutex::new(SysProxyState::default())) }
+            Self {
+                state: StdArc::new(Mutex::new(SysProxyState::default())),
+            }
         }
     }
 
@@ -625,7 +669,10 @@ mod tests {
         fn read(&self) -> std::result::Result<SysProxyState, host_core::error::AppError> {
             Ok(self.state.lock().unwrap().clone())
         }
-        fn write(&self, state: &SysProxyState) -> std::result::Result<(), host_core::error::AppError> {
+        fn write(
+            &self,
+            state: &SysProxyState,
+        ) -> std::result::Result<(), host_core::error::AppError> {
             *self.state.lock().unwrap() = state.clone();
             Ok(())
         }
@@ -642,7 +689,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let sp = StdArc::new(MockSp::new());
-        let svc = ProxyService::open(&dir, Arc::new(host_core::events::EventBus::new()), sp.clone()).unwrap();
+        let svc = ProxyService::open(
+            &dir,
+            Arc::new(host_core::events::EventBus::new()),
+            sp.clone(),
+        )
+        .unwrap();
         (svc, sp, dir)
     }
 
@@ -666,7 +718,8 @@ mod tests {
         assert_eq!(svc.subs().len(), 1);
         drop(svc);
         let sp = StdArc::new(MockSp::new());
-        let svc2 = ProxyService::open(&dir, Arc::new(host_core::events::EventBus::new()), sp).unwrap();
+        let svc2 =
+            ProxyService::open(&dir, Arc::new(host_core::events::EventBus::new()), sp).unwrap();
         assert_eq!(svc2.subs().len(), 1, "订阅应持久化");
         assert_eq!(svc2.subs()[0].name, "测试订阅");
         assert!(svc2.sub_remove(&sub.id).unwrap());
@@ -680,15 +733,26 @@ mod tests {
         assert!(matches!(Mode::parse("bogus"), Err(ProxyError::BadState(_))));
         // 无管理员（MockSp is_admin=false）→ TUN 拒绝
         let arc_svc: Arc<ProxyService> = svc;
-        assert!(matches!(arc_svc.set_mode(Mode::Tun), Err(ProxyError::Permission(_))));
+        assert!(matches!(
+            arc_svc.set_mode(Mode::Tun),
+            Err(ProxyError::Permission(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn direct_rules_roundtrip() {
         let (svc, _sp, dir) = open_service("rules");
-        svc.set_direct_rules(vec![".corp.example.com".into(), " internal.local ".into(), String::new()]).unwrap();
-        assert_eq!(svc.direct_rules(), vec![".corp.example.com", "internal.local"]);
+        svc.set_direct_rules(vec![
+            ".corp.example.com".into(),
+            " internal.local ".into(),
+            String::new(),
+        ])
+        .unwrap();
+        assert_eq!(
+            svc.direct_rules(),
+            vec![".corp.example.com", "internal.local"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -697,6 +761,11 @@ mod tests {
         use base64::Engine;
         // http_get 返回的字节可能整体 base64 —— 引擎能力自检
         let s = base64::engine::general_purpose::STANDARD.encode("hello");
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(&s).unwrap(), b"hello");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&s)
+                .unwrap(),
+            b"hello"
+        );
     }
 }

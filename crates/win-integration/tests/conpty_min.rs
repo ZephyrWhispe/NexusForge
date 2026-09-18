@@ -7,19 +7,17 @@
 //! 注意：用例会调用 FreeConsole() 摘除 cargo test 进程自身的控制台（这正是它的实验目的），
 //! 在常规终端里运行会造成该终端会话输出丢失，故必须用可丢弃的终端窗口。
 
-use std::os::windows::ffi::OsStrExt;
-
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
-use windows::Win32::System::Console::{ClosePseudoConsole, COORD, CreatePseudoConsole, HPCON};
+use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
 };
-use windows::Win32::Storage::FileSystem::ReadFile;
 
 fn make_pipe() -> (HANDLE, HANDLE) {
     let sa = SECURITY_ATTRIBUTES {
@@ -51,7 +49,12 @@ fn conpty_min_echocon_reference() {
     // 属性列表（照 EchoCon）
     let mut list_size: usize = 0;
     let _ = unsafe {
-        InitializeProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST(std::ptr::null_mut()), 1, 0, &mut list_size)
+        InitializeProcThreadAttributeList(
+            LPPROC_THREAD_ATTRIBUTE_LIST(std::ptr::null_mut()),
+            1,
+            0,
+            &mut list_size,
+        )
     };
     let mut list_buf = vec![0u8; list_size];
     let list = LPPROC_THREAD_ATTRIBUTE_LIST(list_buf.as_mut_ptr().cast());
@@ -70,7 +73,10 @@ fn conpty_min_echocon_reference() {
         .expect("UpdateAttr");
     }
 
-    let mut cmd = "cmd.exe /c pause".encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let mut cmd = "cmd.exe /c pause"
+        .encode_utf16()
+        .chain([0])
+        .collect::<Vec<u16>>();
     let mut si = STARTUPINFOEXW::default();
     si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     si.lpAttributeList = list;
@@ -109,7 +115,12 @@ fn conpty_min_echocon_reference() {
             let data = b"echo NFTEST_INJECT\r\n";
             let mut written: u32 = 0;
             let r = unsafe {
-                windows::Win32::Storage::FileSystem::WriteFile(h, Some(data), Some(&mut written), None)
+                windows::Win32::Storage::FileSystem::WriteFile(
+                    h,
+                    Some(data),
+                    Some(&mut written),
+                    None,
+                )
             };
             println!("[min] 注入输入: r={r:?} written={written}");
         });
@@ -154,7 +165,7 @@ fn conpty_min_echocon_reference() {
     // 收尾：杀子进程（解除 pause 等待）→ 关 PTY/句柄
     unsafe {
         let _ = windows::Win32::System::Threading::TerminateProcess(pi.hProcess, 1);
-        let _ = ClosePseudoConsole(hpc);
+        ClosePseudoConsole(hpc);
         let _ = CloseHandle(pi.hProcess);
     }
 

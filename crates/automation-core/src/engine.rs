@@ -59,7 +59,11 @@ impl CooldownTable {
 
     /// 尝试触发：冷却内返回 false（并计数）；通过则记录本次时间
     pub fn try_fire(&self, rule_id: &str, cooldown_secs: u64, now_ms: i64) -> bool {
-        let cooldown = if cooldown_secs == 0 { DEFAULT_COOLDOWN_SECS } else { cooldown_secs };
+        let cooldown = if cooldown_secs == 0 {
+            DEFAULT_COOLDOWN_SECS
+        } else {
+            cooldown_secs
+        };
         let mut table = self.last_fired.lock().expect("冷却表锁污染");
         let gate_ms = cooldown * 1000;
         if let Some(&last) = table.get(rule_id) {
@@ -103,7 +107,7 @@ fn run_action(
                 );
                 return;
             }
-            Err(e) if (attempt as u32) < ACTION_RETRIES => {
+            Err(e) if attempt < ACTION_RETRIES => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(500u64 << (attempt - 1)));
                 tracing::warn!(rule = %rule.id, attempt, error = %e, "动作重试");
@@ -249,8 +253,14 @@ mod tests {
         Rule {
             id: id.into(),
             name: format!("规则{id}"),
-            on: crate::rule::Trigger::Event { topic: "clipboard.captured".into() },
-            when: Some(Expr::Leaf { path: "entry.kind".into(), cmp: crate::rule::CmpOp::Eq, value: json!("url") }),
+            on: crate::rule::Trigger::Event {
+                topic: "clipboard.captured".into(),
+            },
+            when: Some(Expr::Leaf {
+                path: "entry.kind".into(),
+                cmp: crate::rule::CmpOp::Eq,
+                value: json!("url"),
+            }),
             then: actions,
             cooldown_secs: 0,
             enabled: true,
@@ -273,8 +283,13 @@ mod tests {
         let r = rule(
             "r1",
             vec![
-                Action::Notify { title: "标题".into(), body: "正文".into() },
-                Action::OpenUrl { url: "https://ok".into() },
+                Action::Notify {
+                    title: "标题".into(),
+                    body: "正文".into(),
+                },
+                Action::OpenUrl {
+                    url: "https://ok".into(),
+                },
             ],
         );
         engine.fire(&r, &json!({ "entry": { "kind": "url" } }), 0);
@@ -290,7 +305,12 @@ mod tests {
     fn when_filter_blocks_execution() {
         let h = Arc::new(FakeHandler::new());
         let engine = RuleEngine::new(h.clone());
-        let r = rule("r2", vec![Action::OpenUrl { url: "https://ok".into() }]);
+        let r = rule(
+            "r2",
+            vec![Action::OpenUrl {
+                url: "https://ok".into(),
+            }],
+        );
         // when 不通过（kind != url）
         engine.fire(&r, &json!({ "entry": { "kind": "text" } }), 0);
         assert_eq!(h.calls.load(Ordering::SeqCst), 0);
@@ -300,7 +320,12 @@ mod tests {
     fn failing_action_retries_then_dead_letter() {
         let h = Arc::new(FakeHandler::new());
         let engine = RuleEngine::new(h.clone());
-        let r = rule("r3", vec![Action::OpenUrl { url: "https://fail/x".into() }]);
+        let r = rule(
+            "r3",
+            vec![Action::OpenUrl {
+                url: "https://fail/x".into(),
+            }],
+        );
         engine.fire(&r, &json!({ "entry": { "kind": "url" } }), 0);
         // 1 次原始 + 2 次重试 = 3
         assert_eq!(h.calls.load(Ordering::SeqCst), 3);
@@ -314,7 +339,12 @@ mod tests {
     fn replay_removes_on_success_keeps_on_failure() {
         let h = Arc::new(FakeHandler::new());
         let engine = RuleEngine::new(h.clone());
-        let r = rule("r4", vec![Action::OpenUrl { url: "https://fail".into() }]);
+        let r = rule(
+            "r4",
+            vec![Action::OpenUrl {
+                url: "https://fail".into(),
+            }],
+        );
         engine.fire(&r, &json!({ "entry": { "kind": "url" } }), 0);
         let dead_id = engine.dead_letters()[0].id.clone();
         // 重放仍失败 → 移除旧条目，失败动作重新入队（新 id）

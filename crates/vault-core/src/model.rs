@@ -17,7 +17,10 @@ pub fn now_ms() -> i64 {
 }
 
 fn db_err(code: &str, e: impl std::fmt::Display) -> AppError {
-    AppError::Storage { code: code.into(), message: e.to_string() }
+    AppError::Storage {
+        code: code.into(),
+        message: e.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,13 +123,19 @@ impl VaultStore {
         migrations()
             .to_latest(&mut conn)
             .map_err(|e| db_err("VAULT_DB_003", e))?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     // ---- 文件夹 ----
 
     pub fn create_folder(&self, name: &str) -> Result<Folder, AppError> {
-        let folder = Folder { id: uuid::Uuid::now_v7().to_string(), name: name.into(), created_at: now_ms() };
+        let folder = Folder {
+            id: uuid::Uuid::now_v7().to_string(),
+            name: name.into(),
+            created_at: now_ms(),
+        };
         let conn = self.conn.lock().expect("vault db 锁");
         conn.execute(
             "INSERT INTO folders (id, name, created_at) VALUES (?1, ?2, ?3)",
@@ -143,16 +152,24 @@ impl VaultStore {
             .map_err(|e| db_err("VAULT_DB_005", e))?;
         let rows = stmt
             .query_map([], |r| {
-                Ok(Folder { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)? })
+                Ok(Folder {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
             })
             .map_err(|e| db_err("VAULT_DB_005", e))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| db_err("VAULT_DB_005", e))
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_err("VAULT_DB_005", e))
     }
 
     pub fn rename_folder(&self, id: &str, name: &str) -> Result<bool, AppError> {
         let conn = self.conn.lock().expect("vault db 锁");
         let n = conn
-            .execute("UPDATE folders SET name = ?2 WHERE id = ?1", params![id, name])
+            .execute(
+                "UPDATE folders SET name = ?2 WHERE id = ?1",
+                params![id, name],
+            )
             .map_err(|e| db_err("VAULT_DB_006", e))?;
         Ok(n > 0)
     }
@@ -235,7 +252,6 @@ impl VaultStore {
         if let Some(s) = search {
             if !s.is_empty() {
                 conds.push(format!("title LIKE ?{next_param}"));
-                next_param += 1;
             }
         }
         if !conds.is_empty() {
@@ -265,7 +281,8 @@ impl VaultStore {
             (None, None) => stmt.query_map([], map_row),
         }
         .map_err(|e| db_err("VAULT_DB_011", e))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| db_err("VAULT_DB_011", e))
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_err("VAULT_DB_011", e))
     }
 
     pub fn get_entry(&self, id: &str) -> Result<Option<EntryRow>, AppError> {

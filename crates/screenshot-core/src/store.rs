@@ -40,24 +40,26 @@ impl ShotStore {
             CREATE INDEX IF NOT EXISTS idx_shots_created ON shots(created_ms DESC);",
         )
         .map_err(|e| err("SCREENSHOT_STORE_002", format!("建表失败: {e}")))?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn insert(&self, item: &ShotItem) -> Result<(), AppError> {
         let conn = self.conn.lock().expect("ShotStore 连接锁");
         conn.execute(
-                "INSERT INTO shots(id, created_ms, width, height, file, ocr_text)
+            "INSERT INTO shots(id, created_ms, width, height, file, ocr_text)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    item.id,
-                    item.created_ms,
-                    item.width as i64,
-                    item.height as i64,
-                    item.file,
-                    item.ocr_text
-                ],
-            )
-            .map_err(|e| err("SCREENSHOT_STORE_003", e.to_string()))?;
+            rusqlite::params![
+                item.id,
+                item.created_ms,
+                item.width as i64,
+                item.height as i64,
+                item.file,
+                item.ocr_text
+            ],
+        )
+        .map_err(|e| err("SCREENSHOT_STORE_003", e.to_string()))?;
         Ok(())
     }
 
@@ -103,7 +105,12 @@ impl ShotStore {
             .map_err(|e| err("SCREENSHOT_STORE_004", e.to_string()))?
             .filter_map(|r| r.ok())
             .collect();
-        Ok(Page { items, total, page, size })
+        Ok(Page {
+            items,
+            total,
+            page,
+            size,
+        })
     }
 }
 

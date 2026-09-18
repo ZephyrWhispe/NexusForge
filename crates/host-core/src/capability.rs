@@ -110,7 +110,11 @@ mod tests {
     // Port 由 blanket impl 覆盖，无需显式实现
     impl TrayProvider for FakeProvider {
         fn tray_menu_items(&self) -> Vec<TrayMenuItem> {
-            vec![TrayMenuItem { id: "open".into(), label: "打开面板".into(), enabled: true }]
+            vec![TrayMenuItem {
+                id: "open".into(),
+                label: "打开面板".into(),
+                enabled: true,
+            }]
         }
     }
 

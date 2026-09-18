@@ -40,7 +40,11 @@ pub enum SyncMsg {
     /// 请求对端产出（since_ts = 本端已收到的最大 ts）
     Pull { since_ts: i64 },
     /// 应用完成回执（until_ts = 已处理到的最大 ts，供推送方对账）
-    Ack { until_ts: i64, applied: u32, lost: u32 },
+    Ack {
+        until_ts: i64,
+        applied: u32,
+        lost: u32,
+    },
     /// 协议错误（中断会话）
     Err { msg: String },
 }
@@ -65,8 +69,11 @@ fn verify_peer(store: &PairStore, hello: &SyncHello) -> Result<(PairedPeer, [u8;
     if peer.fingerprint != hello.fingerprint {
         return Err(SyncError::Peer("指纹与配对记录不符".into()));
     }
-    let raw = b64_decode(&peer.pubkey_b64).ok_or_else(|| SyncError::Peer("配对公钥 base64 非法".into()))?;
-    let pubkey: [u8; 32] = raw.try_into().map_err(|_| SyncError::Peer("配对公钥长度非法".into()))?;
+    let raw = b64_decode(&peer.pubkey_b64)
+        .ok_or_else(|| SyncError::Peer("配对公钥 base64 非法".into()))?;
+    let pubkey: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| SyncError::Peer("配对公钥长度非法".into()))?;
     Ok((peer, pubkey))
 }
 
@@ -98,7 +105,10 @@ fn session_key_from(
     let mut shared = Vec::with_capacity(64);
     shared.extend_from_slice(&dh1);
     shared.extend_from_slice(&dh2);
-    let mut salt = [identity.pubkey_fingerprint.as_bytes(), peer_fingerprint.as_bytes()];
+    let mut salt = [
+        identity.pubkey_fingerprint.as_bytes(),
+        peer_fingerprint.as_bytes(),
+    ];
     salt.sort();
     Ok(derive_session_key(&shared, &salt.concat()))
 }
@@ -120,9 +130,13 @@ where
         .map_err(|_| SyncError::Net("握手超时".into()))?
         .map_err(|e| SyncError::Net(e.to_string()))?;
     if frame.msg_type != MsgType::Hello {
-        return Err(SyncError::Proto(format!("非 Hello 帧: {:?}", frame.msg_type)));
+        return Err(SyncError::Proto(format!(
+            "非 Hello 帧: {:?}",
+            frame.msg_type
+        )));
     }
-    serde_json::from_slice(&frame.payload).map_err(|e| SyncError::Proto(format!("Hello 载荷非法: {e}")))
+    serde_json::from_slice(&frame.payload)
+        .map_err(|e| SyncError::Proto(format!("Hello 载荷非法: {e}")))
 }
 
 async fn write_hello_frame<S>(stream: &mut S, hello: &Frame) -> Result<()>
@@ -155,7 +169,13 @@ pub async fn handshake_client(
     let dh2 = ephemeral_dh2(eph, peer_eph).await?;
     let key = session_key_from(identity, &peer_static, dh2, &peer.fingerprint)?;
     let (rd, wr) = stream.into_split();
-    Ok(SyncSession { rd, wr, rx: FrameCipher::new(key), tx: FrameCipher::new(key), peer })
+    Ok(SyncSession {
+        rd,
+        wr,
+        rx: FrameCipher::new(key),
+        tx: FrameCipher::new(key),
+        peer,
+    })
 }
 
 /// 服务端握手：Hello 已由 accept 分流读出
@@ -179,7 +199,13 @@ pub async fn handshake_server(
     let dh2 = ephemeral_dh2(eph, peer_eph).await?;
     let key = session_key_from(identity, &peer_static, dh2, &peer.fingerprint)?;
     let (rd, wr) = stream.into_split();
-    Ok(SyncSession { rd, wr, rx: FrameCipher::new(key), tx: FrameCipher::new(key), peer })
+    Ok(SyncSession {
+        rd,
+        wr,
+        rx: FrameCipher::new(key),
+        tx: FrameCipher::new(key),
+        peer,
+    })
 }
 
 /// 读取一条加密消息（`[u32 len][12B nonce][ct]`，ct 尾部含 Poly1305 tag）
@@ -191,7 +217,7 @@ pub async fn read_msg(session: &mut SyncSession) -> Result<SyncMsg> {
         .await
         .map_err(|e| SyncError::Net(e.to_string()))?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len < 12 + 16 || len > 4 * 1024 * 1024 {
+    if !(12 + 16..=4 * 1024 * 1024).contains(&len) {
         return Err(SyncError::Proto(format!("消息长度非法: {len}")));
     }
     let mut body = vec![0u8; len];
@@ -203,14 +229,20 @@ pub async fn read_msg(session: &mut SyncSession) -> Result<SyncMsg> {
     let (nonce, ct) = body.split_at(12);
     let mut n = [0u8; 12];
     n.copy_from_slice(nonce);
-    let plain = session.rx.open(&n, ct).map_err(|e| SyncError::Net(e.to_string()))?;
+    let plain = session
+        .rx
+        .open(&n, ct)
+        .map_err(|e| SyncError::Net(e.to_string()))?;
     serde_json::from_slice(&plain).map_err(|e| SyncError::Proto(format!("消息载荷非法: {e}")))
 }
 
 /// 写出一条加密消息
 pub async fn write_msg(session: &mut SyncSession, msg: &SyncMsg) -> Result<()> {
     let plain = serde_json::to_vec(msg).map_err(|e| SyncError::Proto(e.to_string()))?;
-    let (nonce, ct) = session.tx.seal(&plain).map_err(|e| SyncError::Net(e.to_string()))?;
+    let (nonce, ct) = session
+        .tx
+        .seal(&plain)
+        .map_err(|e| SyncError::Net(e.to_string()))?;
     let mut body = Vec::with_capacity(12 + ct.len());
     body.extend_from_slice(nonce.as_slice());
     body.extend_from_slice(&ct);
@@ -222,7 +254,11 @@ pub async fn write_msg(session: &mut SyncSession, msg: &SyncMsg) -> Result<()> {
         .write_all(&wire)
         .await
         .map_err(|e| SyncError::Net(e.to_string()))?;
-    session.wr.flush().await.map_err(|e| SyncError::Net(e.to_string()))
+    session
+        .wr
+        .flush()
+        .await
+        .map_err(|e| SyncError::Net(e.to_string()))
 }
 
 #[cfg(test)]
@@ -231,7 +267,14 @@ mod tests {
     use host_core::device::PairedPeer;
 
     /// 构造互信的两台设备（临时目录共享 identity.json 目录布局）
-    fn paired_devices(tag: &str) -> (Arc<DeviceIdentity>, PairStore, Arc<DeviceIdentity>, PairStore) {
+    fn paired_devices(
+        tag: &str,
+    ) -> (
+        Arc<DeviceIdentity>,
+        PairStore,
+        Arc<DeviceIdentity>,
+        PairStore,
+    ) {
         let dir_a = std::env::temp_dir().join(format!("nf_sync_tr_{tag}_a_{}", std::process::id()));
         let dir_b = std::env::temp_dir().join(format!("nf_sync_tr_{tag}_b_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir_a);
@@ -273,7 +316,9 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let mut stream = stream;
             let hello = read_hello_frame(&mut stream).await.unwrap();
-            handshake_server(stream, &id_b, &store_b, hello).await.unwrap()
+            handshake_server(stream, &id_b, &store_b, hello)
+                .await
+                .unwrap()
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
@@ -285,12 +330,23 @@ mod tests {
 
         // 加密消息往返（双向独立 cipher 计数器；多轮验证 nonce 单调）
         for i in 0..3 {
-            write_msg(&mut client, &SyncMsg::Pull { since_ts: i }).await.unwrap();
+            write_msg(&mut client, &SyncMsg::Pull { since_ts: i })
+                .await
+                .unwrap();
             match read_msg(&mut server).await.unwrap() {
                 SyncMsg::Pull { since_ts } => assert_eq!(since_ts, i),
                 m => panic!("非 Pull: {m:?}"),
             }
-            write_msg(&mut server, &SyncMsg::Ack { until_ts: i + 1, applied: 1, lost: 0 }).await.unwrap();
+            write_msg(
+                &mut server,
+                &SyncMsg::Ack {
+                    until_ts: i + 1,
+                    applied: 1,
+                    lost: 0,
+                },
+            )
+            .await
+            .unwrap();
             match read_msg(&mut client).await.unwrap() {
                 SyncMsg::Ack { applied, .. } => assert_eq!(applied, 1),
                 m => panic!("非 Ack: {m:?}"),

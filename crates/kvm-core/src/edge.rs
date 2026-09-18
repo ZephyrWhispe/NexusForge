@@ -75,7 +75,11 @@ pub struct EdgeSwitchConfig {
 
 impl Default for EdgeSwitchConfig {
     fn default() -> Self {
-        Self { tolerance_px: 2, cooldown: Duration::from_millis(100), release_combo: [0x10, 0x11, 0x12, 0x51] }
+        Self {
+            tolerance_px: 2,
+            cooldown: Duration::from_millis(100),
+            release_combo: [0x10, 0x11, 0x12, 0x51],
+        }
     }
 }
 
@@ -147,7 +151,11 @@ impl EdgeSwitch {
 
     /// 对端像素换算（归一化 abs → 对端虚拟桌面物理像素）
     fn to_peer_px(abs: i32, peer: &ScreenRect, horizontal: bool) -> i32 {
-        let extent = if horizontal { peer.w.max(1) } else { peer.h.max(1) } as i64;
+        let extent = if horizontal {
+            peer.w.max(1)
+        } else {
+            peer.h.max(1)
+        } as i64;
         let origin = if horizontal { peer.x } else { peer.y };
         (abs as i64 * extent / 65536) as i32 + origin
     }
@@ -199,10 +207,17 @@ impl EdgeSwitch {
                 if !self.armed || !self.cooldown_elapsed() {
                     return Decision::Passthrough;
                 }
-                let Some(device_id) = self.edges.iter().find_map(|(id, e)| (*e == edge).then(|| id.clone())) else {
+                let Some(device_id) = self
+                    .edges
+                    .iter()
+                    .find_map(|(id, e)| (*e == edge).then(|| id.clone()))
+                else {
                     return Decision::Passthrough;
                 };
-                self.state = ControlState::Controlling { device_id: device_id.clone(), edge };
+                self.state = ControlState::Controlling {
+                    device_id: device_id.clone(),
+                    edge,
+                };
                 self.last_switch = Some(Instant::now());
                 self.armed = false;
                 Decision::SwitchTo(device_id)
@@ -221,7 +236,8 @@ impl EdgeSwitch {
     }
 
     fn cooldown_elapsed(&self) -> bool {
-        self.last_switch.map_or(true, |t| t.elapsed() >= self.config.cooldown)
+        self.last_switch
+            .is_none_or(|t| t.elapsed() >= self.config.cooldown)
     }
 
     fn release_combo_pressed(&self) -> bool {
@@ -272,12 +288,22 @@ mod tests {
     use super::*;
 
     fn own() -> ScreenRect {
-        ScreenRect { x: 0, y: 0, w: 1920, h: 1080 }
+        ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        }
     }
 
     fn peer_right() -> ScreenRect {
         // 对端虚拟桌面 (-1920,0,1920,1080)：在本端右侧
-        ScreenRect { x: -1920, y: 0, w: 1920, h: 1080 }
+        ScreenRect {
+            x: -1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        }
     }
 
     fn es_right(map_device: &str) -> EdgeSwitch {
@@ -294,10 +320,6 @@ mod tests {
         RawInput::KeyDown { vk, scan: 0 }
     }
 
-    fn key_up(vk: u16) -> RawInput {
-        RawInput::KeyUp { vk, scan: 0 }
-    }
-
     #[test]
     fn switch_requires_arm_cooldown_and_mapped_edge() {
         let mut es = es_right("dev-b");
@@ -306,7 +328,10 @@ mod tests {
         // 移入中间 → 武装
         assert_eq!(es.on_local_event(&mv(960), &own()), Decision::Passthrough);
         // 回到右缘（容差 2px：1917..=1919）→ 切换
-        assert_eq!(es.on_local_event(&mv(1918), &own()), Decision::SwitchTo("dev-b".into()));
+        assert_eq!(
+            es.on_local_event(&mv(1918), &own()),
+            Decision::SwitchTo("dev-b".into())
+        );
         assert_eq!(es.controlling_device(), Some("dev-b"));
         // 受控中：本地事件全部 Forward（抑制）
         assert_eq!(es.on_local_event(&mv(500), &own()), Decision::Forward);
@@ -329,7 +354,10 @@ mod tests {
         let mut es = es_right("dev-b");
         es.config_mut().cooldown = Duration::from_millis(50);
         assert_eq!(es.on_local_event(&mv(960), &own()), Decision::Passthrough);
-        assert_eq!(es.on_local_event(&mv(1919), &own()), Decision::SwitchTo("dev-b".into()));
+        assert_eq!(
+            es.on_local_event(&mv(1919), &own()),
+            Decision::SwitchTo("dev-b".into())
+        );
         // 快捷键切回
         assert_eq!(es.on_local_event(&key(0x11), &own()), Decision::Forward);
         assert_eq!(es.on_local_event(&key(0x12), &own()), Decision::Forward);
@@ -341,14 +369,20 @@ mod tests {
         assert_eq!(es.on_local_event(&mv(1919), &own()), Decision::Passthrough);
         // 移入中间武装 → 回边缘 → 再次切换
         assert_eq!(es.on_local_event(&mv(960), &own()), Decision::Passthrough);
-        assert_eq!(es.on_local_event(&mv(1919), &own()), Decision::SwitchTo("dev-b".into()));
+        assert_eq!(
+            es.on_local_event(&mv(1919), &own()),
+            Decision::SwitchTo("dev-b".into())
+        );
     }
 
     #[test]
     fn remote_edge_return_releases() {
         let mut es = es_right("dev-b");
         assert_eq!(es.on_local_event(&mv(960), &own()), Decision::Passthrough);
-        assert_eq!(es.on_local_event(&mv(1919), &own()), Decision::SwitchTo("dev-b".into()));
+        assert_eq!(
+            es.on_local_event(&mv(1919), &own()),
+            Decision::SwitchTo("dev-b".into())
+        );
         // 转发的归一化坐标 x=0（本机 1919 ≈ 右缘 → abs ≈ 65535）……
         // 直接模拟"转发坐标位于对端左缘"：abs=0 → 对端像素 = -1920 + 0
         es.last_forwarded = (0, 32768);
@@ -367,6 +401,9 @@ mod tests {
             let json = serde_json::to_string(&e).unwrap();
             assert_eq!(serde_json::from_str::<Edge>(&json).unwrap(), e);
         }
-        assert_eq!(serde_json::from_str::<Edge>("\"left\"").unwrap(), Edge::Left);
+        assert_eq!(
+            serde_json::from_str::<Edge>("\"left\"").unwrap(),
+            Edge::Left
+        );
     }
 }

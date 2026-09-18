@@ -179,7 +179,9 @@ mod tests {
             );
         }
         // ModuleError 派生码以 HOST_MODULE_ 为前缀
-        assert!(ModuleError::NotReady.code().starts_with(codes::HOST_MODULE_PREFIX));
+        assert!(ModuleError::NotReady
+            .code()
+            .starts_with(codes::HOST_MODULE_PREFIX));
     }
 
     #[test]

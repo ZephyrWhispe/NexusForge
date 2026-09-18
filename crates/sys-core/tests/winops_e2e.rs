@@ -5,13 +5,19 @@
 //! 沙箱键 = HKCU\Software\NexusForgeWinOpsE2E\{pid}（测试并行隔离）。
 
 use sys_core::winops::{
-    self, load_catalog, scan, ApplyReport, AuditStore, BackupStore, BackupItem, RegistryBackup, ScanState, SysPorts,
-    Tweak, TweakAction,
+    self, load_catalog, scan, ApplyReport, AuditStore, BackupItem, BackupStore, RegistryBackup,
+    ScanState, SysPorts, Tweak, TweakAction,
 };
 
 /// 真实注册表数据面（HKCU 沙箱键；Service/Task/Maintenance/Appx 端口缺省 None）
 fn real_ports(reg: &win_integration::registry::RegistryOpsWin) -> SysPorts<'_> {
-    SysPorts { registry: reg, tasks: None, services: None, maintenance: None, appx: None }
+    SysPorts {
+        registry: reg,
+        tasks: None,
+        services: None,
+        maintenance: None,
+        appx: None,
+    }
 }
 
 fn sandbox_key() -> String {
@@ -38,7 +44,10 @@ fn hksu_sandbox_full_chain() {
     let _ = std::fs::remove_dir_all(&dir);
 
     // 预置原值 0（existed=true 备份路径）
-    ports.registry.write_value(&key, "v", &host_core::ports::RegValue::Dword(0)).unwrap();
+    ports
+        .registry
+        .write_value(&key, "v", &host_core::ports::RegValue::Dword(0))
+        .unwrap();
 
     // ---- scan：目标 1 未应用 ----
     let t = e2e_tweak(&key, 1);
@@ -64,8 +73,14 @@ fn hksu_sandbox_full_chain() {
 
     // ---- 回归检测：目标态 → 无回归；自愈回 0 → 检出 ----
     assert!(winops::regression_check(&ports, &store, &tweaks).is_empty());
-    ports.registry.write_value(&key, "v", &host_core::ports::RegValue::Dword(0)).unwrap();
-    assert_eq!(winops::regression_check(&ports, &store, &tweaks), vec!["e2e_sandbox".to_string()]);
+    ports
+        .registry
+        .write_value(&key, "v", &host_core::ports::RegValue::Dword(0))
+        .unwrap();
+    assert_eq!(
+        winops::regression_check(&ports, &store, &tweaks),
+        vec!["e2e_sandbox".to_string()]
+    );
     // 重新 apply 修复回归
     winops::apply(&ports, &t, true).unwrap();
     assert!(winops::regression_check(&ports, &store, &tweaks).is_empty());
@@ -74,7 +89,9 @@ fn hksu_sandbox_full_chain() {
     let backup = store.take("e2e_sandbox");
     assert!(!backup.is_empty());
     match &backup[0] {
-        BackupItem::Registry(RegistryBackup { existed, old_value, .. }) => {
+        BackupItem::Registry(RegistryBackup {
+            existed, old_value, ..
+        }) => {
             assert!(existed, "原值 0 预置存在");
             assert_eq!(old_value, &Some(host_core::ports::RegValue::Dword(0)));
         }
@@ -95,7 +112,8 @@ fn hksu_sandbox_full_chain() {
     assert_eq!(entries[1].action, "rollback");
     let exported = audit.export(&dir).unwrap();
     assert!(exported.exists(), "导出文件存在");
-    let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&exported).unwrap()).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&exported).unwrap()).unwrap();
     assert_eq!(doc["audit"].as_array().unwrap().len(), 2);
 
     // ---- 清理沙箱键 ----
@@ -107,9 +125,21 @@ fn hksu_sandbox_full_chain() {
 #[test]
 fn catalog_contains_defender_family() {
     let tweaks = load_catalog(None).unwrap();
-    let off = tweaks.iter().find(|t| t.id == "defender_realtime_off").expect("defender_realtime_off 应在目录");
+    let off = tweaks
+        .iter()
+        .find(|t| t.id == "defender_realtime_off")
+        .expect("defender_realtime_off 应在目录");
     assert!(off.requires_admin && off.maintenance);
-    assert!(matches!(off.actions[0], TweakAction::DefenderRealtime { disable: true }));
-    let on = tweaks.iter().find(|t| t.id == "defender_realtime_on").expect("defender_realtime_on 应在目录");
-    assert!(matches!(on.actions[0], TweakAction::DefenderRealtime { disable: false }));
+    assert!(matches!(
+        off.actions[0],
+        TweakAction::DefenderRealtime { disable: true }
+    ));
+    let on = tweaks
+        .iter()
+        .find(|t| t.id == "defender_realtime_on")
+        .expect("defender_realtime_on 应在目录");
+    assert!(matches!(
+        on.actions[0],
+        TweakAction::DefenderRealtime { disable: false }
+    ));
 }

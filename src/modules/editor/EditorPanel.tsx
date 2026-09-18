@@ -27,6 +27,7 @@ import {
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
 import { languageForPath, monaco } from "../../monaco/setup";
+import { keyActivate } from "../../a11y";
 
 /**
  * 文本与 PDF 面板（docs/impl/06 E1–E4，M9 v1）：
@@ -122,6 +123,8 @@ export default function EditorPanel() {
       fontSize: 13,
     });
     const ed = editorRef.current;
+    // modelsRef 从不重赋值，cleanup 经局部变量访问（exhaustive-deps 要求）
+    const models = modelsRef.current;
     // 内容变更 → 脏标记 + 3s 防抖 autosave（E2 崩溃恢复入口）
     ed.onDidChangeModelContent(() => {
       const model = ed.getModel();
@@ -139,10 +142,9 @@ export default function EditorPanel() {
     return () => {
       editorRef.current?.dispose();
       editorRef.current = null;
-      modelsRef.current.forEach((m) => m.dispose());
-      modelsRef.current.clear();
+      models.forEach((m) => m.dispose());
+      models.clear();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, sessions]);
 
   // 切换会话：换 model + 更新降级配置 + MD 预览内容
@@ -265,6 +267,8 @@ export default function EditorPanel() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
+    // doSave 为每次渲染新建的普通函数（仅闭包稳定引用），入依赖表将每帧重挂监听；
+    // activeId 在表内已保证读到当前会话
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
@@ -329,21 +333,27 @@ export default function EditorPanel() {
           )}
         </div>
         {sessions.length > 0 && (
-          <div className={styles.tabs}>
+          <div className={styles.tabs} role="tablist">
             {sessions.map((s) => (
               <div
                 key={s.id}
                 className={`${styles.tab} ${s.id === activeId ? styles.tabActive : ""}`}
                 onClick={() => setActiveId(s.id)}
+                role="tab"
+                tabIndex={0}
+                onKeyDown={keyActivate(() => setActiveId(s.id))}
+                aria-selected={s.id === activeId}
               >
                 {s.dirty && <span style={{ color: tokens.colorPaletteMarigoldForeground1 }}>●</span>}
                 {s.name}
                 <span
-                  role="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     void doClose(s.id);
                   }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={keyActivate(() => void doClose(s.id))}
                 >
                   ✕
                 </span>

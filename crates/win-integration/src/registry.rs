@@ -121,7 +121,9 @@ impl RegistryOps for RegistryOpsWin {
                 }
                 t if t == REG_SZ => {
                     let wide: Vec<u16> = buf[..size as usize]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| u16::from_le_bytes([c[0], c[1]]))
                         .collect();
                     let s = String::from_utf16_lossy(&wide);
@@ -179,7 +181,13 @@ impl RegistryOps for RegistryOpsWin {
                     let mut wide: Vec<u16> = std::ffi::OsStr::new(s).encode_wide().collect();
                     wide.push(0);
                     let bytes: Vec<u8> = wide.iter().flat_map(|w| w.to_le_bytes()).collect();
-                    RegSetValueExW(hkey, PCWSTR(name_w.as_ptr()), 0, REG_SZ, Some(bytes.as_slice()))
+                    RegSetValueExW(
+                        hkey,
+                        PCWSTR(name_w.as_ptr()),
+                        0,
+                        REG_SZ,
+                        Some(bytes.as_slice()),
+                    )
                 }
             };
             let _ = RegCloseKey(hkey);
@@ -232,11 +240,13 @@ mod tests {
         let (v, existed) = ops.read_value(&key, "d").unwrap();
         assert!(existed && v == RegValue::Dword(42));
         // 写 string → 读回
-        ops.write_value(&key, "s", &RegValue::Str("hello 注册表".into())).unwrap();
+        ops.write_value(&key, "s", &RegValue::Str("hello 注册表".into()))
+            .unwrap();
         let (v, _) = ops.read_value(&key, "s").unwrap();
         assert_eq!(v, RegValue::Str("hello 注册表".into()));
         // 写 qword → 读回
-        ops.write_value(&key, "q", &RegValue::Qword(1 << 40)).unwrap();
+        ops.write_value(&key, "q", &RegValue::Qword(1 << 40))
+            .unwrap();
         let (v, _) = ops.read_value(&key, "q").unwrap();
         assert_eq!(v, RegValue::Qword(1 << 40));
         // 覆盖写

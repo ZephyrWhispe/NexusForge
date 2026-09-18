@@ -19,10 +19,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use host_core::ports::RecycleBinPort;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zip::read::ZipArchive;
 use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
-use zip::read::ZipArchive;
 
 use crate::browse::to_long_path;
 use crate::conflict::{resolve_target, unique_target, ConflictPolicy};
@@ -115,7 +115,10 @@ pub(crate) struct OpControl {
 
 impl OpControl {
     fn new() -> Self {
-        Self { paused: AtomicBool::new(false), canceled: AtomicBool::new(false) }
+        Self {
+            paused: AtomicBool::new(false),
+            canceled: AtomicBool::new(false),
+        }
     }
 }
 
@@ -202,7 +205,10 @@ impl OpQueue {
             handles.push(std::thread::spawn(move || {
                 // 快照更新包装：active() 永远拿到最新状态（每 worker 构造一次）
                 let sink: ProgressFn = Arc::new(move |p: OpProgress| {
-                    latest.lock().expect("ops 进度表锁").insert(p.op_id.clone(), p.clone());
+                    latest
+                        .lock()
+                        .expect("ops 进度表锁")
+                        .insert(p.op_id.clone(), p.clone());
                     cb(p);
                 });
                 loop {
@@ -272,7 +278,10 @@ impl OpQueue {
             error: None,
         };
         (self.cb)(progress.clone());
-        self.latest.lock().expect("ops 进度表锁").insert(op_id.clone(), progress);
+        self.latest
+            .lock()
+            .expect("ops 进度表锁")
+            .insert(op_id.clone(), progress);
         self.tx
             .as_ref()
             .expect("队列发送端存活")
@@ -343,8 +352,13 @@ impl OpQueue {
 
     /// 活跃/近期操作快照
     pub fn active(&self) -> Vec<OpProgress> {
-        let mut v: Vec<OpProgress> =
-            self.latest.lock().expect("ops 进度表锁").values().cloned().collect();
+        let mut v: Vec<OpProgress> = self
+            .latest
+            .lock()
+            .expect("ops 进度表锁")
+            .values()
+            .cloned()
+            .collect();
         v.sort_by(|a, b| a.op_id.cmp(&b.op_id));
         v
     }
@@ -407,7 +421,9 @@ fn remove_pending(dir: &Path, op_id: &str) {
 }
 
 pub fn read_pending(dir: &Path) -> Vec<PendingOp> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
     let mut out = Vec::new();
     for item in rd.flatten() {
         let p = item.path();
@@ -453,7 +469,14 @@ impl Reporter<'_> {
 }
 
 fn run_job(job: Job, cb: &ProgressFn) {
-    let Job { op_id, spec, checkpoint, ctl, store_dir, recycle } = job;
+    let Job {
+        op_id,
+        spec,
+        checkpoint,
+        ctl,
+        store_dir,
+        recycle,
+    } = job;
     let kind = spec.kind;
     let mut rep = Reporter {
         cb,
@@ -524,7 +547,10 @@ fn expand_plan(spec: &OpSpec) -> Result<Vec<CopyItem>, Flow> {
         let long_src = to_long_path(src);
         if long_src.is_dir() {
             if spec.dst.is_file() {
-                return Err(Flow::msg(format!("目标是文件而源是目录: {}", src.display())));
+                return Err(Flow::msg(format!(
+                    "目标是文件而源是目录: {}",
+                    src.display()
+                )));
             }
             // 基准：dst 已存在 → 源父目录（保留源目录名）；否则 → 源本身（内容直达 dst）
             let base = if spec.dst.is_dir() {
@@ -538,7 +564,10 @@ fn expand_plan(spec: &OpSpec) -> Result<Vec<CopyItem>, Flow> {
                     continue;
                 }
                 let md = entry.metadata().map_err(|e| Flow::msg(e.to_string()))?;
-                let rel = entry.path().strip_prefix(base).map_err(|e| Flow::msg(e.to_string()))?;
+                let rel = entry
+                    .path()
+                    .strip_prefix(base)
+                    .map_err(|e| Flow::msg(e.to_string()))?;
                 items.push(CopyItem {
                     src: entry.path().to_path_buf(),
                     dst: spec.dst.join(rel),
@@ -580,7 +609,7 @@ fn run_copy_move(
         if let Some(parent) = dst.parent() {
             let _ = std::fs::create_dir_all(to_long_path(parent));
         }
-        if std::fs::rename(&src, &to_long_path(&dst)).is_ok() {
+        if std::fs::rename(&src, to_long_path(&dst)).is_ok() {
             rep.cur.files_done = 1;
             rep.cur.bytes_done = rep.cur.bytes_total;
             rep.tick(true);
@@ -589,7 +618,9 @@ fn run_copy_move(
         tracing::debug!("rename 快速路径失败，走逐项复制（跨卷）");
     }
 
-    let start_index = checkpoint.map(|c| c.file_index.min(items.len())).unwrap_or(0);
+    let start_index = checkpoint
+        .map(|c| c.file_index.min(items.len()))
+        .unwrap_or(0);
     let before_start: u64 = items[..start_index].iter().map(|i| i.size).sum();
     rep.cur.bytes_done = checkpoint
         .map(|c| c.bytes_done)
@@ -620,8 +651,11 @@ fn run_copy_move(
                 continue;
             }
         };
-        rep.cur.current =
-            item.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        rep.cur.current = item
+            .src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let bytes_in_file = if idx == start_index {
             checkpoint.map(|c| c.bytes_done).unwrap_or(0).min(item.size)
         } else {
@@ -654,6 +688,7 @@ fn run_copy_move(
 
 /// 复制单个文件（支持从 bytes_done 续传）；逐块读满；尺寸终验。
 /// 暂停 → 持久化断点；取消 → 清理部分文件。
+#[allow(clippy::too_many_arguments)] // 进度报告/断点续传上下文天然多参，私有 helper 不再包结构体
 fn copy_one(
     item: &CopyItem,
     dst: &Path,
@@ -817,19 +852,17 @@ fn run_delete(
 
     if spec.recycle {
         match recycle {
-            Some(port) => {
-                match port.delete(&spec.srcs) {
-                    Ok(_) => {
-                        rep.cur.files_done = file_count;
-                        rep.cur.bytes_done = bytes_total;
-                        rep.tick(true);
-                        return Flow::Done;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "回收站删除失败，降级直删");
-                    }
+            Some(port) => match port.delete(&spec.srcs) {
+                Ok(_) => {
+                    rep.cur.files_done = file_count;
+                    rep.cur.bytes_done = bytes_total;
+                    rep.tick(true);
+                    return Flow::Done;
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(error = %e, "回收站删除失败，降级直删");
+                }
+            },
             None => tracing::warn!("RecycleBinPort 未注册，回收站删除降级为直删"),
         }
     }
@@ -839,8 +872,10 @@ fn run_delete(
             g => return g.into(),
         }
         let long = to_long_path(src);
-        rep.cur.current =
-            src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        rep.cur.current = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let r = if long.is_dir() {
             std::fs::remove_dir_all(&long)
         } else if long.is_file() {
@@ -876,7 +911,10 @@ fn expand_plan_for_compress(spec: &OpSpec) -> Result<Vec<CompressItem>, Flow> {
                 if !entry.file_type().is_file() {
                     continue;
                 }
-                let rel = entry.path().strip_prefix(&long).map_err(|e| Flow::msg(e.to_string()))?;
+                let rel = entry
+                    .path()
+                    .strip_prefix(&long)
+                    .map_err(|e| Flow::msg(e.to_string()))?;
                 let md = entry.metadata().map_err(|e| Flow::msg(e.to_string()))?;
                 items.push(CompressItem {
                     src: entry.path().to_path_buf(),
@@ -927,7 +965,7 @@ fn run_compress(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
             Gate::Go => {}
         }
         let arc_name = item.rel.to_string_lossy().replace('\\', "/");
-        if let Err(e) = zw.start_file(arc_name, opts.clone()) {
+        if let Err(e) = zw.start_file(arc_name, opts) {
             return Flow::Failed(FileError::Zip(e.to_string()).to_string());
         }
         let mut f = match File::open(&item.src) {
@@ -1072,7 +1110,12 @@ mod tests {
     fn sink() -> (ProgressFn, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
         let c2 = count.clone();
-        (Arc::new(move |_| { c2.fetch_add(1, Ordering::SeqCst); }), count)
+        (
+            Arc::new(move |_| {
+                c2.fetch_add(1, Ordering::SeqCst);
+            }),
+            count,
+        )
     }
 
     fn wait_until(pred: impl Fn() -> bool, timeout: Duration) -> bool {
@@ -1087,7 +1130,11 @@ mod tests {
     }
 
     fn op_state(q: &OpQueue, op: &str) -> OpState {
-        q.active().iter().find(|p| p.op_id == op).map(|p| p.state).unwrap_or(OpState::Queued)
+        q.active()
+            .iter()
+            .find(|p| p.op_id == op)
+            .map(|p| p.state)
+            .unwrap_or(OpState::Queued)
     }
 
     #[test]
@@ -1121,11 +1168,20 @@ mod tests {
             b"hello world"
         );
         // 完成后 pending 清理 + 终态 Done + 统计正确
-        assert!(wait_until(|| op_state(&q, &op) == OpState::Done, Duration::from_secs(5)));
+        assert!(wait_until(
+            || op_state(&q, &op) == OpState::Done,
+            Duration::from_secs(5)
+        ));
         assert!(q.pending().is_empty());
         let active = q.active();
-        assert_eq!(active.iter().find(|p| p.op_id == op).unwrap().files_total, 3);
-        assert_eq!(active.iter().find(|p| p.op_id == op).unwrap().bytes_total, 5 * 1024 * 1024 + 11 + 1);
+        assert_eq!(
+            active.iter().find(|p| p.op_id == op).unwrap().files_total,
+            3
+        );
+        assert_eq!(
+            active.iter().find(|p| p.op_id == op).unwrap().bytes_total,
+            5 * 1024 * 1024 + 11 + 1
+        );
         q.close();
         let _ = std::fs::remove_dir_all(&store);
         let _ = std::fs::remove_dir_all(&src);
@@ -1249,8 +1305,13 @@ mod tests {
         })
         .unwrap();
         assert!(wait_until(
-            || op_state(&q, &q.active().first().map(|p| p.op_id.clone()).unwrap_or_default())
-                == OpState::Done
+            || op_state(
+                &q,
+                &q.active()
+                    .first()
+                    .map(|p| p.op_id.clone())
+                    .unwrap_or_default()
+            ) == OpState::Done
                 && zipfile.exists(),
             Duration::from_secs(20)
         ));
@@ -1270,9 +1331,14 @@ mod tests {
                 .is_ok_and(|b| b == b"x"),
             Duration::from_secs(20)
         ));
-        assert!(wait_until(|| op_state(&q, &op2) == OpState::Done, Duration::from_secs(10)));
+        assert!(wait_until(
+            || op_state(&q, &op2) == OpState::Done,
+            Duration::from_secs(10)
+        ));
         assert_eq!(
-            std::fs::metadata(ext_dir.join(&zip_root).join("a.bin")).unwrap().len(),
+            std::fs::metadata(ext_dir.join(&zip_root).join("a.bin"))
+                .unwrap()
+                .len(),
             5 * 1024 * 1024
         );
         q.close();
@@ -1306,11 +1372,20 @@ mod tests {
             assert!(!q.pending().is_empty(), "暂停应保留 pending 断点");
             let op2 = q.resume(&op).unwrap();
             assert_ne!(op2, op);
-            assert!(wait_until(|| op_state(&q, &op2) == OpState::Done, Duration::from_secs(20)));
+            assert!(wait_until(
+                || op_state(&q, &op2) == OpState::Done,
+                Duration::from_secs(20)
+            ));
         } else {
-            assert!(wait_until(|| op_state(&q, &op) == OpState::Done, Duration::from_secs(20)));
+            assert!(wait_until(
+                || op_state(&q, &op) == OpState::Done,
+                Duration::from_secs(20)
+            ));
         }
-        assert_eq!(std::fs::metadata(dst.join("big.bin")).unwrap().len(), 24 * 1024 * 1024);
+        assert_eq!(
+            std::fs::metadata(dst.join("big.bin")).unwrap().len(),
+            24 * 1024 * 1024
+        );
         q.close();
         let _ = std::fs::remove_dir_all(&store);
         let _ = std::fs::remove_dir_all(&src);
