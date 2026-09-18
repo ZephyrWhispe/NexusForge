@@ -11,13 +11,15 @@
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::{AppError, ModuleError};
 use host_core::events::{Event, EventBus};
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::{CapturePort, CaptureTarget, ClipboardPort};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -28,9 +30,7 @@ use crate::types::{
 };
 use crate::util;
 
-fn mod_err(code: &str, m: impl Into<String>) -> AppError {
-    AppError::module(code, m.into(), None)
-}
+use host_core::util::app_err as mod_err;
 
 /// 进行中的截图任务（同一时刻通常只有一个；新任务替换旧任务）
 struct PendingTask {
@@ -63,7 +63,7 @@ pub struct ScreenshotModule {
     pending: Mutex<HashMap<String, PendingTask>>,
     pins: Mutex<Vec<PinRecord>>,
     config: Arc<AsyncMutex<ScreenshotConfig>>,
-    state: AtomicU8,
+    state: ModuleStateCell,
 }
 
 impl ScreenshotModule {
@@ -77,7 +77,7 @@ impl ScreenshotModule {
             pending: Mutex::new(HashMap::new()),
             pins: Mutex::new(Vec::new()),
             config: Arc::new(AsyncMutex::new(ScreenshotConfig::default())),
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
         }
     }
 
@@ -132,7 +132,7 @@ impl Module for ScreenshotModule {
             name: "截图贴图",
             version: "0.1.0",
             icon: Some("screenshot"),
-            priority: 10,
+            priority: priority_of("screenshot"),
         }
     }
 
@@ -155,18 +155,18 @@ impl Module for ScreenshotModule {
         *self.clipboard.write() = Some(clipboard);
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.restore_pins();
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
         self.pending.lock().clear();
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -210,11 +210,11 @@ impl Module for ScreenshotModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 
@@ -550,7 +550,7 @@ impl ScreenshotModule {
             .map_err(|e| mod_err("SCREENSHOT_PIN_007", format!("读取贴图失败: {e}")))?;
         Ok(PinDataDto {
             id: record.id.clone(),
-            png_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+            png_b64: host_core::util::b64_encode(&bytes),
             x: record.x,
             y: record.y,
             width: record.width,

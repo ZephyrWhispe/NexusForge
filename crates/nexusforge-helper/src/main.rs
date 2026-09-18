@@ -15,17 +15,12 @@ mod dispatch;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use win_integration::helper::{self as h, PipeHandle};
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms_u64 as now_ms;
 
 /// 命令行参数解析（--flag value 形式）
 fn arg_value(args: &[String], flag: &str) -> Option<u32> {

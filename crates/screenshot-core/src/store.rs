@@ -10,9 +10,7 @@ use rusqlite::Connection;
 
 use crate::types::{HistoryQuery, Page, ShotItem};
 
-fn err(code: &str, m: impl std::fmt::Display) -> AppError {
-    AppError::module(code, m.to_string(), None)
-}
+use host_core::util::app_err as err;
 
 /// 连接以 Mutex 包裹：ShotStore 经 Arc 跨线程共享（rusqlite Connection 非 Sync）
 pub struct ShotStore {

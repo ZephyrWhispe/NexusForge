@@ -6,16 +6,18 @@
 //! - 变更事件 notes.changed 由 IPC 层发布（含 path/action），UI 事件驱动刷新
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 
 use crate::library::NoteLibrary;
 
 pub struct NotesModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     library: RwLockOption,
     /// 库根 {appData}/notes
     root: PathBuf,
@@ -29,7 +31,7 @@ type RwLockOption = parking_lot::RwLock<Option<Arc<NoteLibrary>>>;
 impl NotesModule {
     pub fn new(app_data_dir: &std::path::Path) -> Self {
         Self {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             library: parking_lot::RwLock::new(None),
             root: app_data_dir.join("notes"),
             db_path: app_data_dir.join("db").join("notes.db"),
@@ -53,7 +55,7 @@ impl Module for NotesModule {
             name: "笔记与知识",
             version: "0.1.0",
             icon: Some("notes"),
-            priority: 15,
+            priority: priority_of("notes"),
         }
     }
 
@@ -82,17 +84,17 @@ impl Module for NotesModule {
             Err(e) => tracing::warn!(error = %e, "笔记索引同步失败（UI 可手动 reindex）"),
         }
         *self.library.write() = Some(Arc::new(lib));
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -114,10 +116,10 @@ impl Module for NotesModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }

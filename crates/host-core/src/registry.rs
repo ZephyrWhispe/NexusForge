@@ -4,6 +4,9 @@
 //! - **panic 隔离**：模块 init/start/stop 均在 `spawn_blocking` 中执行，
 //!   panic 被 join 错误捕获并转为 [`ModuleError::Panicked`]，宿主存活；
 //! - **状态机**：`Uninitialized → Stopped → Running`；异常/panic → `Error`；可 restart；
+//!   状态读写唯一来源是模块自身的 [`Module`](crate::module::Module)（内部
+//!   `ModuleStateCell`），注册表不再另持 HashMap（D-16）；每次状态迁移发布
+//!   `host.module_state`（含 init / stop，此前仅 start 发布）；
 //! - **启动不互相阻断**：某模块 init 失败只记录结果，其余模块继续；
 //! - **停止限时**：stop 超过 [`STOP_TIMEOUT`] 视为失败并标记 Error。
 
@@ -28,7 +31,6 @@ pub struct ModuleRegistry {
     bus: Arc<EventBus>,
     modules: RwLock<HashMap<String, Arc<dyn Module>>>,
     order: RwLock<Vec<String>>,
-    states: RwLock<HashMap<String, ModuleState>>,
     ctx: RwLock<Option<Arc<ModuleContext>>>,
     /// 能力注册表（TrayProvider / HotkeyProvider 等多实例收集，S6.3/S7 消费）
     abilities: Ports,
@@ -40,7 +42,6 @@ impl ModuleRegistry {
             bus,
             modules: RwLock::new(HashMap::new()),
             order: RwLock::new(Vec::new()),
-            states: RwLock::new(HashMap::new()),
             ctx: RwLock::new(None),
             abilities: Ports::new(),
         }
@@ -65,7 +66,7 @@ impl ModuleRegistry {
             .collect()
     }
 
-    /// 注册模块（id 去重）。注册后状态为 Uninitialized。
+    /// 注册模块（id 去重）。注册后状态为模块 cell 初值 Uninitialized。
     pub fn register(&self, module: Arc<dyn Module>) -> Result<(), AppError> {
         let id = module.info().id.to_owned();
         {
@@ -79,8 +80,7 @@ impl ModuleRegistry {
             }
             modules.insert(id.clone(), module);
         }
-        self.order.write().push(id.clone());
-        self.states.write().insert(id, ModuleState::Uninitialized);
+        self.order.write().push(id);
         Ok(())
     }
 
@@ -97,6 +97,7 @@ impl ModuleRegistry {
         let modules = self.ordered();
         let mut results = Vec::with_capacity(modules.len());
         for (id, module) in modules {
+            let prev = module.status();
             let m = module.clone();
             let c = ctx.clone();
             let r = match tokio::task::spawn_blocking(move || m.init(c)).await {
@@ -109,8 +110,10 @@ impl ModuleRegistry {
                 )),
                 Err(je) => Err(ModuleError::Init(je.to_string())),
             };
-            self.set_state(
+            self.apply_state(
+                &module,
                 &id,
+                prev,
                 if r.is_ok() {
                     ModuleState::Stopped
                 } else {
@@ -169,20 +172,13 @@ impl ModuleRegistry {
         Ok(())
     }
 
-    /// 全部模块状态（按注册顺序）
+    /// 全部模块状态（按注册顺序；直接读模块 cell，与 Module::status() 同源）
     pub fn status_all(&self) -> Vec<(String, ModuleState)> {
+        let modules = self.modules.read();
         self.order
             .read()
             .iter()
-            .map(|id| {
-                let st = self
-                    .states
-                    .read()
-                    .get(id)
-                    .copied()
-                    .unwrap_or(ModuleState::Uninitialized);
-                (id.clone(), st)
-            })
+            .filter_map(|id| modules.get(id).map(|m| (id.clone(), m.status())))
             .collect()
     }
 
@@ -196,8 +192,24 @@ impl ModuleRegistry {
             .collect()
     }
 
-    fn set_state(&self, id: &str, state: ModuleState) {
-        self.states.write().insert(id.to_owned(), state);
+    /// 唯一状态源的写入点：落到模块 cell，发生变化时发布 `host.module_state`
+    fn apply_state(
+        &self,
+        module: &Arc<dyn Module>,
+        id: &str,
+        prev: ModuleState,
+        next: ModuleState,
+    ) {
+        module.set_status(next);
+        if next != prev {
+            self.bus
+                .publish(Event::new(
+                    "host.module_state",
+                    "host",
+                    serde_json::json!({ "key": id, "module": id, "state": next }),
+                ))
+                .ok();
+        }
     }
 
     async fn report_failure(&self, id: &str, e: &ModuleError) {
@@ -217,7 +229,9 @@ impl ModuleRegistry {
         module: Arc<dyn Module>,
         ctx: Arc<ModuleContext>,
     ) -> Result<(), ModuleError> {
-        let r = match tokio::task::spawn_blocking(move || module.init(ctx)).await {
+        let prev = module.status();
+        let m = module.clone();
+        let r = match tokio::task::spawn_blocking(move || m.init(ctx)).await {
             Ok(r) => r,
             Err(je) if je.is_panic() => Err(ModuleError::Panicked(
                 je.into_panic()
@@ -227,8 +241,10 @@ impl ModuleRegistry {
             )),
             Err(je) => Err(ModuleError::Init(je.to_string())),
         };
-        self.set_state(
+        self.apply_state(
+            &module,
             id,
+            prev,
             if r.is_ok() {
                 ModuleState::Stopped
             } else {
@@ -242,7 +258,9 @@ impl ModuleRegistry {
     }
 
     async fn start_one(&self, id: &str, module: Arc<dyn Module>) -> Result<(), ModuleError> {
-        let r = match tokio::task::spawn_blocking(move || module.start()).await {
+        let prev = module.status();
+        let m = module.clone();
+        let r = match tokio::task::spawn_blocking(move || m.start()).await {
             Ok(r) => r,
             Err(je) if je.is_panic() => Err(ModuleError::Panicked(
                 je.into_panic()
@@ -252,15 +270,16 @@ impl ModuleRegistry {
             )),
             Err(je) => Err(ModuleError::Start(je.to_string())),
         };
-        self.set_state(
+        self.apply_state(
+            &module,
             id,
+            prev,
             if r.is_ok() {
                 ModuleState::Running
             } else {
                 ModuleState::Error
             },
         );
-        self.publish_state(id).await;
         if let Err(e) = &r {
             self.report_failure(id, e).await;
         }
@@ -268,13 +287,10 @@ impl ModuleRegistry {
     }
 
     async fn stop_one(&self, id: &str, module: Arc<dyn Module>) -> Result<(), ModuleError> {
+        let prev = module.status();
+        let m = module.clone();
         // 三层嵌套：timeout(Elapsed) → JoinHandle(JoinError) → 模块返回值(Result<(), ModuleError>)
-        let r = match timeout(
-            STOP_TIMEOUT,
-            tokio::task::spawn_blocking(move || module.stop()),
-        )
-        .await
-        {
+        let r = match timeout(STOP_TIMEOUT, tokio::task::spawn_blocking(move || m.stop())).await {
             Err(_elapsed) => Err(ModuleError::Stop("stop 超时 5s，已强制返回".into())),
             Ok(Err(je)) if je.is_panic() => Err(ModuleError::Panicked(
                 je.into_panic()
@@ -286,8 +302,10 @@ impl ModuleRegistry {
             Ok(Ok(Err(me))) => Err(me),
             Ok(Ok(Ok(()))) => Ok(()),
         };
-        self.set_state(
+        self.apply_state(
+            &module,
             id,
+            prev,
             if r.is_ok() {
                 ModuleState::Stopped
             } else {
@@ -296,36 +314,24 @@ impl ModuleRegistry {
         );
         r
     }
-
-    async fn publish_state(&self, id: &str) {
-        if let Some(state) = self.states.read().get(id).copied() {
-            self.bus
-                .publish(Event::new(
-                    "host.module_state",
-                    "host",
-                    serde_json::json!({ "key": id, "module": id, "state": state }),
-                ))
-                .ok();
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::ModuleStateCell;
     use crate::ports::Ports;
     use std::sync::atomic::{AtomicU8, Ordering};
 
-    // state: 0=Uninitialized 1=Stopped 2=Running
     struct FakeModule {
-        state: AtomicU8,
+        state: ModuleStateCell,
         panic_on_start: bool,
         panicked_once: AtomicU8,
     }
     impl FakeModule {
         fn new(panic_on_start: bool) -> Self {
             Self {
-                state: AtomicU8::new(0),
+                state: ModuleStateCell::new(),
                 panic_on_start,
                 panicked_once: AtomicU8::new(0),
             }
@@ -338,11 +344,11 @@ mod tests {
                 name: "假模块",
                 version: "0.1.0",
                 icon: None,
-                priority: 100,
+                priority: crate::module::priority_of("fake"),
             }
         }
         fn init(&self, _ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
-            self.state.store(1, Ordering::SeqCst);
+            self.state.set(ModuleState::Stopped);
             Ok(())
         }
         fn start(&self) -> Result<(), ModuleError> {
@@ -350,19 +356,18 @@ mod tests {
             if self.panic_on_start && self.panicked_once.swap(1, Ordering::SeqCst) == 0 {
                 panic!("故意 panic：验证隔离");
             }
-            self.state.store(2, Ordering::SeqCst);
+            self.state.set(ModuleState::Running);
             Ok(())
         }
         fn stop(&self) -> Result<(), ModuleError> {
-            self.state.store(1, Ordering::SeqCst);
+            self.state.set(ModuleState::Stopped);
             Ok(())
         }
         fn status(&self) -> ModuleState {
-            match self.state.load(Ordering::SeqCst) {
-                0 => ModuleState::Uninitialized,
-                1 => ModuleState::Stopped,
-                _ => ModuleState::Running,
-            }
+            self.state.get()
+        }
+        fn set_status(&self, state: ModuleState) {
+            self.state.set(state);
         }
     }
 
@@ -402,6 +407,46 @@ mod tests {
         reg.stop_all().await;
         assert_eq!(reg.status_all()[0].1, ModuleState::Stopped);
         assert_eq!(mods[0].status(), ModuleState::Stopped);
+    }
+
+    // D-16 回归①：单一状态源——注册表视图与模块自身视图必须恒等，
+    // 旧实现注册表另持 HashMap，panic 后模块自称 Running 而宿主记 Error，两套真相
+    #[tokio::test]
+    async fn registry_and_module_share_single_state_source() {
+        let (reg, _bus, mods) = registry_with(vec![FakeModule::new(true)]);
+        reg.init_all(ctx()).await;
+        assert_eq!(reg.status_all()[0].1, mods[0].status());
+        reg.start_all().await; // 首次 start panic
+        assert_eq!(reg.status_all()[0].1, ModuleState::Error);
+        assert_eq!(
+            mods[0].status(),
+            ModuleState::Error,
+            "panic 补记的 Error 必须落在模块 cell（唯一状态源）"
+        );
+        reg.stop_all().await;
+        assert_eq!(reg.status_all()[0].1, mods[0].status());
+    }
+
+    // D-16 回归②：init / stop 迁移同样发布 host.module_state（旧实现仅 start 发布，
+    // 前端状态流在"init 成功待 start"与"已停止"两个区间失真）
+    #[tokio::test]
+    async fn module_state_events_cover_init_and_stop() {
+        let (reg, bus, _mods) = registry_with(vec![FakeModule::new(false)]);
+        let mut rx = bus.subscribe("host.module_state").unwrap();
+        reg.init_all(ctx()).await;
+        let ev = rx.recv().await.expect("init 成功应发布 Stopped");
+        assert_eq!(ev.payload["module"], "fake");
+        assert_eq!(ev.payload["state"], "Stopped");
+        reg.start_all().await;
+        assert_eq!(
+            rx.recv().await.expect("start 应发布 Running").payload["state"],
+            "Running"
+        );
+        reg.stop_all().await;
+        assert_eq!(
+            rx.recv().await.expect("stop 应发布 Stopped").payload["state"],
+            "Stopped"
+        );
     }
 
     #[tokio::test]

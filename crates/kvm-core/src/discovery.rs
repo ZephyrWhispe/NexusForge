@@ -326,12 +326,7 @@ fn bind_multicast(port: u16) -> Result<UdpSocket, AppError> {
     UdpSocket::from_std(std_sock).map_err(|e| AppError::module("KVM_NET_001", e.to_string(), None))
 }
 
-fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms_u64 as unix_ms;
 
 #[cfg(test)]
 mod tests {

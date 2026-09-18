@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::error::{ProxyError, Result};
 
@@ -31,10 +31,7 @@ pub struct LogLine {
 impl LogLine {
     fn now(text: impl Into<String>) -> Self {
         Self {
-            ts_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+            ts_ms: host_core::util::now_ms_u64(),
             text: text.into(),
         }
     }

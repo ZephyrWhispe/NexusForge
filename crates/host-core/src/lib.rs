@@ -19,6 +19,7 @@ pub mod module;
 pub mod ports;
 pub mod registry;
 pub mod storage;
+pub mod util;
 pub mod wire;
 
 /// 宿主核心版本，与 workspace 版本保持一致

@@ -636,12 +636,7 @@ async fn resolve_host(host: &str) -> Option<std::net::IpAddr> {
     (host, 1u16).to_socket_addrs().ok()?.next().map(|a| a.ip())
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms_u64 as now_ms;
 
 #[cfg(test)]
 mod tests {

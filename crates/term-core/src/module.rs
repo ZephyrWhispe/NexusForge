@@ -6,18 +6,20 @@
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::ConptyPort;
 
 use crate::session::TermSessions;
 use crate::ssh::SshService;
 
 pub struct TermModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     sessions: Arc<TermSessions>,
     ssh: RwLock<Option<Arc<SshService>>>,
     /// appData 根（known_hosts 路径）
@@ -27,7 +29,7 @@ pub struct TermModule {
 impl TermModule {
     pub fn new(app_data_dir: &std::path::Path) -> Self {
         Self {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             sessions: Arc::new(TermSessions::new()),
             ssh: RwLock::new(None),
             app_data_dir: app_data_dir.to_path_buf(),
@@ -51,7 +53,7 @@ impl Module for TermModule {
             name: "终端与运维",
             version: "0.1.0",
             icon: Some("term"),
-            priority: 14,
+            priority: priority_of("term"),
         }
     }
 
@@ -66,19 +68,19 @@ impl Module for TermModule {
             .map_err(|e| ModuleError::Init(e.to_string()))?;
         *self.ssh.write() = Some(Arc::new(ssh));
 
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
         // 强制回收全部会话（ConPTY 句柄防泄漏）
         self.sessions.kill_all();
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -100,10 +102,10 @@ impl Module for TermModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }

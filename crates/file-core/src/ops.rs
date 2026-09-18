@@ -15,7 +15,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use host_core::ports::RecycleBinPort;
 use serde::{Deserialize, Serialize};
@@ -376,12 +376,7 @@ impl Drop for OpQueue {
     }
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms;
 
 // ---------------------------------------------------------------------------
 // pending 持久化（原子写）

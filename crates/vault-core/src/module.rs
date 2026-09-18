@@ -5,24 +5,26 @@
 //! - V4 Windows Hello / V5 自动锁后续轮次接入（start 时挂计时器）
 
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 
 use crate::vault::VaultService;
 
 pub struct VaultModule {
     service: RwLock<Option<Arc<VaultService>>>,
-    state: AtomicU8,
+    state: ModuleStateCell,
 }
 
 impl VaultModule {
     pub fn new() -> Self {
         Self {
             service: RwLock::new(None),
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
         }
     }
 
@@ -45,7 +47,7 @@ impl Module for VaultModule {
             name: "安全与凭据",
             version: "0.1.0",
             icon: Some("vault"),
-            priority: 20,
+            priority: priority_of("vault"),
         }
     }
 
@@ -53,13 +55,13 @@ impl Module for VaultModule {
         let svc = VaultService::open(&ctx.app_data_dir)
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
         *self.service.write() = Some(Arc::new(svc));
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
         // V5 自动锁定计时器在后续轮次接入；当前仅标记运行态
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
@@ -68,7 +70,7 @@ impl Module for VaultModule {
         if let Some(svc) = self.service() {
             let _ = svc.lock();
         }
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -90,10 +92,10 @@ impl Module for VaultModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }

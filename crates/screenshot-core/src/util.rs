@@ -3,13 +3,10 @@
 //! 关键规约：GDI BitBlt 得到的 32bpp 帧 alpha 通道无意义（常为 0），
 //! 转 RGBA 时一律置 255，否则保存的 PNG 整图透明。
 
-use base64::Engine;
 use host_core::error::AppError;
 use host_core::ports::{Frame, Rect};
 
-fn err(code: &str, m: impl std::fmt::Display) -> AppError {
-    AppError::module(code, m.to_string(), None)
-}
+use host_core::util::app_err as err;
 
 /// BGRA 帧 → RGBA 字节（alpha 强制 255）
 pub fn bgra_to_rgba(frame: &Frame) -> Vec<u8> {
@@ -61,14 +58,13 @@ pub fn encode_png_b64(width: u32, height: u32, rgba: &[u8]) -> Result<String, Ap
     PngEncoder::new(&mut buf)
         .write_image(rgba, width, height, ExtendedColorType::Rgba8)
         .map_err(|e| err("SCREENSHOT_ENCODE_001", format!("PNG 编码失败: {e}")))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+    Ok(host_core::util::b64_encode(&buf.into_inner()))
 }
 
 /// PNG（Base64）→ RGBA 字节
 pub fn decode_png_b64(b64: &str) -> Result<(u32, u32, Vec<u8>), AppError> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64.trim())
-        .map_err(|e| err("SCREENSHOT_DECODE_001", format!("Base64 解码失败: {e}")))?;
+    let bytes = host_core::util::b64_decode(b64.trim())
+        .ok_or_else(|| err("SCREENSHOT_DECODE_001", "Base64 解码失败"))?;
     let img = image::load_from_memory(&bytes)
         .map_err(|e| err("SCREENSHOT_DECODE_002", format!("PNG 解码失败: {e}")))?;
     let rgba = img.to_rgba8();

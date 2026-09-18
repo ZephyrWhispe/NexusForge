@@ -32,12 +32,7 @@ pub fn our_server(mixed_port: u16) -> String {
     format!("127.0.0.1:{mixed_port}")
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms_u64 as now_ms;
 
 /// 开启系统代理前备份原值（幂等：已有备份不覆盖 —— 后续开关不刷掉用户原始设置）
 pub fn backup_before_enable(proxy_dir: &Path, sp: &dyn SysProxyPort) -> Result<()> {

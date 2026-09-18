@@ -13,9 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 
-pub fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+pub use host_core::util::now_ms;
 
 fn db_err(code: &str, e: impl std::fmt::Display) -> AppError {
     AppError::Storage {

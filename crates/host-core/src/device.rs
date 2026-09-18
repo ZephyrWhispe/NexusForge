@@ -253,15 +253,8 @@ impl PairStore {
 }
 
 /// base64 编解码（配对记录公钥/会话公钥传输；KVM 配对与 SYNC 握手复用）
-pub fn b64_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s).ok()
-}
+/// D-16：实现收敛到 [`crate::util`]，此处保留旧路径 re-export
+pub use crate::util::{b64_decode, b64_encode};
 
 #[cfg(test)]
 mod tests {

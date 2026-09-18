@@ -9,9 +9,7 @@ use host_core::ports::{Frame, OcrLine, OcrPort};
 
 use crate::types::OcrResultDto;
 
-fn err(code: &str, m: impl std::fmt::Display) -> AppError {
-    AppError::module(code, m.to_string(), None)
-}
+use host_core::util::app_err as err;
 
 pub struct OcrPipeline {
     port: std::sync::Arc<dyn OcrPort>,

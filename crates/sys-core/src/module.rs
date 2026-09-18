@@ -6,12 +6,14 @@
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus};
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::{
     AppxPort, MaintenancePort, PerfPort, RecycleBinPort, RegistryOps, ServiceCtlPort,
     TaskTogglePort,
@@ -35,7 +37,7 @@ struct WinopsFace {
 }
 
 pub struct SysModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     perf: RwLock<Option<Arc<dyn PerfPort>>>,
     recycle: RwLock<Option<Arc<dyn RecycleBinPort>>>,
     bus: RwLock<Option<Arc<EventBus>>>,
@@ -53,7 +55,7 @@ pub struct SysModule {
 impl SysModule {
     pub fn new(app_data_dir: &std::path::Path) -> Self {
         Self {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             perf: RwLock::new(None),
             recycle: RwLock::new(None),
             bus: RwLock::new(None),
@@ -195,7 +197,7 @@ impl Module for SysModule {
             name: "系统管理",
             version: "0.1.0",
             icon: Some("sys"),
-            priority: 13,
+            priority: priority_of("sys"),
         }
     }
 
@@ -218,20 +220,20 @@ impl Module for SysModule {
             maintenance: ctx.ports.get::<dyn MaintenancePort>(),
             appx: ctx.ports.get::<dyn AppxPort>(),
         });
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
         self.start_sampler();
         self.start_regression_check();
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
         self.sample_cancel.store(true, Ordering::SeqCst);
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -253,10 +255,10 @@ impl Module for SysModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }

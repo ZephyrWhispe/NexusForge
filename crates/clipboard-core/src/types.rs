@@ -68,9 +68,4 @@ impl Default for ClipboardConfig {
 /// 超过该大小的内容转 blob 存储（DESIGN O4）
 pub const BLOB_THRESHOLD: usize = 64 * 1024;
 
-pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+pub use host_core::util::now_ms;

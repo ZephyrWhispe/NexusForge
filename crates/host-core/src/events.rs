@@ -8,13 +8,13 @@
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::codes;
 use crate::error::AppError;
+use crate::util::now_ms;
 
 /// 每主题通道容量；满后消费端收到 Lagged（背压语义见模块注释）
 pub const EVENT_CHANNEL_CAP: usize = 1024;
@@ -94,13 +94,6 @@ impl Event {
             ts: now_ms(),
         }
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 pub struct EventBus {

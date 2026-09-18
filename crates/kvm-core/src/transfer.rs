@@ -267,11 +267,7 @@ pub async fn send_file(
 
 /// 字节 → 小写 hex（transfer_id 场景）
 pub fn hex_str(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    host_core::util::hex_lower(bytes)
 }
 
 // ---------------------------------------------------------------------------

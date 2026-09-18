@@ -6,29 +6,29 @@
 //! - 事件联动（screenshot.ocr_requested → ocr.completed）保留主题，插件阶段接入。
 
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::{AppError, ModuleError};
 use host_core::events::{Event, EventBus};
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::OcrPort;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::pipeline::OcrPipeline;
 use crate::types::{EngineInfo, EngineStatusDto, OcrRequest, OcrResultDto};
 
-fn mod_err(code: &str, m: impl Into<String>) -> AppError {
-    AppError::module(code, m.into(), None)
-}
+use host_core::util::app_err as mod_err;
 
 pub struct OcrModule {
     port: RwLock<Option<Arc<dyn OcrPort>>>,
     bus: RwLock<Option<Arc<EventBus>>>,
     /// 引擎可用性缓存（start 时探测）
     languages: RwLock<Vec<String>>,
-    state: AtomicU8,
+    state: ModuleStateCell,
     /// 保留异步配置槽位（与其它模块一致的结构，v1 无配置项）
     _config: Arc<AsyncMutex<()>>,
 }
@@ -39,7 +39,7 @@ impl OcrModule {
             port: RwLock::new(None),
             bus: RwLock::new(None),
             languages: RwLock::new(Vec::new()),
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             _config: Arc::new(AsyncMutex::new(())),
         }
     }
@@ -89,7 +89,7 @@ impl OcrModule {
             engines: vec![EngineInfo {
                 id: "win-ocr".into(),
                 name: "Windows.Media.Ocr".into(),
-                available: !langs.is_empty() || self.state.load(Ordering::SeqCst) == 2,
+                available: !langs.is_empty() || self.state.get() == ModuleState::Running,
             }],
             languages: langs,
         }
@@ -109,7 +109,7 @@ impl Module for OcrModule {
             name: "OCR 识别",
             version: "0.1.0",
             icon: Some("ocr"),
-            priority: 10,
+            priority: priority_of("ocr"),
         }
     }
 
@@ -120,7 +120,7 @@ impl Module for OcrModule {
             .ok_or_else(|| ModuleError::Init("OcrPort 未注册（win-integration 缺失）".into()))?;
         *self.port.write() = Some(port);
         *self.bus.write() = Some(ctx.event_bus.clone());
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -138,21 +138,21 @@ impl Module for OcrModule {
                 Err(e) => tracing::warn!(error = %e, "win-ocr 语言探测失败"),
             }
         }
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 
@@ -191,10 +191,8 @@ impl HotkeyProvider for OcrModule {
 // ---------------- 像素工具（与 screenshot-core/util 解耦：模块间不互依赖）----------------
 
 fn decode_rgba(b64: &str) -> Result<(u32, u32, Vec<u8>), AppError> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64.trim())
-        .map_err(|e| mod_err("OCR_INPUT_002", format!("Base64 解码失败: {e}")))?;
+    let bytes = host_core::util::b64_decode(b64.trim())
+        .ok_or_else(|| mod_err("OCR_INPUT_002", "Base64 解码失败"))?;
     let img = image::load_from_memory(&bytes)
         .map_err(|e| mod_err("OCR_INPUT_003", format!("PNG 解码失败: {e}")))?;
     let rgba = img.to_rgba8();

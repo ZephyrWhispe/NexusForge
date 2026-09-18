@@ -38,9 +38,7 @@ enum Inner {
     },
 }
 
-fn err(code: &str, msg: impl Into<String>) -> AppError {
-    AppError::module(code, msg, None)
-}
+use host_core::util::app_err as err;
 
 pub struct VaultService {
     meta_path: PathBuf,

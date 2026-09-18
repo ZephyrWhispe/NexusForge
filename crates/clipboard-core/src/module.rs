@@ -7,7 +7,9 @@ use std::sync::Arc;
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::{AppError, ModuleError};
 use host_core::events::{Event, EventBus};
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::{ClipboardPort, CryptoPort};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -28,7 +30,7 @@ pub struct ClipboardModule {
     cleanup_cancel: RwLock<Option<Arc<AtomicU8>>>,
     /// S3：捕获管线运行句柄（start 建立、stop 拆除；None 表示未运行）
     pipeline: RwLock<Option<PipelineHandle>>,
-    state: AtomicU8,
+    state: ModuleStateCell,
 }
 
 impl ClipboardModule {
@@ -43,7 +45,7 @@ impl ClipboardModule {
             config: Arc::new(AsyncMutex::new(ClipboardConfig::default())),
             cleanup_cancel: RwLock::new(None),
             pipeline: RwLock::new(None),
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
         }
     }
 
@@ -80,8 +82,8 @@ impl Default for ClipboardModule {
     }
 }
 
-fn err(_code: &str, m: impl Into<String>) -> ModuleError {
-    ModuleError::Init(m.into())
+fn err(code: &str, m: impl Into<String>) -> ModuleError {
+    ModuleError::Init(format!("[{code}] {}", m.into()))
 }
 
 impl Module for ClipboardModule {
@@ -91,7 +93,7 @@ impl Module for ClipboardModule {
             name: "剪切板中枢",
             version: "0.1.0",
             icon: Some("clipboard"),
-            priority: 10,
+            priority: priority_of("clipboard"),
         }
     }
 
@@ -125,7 +127,7 @@ impl Module for ClipboardModule {
         *self.port.write() = Some(port);
         *self.crypto.write() = Some(crypto);
         *self.bus.write() = Some(ctx.event_bus.clone());
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -163,7 +165,7 @@ impl Module for ClipboardModule {
         }
         // 启动 C9 清理线程
         self.start_cleanup();
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
@@ -187,7 +189,7 @@ impl Module for ClipboardModule {
             }
         }
         *self.cleanup_cancel.write() = None;
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -239,11 +241,11 @@ impl Module for ClipboardModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 

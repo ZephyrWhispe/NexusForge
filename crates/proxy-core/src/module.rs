@@ -5,25 +5,27 @@
 //! - panic hook 还原由 src-tauri state.rs 经 host-core crash::add_recovery_hook 注册
 
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::SysProxyPort;
 
 use crate::service::ProxyService;
 
 pub struct ProxyModule {
     service: RwLock<Option<Arc<ProxyService>>>,
-    state: AtomicU8,
+    state: ModuleStateCell,
 }
 
 impl ProxyModule {
     pub fn new() -> Self {
         Self {
             service: RwLock::new(None),
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
         }
     }
 
@@ -46,7 +48,7 @@ impl Module for ProxyModule {
             name: "网络代理",
             version: "0.1.0",
             icon: Some("proxy"),
-            priority: 15,
+            priority: priority_of("proxy"),
         }
     }
 
@@ -58,12 +60,12 @@ impl Module for ProxyModule {
         let svc = ProxyService::open(&ctx.app_data_dir, ctx.event_bus.clone(), sp)
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
         *self.service.write() = Some(svc);
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
@@ -72,7 +74,7 @@ impl Module for ProxyModule {
         if let Some(svc) = self.service() {
             svc.shutdown();
         }
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -100,10 +102,10 @@ impl Module for ProxyModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }

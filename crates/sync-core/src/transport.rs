@@ -275,8 +275,10 @@ mod tests {
         Arc<DeviceIdentity>,
         PairStore,
     ) {
-        let dir_a = std::env::temp_dir().join(format!("nf_sync_tr_{tag}_a_{}", std::process::id()));
-        let dir_b = std::env::temp_dir().join(format!("nf_sync_tr_{tag}_b_{}", std::process::id()));
+        let dir_a =
+            std::env::temp_dir().join(format!("nf_sync_tr_{tag}_a_{}", uuid::Uuid::now_v7()));
+        let dir_b =
+            std::env::temp_dir().join(format!("nf_sync_tr_{tag}_b_{}", uuid::Uuid::now_v7()));
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
         let id_a = Arc::new(DeviceIdentity::load_or_create(&dir_a, None).unwrap());
@@ -359,7 +361,7 @@ mod tests {
     fn unpaired_device_rejected() {
         let (id_a, store_a, _id_b, _store_b) = paired_devices("up");
         // 未配对的第三方设备 X（不在 A 白名单）
-        let dir_x = std::env::temp_dir().join(format!("nf_sync_tr_up_x_{}", std::process::id()));
+        let dir_x = std::env::temp_dir().join(format!("nf_sync_tr_up_x_{}", uuid::Uuid::now_v7()));
         let _ = std::fs::remove_dir_all(&dir_x);
         let id_x = DeviceIdentity::load_or_create(&dir_x, None).unwrap();
         let hello = SyncHello {

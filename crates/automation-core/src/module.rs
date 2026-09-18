@@ -9,12 +9,14 @@
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus, TOPIC_REGISTRY};
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::ShellPort;
 use host_core::ports::TaskSchdPort;
 
@@ -165,7 +167,7 @@ impl ActionHandler for HostActionHandler {
 }
 
 pub struct AutomationModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     bus: RwLock<Option<Arc<EventBus>>>,
     engine: RwLock<Option<Arc<RuleEngine>>>,
     /// Arc 化规则表：dispatcher 闭包持有快照访问
@@ -188,7 +190,7 @@ pub struct AutomationModule {
 impl AutomationModule {
     pub fn new(app_data_dir: &std::path::Path) -> Self {
         Self {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             bus: RwLock::new(None),
             engine: RwLock::new(None),
             rules: Arc::new(RwLock::new(Vec::new())),
@@ -433,12 +435,7 @@ impl AutomationModule {
     }
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms;
 
 /// 本地时区当前 "HH:MM" 与 "YYYY-MM-DD"
 fn current_hhmm_date(now_ms: i64) -> (String, String) {
@@ -491,7 +488,7 @@ impl Module for AutomationModule {
             name: "自动化与拓展",
             version: "0.1.0",
             icon: Some("automation"),
-            priority: 12,
+            priority: priority_of("automation"),
         }
     }
 
@@ -513,14 +510,14 @@ impl Module for AutomationModule {
         *self.engine.write() = Some(Arc::new(RuleEngine::new(handler)));
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.load_rules();
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
         self.start_dispatcher();
         self.fire_startup();
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
@@ -534,7 +531,7 @@ impl Module for AutomationModule {
         if let Some(tx) = self.shutdown.write().take() {
             let _ = tx.send(true);
         }
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -556,11 +553,11 @@ impl Module for AutomationModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 

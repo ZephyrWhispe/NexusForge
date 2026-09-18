@@ -188,8 +188,10 @@ mod tests {
     }
 
     fn log(tag: &str) -> OpLog {
-        OpLog::open(&std::env::temp_dir().join(format!("nf_sync_{tag}_{}.db", std::process::id())))
-            .unwrap()
+        OpLog::open(
+            &std::env::temp_dir().join(format!("nf_sync_{tag}_{}.db", uuid::Uuid::now_v7())),
+        )
+        .unwrap()
     }
 
     #[test]

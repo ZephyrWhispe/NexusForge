@@ -1,6 +1,7 @@
 //! Module trait 与模块上下文（docs/impl/01 S3）
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -29,6 +30,68 @@ pub enum ModuleState {
     Stopped,
     Running,
     Error,
+}
+
+impl ModuleState {
+    /// 统一 AtomicU8 编码（D-16：原 13 份模块内复制的魔数即此约定）
+    fn code(self) -> u8 {
+        match self {
+            ModuleState::Uninitialized => 0,
+            ModuleState::Stopped => 1,
+            ModuleState::Running => 2,
+            ModuleState::Error => 3,
+        }
+    }
+
+    /// 未知编码 fail-safe 归为 Error（原 12/13 模块的 `_ => Running` 会把内存踩踏伪装成"运行中"）
+    fn from_code(v: u8) -> Self {
+        match v {
+            0 => ModuleState::Uninitialized,
+            1 => ModuleState::Stopped,
+            2 => ModuleState::Running,
+            _ => ModuleState::Error,
+        }
+    }
+}
+
+/// 模块状态统一存储单元（D-16）：模块字段与注册表读写**同一原子格**，
+/// 消除"模块内 AtomicU8"与"注册表 HashMap"两套状态源。
+#[derive(Debug, Default)]
+pub struct ModuleStateCell(AtomicU8);
+
+impl ModuleStateCell {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn get(&self) -> ModuleState {
+        ModuleState::from_code(self.0.load(Ordering::SeqCst))
+    }
+    pub fn set(&self, state: ModuleState) {
+        self.0.store(state.code(), Ordering::SeqCst);
+    }
+}
+
+/// 未登记 id 的默认仲裁优先级
+pub const PRIORITY_DEFAULT: u8 = 50;
+
+/// 模块快捷键/托盘仲裁优先级集中表（D-16，DESIGN §8.3：小者优先）。
+/// 散落各 crate 的 `priority:` 字面量改由本表推导，保证仲裁可审计；
+/// 表序即阶段规划 docs/impl/07 的模块分组顺序。
+pub fn priority_of(id: &str) -> u8 {
+    match id {
+        // 高频呼出类（全局快捷键主战场）
+        "clipboard" | "ocr" | "screenshot" => 10,
+        "automation" => 12,
+        // 系统级
+        "sync" | "sys" => 13,
+        "term" => 14,
+        "notes" | "proxy" => 15,
+        "desktop" => 16,
+        // 窗口内操作为主、全局冲突概率低
+        "editor" | "kvm" | "vault" => 20,
+        "file" => 25,
+        _ => PRIORITY_DEFAULT,
+    }
 }
 
 /// 依赖注入容器。
@@ -61,21 +124,23 @@ pub trait Module: Send + Sync {
     fn apply_config(&self, _values: serde_json::Value) -> Result<(), ModuleError> {
         Ok(())
     }
+    /// 统一状态读取（D-16：唯一状态源 = 实现方持有的 [`ModuleStateCell`]）
     fn status(&self) -> ModuleState;
+    /// 统一状态写入（注册表在 panic / stop 超时 / init 失败等模块自感知的
+    /// 边界之外补记 Error 态；实现方直接代理到同一 [`ModuleStateCell`]）
+    fn set_status(&self, state: ModuleState);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ports::Ports;
-    use std::sync::atomic::{AtomicU8, Ordering};
 
     struct FakePort;
 
     struct MockModule {
-        state: AtomicU8,
+        state: ModuleStateCell,
     }
-    // state: 0=Uninitialized 1=Stopped 2=Running 3=Error
     impl Module for MockModule {
         fn info(&self) -> ModuleInfo {
             ModuleInfo {
@@ -83,35 +148,33 @@ mod tests {
                 name: "测试模块",
                 version: "0.1.0",
                 icon: None,
-                priority: 100,
+                priority: priority_of("mock"),
             }
         }
         fn init(&self, _ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
-            self.state.store(1, Ordering::SeqCst);
+            self.state.set(ModuleState::Stopped);
             Ok(())
         }
         fn start(&self) -> Result<(), ModuleError> {
-            self.state.store(2, Ordering::SeqCst);
+            self.state.set(ModuleState::Running);
             Ok(())
         }
         fn stop(&self) -> Result<(), ModuleError> {
-            self.state.store(1, Ordering::SeqCst);
+            self.state.set(ModuleState::Stopped);
             Ok(())
         }
         fn status(&self) -> ModuleState {
-            match self.state.load(Ordering::SeqCst) {
-                0 => ModuleState::Uninitialized,
-                1 => ModuleState::Stopped,
-                2 => ModuleState::Running,
-                _ => ModuleState::Error,
-            }
+            self.state.get()
+        }
+        fn set_status(&self, state: ModuleState) {
+            self.state.set(state);
         }
     }
 
     #[test]
     fn mock_module_lifecycle_transitions() {
         let m = MockModule {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
         };
         assert_eq!(m.status(), ModuleState::Uninitialized);
 
@@ -126,6 +189,55 @@ mod tests {
         assert_eq!(m.status(), ModuleState::Running);
         m.stop().unwrap();
         assert_eq!(m.status(), ModuleState::Stopped);
+    }
+
+    #[test]
+    fn state_cell_roundtrip_and_unknown_failsafe() {
+        let cell = ModuleStateCell::new();
+        assert_eq!(cell.get(), ModuleState::Uninitialized);
+        for s in [
+            ModuleState::Stopped,
+            ModuleState::Running,
+            ModuleState::Error,
+            ModuleState::Uninitialized,
+        ] {
+            cell.set(s);
+            assert_eq!(cell.get(), s, "四态读写必须无损往返");
+        }
+        // 未知魔数（模拟内存踩踏 / 旧代码写 3 之外的值）不得伪装成 Running
+        cell.0.store(9, Ordering::SeqCst);
+        assert_eq!(cell.get(), ModuleState::Error);
+    }
+
+    #[test]
+    fn priority_table_covers_all_shipped_modules() {
+        // D-16：14 个出厂模块必须逐名登记（新增模块忘记入表会静默吃默认值）
+        for id in [
+            "clipboard",
+            "ocr",
+            "screenshot",
+            "automation",
+            "sync",
+            "sys",
+            "term",
+            "notes",
+            "proxy",
+            "desktop",
+            "editor",
+            "kvm",
+            "vault",
+            "file",
+        ] {
+            assert_ne!(
+                priority_of(id),
+                PRIORITY_DEFAULT,
+                "模块 {id} 未登记优先级表"
+            );
+        }
+        assert_eq!(priority_of("ghost"), PRIORITY_DEFAULT);
+        // 仲裁语义复核：小者优先，高频呼出类必须优于系统级与文档类
+        assert!(priority_of("clipboard") < priority_of("file"));
+        assert!(priority_of("screenshot") < priority_of("desktop"));
     }
 
     #[test]

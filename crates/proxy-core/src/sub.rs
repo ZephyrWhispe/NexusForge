@@ -5,7 +5,6 @@
 //! 支持：ss://（SIP002 + 旧版整体 base64）、vmess://（v2ray JSON）、trojan://、vless://。
 //! 订阅正文：整体 base64 或纯文本多行 URI，自动探测。
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ProxyError, Result};
@@ -84,10 +83,7 @@ fn detect_and_decode(content: &str) -> String {
     if !b64 || trimmed.is_empty() {
         return trimmed.to_string();
     }
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(trimmed)
-        .ok()
-        .and_then(|b| String::from_utf8(b).ok());
+    let decoded = host_core::util::b64_decode(trimmed).and_then(|b| String::from_utf8(b).ok());
     match decoded {
         Some(s) if s.contains("://") => s,
         _ => trimmed.to_string(),
@@ -272,14 +268,10 @@ fn b64_or_raw(s: &str) -> String {
 }
 
 fn b64_decode(s: &str) -> Result<String> {
-    // base64 URL-safe 与标准变体兼容处理
+    // base64 URL-safe 与标准变体兼容处理（订阅链接可能带 padding 的 URL-safe 段）
     let cleaned = s.trim_end_matches('=');
-    let std_engine = base64::engine::general_purpose::STANDARD;
-    let url_engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    url_engine
-        .decode(cleaned)
-        .ok()
-        .or_else(|| std_engine.decode(s).ok())
+    host_core::util::b64_decode_lenient(cleaned)
+        .or_else(|| host_core::util::b64_decode(s))
         .and_then(|b| String::from_utf8(b).ok())
         .ok_or_else(|| ProxyError::Subscription("base64 解码失败".into()))
 }
@@ -338,7 +330,7 @@ mod tests {
     fn parses_legacy_ss() {
         // base64("aes-128-gcm:test@5.6.7.8:443")
         let inner = "aes-128-gcm:test@5.6.7.8:443";
-        let b64 = base64::engine::general_purpose::STANDARD.encode(inner);
+        let b64 = host_core::util::b64_encode(inner.as_bytes());
         let n = parse_share_uri(&format!("ss://{b64}"), SUB).unwrap();
         assert_eq!(n.server, "5.6.7.8");
         assert_eq!(n.port, 443);
@@ -352,7 +344,7 @@ mod tests {
             "id": "b831381d-6324-4d53-ad4f-8cda48b30811", "aid": "0",
             "net": "ws", "host": "example.com", "path": "/ws", "tls": "tls"
         });
-        let b64 = base64::engine::general_purpose::STANDARD.encode(payload.to_string());
+        let b64 = host_core::util::b64_encode(payload.to_string().as_bytes());
         let n = parse_share_uri(&format!("vmess://{b64}"), SUB).unwrap();
         assert_eq!(n.kind, NodeKind::Vmess);
         assert_eq!(n.server, "example.com");
@@ -383,7 +375,7 @@ mod tests {
     fn parses_whole_b64_subscription() {
         let lines =
             "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#a1\ntrojan://p@5.5.5.5:443#a2";
-        let b64 = base64::engine::general_purpose::STANDARD.encode(lines);
+        let b64 = host_core::util::b64_encode(lines.as_bytes());
         let nodes = parse_subscription(&b64, SUB).unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].kind, NodeKind::Shadowsocks);

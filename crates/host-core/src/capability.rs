@@ -83,6 +83,7 @@ mod tests {
     struct FakeProvider {
         id: &'static str,
         priority: u8,
+        state: crate::module::ModuleStateCell,
     }
     impl Module for FakeProvider {
         fn info(&self) -> crate::module::ModuleInfo {
@@ -104,7 +105,10 @@ mod tests {
             Ok(())
         }
         fn status(&self) -> ModuleState {
-            ModuleState::Running
+            self.state.get()
+        }
+        fn set_status(&self, state: ModuleState) {
+            self.state.set(state);
         }
     }
     // Port 由 blanket impl 覆盖，无需显式实现
@@ -124,10 +128,12 @@ mod tests {
         abilities.register_multi::<dyn TrayProvider>(Arc::new(FakeProvider {
             id: "b_module",
             priority: 20,
+            state: crate::module::ModuleStateCell::new(),
         }));
         abilities.register_multi::<dyn TrayProvider>(Arc::new(FakeProvider {
             id: "a_module",
             priority: 5,
+            state: crate::module::ModuleStateCell::new(),
         }));
         let sections = aggregate_tray(&abilities);
         assert_eq!(sections.len(), 2);

@@ -5,13 +5,15 @@
 
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use host_core::device::DeviceIdentity;
 use host_core::error::ModuleError;
 use host_core::events::Event;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::{
     ClipContent, CryptoPort, InputHookPort, InputInjectPort, RawInput, ScreenInfoPort, ScreenRect,
 };
@@ -23,10 +25,6 @@ use crate::edge::{ControlReleasePayload, ControlTakePayload, Decision, Edge, Edg
 use crate::pairing::{PairCodeManager, PairStore, PairedPeer, PairingService};
 use crate::session::{MsgType, SessionEvent, SessionHandle, SessionManager, SessionServeHandle};
 use crate::transfer::{self, AckPayload, ChunkOutcome, MetaOutcome, TransferManager};
-
-const STATE_UNINIT: u8 = 0;
-const STATE_STOPPED: u8 = 1;
-const STATE_RUNNING: u8 = 2;
 
 /// 本端主动发起（客户端角色）的会话句柄表：connect_to 登记入内，
 /// Closed 事件时移除。服务端接入会话由 SessionManager 注册表持有。
@@ -52,7 +50,7 @@ struct Running {
 }
 
 pub struct KvmModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     bus: RwLock<Option<Arc<host_core::events::EventBus>>>,
     running: RwLock<Option<Running>>,
     discovery: RwLock<Option<Arc<DiscoveryService>>>,
@@ -97,7 +95,7 @@ impl Default for KvmModule {
 impl KvmModule {
     pub fn new() -> Self {
         Self {
-            state: AtomicU8::new(STATE_UNINIT),
+            state: ModuleStateCell::new(),
             bus: RwLock::new(None),
             running: RwLock::new(None),
             discovery: RwLock::new(None),
@@ -352,7 +350,7 @@ impl Module for KvmModule {
             name: "键鼠共享",
             version: "0.1.0",
             icon: Some("kvm"),
-            priority: 20,
+            priority: priority_of("kvm"),
         }
     }
 
@@ -429,7 +427,7 @@ impl Module for KvmModule {
         *self.identity.write() = Some(identity);
         *self.store.write() = Some(store);
         *self.transfers.write() = Some(transfers);
-        self.state.store(STATE_STOPPED, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -899,7 +897,7 @@ impl Module for KvmModule {
             discovery: discovery_handle,
             sessions: sessions_handle,
         });
-        self.state.store(STATE_RUNNING, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         tracing::info!("KVM 发现、配对、会话与传输服务已启动");
         Ok(())
     }
@@ -921,7 +919,7 @@ impl Module for KvmModule {
             // shutdown 需 await：abort 路径由 Drop 兜底（同步上下文）
             drop(running);
         }
-        self.state.store(STATE_STOPPED, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         tracing::info!("KVM 服务已停止");
         Ok(())
     }
@@ -947,12 +945,11 @@ impl Module for KvmModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            STATE_UNINIT => ModuleState::Uninitialized,
-            STATE_STOPPED => ModuleState::Stopped,
-            STATE_RUNNING => ModuleState::Running,
-            _ => ModuleState::Error,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 

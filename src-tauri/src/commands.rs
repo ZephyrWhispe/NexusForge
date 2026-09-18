@@ -1551,12 +1551,7 @@ fn notes_err(e: notes_core::NoteError) -> AppError {
     AppError::module(e.code(), e.to_string(), None)
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms;
 
 /// 变更事件（UI 事件驱动刷新；topic 见 host-core TOPIC_REGISTRY）
 fn notes_notify(state: &HostState, action: &str, path: Option<&str>) {

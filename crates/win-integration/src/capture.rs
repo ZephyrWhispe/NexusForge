@@ -18,9 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use host_core::error::AppError;
 use host_core::ports::{CapturePort, CaptureTarget, Frame, MonitorInfo};
 
-fn err(code: &str, m: impl std::fmt::Display) -> AppError {
-    AppError::module(code, m.to_string(), None)
-}
+use host_core::util::app_err as err;
 
 /// 黑帧检测（docs/impl/03 P2 潜在问题 3）：采样 16 点全 0 → 受保护窗口
 fn black_frame_hint(frame: &Frame) -> bool {

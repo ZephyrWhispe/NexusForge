@@ -103,15 +103,12 @@ impl VaultHeader {
 }
 
 fn b64(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+    host_core::util::b64_encode(bytes)
 }
 
 fn unb64(s: &str) -> Result<Vec<u8>, AppError> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD
-        .decode(s)
-        .map_err(|e| AppError::module("VAULT_CRYPTO_004", format!("base64 解码失败: {e}"), None))
+    host_core::util::b64_decode(s)
+        .ok_or_else(|| AppError::module("VAULT_CRYPTO_004", "base64 解码失败", None))
 }
 
 fn vault_err(code: &str, msg: impl Into<String>) -> AppError {

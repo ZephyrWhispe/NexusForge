@@ -737,9 +737,7 @@ fn content_hash_bytes(bytes: &[u8]) -> String {
     hex(&h.finalize())
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+use host_core::util::hex_lower as hex;
 
 /// FTS5 语法转义：拆词并加前缀匹配，防止语法错误（docs/impl/02 C2 潜在问题）
 fn fts_escape(q: &str) -> String {

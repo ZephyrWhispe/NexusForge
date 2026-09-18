@@ -6,13 +6,15 @@
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus};
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 use host_core::ports::ShellPort;
 
 use crate::index::{ItemKind, LauncherIndex};
@@ -22,7 +24,7 @@ use crate::note::NoteStore;
 const REMIND_POLL_MS: u64 = 30_000;
 
 pub struct DesktopModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     bus: RwLock<Option<Arc<EventBus>>>,
     notes: RwLock<Option<Arc<NoteStore>>>,
     shell: RwLock<Option<Arc<dyn ShellPort>>>,
@@ -41,7 +43,7 @@ impl DesktopModule {
             app_data_dir.join("desktop").join("usage.json"),
         ));
         Self {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             bus: RwLock::new(None),
             notes: RwLock::new(None),
             shell: RwLock::new(None),
@@ -177,7 +179,7 @@ impl Module for DesktopModule {
             name: "桌面效率",
             version: "0.1.0",
             icon: Some("desktop"),
-            priority: 16,
+            priority: priority_of("desktop"),
         }
     }
 
@@ -214,19 +216,19 @@ impl Module for DesktopModule {
             serde_json::json!({ "mode": "ocr" }),
         );
 
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
         self.start_remind_loop();
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
         self.remind_cancel.store(true, Ordering::SeqCst);
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -248,11 +250,11 @@ impl Module for DesktopModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 

@@ -12,13 +12,15 @@
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
 use host_core::error::ModuleError;
 use host_core::events::{topic, Event, EventBus};
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 
 use crate::engine::{ApplyOutcome, ChangeApplier, SyncEngine};
 use crate::error::SyncError;
@@ -216,7 +218,7 @@ pub fn record_change_with(ctx: &SyncCtx, path: &str, action: &str) -> R<()> {
 }
 
 pub struct SyncModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     bus: RwLock<Option<Arc<EventBus>>>,
     log: RwLock<Option<Arc<OpLog>>>,
     applier: RwLock<Option<Arc<dyn ChangeApplier>>>,
@@ -233,7 +235,7 @@ impl SyncModule {
         let kvm_dir = app_data_dir.join("kvm");
         let store = PairStore::load_or_default(&kvm_dir).expect("PairStore 加载失败");
         Self {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             bus: RwLock::new(None),
             log: RwLock::new(None),
             applier: RwLock::new(None),
@@ -406,7 +408,7 @@ impl Module for SyncModule {
             name: "跨设备同步",
             version: "0.1.0",
             icon: Some("sync"),
-            priority: 13,
+            priority: priority_of("sync"),
         }
     }
 
@@ -420,7 +422,7 @@ impl Module for SyncModule {
         let log = OpLog::open(&self.db_path).map_err(|e| ModuleError::Init(e.to_string()))?;
         *self.log.write() = Some(Arc::new(log));
         *self.bus.write() = Some(ctx.event_bus.clone());
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -467,13 +469,13 @@ impl Module for SyncModule {
                 });
             }
         }
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
         self.cancel.store(true, Ordering::SeqCst);
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -495,11 +497,11 @@ impl Module for SyncModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 
@@ -508,7 +510,7 @@ mod tests {
     use super::*;
 
     fn temp_appdata(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nf_syncmod_{tag}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nf_syncmod_{tag}_{}", uuid::Uuid::now_v7()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

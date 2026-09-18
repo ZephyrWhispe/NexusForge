@@ -4,16 +4,18 @@
 //! 自动保存草稿由 IPC 层防抖触发（E2 前端 3s 防抖）。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 
 use crate::session::EditorSessions;
 
 pub struct EditorModule {
-    state: AtomicU8,
+    state: ModuleStateCell,
     sessions: Arc<EditorSessions>,
     /// 自动保存草稿根（{appData}/editor/autosave 日志目录，预留）
     work_dir: PathBuf,
@@ -22,7 +24,7 @@ pub struct EditorModule {
 impl EditorModule {
     pub fn new(app_data_dir: &std::path::Path) -> Self {
         Self {
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
             sessions: Arc::new(EditorSessions::new()),
             work_dir: app_data_dir.join("editor"),
         }
@@ -45,24 +47,24 @@ impl Module for EditorModule {
             name: "文本与 PDF",
             version: "0.1.0",
             icon: Some("editor"),
-            priority: 20,
+            priority: priority_of("editor"),
         }
     }
 
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
         std::fs::create_dir_all(&self.work_dir).map_err(|e| ModuleError::Storage(e.to_string()))?;
         let _ = ctx; // 无端口依赖
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -84,10 +86,10 @@ impl Module for EditorModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }

@@ -5,24 +5,26 @@
 //! - stop：不再接收新任务；存量任务由 worker 完成或进程退出自然终止
 
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
-use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
+use host_core::module::{
+    priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
+};
 
 use crate::service::FileService;
 
 pub struct FileModule {
     service: RwLock<Option<Arc<FileService>>>,
-    state: AtomicU8,
+    state: ModuleStateCell,
 }
 
 impl FileModule {
     pub fn new() -> Self {
         Self {
             service: RwLock::new(None),
-            state: AtomicU8::new(0),
+            state: ModuleStateCell::new(),
         }
     }
 
@@ -45,7 +47,7 @@ impl Module for FileModule {
             name: "文件与存储",
             version: "0.1.0",
             icon: Some("file"),
-            priority: 25,
+            priority: priority_of("file"),
         }
     }
 
@@ -53,7 +55,7 @@ impl Module for FileModule {
         let svc = FileService::open(&ctx.app_data_dir, ctx.event_bus.clone(), ctx.ports.clone())
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
         *self.service.write() = Some(Arc::new(svc));
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -65,7 +67,7 @@ impl Module for FileModule {
                 tracing::info!(count = resumed, "文件操作崩溃恢复重入队");
             }
         }
-        self.state.store(2, Ordering::SeqCst);
+        self.state.set(ModuleState::Running);
         Ok(())
     }
 
@@ -79,7 +81,7 @@ impl Module for FileModule {
                 }
             }
         }
-        self.state.store(1, Ordering::SeqCst);
+        self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
@@ -102,11 +104,11 @@ impl Module for FileModule {
     }
 
     fn status(&self) -> ModuleState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ModuleState::Uninitialized,
-            1 => ModuleState::Stopped,
-            _ => ModuleState::Running,
-        }
+        self.state.get()
+    }
+
+    fn set_status(&self, state: ModuleState) {
+        self.state.set(state);
     }
 }
 

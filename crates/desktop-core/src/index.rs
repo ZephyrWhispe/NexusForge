@@ -243,12 +243,7 @@ impl LauncherIndex {
     }
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms;
 
 /// Windows 标准开始菜单目录（系统 + 用户两级）
 pub fn start_menu_dirs() -> Vec<PathBuf> {

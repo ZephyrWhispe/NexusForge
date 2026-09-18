@@ -56,8 +56,7 @@ pub fn write_manifest(bin_dir: &Path, manifest: &Manifest) -> Result<()> {
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    let out = h.finalize();
-    out.iter().map(|b| format!("{b:02x}")).collect()
+    host_core::util::hex_lower(&h.finalize())
 }
 
 /// 从官方 zip 安装 sing-box：解压包内 `sing-box.exe` 到 `bin_dir`，写 manifest。
@@ -135,12 +134,7 @@ pub fn wintun_installed(bin_dir: &Path) -> bool {
     bin_dir.join("wintun.dll").is_file()
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use host_core::util::now_ms_u64 as now_ms;
 
 #[cfg(test)]
 mod tests {

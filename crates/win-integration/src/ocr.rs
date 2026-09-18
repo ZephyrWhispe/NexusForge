@@ -13,9 +13,7 @@ use windows::Security::Cryptography::CryptographicBuffer;
 use host_core::error::AppError;
 use host_core::ports::{Frame, OcrLine, OcrPort, Rect};
 
-fn err(code: &str, m: impl std::fmt::Display) -> AppError {
-    AppError::module(code, m.to_string(), None)
-}
+use host_core::util::app_err as err;
 
 pub struct WinOcr;
 

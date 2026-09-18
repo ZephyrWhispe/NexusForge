@@ -25,7 +25,7 @@
 | D-13 | WinOps v1 交付范围收敛为 5 命令 | 改规范 | P2 | 3 | 已裁决（文档生效） |
 | D-14 | 引入 Zustand 三 store，替换轮询与静态状态 | 补实现 | P1 | 1 | 已完成 |
 | D-15 | 锁策略统一（parking_lot + 回调无锁快照） | 补实现 | P0 | 2 | 已完成 |
-| D-16 | host-core 收敛公共工具与 ModuleStateCell | 补实现 | P1 | 2 | 待实施 |
+| D-16 | host-core 收敛公共工具与 ModuleStateCell | 补实现 | P1 | 2 | 已完成 |
 | D-17 | 前端工程门禁（ESLint + Vitest + CI） | 补实现 | P0 | 2 | 已完成 |
 | D-18 | 前端组件基线 + 破坏性操作统一二次确认 | 补实现 | P1 | 2 | 待实施 |
 | D-19 | 全局错误通道与模块重启入口 | 补实现 | P0 | 1 | 已完成 |
@@ -178,6 +178,8 @@
 
 - **决策**：`now_ms()`（现 9 份）、错误工厂（8 份）、`hex`/`b64`（4 份）、模块状态机（13 份逐字复制）统一收敛到 `host-core`（`util` + `ModuleStateCell`）；`Module::status()` 直接返回统一状态，消除"模块内 AtomicU8"与"注册表 HashMap"两套状态源。
 - **附加**：`ModuleInfo.priority` 的硬编码 `10` 改为集中优先级表（DESIGN §8.3 要求按优先级仲裁快捷键冲突，散落常量使仲裁不可审计）。
+- **实施记录（2026-09-18）**：实测漂移比审查更大：`now_ms`/`unix_ms` 具名定义 **15 份**（含 kvm `unix_ms` 与 proxy/helper 的 u64 变体）另加 proxy `kernel.rs` 内联拷贝 1 处，全部改 `host_core::util::now_ms`（i64）/ `now_ms_u64`（u64 协议字段），全仓 `fn now_ms` 仅剩 util 一处（文件系统 mtime→epoch 换算非"当前时间"，保留）。错误工厂：9 处 `AppError::module(code, msg, None)` 型逐字复制（screenshot util/store/module、ocr pipeline/module、win-integration capture/ocr、vault）改 `use host_core::util::app_err as err`，不同 kind 的工厂（clipboard `Storage`、host `cfg_err`、win32 HRESULT、io 映射）语义不同保留。**顺带修复真实缺陷**：clipboard `module.rs err(_code, m)` 吞掉错误码——现以 `[CODE] message` 嵌入 `ModuleError::Init`。hex/b64：`util` 提供 `hex_lower`/`b64_encode`/`b64_decode`/`b64_decode_lenient`（URL_SAFE_NO_PAD 优先、STANDARD 兜底），收敛 clipboard `hex`、proxy `sha256_hex` 与订阅双引擎解码、kvm `hex_str`、vault crypto `b64/unb64`、screenshot `png_b64` 对、ocr `decode_rgba`；`device.rs` b64 保留 re-export 兼容既有导入。状态机：新增 `ModuleStateCell`（AtomicU8，0=Uninit/1=Stopped/2=Running/3=Error，未知值 fail-safe 归 Error——原 12/14 模块 `_ => Running` 一并消灭），14 个模块 + 3 个宿主测试 mock 全部换格；`Module` trait 增 `set_status`，注册表**删除 `states: HashMap` 第二状态源**，`status_all`/panic 补记 Error 均直写模块 cell，且 `host.module_state` 事件从"仅 start 发布"改为 **init/stop/panic 全迁移发布**（D-14 前端状态流此前在两区间失真）。优先级：`priority_of(id)` 集中表落 host-core（10×3/12/13×2/14/15×2/16/20×3/25 与散落字面量实测一致，非审查记载"全 10"），14 模块 `info()` 改表推导；kvm 具名魔数常量删除。附带修复：sync-core 4 处测试临时库路径以 `process::id()` 去重，Windows PID 复用导致跨运行残留数据（engine/oplog 5 测试随机失败），改 `uuid::now_v7` 与 `tests/loopback.rs` 既有做法对齐。
+- **完成证据（2026-09-18）**：`cargo fmt --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` 45 套件全绿（EXIT=0）。回归测试 8 枚：`util` 4（now_ms epoch 合理性与单调、hex 已知向量、b64 双字母表往返与垃圾输入、app_err 保码）；`module.rs` `state_cell_roundtrip_and_unknown_failsafe`（未知魔数 9 必归 Error）、`priority_table_covers_all_shipped_modules`（14 模块逐名登记 + 默认值 + 仲裁序断言）；`registry.rs` `registry_and_module_share_single_state_source`（panic 后注册表视图==模块视图==Error，旧双源实现下必失败）、`module_state_events_cover_init_and_stop`（init→Stopped、start→Running、stop→Stopped 三事件齐发，旧实现只发 start）。
 
 ### D-17 前端工程门禁（ESLint + Vitest + CI）
 
