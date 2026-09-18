@@ -158,8 +158,12 @@ pub struct AutomationModule {
     taskschd: RwLock<Option<Arc<dyn TaskSchdPort>>>,
     /// A6：插件库（IPC 层入口）
     plugins: RwLock<Option<Arc<PluginStore>>>,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
+    cancel: RwLock<Arc<std::sync::atomic::AtomicBool>>,
     thread: RwLock<Option<std::thread::JoinHandle<()>>>,
+    /// S4：本轮 dispatcher 任务的协作停机信道（stop 时 send(true)，任务在 recv select 中退出）
+    shutdown: RwLock<Option<tokio::sync::watch::Sender<bool>>>,
+    /// S4：当前存活的 dispatcher 任务数（回归重启不累积）
+    active_dispatchers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AutomationModule {
@@ -173,8 +177,10 @@ impl AutomationModule {
             handler: RwLock::new(None),
             taskschd: RwLock::new(None),
             plugins: RwLock::new(None),
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel: RwLock::new(Arc::new(std::sync::atomic::AtomicBool::new(false))),
             thread: RwLock::new(None),
+            shutdown: RwLock::new(None),
+            active_dispatchers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -189,6 +195,11 @@ impl AutomationModule {
 
     pub fn plugin_store(&self) -> Option<Arc<PluginStore>> {
         self.plugins.read().ok().and_then(|g| g.clone())
+    }
+
+    /// S4 回归观测：当前存活的 dispatcher 订阅任务数
+    pub fn active_dispatchers(&self) -> usize {
+        self.active_dispatchers.load(Ordering::SeqCst)
     }
 
     /// 保存规则（新增/覆盖）；校验 + 持久化 + 计划任务同步（A4）
@@ -307,42 +318,61 @@ impl AutomationModule {
         let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) else { return };
         let Some(engine) = self.engine() else { return };
         let rules = self.rules.clone();
+        // S4：本轮协作文档/停机信道重建；调度线程持"本次运行"取消令牌——
+        // 旧线程保留已被 stop 置真的旧令牌，重启窗口内不会误复活
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        *self.shutdown.write().expect("停机信道锁污染") = Some(shutdown_tx);
+        let sched_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *self.cancel.write().expect("取消令牌锁污染") = sched_token.clone();
         // 事件订阅任务（tokio——bootstrap 在 runtime 内 start）
         for (topic, _) in TOPIC_REGISTRY {
             let Ok(mut rx) = bus.subscribe(topic) else { continue };
             let engine = engine.clone();
             let rules = rules.clone();
             let topic_static: &'static str = topic;
+            let mut shutdown_rx = shutdown_rx.clone();
+            let active = self.active_dispatchers.clone();
             tokio::spawn(async move {
+                // RAII 计数：任务无论 break 还是被 drop，退出即减一（回归观测不累积）
+                let _guard = DispatcherGuard::new(active);
                 loop {
-                    match rx.recv().await {
-                        Ok(event) => {
-                            // 防自环：automation 自产事件不再触发规则（风暴防护）
-                            if event.source == "automation" {
-                                continue;
-                            }
-                            let payload = event.payload.clone();
-                            // 规则快照读取（触发时点的启用规则）
-                            let matched: Vec<Rule> = rules
-                                .read()
-                                .expect("规则锁污染")
-                                .iter()
-                                .filter(|r| r.enabled && r.matches_event(topic_static) && r.when_passes(&payload))
-                                .cloned()
-                                .collect();
-                            for r in matched {
-                                engine.fire(&r, &payload, event.ts);
+                    tokio::select! {
+                        biased;
+                        // 协作停机（S4）：stop() send(true) 或信道关闭 → 退出
+                        ch = shutdown_rx.changed() => {
+                            if ch.is_err() || *shutdown_rx.borrow_and_update() {
+                                break;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(_) => break,
+                        received = rx.recv() => match received {
+                            Ok(event) => {
+                                // 防自环：automation 自产事件不再触发规则（风暴防护）
+                                if event.source == "automation" {
+                                    continue;
+                                }
+                                let payload = event.payload.clone();
+                                // 规则快照读取（触发时点的启用规则）
+                                let matched: Vec<Rule> = rules
+                                    .read()
+                                    .expect("规则锁污染")
+                                    .iter()
+                                    .filter(|r| r.enabled && r.matches_event(topic_static) && r.when_passes(&payload))
+                                    .cloned()
+                                    .collect();
+                                for r in matched {
+                                    engine.fire(&r, &payload, event.ts);
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(_) => break,
+                        },
                     }
                 }
             });
         }
 
         // Schedule 触发（30s 轮询每日 HH:MM；当日触发后防重）
-        let cancel = self.cancel.clone();
+        let cancel = sched_token;
         let handle = std::thread::Builder::new()
             .name("nf-auto-sched".into())
             .spawn(move || {
@@ -415,6 +445,23 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// dispatcher 任务存活的 RAII 计数守卫（S4）：构造 +1、Drop −1，
+/// 无论任务因停机信道 break 退出还是被 runtime drop，计数都收敛。
+struct DispatcherGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl DispatcherGuard {
+    fn new(counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for DispatcherGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Module for AutomationModule {
     fn info(&self) -> ModuleInfo {
         ModuleInfo {
@@ -460,7 +507,14 @@ impl Module for AutomationModule {
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
-        self.cancel.store(true, Ordering::SeqCst);
+        // S4：置"本次运行"的调度取消令牌 + 通知 dispatcher 任务协作退出。
+        // 令牌为每轮 start 新建的 Arc，旧线程持旧令牌不受下一轮复位影响（重启无复活/无叠加）。
+        if let Ok(g) = self.cancel.read() {
+            g.store(true, Ordering::SeqCst);
+        }
+        if let Some(tx) = self.shutdown.write().expect("停机信道锁污染").take() {
+            let _ = tx.send(true);
+        }
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -492,3 +546,40 @@ impl Module for AutomationModule {
 }
 
 use std::time::Duration;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S4 回归：stop() 后全部订阅任务协作退出（旧实现 Err(_) => break 永不触发，
+    /// 每轮 restart 泄漏 TOPIC_REGISTRY.len() 个任务）；连续 3 轮重启计数不累积。
+    #[tokio::test]
+    async fn dispatcher_tasks_shutdown_and_do_not_accumulate() {
+        let dir = std::env::temp_dir().join(format!("nf-auto-s4-{}", std::process::id()));
+        let m = AutomationModule::new(&dir);
+        let bus = Arc::new(EventBus::new());
+        let handler = Arc::new(HostActionHandler::new(bus.clone()));
+        *m.engine.write().unwrap() = Some(Arc::new(RuleEngine::new(handler)));
+        *m.bus.write().unwrap() = Some(bus.clone());
+
+        let total = TOPIC_REGISTRY.len();
+        assert!(total > 0);
+
+        for cycle in 0..3 {
+            m.start_dispatcher();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while m.active_dispatchers() < total && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(m.active_dispatchers(), total, "第 {cycle} 轮：全部订阅任务应上线");
+
+            m.stop().unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while m.active_dispatchers() > 0 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(m.active_dispatchers(), 0, "第 {cycle} 轮：stop() 后订阅任务应全部退出");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

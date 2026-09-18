@@ -1,7 +1,7 @@
 //! ClipboardModule：Module trait 实现 + start 时挂接捕获管线（docs/impl/02 C3/C7）
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::{AppError, ModuleError};
@@ -10,7 +10,7 @@ use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
 use host_core::ports::{ClipboardPort, CryptoPort};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::pipeline::CapturePipeline;
+use crate::pipeline::{CapturePipeline, PipelineHandle};
 use crate::store::ClipStore;
 use crate::types::{ClipboardConfig, SearchQuery};
 
@@ -25,6 +25,8 @@ pub struct ClipboardModule {
     config: Arc<AsyncMutex<ClipboardConfig>>,
     /// C9 清理线程取消标志
     cleanup_cancel: RwLock<Option<Arc<AtomicU8>>>,
+    /// S3：捕获管线运行句柄（start 建立、stop 拆除；None 表示未运行）
+    pipeline: RwLock<Option<PipelineHandle>>,
     state: AtomicU8,
 }
 
@@ -39,6 +41,7 @@ impl ClipboardModule {
             bus: RwLock::new(None),
             config: Arc::new(AsyncMutex::new(ClipboardConfig::default())),
             cleanup_cancel: RwLock::new(None),
+            pipeline: RwLock::new(None),
             state: AtomicU8::new(0),
         }
     }
@@ -111,17 +114,6 @@ impl Module for ClipboardModule {
             .get::<dyn CryptoPort>()
             .ok_or_else(|| err("CLIPBOARD_INIT_002", "CryptoPort 未注册（信封加密缺失）"))?;
 
-        // 捕获管线启动（worker 常驻；panic 由注册表隔离层捕获）
-        CapturePipeline::start(
-            port.clone(),
-            store.clone(),
-            ctx.event_bus.clone(),
-            crypto.clone(),
-            self.config.clone(),
-            self.write_back.clone(),
-        )
-        .map_err(|e| ModuleError::Start(e.to_string()))?;
-
         *self.db_dir.write().map_err(|_| ModuleError::Init("锁污染".into()))? =
             Some(ctx.app_data_dir.clone());
         *self.store.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(store);
@@ -134,13 +126,61 @@ impl Module for ClipboardModule {
     }
 
     fn start(&self) -> Result<(), ModuleError> {
-        // 管线已在 init 挂接；start 标记运行态 + 启动 C9 清理线程
+        // S3：捕获管线在 start 挂接（与 stop 对称），而非 init——否则 restart（stop→init→start）
+        // 每轮都新增一个不退出的 worker 线程 + 一份 DB 连接
+        let already = self
+            .pipeline
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|_| ()));
+        if already.is_none() {
+            let port = self
+                .port()
+                .ok_or_else(|| ModuleError::Start("ClipboardPort 未就绪".into()))?;
+            let store = self
+                .store()
+                .ok_or_else(|| ModuleError::Start("store 未就绪".into()))?;
+            let crypto = self
+                .crypto
+                .read()
+                .ok()
+                .and_then(|g| g.clone())
+                .ok_or_else(|| ModuleError::Start("CryptoPort 未就绪".into()))?;
+            let bus = self
+                .bus
+                .read()
+                .ok()
+                .and_then(|g| g.clone())
+                .ok_or_else(|| ModuleError::Start("event bus 未就绪".into()))?;
+            let handle = CapturePipeline::start(
+                port,
+                store,
+                bus,
+                crypto,
+                self.config.clone(),
+                self.write_back.clone(),
+            )
+            .map_err(|e| ModuleError::Start(e.to_string()))?;
+            *self.pipeline.write().map_err(|_| ModuleError::Start("锁污染".into()))? =
+                Some(handle);
+        }
+        // 启动 C9 清理线程
         self.start_cleanup();
         self.state.store(2, Ordering::SeqCst);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
+        // S3：真正停机——先摘系统监听（结束消息循环线程并释放回调 Sender），
+        // 再 shutdown 管线 worker（退出线程并释放 Arc<ClipStore>）
+        if let Some(port) = self.port() {
+            let _ = port.stop_listener();
+        }
+        if let Ok(mut g) = self.pipeline.write() {
+            if let Some(handle) = g.take() {
+                handle.shutdown();
+            }
+        }
         // 停止清理线程（置取消标志；线程 sleep 期间会滞后响应，可接受）
         if let Ok(cancel) = self.cleanup_cancel.read() {
             if let Some(flag) = cancel.as_ref() {

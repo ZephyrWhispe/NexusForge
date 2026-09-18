@@ -4,7 +4,7 @@
 //! 过滤(黑名单) → secret 检测 → 分类 → 加密/入库 → 发事件。
 //! 回写窗口（500ms）内到达的读取事件直接丢弃（防剪贴板循环）。
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,6 +23,40 @@ use crate::types::ClipboardConfig;
 /// 回写防循环窗口（docs/impl/02 C3 ③）
 pub const WRITE_BACK_WINDOW: Duration = Duration::from_millis(500);
 
+/// worker 停机检查节拍：无事件时每 100ms 复查取消标志
+const WORKER_TICK: Duration = Duration::from_millis(100);
+
+/// 管线运行句柄（S3）：`shutdown` 置取消位使 worker 线程退出并释放 store，
+/// `live_workers` 供停机/重启回归测试观测存活 worker 数不随重启累积。
+pub struct PipelineHandle {
+    cancel: Arc<AtomicBool>,
+    live_workers: Arc<AtomicUsize>,
+}
+
+impl PipelineHandle {
+    /// 请求停机：worker 在一个 tick 内退出并释放其持有的 Arc<ClipStore>
+    pub fn shutdown(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// 当前存活 worker 线程数
+    pub fn live_workers(&self) -> usize {
+        self.live_workers.load(Ordering::SeqCst)
+    }
+
+    /// 等待 worker 全部退出（用于停机回归断言）；超时返回 false。
+    pub fn wait_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while self.live_workers() > 0 {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+}
+
 pub struct CapturePipeline {
     store: Arc<ClipStore>,
     bus: Arc<EventBus>,
@@ -35,6 +69,8 @@ pub struct CapturePipeline {
 impl CapturePipeline {
     /// 启动管线。`write_back` 标志由调用方（模块）创建并持有——
     /// 模块在回写剪贴板前置位，管线回调据此丢弃自回写事件（防循环）。
+    /// 返回运行句柄（S3）：stop 时 shutdown 使 worker 线程退出并释放 store，
+    /// 修复旧实现每次重启泄漏一个常驻线程 + 一份 DB 连接。
     pub fn start(
         port: Arc<dyn ClipboardPort>,
         store: Arc<ClipStore>,
@@ -42,7 +78,7 @@ impl CapturePipeline {
         crypto: Arc<dyn CryptoPort>,
         config: Arc<AsyncMutex<ClipboardConfig>>,
         write_back: Arc<std::sync::Mutex<Option<Instant>>>,
-    ) -> Result<(), AppError> {
+    ) -> Result<PipelineHandle, AppError> {
         let (tx, rx) = mpsc::channel::<(host_core::ports::ClipContent, Option<String>)>();
         let pipeline = Arc::new(Self {
             store,
@@ -52,11 +88,18 @@ impl CapturePipeline {
             write_back_at: write_back,
             insert_counter: std::sync::atomic::AtomicU32::new(0),
         });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(AtomicUsize::new(0));
 
         // Port 回调：只入队（消息循环线程禁长阻塞）
         let tx_cb = tx.clone();
         let wb = pipeline.write_back_at.clone();
+        let cancel_cb = cancel.clone();
         port.start_listener(Box::new(move |content, source_app| {
+            // 停机后到达的事件直接丢弃（端口收尾会释放回调，此为在途兜底）
+            if cancel_cb.load(Ordering::SeqCst) {
+                return;
+            }
             // 回写窗口内的事件丢弃（自回写会再次触发 WM_CLIPBOARDUPDATE）
             let in_window = wb
                 .lock()
@@ -70,12 +113,23 @@ impl CapturePipeline {
             let _ = tx_cb.send((content, source_app));
         }) as Box<dyn Fn(host_core::ports::ClipContent, Option<String>) + Send + Sync>)?;
 
-        // worker：批量落库
+        // worker：批量落库；cancel 置位后一个 WORKER_TICK 内退出，释放持有的 Arc<ClipStore>
         std::thread::Builder::new()
             .name("clipboard-pipeline".into())
-            .spawn(move || pipeline.run_worker(rx))
+            .spawn({
+                let pipeline = pipeline.clone();
+                let cancel = cancel.clone();
+                let live = live.clone();
+                move || {
+                    live.fetch_add(1, Ordering::SeqCst);
+                    pipeline.run_worker(rx, &cancel);
+                    live.fetch_sub(1, Ordering::SeqCst);
+                }
+            })
             .map_err(|e| AppError::module("CLIPBOARD_PIPELINE_001", e.to_string(), None))?;
-        Ok(())
+        // 启动期临时引用就地释放；worker 那份随线程结束 drop → store 连接随之回收
+        drop(pipeline);
+        Ok(PipelineHandle { cancel, live_workers: live })
     }
 
     /// write 前调用：记录回写窗口起点
@@ -85,17 +139,33 @@ impl CapturePipeline {
         }
     }
 
-    fn run_worker(self: Arc<Self>, rx: mpsc::Receiver<(host_core::ports::ClipContent, Option<String>)>) {
+    fn run_worker(
+        self: Arc<Self>,
+        rx: mpsc::Receiver<(host_core::ports::ClipContent, Option<String>)>,
+        cancel: &AtomicBool,
+    ) {
         loop {
-            // 阻塞取首条（跨批次 50ms 窗口合并，docs/impl/02 C3 ⑦）
-            let Ok(first) = rx.recv() else { return };
+            // 取首条改为 tick 轮询以协作响应取消（跨批次 50ms 窗口合并，docs/impl/02 C3 ⑦）
+            let first = loop {
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                match rx.recv_timeout(WORKER_TICK) {
+                    Ok(item) => break item,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            };
             let mut batch = vec![first];
             let deadline = Instant::now() + Duration::from_millis(50);
             while batch.len() < 20 && Instant::now() < deadline {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
                 match rx.recv_timeout(deadline - Instant::now()) {
                     Ok(item) => batch.push(item),
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
             for (content, source_app) in batch {
@@ -224,4 +294,127 @@ fn futures_now(cfg: &AsyncMutex<ClipboardConfig>) -> ClipboardConfig {
     cfg.try_lock()
         .map(|g| g.clone())
         .unwrap_or_else(|_| ClipboardConfig::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use host_core::ports::ClipContent;
+
+    /// 替身端口：start_listener 仅捕获回调（stop_listener 沿用默认 no-op，
+    /// 因此回调及其持有的 Sender 全程存活——正是旧实现 worker 永不退出的根因场景）
+    struct FakeClipboard {
+        cb: Arc<Mutex<Option<Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>>>>,
+    }
+    impl ClipboardPort for FakeClipboard {
+        fn start_listener(
+            &self,
+            cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>,
+        ) -> Result<(), AppError> {
+            *self.cb.lock().unwrap() = Some(cb);
+            Ok(())
+        }
+        fn write(&self, _content: &ClipContent) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    struct FakeCrypto;
+    impl CryptoPort for FakeCrypto {
+        fn protect(&self, p: &[u8]) -> Result<Vec<u8>, AppError> {
+            Ok(p.to_vec())
+        }
+        fn unprotect(&self, c: &[u8]) -> Result<Vec<u8>, AppError> {
+            Ok(c.to_vec())
+        }
+    }
+
+    fn temp_store(tag: &str) -> Arc<ClipStore> {
+        let dir = std::env::temp_dir().join(format!("nf_clip_pipe_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Arc::new(ClipStore::open(&dir.join("clipboard.db"), dir.join("blobs")).unwrap())
+    }
+
+    fn wait_until(mut pred: impl FnMut() -> bool, dur: Duration) -> bool {
+        let deadline = Instant::now() + dur;
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pred()
+    }
+
+    fn start_with_fake(tag: &str) -> (PipelineHandle, Arc<ClipStore>, Arc<FakeClipboard>) {
+        let store = temp_store(tag);
+        let bus = Arc::new(EventBus::new());
+        let port = Arc::new(FakeClipboard { cb: Arc::new(Mutex::new(None)) });
+        let crypto = Arc::new(FakeCrypto);
+        let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
+        let write_back = Arc::new(Mutex::new(None));
+        let handle = CapturePipeline::start(
+            port.clone(),
+            store.clone(),
+            bus,
+            crypto,
+            config,
+            write_back,
+        )
+        .unwrap();
+        (handle, store, port)
+    }
+
+    fn fire(port: &FakeClipboard, text: &str) {
+        let cb = port.cb.lock().unwrap();
+        let Some(f) = cb.as_ref() else { return };
+        f(
+            ClipContent::Text { text: text.into(), html: None },
+            Some("tester".into()),
+        );
+    }
+
+    #[test]
+    fn worker_processes_then_shuts_down_despite_live_sender() {
+        // 关键：FakeClipboard 的 stop_listener 是 no-op，回调（含 Sender）始终存活，
+        // 通道永不 Disconnected —— worker 仍须凭 cancel 标志在 shutdown 后退出（旧实现会泄漏）。
+        let (handle, store, port) = start_with_fake("proc");
+        fire(&port, "hello-s3-pipeline");
+        assert!(
+            wait_until(
+                || store.search(&crate::types::SearchQuery::default()).unwrap().items.len() == 1,
+                Duration::from_secs(2)
+            ),
+            "worker 应在运行期间处理入队事件"
+        );
+        assert_eq!(handle.live_workers(), 1, "运行期间应恰有 1 个 worker");
+        handle.shutdown();
+        assert!(
+            handle.wait_idle(Duration::from_secs(3)),
+            "shutdown 后 worker 必须退出（即使端口回调 Sender 仍存活）"
+        );
+        assert_eq!(handle.live_workers(), 0);
+    }
+
+    #[test]
+    fn restart_does_not_accumulate_workers() {
+        // 回归 S3：模拟 registry.restart（stop→init→start）多轮，存活 worker 数不得累积。
+        let mut handles = Vec::new();
+        for round in 0..5 {
+            let (handle, _store, _port) = start_with_fake(&format!("restart{round}"));
+            // 未 shutdown 前，允许存在 1 个 worker
+            handles.push(handle);
+        }
+        // 全部停机后应无残留
+        for h in &handles {
+            h.shutdown();
+        }
+        for h in &handles {
+            assert!(h.wait_idle(Duration::from_secs(3)), "存在未退出的 worker 线程");
+        }
+        let total: usize = handles.iter().map(|h| h.live_workers()).sum();
+        assert_eq!(total, 0, "5 轮启停后存活 worker 总数应为 0，实际 {total}");
+    }
 }

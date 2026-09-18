@@ -13,8 +13,8 @@
 | D-01 | 门禁先行：CI 与工具链先于功能补齐 | 流程 | P0 | 2 | 待实施 |
 | D-02 | 消除模块间直接依赖（O1 红线） | 补实现 | P0 | 1 | 待实施 |
 | D-03 | 事件总线统一背压 API（O8） | 补实现 | P1 | 2 | 待实施 |
-| D-04 | 剪贴板敏感数据改用 AES-256-GCM 信封加密 | 补实现 | P0 | 1 | 待实施 |
-| D-05 | 剪贴板 blob 生命周期治理（随删随清 + 覆写 + GC） | 补实现 | P0 | 1 | 待实施 |
+| D-04 | 剪贴板敏感数据改用 AES-256-GCM 信封加密 | 补实现 | P0 | 1 | 已完成 |
+| D-05 | 剪贴板 blob 生命周期治理（随删随清 + 覆写 + GC） | 补实现 | P0 | 1 | 已完成 |
 | D-06 | blob 路径采用扁平结构 | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-07 | 截图捕获 v1 以 GDI/PrintWindow 为主路径 | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-08 | 录屏（P7）移出 v1，列入 v1.1 | 改规范 | P1 | 3 | 已裁决（文档生效） |
@@ -115,6 +115,7 @@
 - **理由**：§8.5 是数据安全红线，DPAPI 绑定当前用户/机器、不可审计且无法与端到端同步（sync）设计共存；AES-GCM 为 DESIGN 明确指定的标准原语，实现成本低（vault-core 已有可复用代码模式）。
 - **拒绝的备选**：仅修改 DESIGN 承认 DPAPI——会同时削弱 §8.5 与 sync 的 E2E 前提，且"只用标准加密原语"是 GPL 合规与安全审计的对外承诺。
 - **验收**：单测覆盖 加密→解密往返、错误密钥失败、密文篡改失败、锁定后密钥清零；前端文案同步改为 AES-256-GCM。
+- **完成证据（2026-09-18，提交 `ee24f90`）**：信封格式 `MAGIC|u16le wrapped_len|wrapped_dek|nonce|ct+tag`，DEK 随机 32B（AAD 绑定 NFX1 魔数）、DPAPI 降级为 KEK 仅包 DEK、DEK 全程 `Zeroizing`；负例覆盖 错误 KEK / 篡改密文 / 篡改 wrapped DEK / 截断与谎报长度信封 / AAD 不匹配，另有真机 DPAPI 往返；`cargo test -p clipboard-core` 全绿；`EnvelopeCrypto::with_dpapi()` 已替换 CryptoPort 注册；ports.rs/store/commands/MainWorkbench 文案同步。
 
 ### D-05 剪贴板 blob 生命周期治理（安全红线）
 
@@ -124,6 +125,7 @@
   2. 启动期执行孤儿 blob 扫描：主表中不存在的 blob 文件清理并记日志。
   3. 保留期淘汰（30 天）与上限淘汰（max_entries）路径复用同一套"删记录 + 删 blob"实现，杜绝第二处遗漏。
 - **验收**：单测断言"删除后 blob 文件不存在""清空后 blobs 目录为空""人为放置孤儿 blob → 启动后消失"；`rm` 类操作不得存在未使用返回值（消除 `??` 丢弃）。
+- **完成证据（2026-09-18，提交 `7741f99`）**：`delete/clear/purge` 收敛到单一 `remove_blob` 出口（clear/purge 覆写后 unlink，保留 pinned）；启动期 `gc_orphan_blobs` 扫描主表外文件；回归测试覆盖 删除即删 blob、清空保留置顶 blob、孤儿 GC、purge max_entries 删 blob 四场景；`cargo test -p clipboard-core` 17/17。
 
 ### D-10 OCR「复制全部」走剪贴板回写窗口
 

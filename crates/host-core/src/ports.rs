@@ -145,6 +145,11 @@ pub trait ClipboardPort: Port {
     /// 启动监听；变更时回调 (内容, 来源应用进程名)。回调在专用 OS 消息循环线程触发。
     fn start_listener(&self, cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>)
         -> Result<(), AppError>;
+    /// 卸载监听（S3）：移除系统格式监听、结束消息循环线程、释放回调（进而释放其持有的 Sender）。
+    /// 无活动监听时应为无害 no-op。默认空实现，允许无监听能力的测试替身沿用。
+    fn stop_listener(&self) -> Result<(), AppError> {
+        Ok(())
+    }
     /// 写回系统剪贴板；调用方须先标记回写窗口（docs/impl/02 C3 ③ 防循环）
     fn write(&self, content: &ClipContent) -> Result<(), AppError>;
 }

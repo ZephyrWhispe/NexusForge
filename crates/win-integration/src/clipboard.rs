@@ -9,7 +9,8 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HGLOBAL, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
-    GetClipboardOwner, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    GetClipboardOwner, OpenClipboard, RegisterClipboardFormatW, RemoveClipboardFormatListener,
+    SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
@@ -20,10 +21,10 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Shell::DragQueryFileW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
-    GetWindowLongPtrW, GetWindowThreadProcessId, RegisterClassW, SetWindowLongPtrW,
-    TranslateMessage, GWLP_USERDATA, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLIPBOARDUPDATE, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    GetWindowLongPtrW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage, RegisterClassW,
+    SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, HWND_MESSAGE, WM_APP, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
 use host_core::error::AppError;
@@ -44,12 +45,37 @@ unsafe fn cb_of(hwnd: HWND) -> Option<Cb> {
     Some((&*(raw as *const Cb)).clone())
 }
 
+/// 自定义停止消息：外部经 PostMessageW 投递，wndproc 收到后结束消息循环（S3 卸载监听）
+const WM_STOP_LISTENER: u32 = WM_APP + 7;
+
+/// 窗口类进程内注册一次（重启时复用同一类，避免 RegisterClassW 返回 0 误判失败）
+static CLASS_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// 消息循环退出时回收 GWLP_USERDATA 里的回调盒：清空内部 Box<dyn Fn>，
+/// 从而释放其捕获的管线 Sender（使 worker 通道收到 Disconnected，双保险）。
+unsafe fn release_cb(hwnd: HWND) {
+    let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if raw == 0 {
+        return;
+    }
+    let cb: Cb = *Box::from_raw(raw as *mut Cb);
+    if let Ok(mut g) = cb.lock() {
+        *g = None;
+    }
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+}
+
 unsafe extern "system" fn wndproc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_STOP_LISTENER {
+        // 结束本线程消息循环：GetMessageW 返回 0 → 循环退出 → 线程收尾清理
+        PostQuitMessage(0);
+        return LRESULT(0);
+    }
     if msg == WM_CLIPBOARDUPDATE {
         if let Some(cb) = cb_of(hwnd) {
             let content = read_clipboard_content();
@@ -180,11 +206,15 @@ unsafe fn read_source_app() -> Option<String> {
         .map(|s| s.to_string_lossy().to_string())
 }
 
-pub struct WindowsClipboard;
+/// 活动监听窗口句柄（消息循环线程创建后登记，stop_listener 取出并发停止消息）。
+/// 存 HWND.0 的地址（usize）：HWND 包装裸指针、非 Send，不能进跨线程 Arc<Mutex<..>>。
+pub struct WindowsClipboard {
+    listener: Arc<Mutex<Option<usize>>>,
+}
 
 impl WindowsClipboard {
     pub fn new() -> Self {
-        Self
+        Self { listener: Arc::new(Mutex::new(None)) }
     }
 }
 
@@ -206,21 +236,27 @@ impl ClipboardPort for WindowsClipboard {
         let err = |m: &str| {
             AppError::module("CLIPBOARD_LISTENER_001", format!("剪贴板监听启动失败: {m}"), None)
         };
+        // 握手：消息循环线程建窗 + 注册监听成功后才返回，确保 self.listener 就绪、
+        // 后续 stop_listener 随时可拆（S3 生命周期对称）
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), ()>>();
+        let shared = self.listener.clone();
         // 专用 OS 线程：消息循环不能跑在 tokio worker 上
         std::thread::Builder::new()
             .name("clipboard-listener".into())
             .spawn(move || unsafe {
+                CLASS_ONCE.call_once(|| {
+                    let cname: Vec<u16> = "NexusForgeClipWnd\0".encode_utf16().collect();
+                    let wc = WNDCLASSW {
+                        lpfnWndProc: Some(wndproc),
+                        lpszClassName: PCWSTR(cname.as_ptr()),
+                        hInstance: GetModuleHandleW(None).unwrap_or_default().into(),
+                        ..Default::default()
+                    };
+                    RegisterClassW(&wc);
+                });
                 let name: Vec<u16> = "NexusForgeClipWnd\0".encode_utf16().collect();
                 let class_name = PCWSTR(name.as_ptr());
-                let wc = WNDCLASSW {
-                    lpfnWndProc: Some(wndproc),
-                    lpszClassName: class_name,
-                    hInstance: GetModuleHandleW(None).unwrap_or_default().into(),
-                    ..Default::default()
-                };
-                if RegisterClassW(&wc) == 0 {
-                    return;
-                }
+                let hinst = GetModuleHandleW(None).unwrap_or_default();
                 let hwnd = CreateWindowExW(
                     WINDOW_EX_STYLE::default(),
                     class_name,
@@ -232,24 +268,60 @@ impl ClipboardPort for WindowsClipboard {
                     0,
                     HWND_MESSAGE,
                     None,
-                    wc.hInstance,
+                    hinst,
                     None,
                 )
                 .unwrap_or_default();
                 if hwnd.is_invalid() {
+                    let _ = ready_tx.send(Err(()));
                     return;
                 }
                 set_cb(hwnd, cb);
                 if AddClipboardFormatListener(hwnd).is_err() {
+                    release_cb(hwnd);
+                    let _ = DestroyWindow(hwnd);
+                    let _ = ready_tx.send(Err(()));
                     return;
                 }
+                if let Ok(mut g) = shared.lock() {
+                    *g = Some(hwnd.0 as usize);
+                }
+                let _ = ready_tx.send(Ok(()));
                 let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
                 while GetMessageW(&mut msg, hwnd, 0, 0).as_bool() {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
+                // 收尾（S3）：注销监听、清句柄登记、回收回调（释放管线 Sender）、销毁窗口
+                let _ = RemoveClipboardFormatListener(hwnd);
+                if let Ok(mut g) = shared.lock() {
+                    if *g == Some(hwnd.0 as usize) {
+                        *g = None;
+                    }
+                }
+                release_cb(hwnd);
+                let _ = DestroyWindow(hwnd);
             })
             .map_err(|e| err(&e.to_string()))?;
+        ready_rx
+            .recv()
+            .map_err(|_| err("监听线程提前退出"))?
+            .map_err(|_| err("消息窗口创建失败"))?;
+        Ok(())
+    }
+
+    fn stop_listener(&self) -> Result<(), AppError> {
+        let raw = self
+            .listener
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        if let Some(raw) = raw {
+            unsafe {
+                // 异步投递：目标线程 wndproc 收到后 PostQuitMessage，消息循环退出并自行收尾
+                let _ = PostMessageW(HWND(raw as *mut core::ffi::c_void), WM_STOP_LISTENER, WPARAM(0), LPARAM(0));
+            }
+        }
         Ok(())
     }
 
