@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { tokens } from "@fluentui/react-components";
 import { clipboardGetImage } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 import { IN_TAURI } from "../../ipc/env";
 import { dibToDataUrl } from "./dib";
 
@@ -27,7 +28,9 @@ export default function DibThumb({
         const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
         if (alive) setSrc(dibToDataUrl(bin));
       })
-      .catch(() => {});
+      .catch((e) =>
+        reportError(e, { context: "图片缩略图解码失败", dedupeKey: "dib-thumb", toast: false }),
+      );
     return () => {
       alive = false;
     };

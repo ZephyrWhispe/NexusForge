@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { makeStyles, tokens, Text } from "@fluentui/react-components";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clipboardSearch, clipboardPaste, type ClipEntry } from "../ipc/client";
+import { reportError } from "../stores/notifications";
 import DibThumb from "../modules/clipboard/DibThumb";
 
 /**
@@ -74,9 +75,17 @@ export default function QuickPanel() {
   useEffect(() => {
     clipboardSearch({ size: 9 })
       .then((p) => setItems(p.items))
-      .catch(() => setItems([]));
+      .catch((e) => {
+        setItems([]);
+        reportError(e, { context: "快速面板加载剪贴板失败", dedupeKey: "quickpanel-open" });
+      });
     const t = window.setInterval(
-      () => clipboardSearch({ size: 9 }).then((p) => setItems(p.items)).catch(() => {}),
+      () =>
+        clipboardSearch({ size: 9 })
+          .then((p) => setItems(p.items))
+          .catch((e) =>
+            reportError(e, { context: "快速面板轮询失败", dedupeKey: "quickpanel-poll", toast: false }),
+          ),
       1500,
     );
     return () => window.clearInterval(t);

@@ -28,6 +28,7 @@ import {
   type PkgSourceDto,
   type WinopsScanItemDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 系统管理面板（docs/impl/06 SY1–SY4，M12 v1）：
@@ -174,7 +175,9 @@ export default function SysPanel() {
         historyRef.current = h;
         setHistory(h);
       })
-      .catch(() => {});
+      .catch((e) =>
+        reportError(e, { context: "性能历史加载失败", dedupeKey: "sys-metrics-history", toast: false }),
+      );
     if (!("__TAURI_INTERNALS__" in window)) return;
     let unlisten: (() => void) | null = null;
     let cancelled = false;

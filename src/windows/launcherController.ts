@@ -1,5 +1,6 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { IN_TAURI } from "../ipc/env";
+import { reportError } from "../stores/notifications";
 
 /**
  * 快速启动器控制器（docs/impl/05 D1）：全局快捷键事件（desktop.launcher_toggled）
@@ -31,6 +32,6 @@ export async function toggleLauncher(): Promise<void> {
     shadow: true,
   });
   win.once("tauri://error", (e) => {
-    console.error("启动器窗口创建失败", e);
+    reportError(e, { context: "启动器窗口创建失败" });
   });
 }

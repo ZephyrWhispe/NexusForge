@@ -35,6 +35,7 @@ import {
   type SshAuthDto,
   type TermSessionDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 终端与运维面板（docs/impl/06 T1–T6，M11 v1）：
@@ -157,8 +158,8 @@ export default function TerminalPanel() {
     try {
       const list = await termSessions();
       setSessions(list);
-    } catch {
-      /* 模块未就绪静默 */
+    } catch (e) {
+      reportError(e, { context: "终端会话列表刷新失败", dedupeKey: "term-sessions", toast: false });
     }
   }, []);
 
@@ -192,7 +193,11 @@ export default function TerminalPanel() {
       // 输入 → 后端；会话方向键/控制序列全透传
       term.onData((data) => void termWrite(s.id, data));
       // 首次 resize 上报
-      term.onResize((size) => void termResize(s.id, size.cols, size.rows).catch(() => {}));
+      term.onResize((size) =>
+        void termResize(s.id, size.cols, size.rows).catch((e) =>
+          reportError(e, { context: "终端尺寸上报失败", dedupeKey: "term-resize", toast: false }),
+        ),
+      );
     }
     return entry;
   }, []);
@@ -218,7 +223,11 @@ export default function TerminalPanel() {
   // 初始 + 事件驱动
   useEffect(() => {
     void refreshSessions();
-    void termWslList().then(setWsl).catch(() => {});
+    void termWslList()
+      .then(setWsl)
+      .catch((e) =>
+        reportError(e, { context: "WSL 发行版列表加载失败", dedupeKey: "term-wsl-list", toast: false }),
+      );
     if (!("__TAURI_INTERNALS__" in window)) return;
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -231,7 +240,9 @@ export default function TerminalPanel() {
             if (entry && data) {
               entry.term.write(data);
               entry.received += data.length; // 近似字节数（UTF-16 差异可接受，ack 语义为吞吐反馈）
-              void termAck(session_id, entry.received).catch(() => {});
+              void termAck(session_id, entry.received).catch((e) =>
+                reportError(e, { context: "终端吞吐回执失败", dedupeKey: "term-ack", toast: false }),
+              );
             }
           } else if (e.payload?.topic === "term.exit") {
             const sid = e.payload.payload.session_id;

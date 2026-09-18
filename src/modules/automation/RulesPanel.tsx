@@ -26,6 +26,7 @@ import {
   type RuleDto,
   type TriggerDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 自动化面板（docs/impl/07 A1–A3，M14 v1）：
@@ -274,7 +275,10 @@ export default function RulesPanel() {
       const [rs, ds, ps] = await Promise.all([
         automationRulesList(),
         automationDeadLetters(),
-        automationPluginsList().catch(() => [] as PluginInfoDto[]),
+        automationPluginsList().catch((e) => {
+          reportError(e, { context: "插件列表加载失败（已降级为空）", dedupeKey: "plugins-list", toast: false });
+          return [] as PluginInfoDto[];
+        }),
       ]);
       setRules(rs);
       setDead(ds);

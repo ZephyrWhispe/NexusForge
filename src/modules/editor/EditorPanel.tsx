@@ -25,6 +25,7 @@ import {
   type EditorSessionInfoDto,
   type PdfInfoDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 import { languageForPath, monaco } from "../../monaco/setup";
 
 /**
@@ -130,7 +131,9 @@ export default function EditorPanel() {
       setSessions((prev) => prev.map((s) => (s.id === activeId ? { ...s, dirty: true } : s)));
       if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
       autosaveTimer.current = window.setTimeout(() => {
-        void editorAutosave(activeId, model?.getValue() ?? "").catch(() => undefined);
+        void editorAutosave(activeId, model?.getValue() ?? "").catch((e) =>
+          reportError(e, { context: "草稿自动保存失败", dedupeKey: "editor-autosave", toast: false }),
+        );
       }, 3000);
     });
     return () => {

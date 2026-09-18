@@ -30,6 +30,7 @@ import {
   type FileEntryDto,
   type OpProgressDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 文件与存储面板（docs/impl/05 F，M6 v1）：
@@ -144,10 +145,12 @@ export default function FilePanel() {
 
   // 初始定位到主目录；加载盘符下拉
   useEffect(() => {
-    void loadDir("C:\\").catch(() => undefined);
+    void loadDir("C:\\").catch((e) => reportError(e, { context: "文件面板初始加载异常", toast: false }));
     fileDrives()
       .then((ds) => setDrives(ds.map((d) => [d.letter, String(d.path)] as [string, string])))
-      .catch(() => undefined);
+      .catch((e) =>
+        reportError(e, { context: "盘符列表加载失败", dedupeKey: "file-drives", toast: false }),
+      );
   }, [loadDir]);
 
   const refreshOps = useCallback(async () => {
@@ -156,8 +159,8 @@ export default function FilePanel() {
       for (const p of list) opsRef.current.set(p.op_id, p);
       // 只保留近端（Done/Failed 保留至下一次刷新窗口）
       setOps(list.slice(-8));
-    } catch {
-      /* 模块未就绪时静默 */
+    } catch (e) {
+      reportError(e, { context: "文件操作进度刷新失败", dedupeKey: "file-ops-refresh", toast: false });
     }
   }, []);
 
@@ -186,7 +189,7 @@ export default function FilePanel() {
         }
         unlisten = u;
       })
-      .catch(() => undefined);
+      .catch((e) => reportError(e, { context: "文件面板事件监听注册失败", toast: false }));
     return () => {
       cancelled = true;
       unlisten?.();

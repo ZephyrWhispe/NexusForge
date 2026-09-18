@@ -32,6 +32,7 @@ import {
   type PeerInfoDto,
   type SessionDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 键鼠共享面板（docs/impl/05 K8，M4 v1）：
@@ -130,7 +131,7 @@ export default function KvmPanel() {
           setCodeTtl(ttl);
         }
       })
-      .catch(() => undefined);
+      .catch((e) => reportError(e, { context: "配对码签发失败", dedupeKey: "kvm-pair-code" }));
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     import("@tauri-apps/api/event")
@@ -169,7 +170,9 @@ export default function KvmPanel() {
             setPairCode(code);
             setCodeTtl(ttl);
           })
-          .catch(() => undefined);
+          .catch((e) =>
+            reportError(e, { context: "配对码续签失败", dedupeKey: "kvm-pair-code", toast: false }),
+          );
       },
       Math.max(1000, codeTtl),
     );

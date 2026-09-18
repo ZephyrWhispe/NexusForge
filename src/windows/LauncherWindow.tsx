@@ -7,6 +7,7 @@ import {
   parseAppError,
   type DesktopLauncherHitDto,
 } from "../ipc/client";
+import { reportError } from "../stores/notifications";
 
 /**
  * 快速启动器窗口（docs/impl/05 D1+D2）：独立置顶小窗，Alt+Q 全局呼出。
@@ -101,7 +102,7 @@ export default function LauncherWindow() {
       if (focused) focus();
     });
     return () => {
-      p.then((u) => u()).catch(() => undefined);
+      p.then((u) => u()).catch((e) => reportError(e, { context: "启动器焦点监听注销失败", toast: false }));
     };
   }, []);
 

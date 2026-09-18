@@ -10,6 +10,7 @@ import {
   type ClipEntry,
 } from "../../ipc/client";
 import { IN_TAURI } from "../../ipc/env";
+import { reportError } from "../../stores/notifications";
 import DibThumb from "./DibThumb";
 
 /**
@@ -145,7 +146,7 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
     if (!IN_TAURI) return;
     clipboardGroupCounts()
       .then((c) => onCounts(c as Record<string, number>))
-      .catch(() => {});
+      .catch((e) => reportError(e, { context: "分组计数刷新失败", dedupeKey: "clip-counts", toast: false }));
   }, [onCounts]);
 
   // 搜索/分组变化 → 重置首页
@@ -161,7 +162,10 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
     import("@tauri-apps/api/event").then(({ listen }) =>
       listen("nf:event", (e) => {
         const topic = (e.payload as { topic?: string }).topic;
-        if (topic === "clipboard.captured") load(0, false).catch(() => {});
+        if (topic === "clipboard.captured")
+          load(0, false).catch((e) =>
+            reportError(e, { context: "剪切板实时刷新失败", dedupeKey: "clip-event-refresh", toast: false }),
+          );
         if (
           topic === "clipboard.deleted" ||
           topic === "clipboard.cleared" ||

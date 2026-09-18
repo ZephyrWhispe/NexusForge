@@ -1,5 +1,6 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { IN_TAURI } from "../ipc/env";
+import { reportError } from "../stores/notifications";
 
 /**
  * 快速速记条控制器（docs/impl/05 D4）：全局快捷键事件（desktop.note_quick）
@@ -38,11 +39,11 @@ export async function toggleNoteBar(): Promise<void> {
         const x = mon.position.x + Math.floor((mon.size.width - 520) / 2);
         await win.setPosition(new PhysicalPosition(x, mon.position.y + 80));
       }
-    } catch {
-      /* 定位失败保持默认 */
+    } catch (e) {
+      reportError(e, { context: "速记条定位失败（保持默认位置）", dedupeKey: "notebar-pos", toast: false });
     }
   });
   win.once("tauri://error", (e) => {
-    console.error("速记条窗口创建失败", e);
+    reportError(e, { context: "速记条窗口创建失败" });
   });
 }

@@ -26,6 +26,7 @@ import SchemaForm from "../settings/SchemaForm";
 import { MODULES } from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
 import { toggleQuickPanel } from "./quickPanelController";
+import { reportError } from "../stores/notifications";
 
 /**
  * 主工作台（docs/DESIGN.md §3 像素级布局：40/44/1fr/28 四行 + 228/190 双列导航）。
@@ -118,7 +119,7 @@ export default function MainWorkbench() {
             if (topic === "desktop.launcher_toggled") void toggleLauncher();
             if (topic === "desktop.note_quick") void toggleNoteBar();
           } catch (err) {
-            import("../ipc/client").then((c) => c.hostLog("error", `nf:event 处理异常: ${String(err)}`));
+            reportError(err, { context: "nf:event 处理异常", dedupeKey: "main-event-handler", toast: false });
           }
         }),
       )
@@ -130,7 +131,7 @@ export default function MainWorkbench() {
         unlisten = u;
       })
       .catch((err) => {
-        import("../ipc/client").then((c) => c.hostLog("error", `nf:event 监听注册失败: ${String(err)}`));
+        reportError(err, { context: "nf:event 监听注册失败", toast: false });
       });
     return () => {
       cancelled = true;

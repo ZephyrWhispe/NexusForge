@@ -3,6 +3,7 @@ import { makeStyles, tokens } from "@fluentui/react-components";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
 import { screenshotPinGet, screenshotPinUpdate, screenshotPinClose, type PinDataDto } from "../ipc/client";
+import { reportError } from "../stores/notifications";
 
 /**
  * 贴图置顶窗口（docs/impl/03 P6）：
@@ -73,7 +74,7 @@ export default function PinWindow() {
   /** 关闭贴图：删记录 + 关窗（Esc/双击/右键共用） */
   const closePin = useCallback(() => {
     void screenshotPinClose(pinRef.current?.id ?? "")
-      .catch(() => undefined)
+      .catch((e) => reportError(e, { context: "贴图记录删除失败", toast: false }))
       .finally(() => getCurrentWindow().close());
   }, []);
 
@@ -116,7 +117,9 @@ export default function PinWindow() {
     } catch {
       // 窗口可能在关闭流程中
     }
-    void screenshotPinUpdate(p.id, next, p.opacity).catch(() => undefined);
+    void screenshotPinUpdate(p.id, next, p.opacity).catch((e) =>
+      reportError(e, { context: "贴图缩放持久化失败", dedupeKey: "pin-persist", toast: false }),
+    );
     flashHint();
   };
 
@@ -127,7 +130,9 @@ export default function PinWindow() {
     const updated = { ...p, opacity: next };
     pinRef.current = updated;
     setPin(updated);
-    void screenshotPinUpdate(p.id, p.zoom, next).catch(() => undefined);
+    void screenshotPinUpdate(p.id, p.zoom, next).catch((e) =>
+      reportError(e, { context: "贴图透明度持久化失败", dedupeKey: "pin-persist", toast: false }),
+    );
     flashHint();
   };
 

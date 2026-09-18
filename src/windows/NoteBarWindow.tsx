@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { makeStyles, tokens, Text } from "@fluentui/react-components";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { desktopNoteAdd } from "../ipc/client";
+import { reportError } from "../stores/notifications";
 
 /**
  * 快速速记条（docs/impl/05 D4）：Ctrl+Alt+N 全局呼出的顶部小条。
@@ -50,8 +51,9 @@ export default function NoteBarWindow() {
         setSaved(false);
         await getCurrentWindow().hide();
       }, 700);
-    } catch {
+    } catch (e) {
       // 保存失败保留输入（不打断）
+      reportError(e, { context: "速记保存失败，内容已保留", dedupeKey: "notebar-save" });
     }
   }, [text]);
 

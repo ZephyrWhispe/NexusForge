@@ -34,6 +34,7 @@ import {
   type ProxyStatusDto,
   type ProxySubDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 代理面板（docs/impl/05 PR6，M7 v1）：
@@ -122,8 +123,8 @@ export default function ProxyPanel() {
     try {
       const lines = await proxyLogs(200);
       if (mounted.current) setLogs(lines);
-    } catch {
-      /* 日志失败不打扰主流程 */
+    } catch (e) {
+      reportError(e, { context: "内核日志拉取失败", dedupeKey: "proxy-logs", toast: false });
     }
   }, []);
 
@@ -152,7 +153,7 @@ export default function ProxyPanel() {
         }
         unlisten = u;
       })
-      .catch(() => undefined);
+      .catch((e) => reportError(e, { context: "代理面板事件监听注册失败", toast: false }));
     return () => {
       cancelled = true;
       mounted.current = false;
@@ -303,7 +304,9 @@ export default function ProxyPanel() {
                 const sub = await proxySubAdd(subName, subUrl);
                 setSubName("");
                 setSubUrl("");
-                await proxySubUpdate(sub.id).catch(() => undefined);
+                await proxySubUpdate(sub.id).catch((e) =>
+                  reportError(e, { context: "订阅添加后节点更新失败" }),
+                );
                 await refresh();
               })
             }

@@ -38,6 +38,7 @@ import {
   type NoteLinkDto,
   type NoteMetaDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 笔记与知识面板（docs/impl/06 N1–N5，M10 v1）：
@@ -204,8 +205,8 @@ export default function NotesPanel() {
     try {
       const list = await notesList();
       setAll(list);
-    } catch {
-      /* 模块未就绪静默 */
+    } catch (e) {
+      reportError(e, { context: "笔记列表加载失败", dedupeKey: "notes-list", toast: false });
     } finally {
       setLoading(false);
     }
@@ -216,8 +217,8 @@ export default function NotesPanel() {
       const [q, a] = await Promise.all([notesReviewQueue(), notesCards()]);
       setQueue(q);
       setAllCards(a);
-    } catch {
-      /* 静默 */
+    } catch (e) {
+      reportError(e, { context: "复习队列加载失败", dedupeKey: "notes-review", toast: false });
     }
   }, []);
 
@@ -242,7 +243,11 @@ export default function NotesPanel() {
   useEffect(() => {
     void refreshList();
     void refreshReview();
-    void notesCanvasDirs().then(setDirs).catch(() => {});
+    void notesCanvasDirs()
+      .then(setDirs)
+      .catch((e) =>
+        reportError(e, { context: "画板目录加载失败", dedupeKey: "notes-canvas-dirs", toast: false }),
+      );
     if (!("__TAURI_INTERNALS__" in window)) return;
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -271,7 +276,7 @@ export default function NotesPanel() {
       .then((r) => {
         if (r.updated + r.added + r.removed > 0) void refreshList();
       })
-      .catch(() => {});
+      .catch((e) => reportError(e, { context: "笔记索引增量同步失败", dedupeKey: "notes-sync" }));
   }, [refreshList]);
 
   const saveNote = useCallback(async () => {
@@ -474,7 +479,9 @@ export default function NotesPanel() {
   const onWrapPointerUp = useCallback(() => {
     if (dragRef.current) {
       dragRef.current = null;
-      void notesCanvasSave(canvasDir, doc).catch(() => {});
+      void notesCanvasSave(canvasDir, doc).catch((e) =>
+        reportError(e, { context: "画板保存失败", dedupeKey: "notes-canvas-save" }),
+      );
     }
   }, [canvasDir, doc]);
 

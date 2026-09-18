@@ -28,7 +28,7 @@
 | D-16 | host-core 收敛公共工具与 ModuleStateCell | 补实现 | P1 | 2 | 待实施 |
 | D-17 | 前端工程门禁（ESLint + Vitest + CI） | 补实现 | P0 | 2 | 待实施 |
 | D-18 | 前端组件基线 + 破坏性操作统一二次确认 | 补实现 | P1 | 2 | 待实施 |
-| D-19 | 全局错误通道与模块重启入口 | 补实现 | P0 | 1 | 待实施 |
+| D-19 | 全局错误通道与模块重启入口 | 补实现 | P0 | 1 | 已完成 |
 | D-20 | ConPTY 诊断探针与验收门禁治理 | 治理 | P0 | 0 | 已完成 |
 | D-21 | 仓库治理与开源合规补齐 | 治理 | P0 | 0 | 已完成 |
 | D-22 | 批次划分、执行顺序与质量门槛 | 流程 | P0 | — | 已裁决（文档生效） |
@@ -189,6 +189,8 @@
 
 - **背景（实测）**：`AppErrorDto` 已带 `hint`/`retryable`，但全库仅 1 处渲染 `hint`；无 `Toaster`/`Dialog`；空 `catch` 块实测 11 处、含其他静默形式合计 40+ 处（示例：`src/modules/vault/VaultPanel.tsx:396` 删除失败被吞后照常 `refresh()`）；`hostModuleRestart` 有定义无调用者，`StatusBar` 的 Error 红点不是按钮——DESIGN §8.2「UI 显示"该模块已停止，点击重启"」落空。
 - **决策**：建 `notifications` store + 全局 `Toaster` + 统一 `reportError(e, opts)`；`StatusBar` 红点改为按钮并调用 `hostModuleRestart(id)`；40+ 处静默 catch 一律替换为"记录 + 状态栏角标"，禁止裸 `catch {}`（由 D-17 的 ESLint 规则兜底）。
+- **实施记录（2026-09-18）**：`src/stores/notifications.ts`——zustand store（notes 历史 30 条 / 同屏 toast ≤4 / `unseenErrors` 角标）+ `reportError(e, {context, dedupeKey, toast})`：normalize `AppErrorDto`（含 `hint`；非 AppError 走 humanize 兜底 `JSON.stringify`）→ 宿主日志必有 → 角标必有 → toast 默认；`toast:false` + `dedupeKey`（3s 窗口）用于轮询、每帧 ack、监听注册等高频低价值路径；main.tsx 挂全局 `unhandledrejection`/`error` 兜底。`src/components/Toaster.tsx` 按 demo 规格（右 16px/底 40px、320px、error 6.5s 自动消失、`role=status`/错误条目 `role=alert`、zIndex 1000 高于 vault 模态），挂载于 `Root()` 内与 `<App/>` 并列，覆盖所有 `?w=` 窗口角色。StatusBar：Error 态模块渲染为按钮（§8.2 文案"该模块已停止，点击重启"）调 `hostModuleRestart`（stop→init→start 由宿主执行），结果 toast 反馈；新增"N 条错误"红角标，点击回放最近错误并清零。全仓 32 处 `catch(() => undefined)`/`catch(() => {})` 与 11 处注释吞异常站点全部改接 `reportError`；有意保留的静默仅 3 处：client.ts `hostLog` 防递归 guard、`hostSystemAccent`/`hostModulesStatus` 两处 by-design null 返回；面板内 `setError` 内联错误带保留（非静默）。U7-1 焦点感知双通道（Windows 系统通知）延后至批次 3；D-17 ESLint `no-empty` 兜底规则随批次 2 落地。
+- **完成证据（2026-09-18）**：`npx tsc --noEmit` 与 `npm run build` 零错误；浏览器实测（vite dev + DevTools 脚本注入）：dispatch 伪造 `AppErrorDto` rejection → toast 呈现 `[DEMO_003] 演示错误：超时`、状态栏出现"1 条错误"角标并随第二条累加至 2 → 点击角标回放最近 3 条错误 toast 且角标清零。Error 态真实重启（U7-3"mock panic 场景可从 UI 重启"）为 GUI 手测项，随批次验收执行。
 
 ### D-20 ConPTY 诊断探针与验收门禁治理
 

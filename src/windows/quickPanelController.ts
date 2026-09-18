@@ -1,5 +1,6 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { IN_TAURI } from "../ipc/env";
+import { reportError } from "../stores/notifications";
 
 /**
  * 剪切板快速面板控制器（docs/UI-PLAN.md U3-5）。
@@ -32,6 +33,6 @@ export async function toggleQuickPanel(): Promise<void> {
     shadow: true,
   });
   win.once("tauri://error", (e) => {
-    console.error("快速面板创建失败", e);
+    reportError(e, { context: "快速面板创建失败" });
   });
 }

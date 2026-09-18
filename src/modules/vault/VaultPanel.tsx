@@ -42,6 +42,7 @@ import {
   type VaultFolderDto,
   type VaultStatusDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 密码库面板（docs/impl/05 V7，M5 v1）三态渲染：
@@ -199,7 +200,8 @@ function TotpBadge({ secret }: { secret: string }) {
 function FieldValue({ field }: { field: EntryFieldDto }) {
   const styles = useStyles();
   const [shown, setShown] = useState(false);
-  const copy = () => void navigator.clipboard.writeText(field.value).catch(() => undefined);
+  const copy = () =>
+    void navigator.clipboard.writeText(field.value).catch((e) => reportError(e, { context: "复制到剪贴板失败" }));
   if (field.kind === "otp") return <TotpBadge secret={field.value} />;
   const masked = field.kind === "password" && !shown;
   return (
@@ -354,7 +356,7 @@ export default function VaultPanel() {
   };
 
   const doLock = async () => {
-    await vaultLock().catch(() => undefined);
+    await vaultLock().catch((e) => reportError(e, { context: "锁定密码库失败" }));
     setEntries([]);
     await refresh();
   };
@@ -393,7 +395,7 @@ export default function VaultPanel() {
   };
 
   const doDeleteEntry = async (id: string) => {
-    await vaultEntryDelete(id).catch(() => undefined);
+    await vaultEntryDelete(id).catch((e) => reportError(e, { context: "删除条目失败" }));
     await refresh();
   };
 
@@ -401,7 +403,7 @@ export default function VaultPanel() {
     const name = newFolderName.trim();
     if (!name) return;
     setNewFolderName("");
-    await vaultFolderCreate(name).catch(() => undefined);
+    await vaultFolderCreate(name).catch((e) => reportError(e, { context: "新建文件夹失败" }));
     await refresh();
   };
 

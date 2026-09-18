@@ -9,6 +9,7 @@ import {
   screenshotPins,
   type TaskStartDto,
 } from "../ipc/client";
+import { reportError } from "../stores/notifications";
 
 /**
  * 截图覆盖层控制器（docs/impl/03 P3，docs/UI-PLAN.md U5）。
@@ -47,7 +48,7 @@ export async function prewarmOverlay(): Promise<void> {
     });
     win.once("tauri://error", (e) => {
       prewarmed = false; // 允许下次重试
-      hostLog("error", `prewarmOverlay: 覆盖层窗口创建失败: ${JSON.stringify(e)}`);
+      reportError(e, { context: "覆盖层预热窗口创建失败", dedupeKey: "overlay-prewarm", toast: false });
     });
   } catch (e) {
     prewarmed = false;
@@ -87,7 +88,7 @@ export async function startOverlay(mode: "shot" | "ocr"): Promise<void> {
       visible: false, // 定位完成后再显示，避免闪跳
     });
     win.once("tauri://error", (e) => {
-      hostLog("error", `startOverlay: 覆盖层窗口创建失败: ${JSON.stringify(e)}`);
+      reportError(e, { context: "截图覆盖层窗口创建失败", dedupeKey: "overlay-create" });
     });
     win.once("tauri://created", async () => {
       try {
@@ -108,7 +109,10 @@ export async function startOverlay(mode: "shot" | "ocr"): Promise<void> {
 
 /** 取消任务：丢弃帧 + 隐藏覆盖层（隐藏而非关闭，保留预热窗口供下次秒开） */
 export async function cancelOverlay(taskId: string | null): Promise<void> {
-  if (taskId) await screenshotDiscard(taskId).catch(() => undefined);
+  if (taskId)
+    await screenshotDiscard(taskId).catch((e) =>
+      reportError(e, { context: "截图帧丢弃失败", dedupeKey: "overlay-discard", toast: false }),
+    );
   const overlay = await WebviewWindow.getByLabel("overlay");
   await overlay?.hide();
 }
@@ -148,7 +152,7 @@ export async function openPinWindow(pin: {
     resizable: false,
   });
   win.once("tauri://error", (e) => {
-    hostLog("error", `openPinWindow: 贴图窗口创建失败 ${label}: ${JSON.stringify(e)}`);
+    reportError(e, { context: `贴图窗口创建失败 ${label}` });
   });
   win.once("tauri://created", async () => {
     try {

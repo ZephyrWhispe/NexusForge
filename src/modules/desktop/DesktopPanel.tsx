@@ -25,6 +25,7 @@ import {
   type DesktopNoteDto,
   type DesktopTidyPlanDto,
 } from "../../ipc/client";
+import { reportError } from "../../stores/notifications";
 
 /**
  * 桌面效率面板（docs/impl/05 D3+D4，M8 v1）：
@@ -155,7 +156,7 @@ export default function DesktopPanel() {
         }
         unlisten = u;
       })
-      .catch(() => undefined);
+      .catch((e) => reportError(e, { context: "桌面面板事件监听注册失败", toast: false }));
     return () => {
       cancelled = true;
       unlisten?.();

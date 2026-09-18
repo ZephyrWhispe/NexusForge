@@ -15,6 +15,7 @@ import {
   type OcrResultDto,
   type AnnotationDto,
 } from "../ipc/client";
+import { reportError } from "../stores/notifications";
 import { cancelOverlay } from "./overlayController";
 
 /**
@@ -255,7 +256,11 @@ export default function OverlayShot() {
       const msg = fmtErr(e);
       hostLog("error", `loadTask 失败: ${msg}`);
       setError(msg);
-      await getCurrentWindow().show().catch(() => undefined); // 出错也要展示错误页
+      await getCurrentWindow()
+        .show()
+        .catch((e2) =>
+          reportError(e2, { context: "覆盖层错误页展示失败", dedupeKey: "overlay-show", toast: false }),
+        ); // 出错也要展示错误页
     }
   }, []);
 
