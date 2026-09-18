@@ -244,11 +244,17 @@ impl KvmModule {
             let on_progress = {
                 let bus = bus.clone();
                 move |p: transfer::FileProgress| {
-                    let _ = bus.publish(Event::new(
-                        "kvm.file_progress",
-                        "kvm",
-                        serde_json::to_value(&p).unwrap_or_default(),
-                    ));
+                    // D-03 统一背压：200ms 合并，key=transfer_id（阈值取 TOPIC_REGISTRY）
+                    let key = p.transfer_id.clone();
+                    let _ = bus.publish_merged(
+                        Event::new(
+                            "kvm.file_progress",
+                            "kvm",
+                            serde_json::to_value(&p).unwrap_or_default(),
+                        ),
+                        &key,
+                        host_core::events::merged_window("kvm.file_progress"),
+                    );
                 }
             };
             match transfer::send_file(&handle, &path, Some(Box::new(on_progress))).await {

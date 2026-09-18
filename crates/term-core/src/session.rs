@@ -12,17 +12,26 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
-use host_core::events::{Event, EventBus};
+use host_core::events::{BackpressurePolicy, Event, EventBus};
 use host_core::ports::{ConptyPort, PtyHandle, TermCfg};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
 
 use crate::error::{Result, TermError};
 
-/// 输出批处理窗口
-const BATCH_WINDOW_MS: u64 = 8;
-/// 单批上限（超出立即切批发送）
-const BATCH_MAX: usize = 64 * 1024;
+/// 输出批处理参数（D-03）：窗口与单批上限的唯一来源是
+/// TOPIC_REGISTRY 中 term.output 的 `Batched` 策略；字节流为累计拼接
+/// （last-wins 合并会丢输出），故读取循环保留在 reader，参数从总线契约注入。
+fn batched_params() -> (std::time::Duration, usize) {
+    match host_core::events::backpressure_policy("term.output") {
+        BackpressurePolicy::Batched {
+            window_ms,
+            max_bytes,
+        } => (std::time::Duration::from_millis(window_ms), max_bytes),
+        other => unreachable!("term.output 必须登记 Batched 策略，实际 {other:?}"),
+    }
+}
+
 /// 背压阈值：未 ack 字节数超过即暂停读（docs/impl/06 T2）
 const BACKPRESSURE_LIMIT: i64 = 4 * 1024 * 1024;
 
@@ -290,12 +299,12 @@ impl TermSessions {
         let mut out_rx = output_rx;
         state.kill.write().replace(KillFn(kill));
 
-        // reader：8ms 批处理 + 单批 64KB 切分 + 背压（T2）
+        // reader：批窗口 + 单批上限 + 背压（T2；窗口参数见 batched_params，D-03）
         let reader_state = state.clone();
         tokio::spawn(async move {
-            let mut window: Vec<u8> = Vec::with_capacity(BATCH_MAX);
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_millis(BATCH_WINDOW_MS));
+            let (batch_window, batch_max) = batched_params();
+            let mut window: Vec<u8> = Vec::with_capacity(batch_max);
+            let mut ticker = tokio::time::interval(batch_window);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             ticker.tick().await; // 首跳立即返回
             loop {
@@ -310,14 +319,14 @@ impl TermSessions {
                     },
                 };
                 // 批满 / 窗口到点且有数据 → 发送
-                if window.len() >= BATCH_MAX || (got && !window.is_empty()) {
+                if window.len() >= batch_max || (got && !window.is_empty()) {
                     reader_state.wait_while_paused().await;
                     if !reader_state.alive.load(Ordering::SeqCst) {
                         break;
                     }
                     let mut off = 0;
                     while off < window.len() {
-                        let end = (off + BATCH_MAX).min(window.len());
+                        let end = (off + batch_max).min(window.len());
                         let slice = String::from_utf8_lossy(&window[off..end]).into_owned();
                         let n = (end - off) as i64;
                         reader_state.sent_total.fetch_add(n, Ordering::SeqCst);
@@ -416,6 +425,14 @@ fn shell_title(shell: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D-03 回归：批窗口/单批上限唯一来源是 TOPIC_REGISTRY 的 Batched 策略
+    #[test]
+    fn batch_params_sourced_from_registry() {
+        let (window, max_bytes) = batched_params();
+        assert_eq!(window, std::time::Duration::from_millis(8));
+        assert_eq!(max_bytes, 64 * 1024);
+    }
 
     #[test]
     fn list_and_missing_session() {

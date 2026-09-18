@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use host_core::error::AppError;
-use host_core::events::{Event, EventBus};
+use host_core::events::{merged_window, Event, EventBus};
 use host_core::ports::{ClipboardPort, CryptoPort};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -25,6 +25,10 @@ pub const WRITE_BACK_WINDOW: Duration = Duration::from_millis(500);
 
 /// worker 停机检查节拍：无事件时每 100ms 复查取消标志
 const WORKER_TICK: Duration = Duration::from_millis(100);
+
+/// 入库批窗口（docs/impl/02 C3 ⑦）：合并 DB 写入批次的调度参数，
+/// 与事件背压无关（事件合并统一走 EventBus::publish_merged，D-03）
+const DB_BATCH_WINDOW: Duration = Duration::from_millis(50);
 
 /// 管线运行句柄（S3）：`shutdown` 置取消位使 worker 线程退出并释放 store，
 /// `live_workers` 供停机/重启回归测试观测存活 worker 数不随重启累积。
@@ -147,7 +151,7 @@ impl CapturePipeline {
         cancel: &AtomicBool,
     ) {
         loop {
-            // 取首条改为 tick 轮询以协作响应取消（跨批次 50ms 窗口合并，docs/impl/02 C3 ⑦）
+            // 取首条改为 tick 轮询以协作响应取消（跨批次入库合并，docs/impl/02 C3 ⑦）
             let first = loop {
                 if cancel.load(Ordering::SeqCst) {
                     return;
@@ -159,7 +163,7 @@ impl CapturePipeline {
                 }
             };
             let mut batch = vec![first];
-            let deadline = Instant::now() + Duration::from_millis(50);
+            let deadline = Instant::now() + DB_BATCH_WINDOW;
             while batch.len() < 20 && Instant::now() < deadline {
                 if cancel.load(Ordering::SeqCst) {
                     break;
@@ -264,13 +268,18 @@ impl CapturePipeline {
             let _ = self.store.purge(config.retention_days, config.max_entries);
         }
 
-        // ⑦ 事件（前端收到后按需 IPC 拉详情；secret 只带布尔标记，不外泄类别特征）
+        // ⑦ 事件（D-03 统一背压：O8 通知型 300ms 合并发布，阈值取 TOPIC_REGISTRY；
+        // 前端收到后按需 IPC 拉最新列表；secret 只带布尔标记，不外泄类别特征）
         self.bus
-            .publish(Event::new(
-                "clipboard.captured",
-                "clipboard",
-                serde_json::json!({ "id": id, "secret": kind.is_some() }),
-            ))
+            .publish_merged(
+                Event::new(
+                    "clipboard.captured",
+                    "clipboard",
+                    serde_json::json!({ "id": id, "secret": kind.is_some() }),
+                ),
+                "captured",
+                merged_window("clipboard.captured"),
+            )
             .ok();
     }
 
@@ -289,11 +298,15 @@ impl CapturePipeline {
             return;
         };
         self.bus
-            .publish(Event::new(
-                "clipboard.captured",
-                "clipboard",
-                serde_json::json!({ "id": id, "secret": false, "kind": "image" }),
-            ))
+            .publish_merged(
+                Event::new(
+                    "clipboard.captured",
+                    "clipboard",
+                    serde_json::json!({ "id": id, "secret": false, "kind": "image" }),
+                ),
+                "captured",
+                merged_window("clipboard.captured"),
+            )
             .ok();
     }
 
@@ -305,11 +318,15 @@ impl CapturePipeline {
             return;
         };
         self.bus
-            .publish(Event::new(
-                "clipboard.captured",
-                "clipboard",
-                serde_json::json!({ "id": id, "secret": false, "kind": "files" }),
-            ))
+            .publish_merged(
+                Event::new(
+                    "clipboard.captured",
+                    "clipboard",
+                    serde_json::json!({ "id": id, "secret": false, "kind": "files" }),
+                ),
+                "captured",
+                merged_window("clipboard.captured"),
+            )
             .ok();
     }
 }
@@ -376,7 +393,14 @@ mod tests {
         pred()
     }
 
-    fn start_with_fake(tag: &str) -> (PipelineHandle, Arc<ClipStore>, Arc<FakeClipboard>) {
+    fn start_with_fake(
+        tag: &str,
+    ) -> (
+        PipelineHandle,
+        Arc<ClipStore>,
+        Arc<FakeClipboard>,
+        Arc<EventBus>,
+    ) {
         let store = temp_store(tag);
         let bus = Arc::new(EventBus::new());
         let port = Arc::new(FakeClipboard {
@@ -385,10 +409,16 @@ mod tests {
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
         let write_back = Arc::new(Mutex::new(None));
-        let handle =
-            CapturePipeline::start(port.clone(), store.clone(), bus, crypto, config, write_back)
-                .unwrap();
-        (handle, store, port)
+        let handle = CapturePipeline::start(
+            port.clone(),
+            store.clone(),
+            bus.clone(),
+            crypto,
+            config,
+            write_back,
+        )
+        .unwrap();
+        (handle, store, port, bus)
     }
 
     fn fire(port: &FakeClipboard, text: &str) {
@@ -407,7 +437,7 @@ mod tests {
     fn worker_processes_then_shuts_down_despite_live_sender() {
         // 关键：FakeClipboard 的 stop_listener 是 no-op，回调（含 Sender）始终存活，
         // 通道永不 Disconnected —— worker 仍须凭 cancel 标志在 shutdown 后退出（旧实现会泄漏）。
-        let (handle, store, port) = start_with_fake("proc");
+        let (handle, store, port, _bus) = start_with_fake("proc");
         fire(&port, "hello-s3-pipeline");
         assert!(
             wait_until(
@@ -435,7 +465,7 @@ mod tests {
         // 回归 S3：模拟 registry.restart（stop→init→start）多轮，存活 worker 数不得累积。
         let mut handles = Vec::new();
         for round in 0..5 {
-            let (handle, _store, _port) = start_with_fake(&format!("restart{round}"));
+            let (handle, _store, _port, _bus) = start_with_fake(&format!("restart{round}"));
             // 未 shutdown 前，允许存在 1 个 worker
             handles.push(handle);
         }
@@ -501,6 +531,46 @@ mod tests {
                 .len(),
             1,
             "窗口内事件不得入库（OCR 复制全部产生重复记录的根因）"
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn burst_captures_merge_into_fewer_events_than_entries() {
+        // D-03 回归：clipboard.captured 生产端走 EventBus::publish_merged
+        // （300ms 窗口、阈值取 TOPIC_REGISTRY）。突发 8 条捕获在窗口内应合并为
+        // 极少数通知（≤2 容忍真实时钟抖动），但 8 条数据全部照常入库——
+        // 合并只削减通知频率，不丢数据。
+        let (handle, store, port, bus) = start_with_fake("merge");
+        let mut rx = bus.subscribe("clipboard.captured").unwrap();
+        for i in 0..8 {
+            fire(&port, &format!("merge-burst-{i}"));
+        }
+        assert!(
+            wait_until(
+                || store
+                    .search(&crate::types::SearchQuery::default())
+                    .unwrap()
+                    .items
+                    .len()
+                    == 8,
+                Duration::from_secs(3)
+            ),
+            "8 条捕获应全部入库"
+        );
+        let mut events = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(900);
+        while Instant::now() < deadline {
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !events.is_empty() && events.len() <= 2,
+            "300ms 合并窗口内 8 条捕获应至多 2 条通知，实际 {}",
+            events.len()
         );
         handle.shutdown();
         assert!(handle.wait_idle(Duration::from_secs(3)));

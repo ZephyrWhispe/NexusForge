@@ -4,7 +4,7 @@
 //! broadcast，无需 tokio）。每个 Op：
 //! - 入队先落 `{store_dir}/{op_id}.json`（崩溃恢复扫描点，docs/impl/01 S6.5）
 //! - 大文件 4MB 分块 + 逐块读满（非末块必须 read_exact，短块会造成零洞——M4 K9 教训）
-//! - 进度事件 200ms 节流；文件完成/状态迁移立即发
+//! - 进度快照逐块上报，限频合并统一由 EventBus::publish_merged 承担（D-03，200ms 窗口）
 //! - 断点续传：Copy/Move 记录 (file_index, bytes_done)，resume 时 seek 续传
 //! - 删除：recycle=true 走 [`RecycleBinPort`]（SHFileOperationW 回收站），无端口降级直删
 
@@ -15,7 +15,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use host_core::ports::RecycleBinPort;
 use serde::{Deserialize, Serialize};
@@ -31,8 +30,6 @@ use crate::error::FileError;
 
 /// 分块大小（docs/impl/05 K6/F2 统一 4MB）
 pub const CHUNK: usize = 4 * 1024 * 1024;
-/// 进度事件节流窗口
-pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 /// 断点持久化间隔（单文件内复制字节量）
 const CHECKPOINT_EVERY: u64 = 64 * 1024 * 1024;
 
@@ -426,24 +423,18 @@ pub fn read_pending(dir: &Path) -> Vec<PendingOp> {
 
 struct Reporter<'a> {
     cb: &'a ProgressFn,
-    last_emit: Instant,
     cur: OpProgress,
 }
 
 impl Reporter<'_> {
     fn set_state(&mut self, state: OpState) {
         self.cur.state = state;
-        self.emit_now();
+        self.emit();
     }
-    /// 节流进度；force=true 立即发（文件完成/状态迁移）
-    fn tick(&mut self, force: bool) {
-        if force || self.last_emit.elapsed() >= PROGRESS_INTERVAL {
-            self.last_emit = Instant::now();
-            (self.cb)(self.cur.clone());
-        }
-    }
-    fn emit_now(&mut self) {
-        self.last_emit = Instant::now();
+    /// 上报进度快照。限频与合并统一由 EventBus::publish_merged 承担
+    /// （D-03：operation.progress 200ms 窗口登记于 TOPIC_REGISTRY），
+    /// 本模块不再自建节流计时器；终态由接线方 flush_merged 立即冲刷。
+    fn emit(&mut self) {
         (self.cb)(self.cur.clone());
     }
 }
@@ -460,7 +451,6 @@ fn run_job(job: Job, cb: &ProgressFn) {
     let kind = spec.kind;
     let mut rep = Reporter {
         cb,
-        last_emit: Instant::now(),
         cur: OpProgress {
             op_id,
             kind,
@@ -592,7 +582,7 @@ fn run_copy_move(
         if std::fs::rename(&src, to_long_path(&dst)).is_ok() {
             rep.cur.files_done = 1;
             rep.cur.bytes_done = rep.cur.bytes_total;
-            rep.tick(true);
+            rep.emit();
             return Flow::Done;
         }
         tracing::debug!("rename 快速路径失败，走逐项复制（跨卷）");
@@ -627,7 +617,7 @@ fn run_copy_move(
             None => {
                 rep.cur.files_done += 1; // Skip
                 rep.cur.bytes_done += item.size;
-                rep.tick(true);
+                rep.emit();
                 continue;
             }
         };
@@ -651,7 +641,7 @@ fn run_copy_move(
                 return Flow::io(e);
             }
         }
-        rep.tick(true);
+        rep.emit();
     }
 
     // Move：搬空的源目录收尾
@@ -752,7 +742,7 @@ fn copy_one(
         }
         written_in_file += n as u64;
         rep.cur.bytes_done += n as u64;
-        rep.tick(false);
+        rep.emit();
         if written_in_file - last_ckpt >= CHECKPOINT_EVERY {
             last_ckpt = written_in_file;
             let _ = persist_pending(
@@ -836,7 +826,7 @@ fn run_delete(
                 Ok(_) => {
                     rep.cur.files_done = file_count;
                     rep.cur.bytes_done = bytes_total;
-                    rep.tick(true);
+                    rep.emit();
                     return Flow::Done;
                 }
                 Err(e) => {
@@ -867,7 +857,7 @@ fn run_delete(
             return Flow::io(e);
         }
         rep.cur.files_done += 1;
-        rep.tick(true);
+        rep.emit();
     }
     Flow::Done
 }
@@ -965,10 +955,10 @@ fn run_compress(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
                 return Flow::Failed(FileError::Zip(e.to_string()).to_string());
             }
             rep.cur.bytes_done += n as u64;
-            rep.tick(false);
+            rep.emit();
         }
         rep.cur.files_done += 1;
-        rep.tick(true);
+        rep.emit();
     }
     if let Err(e) = zw.finish() {
         return Flow::Failed(FileError::Zip(e.to_string()).to_string());
@@ -1041,7 +1031,7 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
                 ConflictPolicy::Skip => {
                     rep.cur.bytes_done += entry.size();
                     rep.cur.files_done += 1;
-                    rep.tick(true);
+                    rep.emit();
                     continue;
                 }
                 _ => unique_target(&out_path),
@@ -1059,7 +1049,7 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
         }
         rep.cur.bytes_done += entry.size();
         rep.cur.files_done += 1;
-        rep.tick(true);
+        rep.emit();
     }
     Flow::Done
 }
@@ -1072,6 +1062,7 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
 
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("nf_file_ops_{name}"));

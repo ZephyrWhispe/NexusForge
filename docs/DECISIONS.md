@@ -12,7 +12,7 @@
 |------|------|------|--------|------|------|
 | D-01 | 门禁先行：CI 与工具链先于功能补齐 | 流程 | P0 | 2 | 已完成（待首次 CI 绿 run） |
 | D-02 | 消除模块间直接依赖（O1 红线） | 补实现 | P0 | 1 | 已完成 |
-| D-03 | 事件总线统一背压 API（O8） | 补实现 | P1 | 2 | 待实施 |
+| D-03 | 事件总线统一背压 API（O8） | 补实现 | P1 | 2 | 已完成 |
 | D-04 | 剪贴板敏感数据改用 AES-256-GCM 信封加密 | 补实现 | P0 | 1 | 已完成 |
 | D-05 | 剪贴板 blob 生命周期治理（随删随清 + 覆写 + GC） | 补实现 | P0 | 1 | 已完成 |
 | D-06 | blob 路径采用扁平结构 | 改规范 | P2 | — | 已裁决（文档生效） |
@@ -65,6 +65,8 @@
 - **决策**：`EventBus` 增加 `subscribe_throttled(topic, interval)` 与 `publish_merged(topic, key, window)`；背压策略作为元数据写入 `TOPIC_REGISTRY`（`(topic, desc, BackpressurePolicy)`）；clipboard / sys.metrics / term.output / operation.progress 四个生产端改为调用统一 API。
 - **规范对齐**：DESIGN §2.2 O8 要求"剪贴板 300ms 合并、监控指标 1s 节流"，当前 clipboard 实为 50ms，实施时按规范值改为 300ms。
 - **验收**：新增集成测试「1s 内发布 1000 条 → 订阅者收到 1 条」；各模块不再存在自建合并计时器。
+- **实施记录（2026-09-18）**：`TOPIC_REGISTRY` 升级为 `(topic, desc, BackpressurePolicy)` 三元组，策略枚举 `None / Merged{window_ms} / Throttled{interval_ms} / Batched{window_ms,max_bytes}`，配套 `backpressure_policy()`/`merged_window()` 读取器，阈值全仓唯一来源落定。`EventBus` 新增三 API：**`publish_merged(event, key, window)`**（生产端合并：每主题一条后台 std 线程按窗口节拍冲刷 last-wins 快照，普通线程/sys worker 可直接调用，线程持 `Weak<Bus>` 随总线释放自灭）；**`flush_merged(topic, key)`**（终态立即冲刷，冲刷后同快照不二次投递）；**`subscribe_throttled(topic, interval)`**（消费端前沿+后随节流，本次四个高频主题均为生产端合并、暂无 Throttled 策略用户，API 按裁决落地并全测，为后续高频消费 UI 保留统一入口）。生产端接线：`clipboard.captured` 三处发布改 `publish_merged(key="captured", 300ms)`——按 O8 规范值落地（审查记载的"50ms 合并"实为 DB 入库批调度，事件通知此前**逐条直发、并无合并**；入库批更名 `DB_BATCH_WINDOW` 以绝混淆，并顺带消灭"阈值不一致"的真实形态：不是 50≠300，而是通知根本未节流）；`sys.metrics` 改 `publish_merged(key="sample", 1s)`（PDH 1s 采样是数据生成节拍，保留）；`operation.progress` 改 `publish_merged(key=op_id, 200ms)` 且 Done/Failed 先 `flush_merged` 再发终态事件——file-core `Reporter` 的 `last_emit`/`PROGRESS_INTERVAL` 自建计时器删除（快照逐块上报，限频归总线，单批 to_value 成本 µs 级可忽略）；`term.output` 登记 `Batched{8ms,64KB}`——字节流为累计拼接，last-wins 合并会**丢终端输出**，故读取循环保留 term-core，但 `BATCH_WINDOW_MS`/`BATCH_MAX` 模块常量删除，改 `batched_params()` 从注册表读取（参数唯一来源归一）。**漂移补充**：审查列四家，实际第五家 `kvm-core/transfer.rs` 的 `PROGRESS_INTERVAL` 200ms `last_report` 计时器（`kvm.file_progress`）同属自建合并计时器，按"各模块不再存在自建合并计时器"验收标准一并收编（逐块上报快照 + 总线 200ms 合并，key=transfer_id）。
+- **完成证据（2026-09-18）**：`cargo fmt --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` 全绿。回归测试 9 枚：host-core 6（O8 规范值冻结 300/1000/200/8+64KB；**验收测试** `publish_merged_thousand_burst_delivers_one`——1s 内 1000 条突发订阅端恰收 1 条末值且无心跳补发；双 key 不互并；`flush_merged` 即时性+不二次投递；普通线程合并发布与非注册主题报错；`subscribe_throttled` start_paused 虚拟时钟下前沿立即/窗口末补发最新）；clipboard `burst_captures_merge_into_fewer_events_than_entries`（8 连击入库 8 条不受影响、通知合并至 ≤2）；file-core service `progress_merges_on_bus_and_done_flushes_immediately`（10MB/3 分块复制：进度事件经总线合并且 state=done 终态快照必达）；term-core `batch_params_sourced_from_registry`（批参数唯一来源断言）。
 
 ### D-06 blob 路径采用扁平结构（改规范）
 

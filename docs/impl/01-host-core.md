@@ -206,7 +206,7 @@ pub struct Event {
 
 ### 潜在问题
 - broadcast 接收端处理慢会 Lagged，消费端必须设计为"拉最新状态"而非依赖逐条事件（UI 收到事件后调 IPC 拉数据）。
-- 主题注册表用 `static TOPIC_REGISTRY: &[(&str, &str)]` 编译期列出，运行期 `register_topic` 校验其存在。
+- 主题注册表用 `static TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)]` 编译期列出，运行期 `register_topic` 校验其存在；背压策略（Merged/Throttled/Batched）随主题登记，为全仓阈值唯一来源（D-03）。
 
 ---
 

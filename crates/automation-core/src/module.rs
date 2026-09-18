@@ -133,8 +133,8 @@ impl ActionHandler for HostActionHandler {
         // 查 TOPIC_REGISTRY 还原静态主题（总线规则：仅编译期登记主题可发布）
         let static_topic = host_core::events::TOPIC_REGISTRY
             .iter()
-            .find(|(t, _)| *t == topic)
-            .map(|(t, _)| *t)
+            .find(|(t, ..)| *t == topic)
+            .map(|(t, ..)| *t)
             .ok_or_else(|| {
                 AutomationError::Action(format!("未知事件主题 {topic}（需在 TOPIC_REGISTRY 登记）"))
             })?;
@@ -349,7 +349,7 @@ impl AutomationModule {
         let sched_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
         *self.cancel.write() = sched_token.clone();
         // 事件订阅任务（tokio——bootstrap 在 runtime 内 start）
-        for (topic, _) in TOPIC_REGISTRY {
+        for (topic, ..) in TOPIC_REGISTRY {
             let Ok(mut rx) = bus.subscribe(topic) else {
                 continue;
             };

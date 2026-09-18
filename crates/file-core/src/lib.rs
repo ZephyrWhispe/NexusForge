@@ -22,9 +22,7 @@ pub use conflict::{scan_conflicts, ConflictAction, ConflictItem, ConflictPolicy}
 pub use driver::{DriverInfo, DriverRegistry, FileStoragePort, LocalDriver, StorageDriver};
 pub use error::FileError;
 pub use module::FileModule;
-pub use ops::{
-    Checkpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState, PendingOp, CHUNK, PROGRESS_INTERVAL,
-};
+pub use ops::{Checkpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState, PendingOp, CHUNK};
 pub use preview::Preview;
 pub use rename::{apply_plan, build_plan, CaseMode, RenamePlan, RenameRule};
 pub use search::{SearchOpts, SearchResult};

@@ -15,7 +15,6 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,8 +29,6 @@ use crate::session::{Frame, MsgType, SessionHandle, MAX_PAYLOAD};
 pub const CHUNK_SIZE: usize = 4 * 1024 * 1024 - 4096;
 /// ClipData/JSON 载荷单帧预算（同上预留）
 pub const CLIP_MAX: usize = MAX_PAYLOAD - 4096;
-/// 发送进度回调节流周期
-const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
 // ---------------------------------------------------------------------------
 // 线格式载荷
@@ -226,7 +223,6 @@ pub async fn send_file(
         let mut file = tokio::fs::File::open(path).await.map_err(|e| {
             AppError::module("KVM_TRANSFER_008", format!("打开文件失败: {e}"), None)
         })?;
-        let mut last_report = Instant::now();
         for index in 0..total_chunks {
             // 非末块必须读满：AsyncReadExt::read 允许部分读取，短块会让接收端
             // 按 index*chunk_size 定位出现零洞，SHA256 终验必然不符（K9 环回实测踩坑）
@@ -249,16 +245,14 @@ pub async fn send_file(
                 ));
             }
             handle.send(chunk_frame(sha, index, &buf[..n])).await?;
+            // D-03：逐块上报快照，限频合并统一由 EventBus::publish_merged 承担
+            // （kvm.file_progress 200ms 窗口登记于 TOPIC_REGISTRY），本模块不再自建计时器
             if let Some(cb) = progress.as_ref() {
-                let due = index + 1 == total_chunks || last_report.elapsed() >= PROGRESS_INTERVAL;
-                if due {
-                    last_report = Instant::now();
-                    cb(FileProgress {
-                        transfer_id: sha_hex.clone(),
-                        sent_chunks: index + 1,
-                        total_chunks,
-                    });
-                }
+                cb(FileProgress {
+                    transfer_id: sha_hex.clone(),
+                    sent_chunks: index + 1,
+                    total_chunks,
+                });
             }
         }
     }

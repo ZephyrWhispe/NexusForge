@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use host_core::events::{Event, EventBus};
+use host_core::events::{merged_window, Event, EventBus};
 use host_core::ports::{Ports, RecycleBinPort, ThumbPort, UsnIndexPort};
 
 use crate::browse::{self, DriveInfo, FileEntry, SortKey};
@@ -32,14 +32,21 @@ impl FileService {
         let store = app_data_dir.join("pending_ops");
         let bus_cb = bus.clone();
         let cb: crate::ops::ProgressFn = Arc::new(move |p: OpProgress| {
+            // D-03 统一背压：operation.progress 走总线合并发布（200ms 窗口，
+            // 阈值登记于 TOPIC_REGISTRY），key=op_id 使各操作独立合并
             let mut payload = serde_json::to_value(&p).unwrap_or_default();
-            // 去抖订阅 key（EventBus 约定）
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("key".into(), serde_json::Value::String(p.op_id.clone()));
             }
-            let _ = bus_cb.publish(Event::new("operation.progress", "file", payload));
+            let _ = bus_cb.publish_merged(
+                Event::new("operation.progress", "file", payload),
+                &p.op_id,
+                merged_window("operation.progress"),
+            );
             match p.state {
                 crate::ops::OpState::Done => {
+                    // 终态不等窗口：先冲刷最新进度，再发完成事件
+                    bus_cb.flush_merged("operation.progress", &p.op_id);
                     let _ = bus_cb.publish(Event::new(
                         "operation.done",
                         "file",
@@ -47,6 +54,7 @@ impl FileService {
                     ));
                 }
                 crate::ops::OpState::Failed | crate::ops::OpState::Canceled => {
+                    bus_cb.flush_merged("operation.progress", &p.op_id);
                     let _ = bus_cb.publish(Event::new(
                         "operation.failed",
                         "file",
@@ -194,5 +202,83 @@ impl FileService {
 
     pub fn rename_apply(&self, plans: &[RenamePlan]) -> Result<usize, FileError> {
         apply_plan(plans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conflict::ConflictPolicy;
+    use crate::ops::OpKind;
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    /// D-03 回归：operation.progress 经 EventBus::publish_merged 合并发布
+    /// （200ms 窗口），终态经 flush_merged 立即冲刷——多分块复制的进度快照
+    /// 数远大于总线事件数，且 state=done 快照必达、不滞后于 operation.done。
+    #[test]
+    fn progress_merges_on_bus_and_done_flushes_immediately() {
+        let root = std::env::temp_dir().join(format!("nf_file_svc_{}", uuid::Uuid::now_v7()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        // 10MB → 3 个 4MB 分块 + Running/Done 态迁移，Reporter 快照上报 ≥5 次
+        std::fs::write(src.join("big.bin"), vec![7u8; 10 * 1024 * 1024]).unwrap();
+
+        let bus = Arc::new(EventBus::new());
+        let svc =
+            FileService::open(&root.join("store"), bus.clone(), Arc::new(Ports::new())).unwrap();
+        let mut prog = bus.subscribe("operation.progress").unwrap();
+        let mut done = bus.subscribe("operation.done").unwrap();
+        let (op_id, conflicts) = svc
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![src.join("big.bin")],
+                dst: dst.clone(),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(conflicts.is_empty());
+        let op_id = op_id.unwrap();
+
+        let start = std::time::Instant::now();
+        let mut progress = Vec::new();
+        loop {
+            while let Ok(ev) = prog.try_recv() {
+                progress.push(ev);
+            }
+            match done.try_recv() {
+                Ok(_) => break,
+                Err(TryRecvError::Empty) => {}
+                Err(other) => panic!("operation.done 通道异常: {other:?}"),
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(30),
+                "复制未完成"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // 冲刷语义：done 到达后，done 快照已在（或即刻在）progress 通道中
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            while let Ok(ev) = prog.try_recv() {
+                progress.push(ev);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::fs::metadata(dst.join("big.bin")).unwrap().len(),
+            10 * 1024 * 1024,
+            "文件应完整复制"
+        );
+        assert!(!progress.is_empty(), "至少应收到合并后的进度事件");
+        assert!(
+            progress
+                .iter()
+                .any(|e| e.payload["state"] == "done" && e.payload["op_id"] == op_id.as_str()),
+            "flush_merged 应保证 state=done 的终态进度快照立即送达"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

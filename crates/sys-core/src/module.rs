@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use host_core::error::ModuleError;
-use host_core::events::{Event, EventBus};
+use host_core::events::{merged_window, Event, EventBus};
 use host_core::module::{
     priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
 };
@@ -97,18 +97,24 @@ impl SysModule {
         self.recycle.read().clone()
     }
 
+    /// 采样线程（start 在后台调用；1s 采样 → 缓冲 + D-03 统一合并发布：
+    /// sys.metrics 阈值 1s 登记于 TOPIC_REGISTRY，总线保证至多 1 条/窗口）
     fn publish_metrics(&self, point: &MetricsPoint) {
         if let Some(bus) = self.bus.read().clone() {
-            bus.publish(Event::new(
-                "sys.metrics",
-                "sys",
-                serde_json::to_value(point).unwrap_or_default(),
-            ))
+            bus.publish_merged(
+                Event::new(
+                    "sys.metrics",
+                    "sys",
+                    serde_json::to_value(point).unwrap_or_default(),
+                ),
+                "sample",
+                merged_window("sys.metrics"),
+            )
             .ok();
         }
     }
 
-    /// 采样线程（start 在后台调用；1s 采样 → 缓冲 + 事件节流 1s）
+    /// 采样线程（start 在后台调用；PDH 采样节拍 1s，事件发布见 publish_metrics）
     fn start_sampler(&self) {
         let already = self.sample_cancel.swap(false, Ordering::SeqCst);
         if already && self.sample_thread.read().is_some() {

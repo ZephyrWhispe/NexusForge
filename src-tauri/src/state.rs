@@ -340,7 +340,7 @@ impl HostState {
 /// 把事件总线全部主题转发到前端窗口（事件名 `nf:event`）
 pub fn forward_events(app: tauri::AppHandle, bus: Arc<EventBus>) {
     use tauri::Emitter;
-    for (topic, _) in host_core::events::TOPIC_REGISTRY {
+    for (topic, ..) in host_core::events::TOPIC_REGISTRY {
         let mut rx = match bus.subscribe(topic) {
             Ok(rx) => rx,
             Err(e) => {
