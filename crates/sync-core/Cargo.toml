@@ -1,0 +1,18 @@
+[package]
+name = "sync-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+host-core = { path = "../host-core" }
+kvm-core = { path = "../kvm-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+x25519-dalek = { workspace = true }
+rand = { workspace = true }

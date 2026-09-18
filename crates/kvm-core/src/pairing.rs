@@ -192,7 +192,8 @@ impl PairStore {
         list
     }
 
-    pub(crate) fn upsert(&self, peer: PairedPeer) -> Result<(), AppError> {
+    /// 登记配对记录（K2 配对流程写入；sync-core 测试/对账也复用）
+    pub fn upsert(&self, peer: PairedPeer) -> Result<(), AppError> {
         self.peers
             .write()
             .expect("peers 锁")
@@ -243,12 +244,13 @@ struct PairReplyPayload {
     reason: Option<String>,
 }
 
-pub(crate) fn b64_encode(data: &[u8]) -> String {
+/// base64 编解码（配对记录公钥/会话公钥传输；sync-core 握手亦复用）
+pub fn b64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }

@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
@@ -32,4 +33,8 @@ editor-core = { path = "../crates/editor-core" }
 notes-core = { path = "../crates/notes-core" }
 term-core = { path = "../crates/term-core" }
 sys-core = { path = "../crates/sys-core" }
+automation-core = { path = "../crates/automation-core" }
+sync-core = { path = "../crates/sync-core" }
 base64.workspace = true
+# winops_helper token 熵源（docs/impl/08 §4.1 64 hex）
+rand.workspace = true

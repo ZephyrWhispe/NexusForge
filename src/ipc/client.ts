@@ -1198,3 +1198,180 @@ export function sysCleanExecute(selectedIds: string[], recycle: boolean): Promis
 export function sysMetricsHistory(): Promise<MetricsPointDto[]> {
   return invoke("sys_metrics_history");
 }
+
+// ======================== WinOps Tweak 引擎（M16 W1，docs/impl/08） ========================
+
+export interface WinopsRegistryActionDto {
+  type: "registry";
+  key: string;
+  value_name: string;
+  value_type: string;
+  data: { dword?: number; qword?: number; str?: string };
+}
+// W2 起出现的动作形态（服务/计划任务），前端只读展示
+export interface WinopsOpaqueActionDto {
+  type: string;
+  [k: string]: unknown;
+}
+export type WinopsActionDto = WinopsRegistryActionDto | WinopsOpaqueActionDto;
+
+export interface WinopsTweakDto {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  requires_admin: boolean;
+  actions: WinopsActionDto[];
+}
+
+/** scan 状态（Rust ScanState snake_case） */
+export type WinopsScanState = "applied" | "not_applied" | "needs_admin";
+
+/** Rust Vec<(Tweak, ScanState)> serde 序列化为 [tweak, state] 数组 */
+export type WinopsScanItemDto = [WinopsTweakDto, WinopsScanState];
+
+export interface WinopsApplyReportDto {
+  tweak_id: string;
+  backup: { tweak_id: string; key: string; value_name: string; existed: boolean; old_value: unknown }[];
+  verified: boolean;
+}
+
+export function winopsCatalog(): Promise<WinopsTweakDto[]> {
+  return invoke("winops_catalog");
+}
+export function winopsScan(): Promise<WinopsScanItemDto[]> {
+  return invoke("winops_scan");
+}
+export function winopsApply(id: string): Promise<WinopsApplyReportDto> {
+  return invoke("winops_apply", { id });
+}
+export function winopsRollback(id: string): Promise<void> {
+  return invoke("winops_rollback", { id });
+}
+
+// ======================== 自动化与拓展（M14 A1–A3，docs/impl/07） ========================
+
+// Trigger/Expr/Action 与 Rust serde 内部 tag 序列化一一对应
+export type TriggerDto =
+  | { kind: "event"; topic: string }
+  | { kind: "startup" }
+  | { kind: "schedule"; time: string };
+
+export type CmpOpDto = "eq" | "ne" | "gt" | "lt" | "contains";
+
+export type ExprDto =
+  | { op: "leaf"; args: { path: string; cmp: CmpOpDto; value: unknown } }
+  | { op: "and"; args: ExprDto[] }
+  | { op: "or"; args: ExprDto[] }
+  | { op: "not"; args: ExprDto };
+
+export type ActionDto =
+  | { kind: "publish"; topic: string; payload: unknown }
+  | { kind: "notify"; title: string; body: string }
+  | { kind: "open_url"; url: string }
+  | { kind: "ipc_command"; module: string; cmd: string; args: unknown }
+  | { kind: "run_script"; path: string; func: string };
+
+export interface RuleDto {
+  id: string;
+  name: string;
+  on: TriggerDto;
+  when: ExprDto | null;
+  then: ActionDto[];
+  cooldown_secs: number;
+  enabled: boolean;
+}
+
+export interface DeadLetterDto {
+  id: string;
+  rule_id: string;
+  rule_name: string;
+  action: ActionDto;
+  error: string;
+  at_ms: number;
+}
+
+export function automationRulesList(): Promise<RuleDto[]> {
+  return invoke("automation_rules_list");
+}
+export function automationSaveRule(rule: RuleDto): Promise<void> {
+  return invoke("automation_save_rule", { rule });
+}
+export function automationDeleteRule(id: string): Promise<boolean> {
+  return invoke("automation_delete_rule", { id });
+}
+export function automationToggleRule(id: string, enabled: boolean): Promise<boolean> {
+  return invoke("automation_toggle_rule", { id, enabled });
+}
+export function automationDeadLetters(): Promise<DeadLetterDto[]> {
+  return invoke("automation_dead_letters");
+}
+export function automationReplay(deadId: string, ruleId: string): Promise<void> {
+  return invoke("automation_replay", { deadId, ruleId });
+}
+
+// 插件管理（M14 A6）
+export interface PluginManifestDto {
+  id: string;
+  name: string;
+  version: string;
+  api_version: number;
+  permissions: string[];
+  entry: string;
+  func: string;
+  sha256: string;
+}
+
+export interface PluginInfoDto {
+  id: string;
+  name: string;
+  version: string;
+  api_version: number;
+  permissions: string[];
+  entry: string;
+  func: string;
+  sha256: string;
+  installed: boolean;
+}
+
+export function automationPluginsList(): Promise<PluginInfoDto[]> {
+  return invoke("automation_plugins_list");
+}
+export function automationPluginInstall(srcDir: string): Promise<PluginManifestDto> {
+  return invoke("automation_plugin_install", { srcDir });
+}
+export function automationPluginRemove(id: string): Promise<boolean> {
+  return invoke("automation_plugin_remove", { id });
+}
+
+// ======================== 跨设备同步（M15 SYNC，docs/impl/07） ========================
+
+export interface PairedPeerDto {
+  device_id: string;
+  device_name: string;
+  fingerprint: string;
+  pubkey_b64: string;
+  paired_at: number;
+}
+
+export interface SyncSummaryDto {
+  pushed: number;
+  pulled_applied: number;
+  pulled_lost: number;
+  conflicts: number;
+}
+
+export interface SyncStatusDto {
+  op_count: number;
+  port: number;
+}
+
+export function syncPeers(): Promise<PairedPeerDto[]> {
+  return invoke("sync_peers");
+}
+export function syncStatus(): Promise<SyncStatusDto> {
+  return invoke("sync_status");
+}
+export function syncNow(deviceId: string, addr: string): Promise<SyncSummaryDto> {
+  return invoke("sync_now", { deviceId, addr });
+}

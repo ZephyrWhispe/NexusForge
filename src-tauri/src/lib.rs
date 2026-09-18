@@ -2,13 +2,74 @@
 
 mod commands;
 mod state;
+mod winops_helper;
 
+use automation_core::engine::ActionHandler;
+use automation_core::error as auto_err;
+use host_core::ports::ShellPort;
 use state::StartupOptions;
 use tauri::Manager;
+use std::sync::Arc;
+
+/// 独立规则执行的最小动作处理器（A4：Task Scheduler 触发 `--run-rule` 无完整宿主）
+/// publish/notify 无总线收方 → 记日志；run_wasm 无插件库 → 报未开放
+struct StandaloneHandler;
+
+impl ActionHandler for StandaloneHandler {
+    fn open_url(&self, url: &str) -> auto_err::Result<()> {
+        win_integration::shell::ShellOps
+            .shell_execute(url)
+            .map_err(|e| auto_err::AutomationError::Action(e.to_string()))
+    }
+    fn publish(&self, topic: &str, payload: serde_json::Value) -> auto_err::Result<()> {
+        tracing::info!(topic, ?payload, "--run-rule 独立进程无事件总线，publish 记日志");
+        Ok(())
+    }
+    fn ipc_command(&self, module: &str, cmd: &str, _args: &serde_json::Value) -> auto_err::Result<()> {
+        Err(auto_err::AutomationError::Action(format!("独立进程不支持 IpcCommand（{module}.{cmd}）")))
+    }
+    fn run_wasm(&self, path: &str, _func: &str) -> auto_err::Result<()> {
+        Err(auto_err::AutomationError::Action(format!(
+            "独立进程不支持 RunScript（{path}）；请在应用内触发含插件的规则"
+        )))
+    }
+}
+
+/// --run-rule：从 rules.json 执行规则后退出（无窗口、不启动 Tauri 壳）
+fn run_standalone_rule(rule_id: &str) {
+    let rules_path = match std::env::var("APPDATA") {
+        Ok(base) => std::path::PathBuf::from(base)
+            .join("com.nexusforge.app")
+            .join("automation")
+            .join("rules.json"),
+        Err(_) => {
+            eprintln!("[NexusForge] --run-rule：无法定位 APPDATA 目录。");
+            std::process::exit(1);
+        }
+    };
+    // 日志（独立进程也留痕；guard 泄漏至退出属预期）
+    let log_guard = host_core::logging::init_tracing(&rules_path.parent().unwrap().join("log"));
+    Box::leak(Box::new(log_guard));
+    tracing::info!(rule_id, "Task Scheduler 触发独立规则执行");
+    match automation_core::standalone::run_rule_standalone(&rules_path, rule_id, Arc::new(StandaloneHandler)) {
+        Ok(true) => println!("[NexusForge] 规则 {rule_id} 已执行。"),
+        Ok(false) => println!("[NexusForge] 规则 {rule_id} 不存在或已停用。"),
+        Err(e) => {
+            eprintln!("[NexusForge] 规则 {rule_id} 执行失败: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let opts = StartupOptions::from_env();
+
+    // --run-rule：Task Scheduler 独立触发（A4，docs/impl/07）；执行后退出
+    if let Some(rule_id) = opts.run_rule.clone() {
+        run_standalone_rule(&rule_id);
+        std::process::exit(0);
+    }
 
     // --restore-proxy：紧急还原系统代理后退出（崩溃抢救通道，还原挂点之三）
     if opts.restore_proxy {
@@ -41,6 +102,9 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        // REL1（docs/impl/07）：自动更新插件（端点/公钥见 tauri.conf.json plugins.updater；
+        // 签名私钥仅存 CI Secret——REL3 接入后 latest.json 附签名，更新前双签名校验）
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::host_system_accent,
             commands::host_log,
@@ -200,8 +264,30 @@ pub fn run() {
             commands::sys_clean_scan,
             commands::sys_clean_execute,
             commands::sys_metrics_history,
+            // 自动化与拓展（M14 A1–A3）
+            commands::automation_rules_list,
+            commands::automation_save_rule,
+            commands::automation_delete_rule,
+            commands::automation_toggle_rule,
+            commands::automation_dead_letters,
+            commands::automation_replay,
+            // 插件管理（M14 A6）
+            commands::automation_plugins_list,
+            commands::automation_plugin_install,
+            commands::automation_plugin_remove,
+            // 跨设备同步（M15 SYNC）
+            commands::sync_peers,
+            commands::sync_status,
+            commands::sync_now,
+            // WinOps Tweak 引擎（M16 W0–W1）
+            commands::winops_catalog,
+            commands::winops_scan,
+            commands::winops_apply,
+            commands::winops_rollback,
         ])
         .setup(move |app| {
+            // PERF1（docs/impl/07）：启动路径计时（目标 < 1.5s；setup 完成即窗口可见）
+            let started = std::time::Instant::now();
             let dir = app.path().app_data_dir()?;
 
             // 日志必须最先初始化（guard 泄漏持有至进程结束，属预期行为）
@@ -223,9 +309,18 @@ pub fn run() {
 
             // 模块引导放后台任务，不阻塞窗口显示（M1 验收：启动 < 1.5s）
             let host_for_boot = host.clone();
+            let boot_started = started;
             tauri::async_runtime::spawn(async move {
                 host_for_boot.bootstrap_modules().await;
+                tracing::info!(
+                    elapsed_ms = boot_started.elapsed().as_millis() as u64,
+                    "模块引导完成（PERF1 启动剖析）"
+                );
             });
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "窗口就绪（setup 完成，PERF1 启动剖析）"
+            );
             Ok(())
         })
         .run(tauri::generate_context!())

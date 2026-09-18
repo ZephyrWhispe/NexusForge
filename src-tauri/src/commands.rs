@@ -2324,3 +2324,306 @@ pub async fn sys_metrics_history(
 ) -> Result<Vec<sys_core::MetricsPoint>, AppError> {
     Ok(state.sys.metrics().history())
 }
+
+// ======================== 自动化与拓展（M14 A1–A3，docs/impl/07） ========================
+
+fn auto_err(e: automation_core::AutomationError) -> AppError {
+    AppError::module(e.code(), e.to_string(), None)
+}
+
+/// 规则清单
+#[tauri::command]
+pub async fn automation_rules_list(
+    state: State<'_, HostState>,
+) -> Result<Vec<automation_core::rule::Rule>, AppError> {
+    Ok(state.automation.rules())
+}
+
+/// 保存规则（新增/覆盖；校验 + rules.json 持久化）
+#[tauri::command]
+pub async fn automation_save_rule(
+    rule: automation_core::rule::Rule,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    state.automation.save_rule(rule).map_err(auto_err)
+}
+
+/// 删除规则
+#[tauri::command]
+pub async fn automation_delete_rule(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
+    state.automation.delete_rule(&id).map_err(auto_err)
+}
+
+/// 启停规则
+#[tauri::command]
+pub async fn automation_toggle_rule(
+    id: String,
+    enabled: bool,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
+    state.automation.toggle_rule(&id, enabled).map_err(auto_err)
+}
+
+/// 死信队列（UI 死信面板）
+#[tauri::command]
+pub async fn automation_dead_letters(
+    state: State<'_, HostState>,
+) -> Result<Vec<automation_core::engine::DeadLetter>, AppError> {
+    Ok(state
+        .automation
+        .engine()
+        .map(|e| e.dead_letters())
+        .unwrap_or_default())
+}
+
+/// 重放死信（动作成功移除；仍失败以新 id 重新入队）
+#[tauri::command]
+pub async fn automation_replay(
+    dead_id: String,
+    rule_id: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let engine = state
+        .automation
+        .engine()
+        .ok_or_else(|| AppError::module("AUTO_EXEC_001", "规则引擎未初始化", None))?;
+    // 规则已删除的死信无法重放（动作语义随规则上下文）
+    let rule = state
+        .automation
+        .rules()
+        .into_iter()
+        .find(|r| r.id == rule_id)
+        .ok_or_else(|| AppError::module("AUTO_RULE_001", format!("规则 {rule_id} 已删除，无法重放"), None))?;
+    engine.replay(&dead_id, &rule).map_err(auto_err)
+}
+
+/// 插件清单（A6：扫描插件库）
+#[tauri::command]
+pub async fn automation_plugins_list(
+    state: State<'_, HostState>,
+) -> Result<Vec<automation_core::PluginInfo>, AppError> {
+    Ok(state
+        .automation
+        .plugin_store()
+        .map(|s| s.list())
+        .unwrap_or_default())
+}
+
+/// 从本地目录安装插件（读 {src}/manifest.json + entry → 校验 → 入库；A6 v1 市场客户端 = 本地导入）
+#[tauri::command]
+pub async fn automation_plugin_install(
+    src_dir: String,
+    state: State<'_, HostState>,
+) -> Result<automation_core::PluginManifest, AppError> {
+    let store = state
+        .automation
+        .plugin_store()
+        .ok_or_else(|| AppError::module("AUTO_EXEC_001", "插件库未初始化", None))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store.install_from_dir(std::path::Path::new(&src_dir))
+    })
+    .await
+    .map_err(|e| AppError::module("SYS_IPC_001", e.to_string(), None))?
+    .map_err(auto_err)
+}
+
+/// 删除插件
+#[tauri::command]
+pub async fn automation_plugin_remove(id: String, state: State<'_, HostState>) -> Result<bool, AppError> {
+    let store = state
+        .automation
+        .plugin_store()
+        .ok_or_else(|| AppError::module("AUTO_EXEC_001", "插件库未初始化", None))?;
+    tauri::async_runtime::spawn_blocking(move || store.remove(&id))
+        .await
+        .map_err(|e| AppError::module("SYS_IPC_001", e.to_string(), None))?
+        .map_err(auto_err)
+}
+
+// ======================== 跨设备同步（M15 SYNC，docs/impl/07） ========================
+
+fn sync_err(e: sync_core::SyncError) -> AppError {
+    AppError::module(e.code(), e.to_string(), None)
+}
+
+/// 配对设备列表（信任根复用 KVM 配对；UI 选择同步目标）
+#[tauri::command]
+pub async fn sync_peers(state: State<'_, HostState>) -> Result<Vec<kvm_core::PairedPeer>, AppError> {
+    Ok(state.sync.peers())
+}
+
+/// op_log 状态（计数/监听端口）
+#[tauri::command]
+pub async fn sync_status(state: State<'_, HostState>) -> Result<serde_json::Value, AppError> {
+    Ok(state.sync.status())
+}
+
+/// 立即与指定设备同步（addr 如 "192.168.1.10:49820"；端口默认 DEFAULT_SYNC_PORT）
+#[tauri::command]
+pub async fn sync_now(
+    device_id: String,
+    addr: String,
+    state: State<'_, HostState>,
+) -> Result<sync_core::SyncSummary, AppError> {
+    state.sync.sync_with(&device_id, &addr).await.map_err(sync_err)
+}
+
+// ======================== WinOps Tweak 引擎（M16 W0–W2，docs/impl/08） ========================
+
+/// 组装 WinOps 端口聚合（registry 必备；tasks/services 注册缺失容忍为 None）
+fn winops_ports(state: &HostState) -> Result<
+    (
+        std::sync::Arc<dyn host_core::ports::RegistryOps>,
+        Option<std::sync::Arc<dyn host_core::ports::TaskTogglePort>>,
+        Option<std::sync::Arc<dyn host_core::ports::ServiceCtlPort>>,
+    ),
+    AppError,
+> {
+    let registry = state
+        .ports
+        .get::<dyn host_core::ports::RegistryOps>()
+        .ok_or_else(|| AppError::module("SYS_WINOPS_002", "注册表端口未注册", None))?;
+    let tasks = state.ports.get::<dyn host_core::ports::TaskTogglePort>();
+    let services = state.ports.get::<dyn host_core::ports::ServiceCtlPort>();
+    Ok((registry, tasks, services))
+}
+
+/// 目录清单（内置 + 外置 {appData}/winops/catalog/*.json 覆盖）
+#[tauri::command]
+pub async fn winops_catalog(state: State<'_, HostState>) -> Result<Vec<sys_core::winops::Tweak>, AppError> {
+    let external = state.app_data_dir.join("winops").join("catalog");
+    tauri::async_runtime::spawn_blocking(move || {
+        sys_core::winops::load_catalog(Some(&external))
+    })
+    .await
+    .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
+    .map_err(sys_err)
+}
+
+/// 扫描应用状态（三态：已应用/未应用/需管理员——requires_admin 且非提权进程）
+#[tauri::command]
+pub async fn winops_scan(state: State<'_, HostState>) -> Result<Vec<(sys_core::winops::Tweak, sys_core::winops::ScanState)>, AppError> {
+    let external = state.app_data_dir.join("winops").join("catalog");
+    let (reg, tasks, services) = winops_ports(&state)?;
+    let is_admin = state
+        .ports
+        .get::<dyn host_core::ports::SysProxyPort>()
+        .map(|p| p.is_admin())
+        .unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        let tweaks = sys_core::winops::load_catalog(Some(&external))?;
+        let ports = sys_core::winops::SysPorts {
+            registry: reg.as_ref(),
+            tasks: tasks.as_deref(),
+            services: services.as_deref(),
+        };
+        Ok(sys_core::winops::scan(&ports, &tweaks, is_admin))
+    })
+    .await
+    .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
+    .map_err(sys_err)
+}
+
+/// 判定 tweak 是否需要提权数据面（requires_admin 或含 HKLM registry 动作——W3 Helper 路由契约）
+fn winops_needs_elevation(t: &sys_core::winops::Tweak) -> bool {
+    use sys_core::winops::TweakAction;
+    t.requires_admin
+        || t.actions
+            .iter()
+            .any(|a| matches!(a, TweakAction::Registry { key, .. } if key.starts_with("HKLM")))
+}
+
+/// BAVR 应用（备份 → 写入 → 校验 → 失败补偿；成功后备份落 {appData}/winops/backup.json）
+/// 非提权进程应用需管理员条目：拉起提权 Helper（UAC）→ helper-backed 数据面执行
+#[tauri::command]
+pub async fn winops_apply(id: String, state: State<'_, HostState>) -> Result<sys_core::winops::ApplyReport, AppError> {
+    let external = state.app_data_dir.join("winops").join("catalog");
+    let app_dir = state.app_data_dir.clone();
+    let (reg, tasks, services) = winops_ports(&state)?;
+    let helper_spawn = state.ports.get::<dyn host_core::ports::HelperSpawnPort>();
+    let is_admin = state
+        .ports
+        .get::<dyn host_core::ports::SysProxyPort>()
+        .map(|p| p.is_admin())
+        .unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        let tweaks = sys_core::winops::load_catalog(Some(&external)).map_err(sys_err)?;
+        let tweak = tweaks
+            .into_iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| sys_core::SysError::Catalog(format!("Tweak {id} 不存在")))
+            .map_err(sys_err)?;
+        let report = if winops_needs_elevation(&tweak) && !is_admin {
+            // 提权数据面：HKLM registry → helper；HKCU → 本地；Service/Task → helper
+            let spawner = helper_spawn.ok_or_else(|| {
+                AppError::module("SYS_HELPER_006", "HelperSpawnPort 未注册", None)
+            })?;
+            crate::winops_helper::ensure_up(spawner.as_ref())?;
+            let routing = crate::winops_helper::RoutingRegistry::new(reg.clone());
+            let ports = sys_core::winops::SysPorts {
+                registry: &routing,
+                tasks: Some(&crate::winops_helper::HelperTasks),
+                services: Some(&crate::winops_helper::HelperServices),
+            };
+            sys_core::winops::apply(&ports, &tweak, true).map_err(sys_err)?
+        } else {
+            let ports = sys_core::winops::SysPorts {
+                registry: reg.as_ref(),
+                tasks: tasks.as_deref(),
+                services: services.as_deref(),
+            };
+            sys_core::winops::apply(&ports, &tweak, is_admin).map_err(sys_err)?
+        };
+        sys_core::winops::BackupStore::open(&app_dir).save(&report).map_err(sys_err)?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
+}
+
+/// 回滚到最近一次 apply 前的状态（备份含 HKLM/服务/任务且非提权 → helper-backed 数据面）
+#[tauri::command]
+pub async fn winops_rollback(id: String, state: State<'_, HostState>) -> Result<(), AppError> {
+    let app_dir = state.app_data_dir.clone();
+    let (reg, tasks, services) = winops_ports(&state)?;
+    let helper_spawn = state.ports.get::<dyn host_core::ports::HelperSpawnPort>();
+    let is_admin = state
+        .ports
+        .get::<dyn host_core::ports::SysProxyPort>()
+        .map(|p| p.is_admin())
+        .unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || -> sys_core::Result<()> {
+        let store = sys_core::winops::BackupStore::open(&app_dir);
+        let backup = store.take(&id);
+        if backup.is_empty() {
+            return Err(sys_core::SysError::Catalog(format!("Tweak {id} 无备份可回滚")));
+        }
+        if crate::winops_helper::backup_needs_elevation(&backup) && !is_admin {
+            let spawner = helper_spawn
+                .ok_or_else(|| sys_core::SysError::Apply("HelperSpawnPort 未注册".into()))?;
+            // 闭包错误类型为 SysError：AppError 转入 Apply 文案
+            crate::winops_helper::ensure_up(spawner.as_ref())
+                .map_err(|e| sys_core::SysError::Apply(e.to_string()))?;
+            let routing = crate::winops_helper::RoutingRegistry::new(reg.clone());
+            let ports = sys_core::winops::SysPorts {
+                registry: &routing,
+                tasks: Some(&crate::winops_helper::HelperTasks),
+                services: Some(&crate::winops_helper::HelperServices),
+            };
+            sys_core::winops::restore_backup(&ports, &backup)
+        } else {
+            let ports = sys_core::winops::SysPorts {
+                registry: reg.as_ref(),
+                tasks: tasks.as_deref(),
+                services: services.as_deref(),
+            };
+            sys_core::winops::restore_backup(&ports, &backup)
+        }
+    })
+    .await
+    .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
+    .map_err(sys_err)
+}

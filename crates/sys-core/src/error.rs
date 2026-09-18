@@ -12,10 +12,16 @@ pub enum SysError {
     PkgCmd(String),
     #[error("清理目标不存在: {0}")]
     CleanTarget(String),
+    #[error("WinOps 目录错误: {0}")]
+    Catalog(String),
+    #[error("WinOps 注册表错误: {0}")]
+    Registry(String),
+    #[error("WinOps 应用失败: {0}")]
+    Apply(String),
 }
 
 impl SysError {
-    /// 映射 SYS_* 错误码（docs/impl/06 SY 各步骤）
+    /// 映射 SYS_* 错误码（docs/impl/06 SY 各步骤 + docs/impl/08 WinOps）
     pub fn code(&self) -> &'static str {
         match self {
             SysError::Io(_) => "SYS_PKG_001",
@@ -23,6 +29,9 @@ impl SysError {
             SysError::PkgUnavailable(_) => "SYS_PKG_003",
             SysError::PkgCmd(_) => "SYS_PKG_004",
             SysError::CleanTarget(_) => "SYS_CLEAN_001",
+            SysError::Catalog(_) => "SYS_WINOPS_001",
+            SysError::Registry(_) => "SYS_WINOPS_002",
+            SysError::Apply(_) => "SYS_WINOPS_003",
         }
     }
 }

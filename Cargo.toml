@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core", "crates/vault-core", "crates/file-core", "crates/proxy-core", "crates/desktop-core", "crates/editor-core", "crates/notes-core", "crates/term-core", "crates/sys-core"]
+members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/nexusforge-helper", "crates/clipboard-core", "crates/screenshot-core", "crates/ocr-core", "crates/kvm-core", "crates/vault-core", "crates/file-core", "crates/proxy-core", "crates/desktop-core", "crates/editor-core", "crates/notes-core", "crates/term-core", "crates/sys-core", "crates/automation-core", "crates/sync-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -45,6 +45,9 @@ sha1 = "0.10"
 encoding_rs = "0.8"
 chardetng = "0.1"
 lopdf = { version = "0.36", default-features = false }
+
+# automation-core（docs/impl/07 A5）：WASM 插件沙箱（fuel + 内存限额；wat feature 供测试直接写 wat 样本）
+wasmtime = { version = "29", default-features = false, features = ["cranelift", "runtime", "wat"] }
 
 # 发布配置（docs/impl/07 PERF2，阶段四启用前先保持默认可调试）
 [profile.dev]

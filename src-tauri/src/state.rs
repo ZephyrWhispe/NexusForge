@@ -11,8 +11,8 @@ use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
     CapturePort, ClipboardPort, ConptyPort, CryptoPort, DockerPipePort, HotkeyWinPort, InputHookPort,
-    InputInjectPort, OcrPort, PerfPort, Ports, RecycleBinPort, ScreenInfoPort, ShellPort, SysProxyPort,
-    ThumbPort, UsnIndexPort,
+    InputInjectPort, OcrPort, PerfPort, Ports, RecycleBinPort, RegistryOps, ScreenInfoPort, ServiceCtlPort,
+    ShellPort, SysProxyPort, TaskSchdPort, TaskTogglePort, ThumbPort, UsnIndexPort, HelperSpawnPort,
 };
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
@@ -25,10 +25,12 @@ use win_integration::ocr::WinOcr;
 use win_integration::shell::ShellOps;
 use win_integration::sysproxy::WindowsSysProxy;
 
+use automation_core::module::AutomationModule;
 use clipboard_core::module::ClipboardModule;
 use desktop_core::DesktopModule;
 use editor_core::EditorModule;
 use notes_core::NotesModule;
+use sync_core::SyncModule;
 use sys_core::SysModule;
 use term_core::TermModule;
 use file_core::FileModule;
@@ -44,14 +46,23 @@ pub struct StartupOptions {
     pub safe_mode: bool,
     /// `--restore-proxy`：紧急还原系统代理后退出（真实实现在 lib.rs，PR4 接入）
     pub restore_proxy: bool,
+    /// `--run-rule {id}`：Task Scheduler 触发的独立规则执行（A4，docs/impl/07）
+    pub run_rule: Option<String>,
 }
 
 impl StartupOptions {
     pub fn from_env() -> Self {
         let args: Vec<String> = std::env::args().collect();
+        // --run-rule {id}：取下一个参数
+        let run_rule = args
+            .iter()
+            .position(|a| a == "--run-rule")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
         Self {
             safe_mode: args.iter().any(|a| a == "--safe-mode"),
             restore_proxy: args.iter().any(|a| a == "--restore-proxy"),
+            run_rule,
         }
     }
 }
@@ -76,6 +87,8 @@ pub struct HostState {
     pub notes: Arc<NotesModule>,
     pub term: Arc<TermModule>,
     pub sys: Arc<SysModule>,
+    pub automation: Arc<AutomationModule>,
+    pub sync: Arc<SyncModule>,
     pub app_data_dir: PathBuf,
     pub safe_mode: bool,
 }
@@ -121,6 +134,15 @@ impl HostState {
         ports.register::<dyn PerfPort>(Arc::new(win_integration::perf::PdhWin::new()?));
         // T6 Docker Engine named pipe（docs/impl/06 T6）
         ports.register::<dyn DockerPipePort>(Arc::new(win_integration::docker::DockerPipeWin::new()));
+        // A4 Task Scheduler（automation-core，docs/impl/07）：schtasks 封装
+        ports.register::<dyn TaskSchdPort>(Arc::new(win_integration::taskschd::TaskSchdOps::new()));
+        // WinOps W0 注册表数据面（docs/impl/08）：HKCU 进程内直写
+        ports.register::<dyn RegistryOps>(Arc::new(win_integration::registry::RegistryOpsWin::new()));
+        // WinOps W2 扩展数据面：计划任务启停 + 服务控制（同一个 TaskSchdOps 实现两 trait）
+        ports.register::<dyn TaskTogglePort>(Arc::new(win_integration::taskschd::TaskSchdOps::new()));
+        ports.register::<dyn ServiceCtlPort>(Arc::new(win_integration::service::ServiceOps::new()));
+        // WinOps W3 提权 Helper 拉起（docs/impl/08 §4）：ShellExecuteExW runas → UAC
+        ports.register::<dyn HelperSpawnPort>(Arc::new(win_integration::helper::HelperSpawnWin::new()));
         // PR4 系统代理（proxy-core，docs/impl/05 PR）：注册表 + WinINET 广播
         let sys_proxy: Arc<dyn SysProxyPort> = Arc::new(WindowsSysProxy);
         ports.register::<dyn SysProxyPort>(sys_proxy.clone());
@@ -203,6 +225,17 @@ impl HostState {
         config.register_schema("sys", sys.config_schema());
         registry.register(sys.clone())?;
 
+        // ---- 阶段四自动化（M14，docs/impl/07 A1–A3）----
+        let automation = Arc::new(AutomationModule::new(&app_data_dir));
+        config.register_schema("automation", automation.config_schema());
+        registry.register(automation.clone())?;
+
+        // ---- 阶段四同步（M15，docs/impl/07 SYNC1–SYNC4）：信任根复用 KVM 配对 ----
+        let sync = Arc::new(SyncModule::new(&app_data_dir));
+        sync.attach_applier(Arc::new(NotesApplier { notes: notes.clone() }));
+        config.register_schema("sync", sync.config_schema());
+        registry.register(sync.clone())?;
+
         Ok(Self {
             bus,
             ports,
@@ -221,6 +254,8 @@ impl HostState {
             notes,
             term,
             sys,
+            automation,
+            sync,
             app_data_dir,
             safe_mode: opts.safe_mode,
         })
@@ -319,4 +354,49 @@ pub struct ModuleStatusDto {
     pub version: String,
     pub priority: u8,
     pub state: ModuleState,
+}
+
+/// SYNC 变更应用器（docs/impl/07 SYNC2）：notes-core NoteLibrary 投影。
+/// 动态取 library（NotesModule::init 后可用）；apply 走直调不发 notes.changed（防同步自环）。
+struct NotesApplier {
+    notes: Arc<NotesModule>,
+}
+
+impl sync_core::ChangeApplier for NotesApplier {
+    fn snapshot(&self, entity: &str, entity_id: &str) -> sync_core::Result<Option<serde_json::Value>> {
+        if entity != "note" {
+            return Ok(None);
+        }
+        let Some(lib) = self.notes.library() else { return Ok(None) };
+        match lib.read(entity_id) {
+            Ok((content, meta)) => Ok(Some(serde_json::json!({ "content": content, "title": meta.title }))),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn apply_upsert(&self, entity: &str, entity_id: &str, value: &serde_json::Value) -> sync_core::Result<()> {
+        if entity != "note" {
+            return Err(sync_core::SyncError::Apply(format!("未知数据集 {entity}（v1 仅 note）")));
+        }
+        let Some(lib) = self.notes.library() else {
+            return Err(sync_core::SyncError::NotReady("笔记库未就绪".into()));
+        };
+        let content = value.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        // 存在 → write；不存在 → create（远端新建的笔记）
+        let exists = lib.read(entity_id).is_ok();
+        let r = if exists { lib.write(entity_id, content) } else { lib.create(entity_id, content).map(|_| ()) };
+        r.map_err(|e| sync_core::SyncError::Apply(e.to_string()))
+    }
+
+    fn apply_delete(&self, entity: &str, entity_id: &str) -> sync_core::Result<()> {
+        if entity != "note" {
+            return Err(sync_core::SyncError::Apply(format!("未知数据集 {entity}（v1 仅 note）")));
+        }
+        let Some(lib) = self.notes.library() else {
+            return Err(sync_core::SyncError::NotReady("笔记库未就绪".into()));
+        };
+        // 已不存在视为成功（幂等）
+        let _ = lib.delete(entity_id);
+        Ok(())
+    }
 }

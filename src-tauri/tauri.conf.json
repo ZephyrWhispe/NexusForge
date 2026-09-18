@@ -32,6 +32,24 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "installerHooks": "./windows/installer.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_TAURI_SIGNING_PUBKEY_AT_RELEASE",
+      "endpoints": [
+        "https://github.com/ZephyrWhispe/NexusForge/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

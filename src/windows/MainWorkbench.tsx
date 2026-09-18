@@ -1,21 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
-import { makeStyles, tokens, Text, Badge } from "@fluentui/react-components";
+import { useCallback, useEffect, useState, lazy, Suspense } from "react";
+import { makeStyles, tokens, Text, Badge, Spinner } from "@fluentui/react-components";
 import TitleBar from "../layout/TitleBar";
 import Toolbar from "../layout/Toolbar";
 import ModuleNav from "../layout/ModuleNav";
 import SubNav from "../layout/SubNav";
 import StatusBar from "../layout/StatusBar";
 import MicaBackdrop from "../layout/MicaBackdrop";
+// PERF3（docs/impl/07）：路由级代码分割——首屏只加载宿主框架 + 默认模块（ClipboardPanel），
+// 其余模块（含 Monaco/xterm 等重依赖）按需分 chunk；子窗口（launcher/notebar/overlay）本就动态 import
 import ClipboardPanel from "../modules/clipboard/ClipboardPanel";
-import KvmPanel from "../modules/kvm/KvmPanel";
-import VaultPanel from "../modules/vault/VaultPanel";
-import FilePanel from "../modules/file/FilePanel";
-import ProxyPanel from "../modules/proxy/ProxyPanel";
-import DesktopPanel from "../modules/desktop/DesktopPanel";
-import EditorPanel from "../modules/editor/EditorPanel";
-import NotesPanel from "../modules/notes/NotesPanel";
-import TerminalPanel from "../modules/term/TerminalPanel";
-import SysPanel from "../modules/sys/SysPanel";
+const KvmPanel = lazy(() => import("../modules/kvm/KvmPanel"));
+const VaultPanel = lazy(() => import("../modules/vault/VaultPanel"));
+const FilePanel = lazy(() => import("../modules/file/FilePanel"));
+const ProxyPanel = lazy(() => import("../modules/proxy/ProxyPanel"));
+const DesktopPanel = lazy(() => import("../modules/desktop/DesktopPanel"));
+const EditorPanel = lazy(() => import("../modules/editor/EditorPanel"));
+const NotesPanel = lazy(() => import("../modules/notes/NotesPanel"));
+const TerminalPanel = lazy(() => import("../modules/term/TerminalPanel"));
+const SysPanel = lazy(() => import("../modules/sys/SysPanel"));
+const RulesPanel = lazy(() => import("../modules/automation/RulesPanel"));
+const SyncPanel = lazy(() => import("../modules/sync/SyncPanel"));
 import { toggleLauncher } from "./launcherController";
 import { toggleNoteBar } from "./notebarController";
 import SchemaForm from "../settings/SchemaForm";
@@ -68,7 +72,22 @@ const useStyles = makeStyles({
     textAlign: "center",
     color: tokens.colorNeutralForeground3,
   },
+  loading: {
+    flex: 1,
+    display: "grid",
+    placeItems: "center",
+  },
 });
+
+/** lazy 模块加载占位（PERF3 代码分割 fallback） */
+function ModuleLoading() {
+  const styles = useStyles();
+  return (
+    <div className={styles.loading} aria-label="模块加载中">
+      <Spinner size="large" label="加载模块…" labelPosition="below" />
+    </div>
+  );
+}
 
 export default function MainWorkbench() {
   const styles = useStyles();
@@ -139,6 +158,8 @@ export default function MainWorkbench() {
   const isNotes = active === "notes";
   const isTerm = active === "term";
   const isSys = active === "sys";
+  const isAutomation = active === "automation";
+  const isSync = active === "sync";
   const isSettings = active === "__settings";
 
   return (
@@ -187,40 +208,52 @@ export default function MainWorkbench() {
                                       ? "ConPTY 终端 · WSL · SSH/SFTP（TOFU） · Docker"
                                       : isSys
                                         ? "资源监控 · 系统清理（白名单） · winget/scoop/choco"
-                                        : `${current?.phase} 模块将在对应阶段交付`}
+                                        : isAutomation
+                                          ? "事件/定时规则 · 受限条件求值 · 死信重放 · 防风暴冷却"
+                                          : isSync
+                                            ? "局域网 P2P · 复用配对信任根 · E2E 加密 · LWW 冲突"
+                                            : `${current?.phase} 模块将在对应阶段交付`}
                   </span>
                 </div>
                 {isClipboard ? (
                   <ClipboardPanel search={search} group={group} onCounts={onCounts} />
-                ) : isKvm ? (
-                  <KvmPanel />
-                ) : isVault ? (
-                  <VaultPanel />
-                ) : isFile ? (
-                  <FilePanel />
-                ) : isProxy ? (
-                  <ProxyPanel />
-                ) : isDesktop ? (
-                  <DesktopPanel />
-                ) : isEditor ? (
-                  <EditorPanel />
-                ) : isNotes ? (
-                  <NotesPanel />
-                ) : isTerm ? (
-                  <TerminalPanel />
-                ) : isSys ? (
-                  <SysPanel />
                 ) : (
-                  <div className={styles.empty}>
-                    <div>
-                      <Text size={400} weight="semibold" block>
-                        模块界面待实现
-                      </Text>
-                      <Text size={300} block style={{ marginTop: "8px" }}>
-                        架构与接口已定义于 docs/impl/ 对应文档
-                      </Text>
-                    </div>
-                  </div>
+                  <Suspense fallback={<ModuleLoading />}>
+                    {isKvm ? (
+                      <KvmPanel />
+                    ) : isVault ? (
+                      <VaultPanel />
+                    ) : isFile ? (
+                      <FilePanel />
+                    ) : isProxy ? (
+                      <ProxyPanel />
+                    ) : isDesktop ? (
+                      <DesktopPanel />
+                    ) : isEditor ? (
+                      <EditorPanel />
+                    ) : isNotes ? (
+                      <NotesPanel />
+                    ) : isTerm ? (
+                      <TerminalPanel />
+                    ) : isSys ? (
+                      <SysPanel />
+                    ) : isAutomation ? (
+                      <RulesPanel />
+                    ) : isSync ? (
+                      <SyncPanel />
+                    ) : (
+                      <div className={styles.empty}>
+                        <div>
+                          <Text size={400} weight="semibold" block>
+                            模块界面待实现
+                          </Text>
+                          <Text size={300} block style={{ marginTop: "8px" }}>
+                            架构与接口已定义于 docs/impl/ 对应文档
+                          </Text>
+                        </div>
+                      </div>
+                    )}
+                  </Suspense>
                 )}
               </>
             )}

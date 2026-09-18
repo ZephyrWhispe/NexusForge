@@ -23,7 +23,8 @@ export const MODULES: ModuleDef[] = [
   { id: "notes", name: "笔记与知识", phase: "P2", running: true },
   { id: "term", name: "终端与运维", phase: "P2", running: true },
   { id: "sys", name: "系统管理", phase: "P2", running: true },
-  { id: "automation", name: "自动化与拓展", phase: "P2" },
+  { id: "automation", name: "自动化与拓展", phase: "P2", running: true },
+  { id: "sync", name: "跨设备同步", phase: "P2", running: true },
 ];
 
 export const MODULE_GROUPS: { label: string; phase: ModulePhase }[] = [

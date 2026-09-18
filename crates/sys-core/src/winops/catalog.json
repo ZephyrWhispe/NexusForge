@@ -1,0 +1,232 @@
+{
+  "tweaks": [
+    {
+      "id": "taskbar_hide_widgets",
+      "name": "隐藏任务栏小组件",
+      "category": "taskbar",
+      "description": "移除任务栏左侧的天气/资讯小组件按钮（Win11 22000+）",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+          "value_name": "TaskbarDa",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        }
+      ]
+    },
+    {
+      "id": "taskbar_hide_chat",
+      "name": "隐藏任务栏聊天图标",
+      "category": "taskbar",
+      "description": "移除任务栏 Teams 聊天图标（Win11 22000+）",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+          "value_name": "TaskbarMn",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        }
+      ]
+    },
+    {
+      "id": "start_hide_recommendations",
+      "name": "隐藏开始菜单推荐项目",
+      "category": "start_menu",
+      "description": "关闭开始菜单「推荐的项目/最近添加」区块",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+          "value_name": "Start_IrisRecommendations",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        }
+      ]
+    },
+    {
+      "id": "search_disable_bing_suggestions",
+      "name": "关闭搜索框 Bing 网络建议",
+      "category": "search",
+      "description": "搜索框不再联网展示 Bing 建议（仅本地结果）",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Search",
+          "value_name": "DisableSearchBoxSuggestions",
+          "value_type": "dword",
+          "data": { "dword": 1 }
+        }
+      ]
+    },
+    {
+      "id": "explorer_show_file_extensions",
+      "name": "资源管理器显示文件扩展名",
+      "category": "explorer",
+      "description": "隐藏已知文件类型的扩展名选项关闭",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+          "value_name": "HideFileExt",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        }
+      ]
+    },
+    {
+      "id": "privacy_ad_id_off",
+      "name": "关闭广告 ID 个性化推荐",
+      "category": "privacy",
+      "description": "关闭广告标识符与内容投递管理器的个性化推荐/静默安装应用（HKCU，即时生效）",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo",
+          "value_name": "Enabled",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        },
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+          "value_name": "SilentInstalledAppsEnabled",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        },
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+          "value_name": "SubscribedContent-338387Enabled",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        },
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+          "value_name": "SubscribedContent-338388Enabled",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        },
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+          "value_name": "SubscribedContent-338389Enabled",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        }
+      ]
+    },
+    {
+      "id": "privacy_activity_history_off",
+      "name": "关闭活动历史记录上报",
+      "category": "privacy",
+      "description": "停止收集/上传用户活动时间线（HKCU 策略键）",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Policies\\Microsoft\\Windows\\System",
+          "value_name": "EnableActivityFeed",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        },
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Policies\\Microsoft\\Windows\\System",
+          "value_name": "PublishUserActivities",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        },
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Policies\\Microsoft\\Windows\\System",
+          "value_name": "UploadUserActivities",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        }
+      ]
+    },
+    {
+      "id": "privacy_copilot_off",
+      "name": "关闭 Windows Copilot",
+      "category": "privacy",
+      "description": "通过 HKCU 策略键隐藏任务栏 Copilot 按钮并禁用 Copilot（Win11 23H2）",
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+          "value_name": "TurnOffWindowsCopilot",
+          "value_type": "dword",
+          "data": { "dword": 1 }
+        },
+        {
+          "type": "registry",
+          "key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+          "value_name": "ShowCopilotButton",
+          "value_type": "dword",
+          "data": { "dword": 0 }
+        }
+      ]
+    },
+    {
+      "id": "privacy_recall_off",
+      "name": "关闭 Recall（Windows AI 回顾）",
+      "category": "privacy",
+      "description": "通过 HKLM 策略键禁用 Recall 的 AI 快照分析（Win11 24H2 Copilot+ PC）。需管理员权限：应用时将弹出 UAC 授权，由提权辅助进程写入",
+      "requires_admin": true,
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI",
+          "value_name": "DisableAIDataAnalysis",
+          "value_type": "dword",
+          "data": { "dword": 1 }
+        }
+      ]
+    },
+    {
+      "id": "privacy_diagtrack_off",
+      "name": "禁用诊断跟踪服务（DiagTrack）",
+      "category": "privacy",
+      "description": "将 Connected User Experiences and Telemetry 服务启动类型改为禁用。需管理员权限；修改系统服务可能影响遥测相关的官方诊断能力",
+      "requires_admin": true,
+      "actions": [
+        {
+          "type": "service",
+          "name": "DiagTrack",
+          "start_type": "disabled"
+        }
+      ]
+    },
+    {
+      "id": "privacy_telemetry_tasks_off",
+      "name": "禁用遥测相关计划任务",
+      "category": "privacy",
+      "description": "禁用兼容性数据收集（Compatibility Appraiser/ProgramDataUpdater）与客户体验改善计划（Consolidator/UsbCeip）四个系统计划任务。需管理员权限；系统更新可能重新启用",
+      "requires_admin": true,
+      "actions": [
+        {
+          "type": "task",
+          "path": "\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser",
+          "enabled": false
+        },
+        {
+          "type": "task",
+          "path": "\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater",
+          "enabled": false
+        },
+        {
+          "type": "task",
+          "path": "\\Microsoft\\Windows\\Customer Experience Improvement Program\\Consolidator",
+          "enabled": false
+        },
+        {
+          "type": "task",
+          "path": "\\Microsoft\\Windows\\Customer Experience Improvement Program\\UsbCeip",
+          "enabled": false
+        }
+      ]
+    }
+  ]
+}

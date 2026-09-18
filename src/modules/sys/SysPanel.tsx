@@ -18,10 +18,14 @@ import {
   sysPkgCmdPreview,
   sysPkgList,
   sysPkgSources,
+  winopsApply,
+  winopsRollback,
+  winopsScan,
   type CleanScanItemDto,
   type MetricsPointDto,
   type PkgEntryDto,
   type PkgSourceDto,
+  type WinopsScanItemDto,
 } from "../../ipc/client";
 
 /**
@@ -107,7 +111,7 @@ const useStyles = makeStyles({
   },
 });
 
-type TabId = "monitor" | "clean" | "pkg";
+type TabId = "monitor" | "clean" | "pkg" | "tweaks";
 
 /** SVG 折线（0-100 量程或自动） */
 function Spark({ values, color, label, fmt }: { values: number[]; color: string; label: string; fmt?: (v: number) => string }) {
@@ -154,6 +158,11 @@ export default function SysPanel() {
   const [pkgsLoading, setPkgsLoading] = useState(false);
   const [pending, setPending] = useState<{ source: string; action: string; id: string; cmd: string } | null>(null);
   const [output, setOutput] = useState<string[]>([]);
+
+  // ---- 系统调整（WinOps Tweak，M16 W1）----
+  const [tweaks, setTweaks] = useState<WinopsScanItemDto[]>([]);
+  const [tweaksLoading, setTweaksLoading] = useState(false);
+  const [busyTweak, setBusyTweak] = useState<string | null>(null);
 
   // 事件驱动：sys.metrics 1s 推送
   useEffect(() => {
@@ -256,6 +265,53 @@ export default function SysPanel() {
     }
   }, [pending, loadPkgs, fail]);
 
+  // ---- 系统调整（WinOps）----
+  const doTweakScan = useCallback(async () => {
+    setTweaksLoading(true);
+    setErr(null);
+    try {
+      setTweaks(await winopsScan());
+    } catch (e) {
+      fail(e);
+    } finally {
+      setTweaksLoading(false);
+    }
+  }, [fail]);
+
+  const doTweakApply = useCallback(
+    async (id: string) => {
+      setBusyTweak(id);
+      setErr(null);
+      try {
+        await winopsApply(id);
+        setMsg(`已应用（原值已备份，可回滚）`);
+        await doTweakScan();
+      } catch (e) {
+        fail(e);
+      } finally {
+        setBusyTweak(null);
+      }
+    },
+    [doTweakScan, fail],
+  );
+
+  const doTweakRollback = useCallback(
+    async (id: string) => {
+      setBusyTweak(id);
+      setErr(null);
+      try {
+        await winopsRollback(id);
+        setMsg("已回滚到最近一次应用前的状态");
+        await doTweakScan();
+      } catch (e) {
+        fail(e);
+      } finally {
+        setBusyTweak(null);
+      }
+    },
+    [doTweakScan, fail],
+  );
+
   const cpuSeries = history.map((p) => p.cpu);
   const memSeries = history.map((p) => (p.mem_total ? (p.mem_used / p.mem_total) * 100 : 0));
   const netSeries = history.map((p) => p.net_bps / 1024);
@@ -280,6 +336,9 @@ export default function SysPanel() {
         </button>
         <button className={`${styles.tab} ${tab === "pkg" ? styles.tabActive : ""}`} onClick={() => setTab("pkg")}>
           包管理
+        </button>
+        <button className={`${styles.tab} ${tab === "tweaks" ? styles.tabActive : ""}`} onClick={() => setTab("tweaks")}>
+          系统调整
         </button>
       </div>
 
@@ -455,6 +514,77 @@ export default function SysPanel() {
           {output.length > 0 && (
             <div className={styles.log}>{output.slice(-30).join("\n")}</div>
           )}
+        </div>
+      )}
+
+      {tab === "tweaks" && (
+        <div className={styles.section}>
+          <div className={styles.row}>
+            <Button appearance="primary" size="small" onClick={() => void doTweakScan()}>
+              {tweaksLoading ? "扫描中…" : "扫描"}
+            </Button>
+            {tweaksLoading && <Spinner size="tiny" />}
+            <Text className={styles.muted}>
+              BAVR 语义：应用前自动备份原值 · 校验失败自动回滚 · 回滚恢复最近一次应用前的状态
+            </Text>
+          </div>
+          <div className={styles.list}>
+            {tweaks.map(([t, state]) => (
+              <div key={t.id} className={styles.item}>
+                <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                  <Text size={200} weight="semibold">
+                    {t.name}
+                    <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
+                      {t.category}
+                    </Badge>
+                    {state === "applied" && (
+                      <Badge size="small" appearance="filled" color="success" style={{ marginLeft: 6 }}>
+                        已应用
+                      </Badge>
+                    )}
+                    {state === "not_applied" && (
+                      <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
+                        未应用
+                      </Badge>
+                    )}
+                    {state === "needs_admin" && (
+                      <Badge size="small" appearance="filled" color="warning" style={{ marginLeft: 6 }}>
+                        需管理员
+                      </Badge>
+                    )}
+                  </Text>
+                  {t.description && (
+                    <Text size={100} className={styles.muted}>
+                      {t.description}
+                    </Text>
+                  )}
+                </div>
+                {state === "not_applied" && (
+                  <Button
+                    size="small"
+                    appearance="primary"
+                    disabled={busyTweak !== null}
+                    onClick={() => void doTweakApply(t.id)}
+                  >
+                    {busyTweak === t.id ? "应用中…" : "应用"}
+                  </Button>
+                )}
+                {state !== "not_applied" && (
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    disabled={busyTweak !== null}
+                    onClick={() => void doTweakRollback(t.id)}
+                  >
+                    {busyTweak === t.id ? "处理中…" : "回滚"}
+                  </Button>
+                )}
+              </div>
+            ))}
+            {!tweaksLoading && tweaks.length === 0 && (
+              <Text className={styles.muted}>点击「扫描」检查各调整项的当前状态（目录支持外置扩展：{`{appData}/winops/catalog/*.json`}）</Text>
+            )}
+          </div>
         </div>
       )}
     </div>

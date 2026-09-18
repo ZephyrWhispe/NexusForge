@@ -60,7 +60,16 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("term.exit", "终端会话结束。payload: {session_id, code?}"),
     ("sys.metrics", "系统资源采样（1s 节流）。payload: {ts_ms, cpu, mem_used, mem_total, net_bps, disks}"),
     ("sys.pkg_line", "包管理器命令输出行。payload: {source, action, line}"),
+    ("automation.notify", "自动化规则前端通知。payload: {rule_id, title, body}"),
+    ("automation.rule_fired", "规则已触发。payload: {rule_id, rule_name}"),
+    ("sync.state_changed", "跨设备同步状态。payload: {pushed, pulled_applied, pulled_lost, conflicts}"),
+    ("sync.conflict", "同步冲突（LWW 本地胜出被覆盖/对端胜出）。payload: {entity, entity_id, winner_device, ts}"),
 ];
+
+/// 按名取静态主题（仅编译期登记主题可发布——总线契约；模块层发布入口）
+pub fn topic(name: &str) -> Option<&'static str> {
+    TOPIC_REGISTRY.iter().find(|(t, _)| *t == name).map(|(t, _)| *t)
+}
 
 /// 统一事件信封（前端收到格式与此一致，M1 冻结契约）
 #[derive(Clone, Debug, Serialize)]

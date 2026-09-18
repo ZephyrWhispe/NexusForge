@@ -12,6 +12,7 @@ pub mod error;
 pub mod metrics;
 pub mod module;
 pub mod pkg;
+pub mod winops;
 
 pub use error::{Result, SysError};
 pub use metrics::{MetricsBuffer, MetricsPoint};

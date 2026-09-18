@@ -216,6 +216,97 @@ pub trait ShellPort: Port {
     fn shell_execute(&self, path: &str) -> Result<(), AppError>;
 }
 
+/// Windows Task Scheduler（automation-core A4，docs/impl/07）：schtasks 封装
+/// 注册任务以当前用户运行（v1 不用 /RL HIGHEST——需要最高权限的任务才标 UAC 盾）
+pub trait TaskSchdPort: Port {
+    /// 注册每日任务（存在则 /F 覆盖）；time 格式 HH:MM
+    fn ensure_daily(&self, task_name: &str, exe: &str, args: &str, time: &str) -> Result<(), AppError>;
+    /// 删除任务（不存在视为成功——幂等）
+    fn remove(&self, task_name: &str) -> Result<(), AppError>;
+    /// 列出本应用注册的任务名（按前缀过滤）
+    fn list(&self) -> Result<Vec<String>, AppError>;
+}
+
+/// 注册表窄操作（docs/impl/08 WinOps W0：BAVR 引擎数据面）。
+/// 路由契约：HKCU 由本进程实现直写；HKLM 需提权 Helper（未实现前 catalog 全 HKCU）。
+pub trait RegistryOps: Port {
+    /// 读值（existed=false 表示值不存在——备份语义区分"原值不存在"与"原值为空"）
+    fn read_value(&self, key: &str, value_name: &str) -> Result<(RegValue, bool), AppError>;
+    /// 写值（key 不存在时自动创建）
+    fn write_value(&self, key: &str, value_name: &str, value: &RegValue) -> Result<(), AppError>;
+    /// 删除值（restore 用：原值不存在则恢复为"不存在"）
+    fn delete_value(&self, key: &str, value_name: &str) -> Result<(), AppError>;
+}
+
+/// 注册表值数据（BAVR 备份/恢复的载荷；snake_case 外部标签：{"dword": 0} / {"str": "x"}）
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegValue {
+    Dword(u32),
+    Qword(u64),
+    Str(String),
+}
+
+// ---------------------------------------------------------------------------
+// WinOps W2 扩展数据面（docs/impl/08）：计划任务启停 + 服务控制
+// ---------------------------------------------------------------------------
+
+/// 计划任务启停（WinOps Task 动作；复用 schtasks 命令行，与 TaskSchdPort 同层）
+pub trait TaskTogglePort: Port {
+    /// 查询任务启用状态：None = 任务不存在（备份区分"不存在"与"禁用"）
+    fn query_enabled(&self, path: &str) -> Result<Option<bool>, AppError>;
+    /// 设置启用/禁用（任务不存在时报错）
+    fn set_enabled(&self, path: &str, enabled: bool) -> Result<(), AppError>;
+}
+
+/// 服务启动类型（WinOps Service 动作；修改需管理员——非提权进程返回 ACCESS_DENIED）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartType {
+    Auto,
+    Manual,
+    Disabled,
+}
+
+/// 服务查询快照（BAVR 备份/verify 数据面）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceInfo {
+    pub name: String,
+    pub start_type: StartType,
+    pub running: bool,
+}
+
+/// 服务控制（sc.exe 封装；v1 仅 start_type 三态，stop/start 延后）
+pub trait ServiceCtlPort: Port {
+    fn query(&self, name: &str) -> Result<ServiceInfo, AppError>;
+    fn set_start_type(&self, name: &str, st: StartType) -> Result<(), AppError>;
+}
+
+// ---------------------------------------------------------------------------
+// 提权 Helper（docs/impl/08 §4 W3）：HKLM/服务/系统任务经提权进程执行
+// ---------------------------------------------------------------------------
+
+/// 提权 Helper 启动规格（§4.1：管道名 + token + 父进程三元组）
+#[derive(Clone, Debug)]
+pub struct HelperSpec {
+    /// 命名管道全名（`\\.\pipe\nexusforge-sys-helper-v1-{parent_pid}`）
+    pub pipe_name: String,
+    /// 握手 token（64 hex；经环境变量 NF_HELPER_TOKEN 注入，spawn 后立即清除）
+    pub token: String,
+    /// 主进程 PID（helper 派生管道名 + 校验调用方镜像路径）
+    pub parent_pid: u32,
+    /// helper exe 全路径（必须与主 exe 同目录——bundle 纪律）
+    pub helper_exe: PathBuf,
+    /// 空闲自退秒数（无请求超时退出）
+    pub idle_exit_secs: u32,
+}
+
+/// 提权 Helper 拉起（win-integration：ShellExecuteExW runas → UAC 弹窗）
+pub trait HelperSpawnPort: Port {
+    /// 提权拉起 helper；返回 helper PID（0 = 系统未回传句柄，握手重试兜底）
+    fn spawn(&self, spec: &HelperSpec) -> Result<u32, AppError>;
+}
+
 /// Docker Engine HTTP over named pipe 响应（docs/impl/06 T6）
 #[derive(Clone, Debug)]
 pub struct HttpResp {

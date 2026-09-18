@@ -10,15 +10,20 @@
 //! - Windows.Graphics.Capture（录屏，03 P7）：后续迭代
 
 pub mod accent;
+pub mod admin;
 pub mod capture;
 pub mod clipboard;
 pub mod conpty;
 pub mod docker;
 pub mod dpapi;
+pub mod helper;
 pub mod hotkey;
 pub mod input;
 pub mod ocr;
 pub mod perf;
+pub mod registry;
+pub mod service;
 pub mod shell;
 pub mod sysproxy;
+pub mod taskschd;
 pub mod usn;
