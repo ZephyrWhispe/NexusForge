@@ -11,21 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::FileError;
 
-/// 目录条目（IPC DTO，字段与前端 FileEntryDto 对齐——缺字段是静默失败重灾区）
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FileEntry {
-    pub name: String,
-    /// 原始路径（展示用，不带 \\?\ 前缀）
-    pub path: PathBuf,
-    pub is_dir: bool,
-    /// 字节；目录为 0
-    pub size: u64,
-    /// 毫秒时间戳（前端 new Date(ms) 直用）
-    pub modified_ms: i64,
-    /// 小写扩展名（不含点，目录为空）
-    pub ext: String,
-    pub hidden: bool,
-}
+/// 目录条目（D-02：DTO 上移至 host-core::storage，此处再导出保持 API）
+pub use host_core::storage::FileEntry;
 
 /// 排序键（目录恒排前面，与资源管理器一致）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

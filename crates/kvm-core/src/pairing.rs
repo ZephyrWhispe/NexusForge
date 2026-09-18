@@ -12,10 +12,8 @@
 //!
 //! 后续会话（K3）以 paired.json 的指纹白名单为准入依据。
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::RngCore;
@@ -23,17 +21,14 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
+use host_core::device::DeviceIdentity;
 use host_core::error::AppError;
-
-use crate::identity::DeviceIdentity;
-use crate::session::{read_frame, write_frame, Frame, MsgType};
+use host_core::wire::{read_frame, write_frame, Frame, MsgType, HANDSHAKE_TIMEOUT};
 
 /// 一次性码有效期
 pub const CODE_TTL: Duration = Duration::from_secs(120);
 /// 错误尝试上限（达到即作废当前码）
 pub const MAX_ATTEMPTS: u8 = 5;
-/// 配对握手整体超时
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // 一次性码
@@ -126,100 +121,10 @@ impl Default for PairCodeManager {
 }
 
 // ---------------------------------------------------------------------------
-// 配对设备持久化
+// 配对设备持久化（D-02：信任根上移至 host-core::device；此处再导出保持 kvm API）
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PairedPeer {
-    pub device_id: String,
-    pub device_name: String,
-    /// SHA256(公钥) hex 前 32 位——会话准入白名单依据
-    pub fingerprint: String,
-    /// base64(X25519 公钥)
-    pub pubkey_b64: String,
-    /// unix 毫秒
-    pub paired_at: u64,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-struct PersistedPeers {
-    peers: Vec<PairedPeer>,
-}
-
-/// 已配对设备表（{appData}/kvm/paired.json）
-pub struct PairStore {
-    path: PathBuf,
-    peers: RwLock<HashMap<String, PairedPeer>>,
-}
-
-impl PairStore {
-    pub fn load_or_default(dir: &PathBuf) -> Result<Self, AppError> {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| AppError::module("KVM_PAIR_002", format!("创建 kvm 目录失败: {e}"), None))?;
-        let path = dir.join("paired.json");
-        let mut map = HashMap::new();
-        if let Ok(bytes) = std::fs::read(&path) {
-            let persisted: PersistedPeers = serde_json::from_slice(&bytes)
-                .map_err(|e| AppError::module("KVM_PAIR_001", format!("paired.json 损坏: {e}"), None))?;
-            for p in persisted.peers {
-                map.insert(p.device_id.clone(), p);
-            }
-        }
-        Ok(Self { path, peers: RwLock::new(map) })
-    }
-
-    pub fn is_paired(&self, device_id: &str) -> bool {
-        self.peers.read().expect("peers 锁").contains_key(device_id)
-    }
-
-    pub fn get(&self, device_id: &str) -> Option<PairedPeer> {
-        self.peers.read().expect("peers 锁").get(device_id).cloned()
-    }
-
-    /// 指纹白名单校验（K3 会话准入）
-    pub fn verify_fingerprint(&self, device_id: &str, fingerprint: &str) -> bool {
-        self.peers
-            .read()
-            .expect("peers 锁")
-            .get(device_id)
-            .map(|p| p.fingerprint == fingerprint)
-            .unwrap_or(false)
-    }
-
-    pub fn all(&self) -> Vec<PairedPeer> {
-        let mut list: Vec<PairedPeer> = self.peers.read().expect("peers 锁").values().cloned().collect();
-        list.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-        list
-    }
-
-    /// 登记配对记录（K2 配对流程写入；sync-core 测试/对账也复用）
-    pub fn upsert(&self, peer: PairedPeer) -> Result<(), AppError> {
-        self.peers
-            .write()
-            .expect("peers 锁")
-            .insert(peer.device_id.clone(), peer);
-        self.persist()
-    }
-
-    pub fn remove(&self, device_id: &str) -> Result<bool, AppError> {
-        let removed = self.peers.write().expect("peers 锁").remove(device_id).is_some();
-        if removed {
-            self.persist()?;
-        }
-        Ok(removed)
-    }
-
-    fn persist(&self) -> Result<(), AppError> {
-        let snapshot = PersistedPeers { peers: self.all() };
-        let json = serde_json::to_vec_pretty(&snapshot)
-            .map_err(|e| AppError::module("KVM_PAIR_002", e.to_string(), None))?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| AppError::module("KVM_PAIR_002", e.to_string(), None))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| AppError::module("KVM_PAIR_002", e.to_string(), None))?;
-        Ok(())
-    }
-}
+pub use host_core::device::{b64_decode, b64_encode, PairStore, PairedPeer};
 
 // ---------------------------------------------------------------------------
 // 配对握手
@@ -242,17 +147,6 @@ struct PairReplyPayload {
     fingerprint: String,
     /// Reject 时的原因：code | fingerprint | self | busy
     reason: Option<String>,
-}
-
-/// base64 编解码（配对记录公钥/会话公钥传输；sync-core 握手亦复用）
-pub fn b64_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
 /// 校验"指纹 = SHA256(公钥)"绑定（防伪造公钥/指纹组合）
@@ -520,6 +414,7 @@ fn unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("kvm-pair-{tag}-{}", uuid::Uuid::now_v7()))

@@ -17,7 +17,7 @@ pub mod service;
 
 pub use browse::{breadcrumbs, drives, list_dir, to_long_path, display_path, DriveInfo, FileEntry, SortKey};
 pub use conflict::{scan_conflicts, ConflictAction, ConflictItem, ConflictPolicy};
-pub use driver::{DriverInfo, DriverRegistry, LocalDriver, StorageDriver};
+pub use driver::{DriverInfo, DriverRegistry, FileStoragePort, LocalDriver, StorageDriver};
 pub use error::FileError;
 pub use module::FileModule;
 pub use ops::{OpKind, OpProgress, OpQueue, OpSpec, OpState, PendingOp, Checkpoint, CHUNK, PROGRESS_INTERVAL};

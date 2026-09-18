@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use host_core::error::ModuleError;
 use host_core::events::{topic, Event, EventBus};
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
-use kvm_core::{DeviceIdentity, PairStore};
+use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
 
 use crate::engine::{ApplyOutcome, ChangeApplier, SyncEngine};
 use crate::error::SyncError;
@@ -275,12 +275,12 @@ impl SyncModule {
     }
 
     /// 配对设备列表（SYNC 面板）
-    pub fn peers(&self) -> Vec<kvm_core::PairedPeer> {
+    pub fn peers(&self) -> Vec<PairedPeer> {
         self.store.all()
     }
 
     /// 运行时登记配对记录（正常流程由 KVM 配对落盘、本模块重启加载；测试/对账用）
-    pub fn register_peer(&self, peer: kvm_core::PairedPeer) {
+    pub fn register_peer(&self, peer: PairedPeer) {
         let _ = self.store.upsert(peer);
     }
 

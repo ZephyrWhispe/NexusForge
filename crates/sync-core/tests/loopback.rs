@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex};
 use host_core::events::EventBus;
 use host_core::module::{Module, ModuleContext};
 use host_core::ports::Ports;
-use kvm_core::pairing::{b64_encode, PairedPeer, PairStore};
-use kvm_core::DeviceIdentity;
+use host_core::device::{b64_encode, DeviceIdentity, PairStore, PairedPeer};
 use sync_core::engine::ChangeApplier;
 use sync_core::SyncModule;
 

@@ -1,11 +1,17 @@
 //! 阶段三验收 2（docs/impl/06 尾部清单）：
 //! 笔记外部修改（模拟 VS Code 改 md）10s 内索引同步；重命名引用改写零失败。
+//! D-02 回归：NotesModule 经 StoragePort 注入驱动完成 init（不再直依 file-core）。
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use file_core::driver::DriverRegistry;
-use notes_core::NoteLibrary;
+use host_core::error::AppError;
+use host_core::events::EventBus;
+use host_core::module::{Module, ModuleContext};
+use host_core::ports::Ports;
+use host_core::storage::{DriverInfo, FileEntry, StorageDriver, StoragePort};
+use notes_core::{NoteLibrary, NotesModule};
 
 fn tmpdir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nf_notes_accept_{tag}"));
@@ -14,10 +20,96 @@ fn tmpdir(tag: &str) -> PathBuf {
     d
 }
 
+/// D-02：验收不再借 file-core；自带最小本地盘驱动
+struct FsDriver;
+
+fn io_err(e: std::io::Error) -> AppError {
+    AppError::module("FILE_OPS_001", e.to_string(), None)
+}
+
+impl StorageDriver for FsDriver {
+    fn id(&self) -> &'static str {
+        "local"
+    }
+    fn label(&self) -> String {
+        "本地磁盘(测试)".into()
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![]
+    }
+    fn list(&self, path: &Path) -> Result<Vec<FileEntry>, AppError> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(path).map_err(io_err)? {
+            let e = e.map_err(io_err)?;
+            let md = e.metadata().ok();
+            let name = e.file_name().to_string_lossy().into_owned();
+            out.push(FileEntry {
+                hidden: name.starts_with('.'),
+                is_dir: md.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                size: md.as_ref().map(|m| m.len()).unwrap_or(0),
+                modified_ms: md
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                ext: e
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default(),
+                name,
+                path: e.path(),
+            });
+        }
+        Ok(out)
+    }
+    fn mkdir(&self, path: &Path) -> Result<(), AppError> {
+        std::fs::create_dir_all(path).map_err(io_err)
+    }
+    fn remove(&self, path: &Path, _recycle: bool) -> Result<(), AppError> {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).map_err(io_err)
+        } else {
+            std::fs::remove_file(path).map_err(io_err)
+        }
+    }
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), AppError> {
+        if let Some(p) = to.parent() {
+            std::fs::create_dir_all(p).map_err(io_err)?;
+        }
+        std::fs::rename(from, to).map_err(io_err)
+    }
+    fn read_file(&self, path: &Path) -> Result<Vec<u8>, AppError> {
+        std::fs::read(path).map_err(io_err)
+    }
+    fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), AppError> {
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).map_err(io_err)?;
+        }
+        let tmp = path.with_extension("nf-tmp");
+        std::fs::write(&tmp, data).map_err(io_err)?;
+        std::fs::rename(&tmp, path).map_err(io_err)
+    }
+}
+
+/// D-02 注入面：Ports 注册的 StoragePort 桥
+struct TestStoragePort {
+    driver: Arc<dyn StorageDriver>,
+}
+impl StoragePort for TestStoragePort {
+    fn driver(&self, id: &str) -> Option<Arc<dyn StorageDriver>> {
+        (id == "local").then(|| self.driver.clone())
+    }
+    fn list_drivers(&self) -> Vec<DriverInfo> {
+        vec![DriverInfo { id: "local".into(), label: "本地磁盘(测试)".into(), roots: vec![] }]
+    }
+}
+
 fn lib(tag: &str) -> NoteLibrary {
     let d = tmpdir(tag);
-    let reg = DriverRegistry::new();
-    NoteLibrary::open(d.join("vault"), &d.join("notes.db"), reg.get("local").unwrap()).unwrap()
+    NoteLibrary::open(d.join("vault"), &d.join("notes.db"), Arc::new(FsDriver)).unwrap()
 }
 
 #[test]
@@ -101,4 +193,37 @@ fn rename_conflict_and_missing_are_clean_errors() {
     assert!(l.rename("a.md", "a.md").is_err());
     // 越界路径
     assert!(l.rename("a.md", "../evil.md").is_err());
+}
+
+/// D-02 回归：init 从 Ports 取 StoragePort 注入驱动；缺端口必须明确报错（不静默自建）
+#[test]
+fn module_init_resolves_driver_via_storage_port() {
+    let dir = tmpdir("init");
+    let ports = Arc::new(Ports::new());
+    ports.register::<dyn StoragePort>(Arc::new(TestStoragePort { driver: Arc::new(FsDriver) }));
+    let ctx = Arc::new(ModuleContext {
+        app_data_dir: dir.clone(),
+        ports,
+        event_bus: Arc::new(EventBus::new()),
+    });
+    let module = NotesModule::new(&dir);
+    module.init(ctx).unwrap();
+    let lib = module.library().expect("init 后 library 应可用");
+    lib.create("d02.md", "# 经端口注入的驱动\n").unwrap();
+    assert_eq!(lib.read("d02.md").unwrap().0, "# 经端口注入的驱动\n");
+
+    // 负例：未注册 StoragePort 时 init 必须失败并给出可行动错误
+    let dir2 = tmpdir("init-missing");
+    let ctx2 = Arc::new(ModuleContext {
+        app_data_dir: dir2.clone(),
+        ports: Arc::new(Ports::new()),
+        event_bus: Arc::new(EventBus::new()),
+    });
+    let err = NotesModule::new(&dir2).init(ctx2).unwrap_err();
+    assert!(
+        err.to_string().contains("StoragePort"),
+        "错误应指明 StoragePort 缺失，实际: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
 }

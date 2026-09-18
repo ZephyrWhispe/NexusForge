@@ -79,11 +79,11 @@ impl FileService {
         browse::drives()
     }
 
-    pub fn mkdir(&self, path: &Path) -> Result<(), FileError> {
+    pub fn mkdir(&self, path: &Path) -> Result<(), host_core::error::AppError> {
         self.drivers.get("local").expect("LocalDriver 内置").mkdir(path)
     }
 
-    pub fn rename_entry(&self, from: &Path, to: &Path) -> Result<(), FileError> {
+    pub fn rename_entry(&self, from: &Path, to: &Path) -> Result<(), host_core::error::AppError> {
         self.drivers.get("local").expect("LocalDriver 内置").rename(from, to)
     }
 

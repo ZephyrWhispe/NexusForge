@@ -152,6 +152,10 @@ impl HostState {
         // PR4 系统代理（proxy-core，docs/impl/05 PR）：注册表 + WinINET 广播
         let sys_proxy: Arc<dyn SysProxyPort> = Arc::new(WindowsSysProxy);
         ports.register::<dyn SysProxyPort>(sys_proxy.clone());
+        // D-02 存储驱动端口：notes-core 等消费方经 ctx.ports 取驱动（实现在 file-core）
+        ports.register::<dyn host_core::storage::StoragePort>(Arc::new(
+            file_core::FileStoragePort::new(Arc::new(file_core::DriverRegistry::new())),
+        ));
 
         // 崩溃恢复钩子：panic 时还原系统代理（断网最高危场景兜底，docs/impl/05 PR 风险标注）
         // 另两处还原：ProxyModule::stop（正常退出）+ lib.rs `--restore-proxy`（紧急抢救）

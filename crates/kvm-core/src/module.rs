@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use host_core::device::DeviceIdentity;
 use host_core::error::ModuleError;
 use host_core::events::Event;
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
@@ -16,7 +17,6 @@ use host_core::ports::{
 
 use crate::discovery::{DiscoveryConfig, DiscoveryHandle, DiscoveryService, OwnIdentity, PeerEvent};
 use crate::edge::{ControlReleasePayload, ControlTakePayload, Decision, Edge, EdgeSwitch};
-use crate::identity::DeviceIdentity;
 use crate::pairing::{PairCodeManager, PairingService, PairedPeer, PairStore};
 use crate::session::{MsgType, SessionEvent, SessionHandle, SessionManager, SessionServeHandle};
 use crate::transfer::{self, AckPayload, ChunkOutcome, MetaOutcome, TransferManager};

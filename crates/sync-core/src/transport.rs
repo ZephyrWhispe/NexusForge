@@ -15,11 +15,10 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
-use kvm_core::session::{
+use host_core::device::{b64_decode, b64_encode, DeviceIdentity, PairStore, PairedPeer};
+use host_core::wire::{
     derive_session_key, read_frame, write_frame, Frame, FrameCipher, MsgType, HANDSHAKE_TIMEOUT,
 };
-use kvm_core::pairing::{b64_decode, b64_encode, PairStore, PairedPeer};
-use kvm_core::DeviceIdentity;
 
 use crate::error::{Result, SyncError};
 use crate::oplog::OpEntry;
@@ -229,7 +228,7 @@ pub async fn write_msg(session: &mut SyncSession, msg: &SyncMsg) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kvm_core::pairing::PairedPeer;
+    use host_core::device::PairedPeer;
 
     /// 构造互信的两台设备（临时目录共享 identity.json 目录布局）
     fn paired_devices(tag: &str) -> (Arc<DeviceIdentity>, PairStore, Arc<DeviceIdentity>, PairStore) {

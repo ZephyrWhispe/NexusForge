@@ -2218,15 +2218,21 @@ dependencies = [
 name = "host-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "hkdf",
  "jsonschema",
+ "rand 0.8.8",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -2804,9 +2810,6 @@ dependencies = [
 name = "kvm-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "chacha20poly1305",
- "hkdf",
  "host-core",
  "rand 0.8.8",
  "serde",
@@ -3259,7 +3262,6 @@ dependencies = [
 name = "notes-core"
 version = "0.1.0"
 dependencies = [
- "file-core",
  "host-core",
  "regex",
  "rusqlite",
@@ -5627,7 +5629,6 @@ name = "sync-core"
 version = "0.1.0"
 dependencies = [
  "host-core",
- "kvm-core",
  "rand 0.8.8",
  "rusqlite",
  "serde",

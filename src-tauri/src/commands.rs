@@ -828,7 +828,6 @@ pub async fn file_mkdir(
     tauri::async_runtime::spawn_blocking(move || svc.mkdir(&path))
         .await
         .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
-        .map_err(file_err)
 }
 
 /// 重命名/移动单条目（F1 本地驱动）
@@ -842,7 +841,6 @@ pub async fn file_rename_entry(
     tauri::async_runtime::spawn_blocking(move || svc.rename_entry(&from, &to))
         .await
         .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
-        .map_err(file_err)
 }
 
 /// 入队文件操作（F2/F3；Ask 冲突预扫描）

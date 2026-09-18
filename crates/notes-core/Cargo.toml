@@ -6,7 +6,6 @@ authors.workspace = true
 
 [dependencies]
 host-core = { path = "../host-core" }
-file-core = { path = "../file-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -10,6 +10,7 @@ pub mod capability;
 pub mod codes;
 pub mod config;
 pub mod crash;
+pub mod device;
 pub mod error;
 pub mod events;
 pub mod hotkey;
@@ -17,6 +18,8 @@ pub mod logging;
 pub mod module;
 pub mod ports;
 pub mod registry;
+pub mod storage;
+pub mod wire;
 
 /// 宿主核心版本，与 workspace 版本保持一致
 pub const HOST_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");

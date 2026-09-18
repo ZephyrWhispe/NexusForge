@@ -7,7 +7,6 @@
 
 pub mod discovery;
 pub mod edge;
-pub mod identity;
 pub mod module;
 pub mod pairing;
 pub mod session;
@@ -15,9 +14,9 @@ pub mod transfer;
 
 pub use discovery::{DiscoveryService, PeerEvent, PeerInfo};
 pub use edge::{ControlReleasePayload, ControlTakePayload, Decision, Edge, EdgeSwitch};
-pub use identity::DeviceIdentity;
+pub use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
 pub use module::KvmModule;
-pub use pairing::{PairCodeManager, PairedPeer, PairStore};
+pub use pairing::PairCodeManager;
 pub use session::{SessionEvent, SessionHandle, SessionManager};
 pub use transfer::{
     send_clip, send_file, AckPayload, ChunkOutcome, FileMetaPayload, FileProgress, MetaOutcome,

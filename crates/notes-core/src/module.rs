@@ -1,7 +1,8 @@
 //! NotesModule 模块壳（docs/impl/06 N）：Module trait 实现。
 //!
-//! - init：打开 NoteLibrary（库根 {appData}/notes，docs/impl/06 N1）+ 首次全量索引
-//! - 无 Windows 端口依赖；文件 CRUD 全走 file-core StorageDriver（N5 多存储后端抽象）
+//! - init：装载 StoragePort（D-02：宿主注册，模块间零横向依赖）+ 打开 NoteLibrary
+//!   （库根 {appData}/notes，docs/impl/06 N1）+ 首次全量索引
+//! - 文件 CRUD 全走 host-core::storage::StorageDriver（N5 多存储后端抽象）
 //! - 变更事件 notes.changed 由 IPC 层发布（含 path/action），UI 事件驱动刷新
 
 use std::path::PathBuf;
@@ -57,14 +58,16 @@ impl Module for NotesModule {
     }
 
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
-        let _ = ctx; // 无端口依赖
-        let reg = file_core::driver::DriverRegistry::new();
-        let lib = NoteLibrary::open(
-            self.root.clone(),
-            &self.db_path,
-            reg.get("local").ok_or_else(|| ModuleError::Init("本地驱动缺失".into()))?,
-        )
-        .map_err(|e| ModuleError::Storage(e.to_string()))?;
+        // D-02：存储驱动经 StoragePort 注入（file-core 注册实现），不直依 file-core
+        let storage = ctx
+            .ports
+            .get::<dyn host_core::storage::StoragePort>()
+            .ok_or_else(|| ModuleError::Init("StoragePort 未注册（宿主需在模块 init 前登记）".into()))?;
+        let driver = storage
+            .driver("local")
+            .ok_or_else(|| ModuleError::Init("本地存储驱动缺失".into()))?;
+        let lib = NoteLibrary::open(self.root.clone(), &self.db_path, driver)
+            .map_err(|e| ModuleError::Storage(e.to_string()))?;
         // 首次增量索引（外部编辑器改动在此收敛；失败不阻塞模块启动）
         match lib.sync() {
             Ok(r) => tracing::info!(added = r.added, updated = r.updated, removed = r.removed, total = r.total, "笔记索引同步完成"),

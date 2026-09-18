@@ -11,7 +11,7 @@
 | 编号 | 主题 | 类型 | 优先级 | 批次 | 状态 |
 |------|------|------|--------|------|------|
 | D-01 | 门禁先行：CI 与工具链先于功能补齐 | 流程 | P0 | 2 | 待实施 |
-| D-02 | 消除模块间直接依赖（O1 红线） | 补实现 | P0 | 1 | 待实施 |
+| D-02 | 消除模块间直接依赖（O1 红线） | 补实现 | P0 | 1 | 已完成 |
 | D-03 | 事件总线统一背压 API（O8） | 补实现 | P1 | 2 | 待实施 |
 | D-04 | 剪贴板敏感数据改用 AES-256-GCM 信封加密 | 补实现 | P0 | 1 | 已完成 |
 | D-05 | 剪贴板 blob 生命周期治理（随删随清 + 覆写 + GC） | 补实现 | P0 | 1 | 已完成 |
@@ -53,7 +53,9 @@
 - **背景**：实测 `notes-core → file-core`（`crates/notes-core/Cargo.toml:9`，使用点 `src/library.rs:11`、`src/module.rs:61`）与 `sync-core → kvm-core`（`crates/sync-core/Cargo.toml:9`，使用点 `src/transport.rs:18-22`）。
 - **决策**：**补实现，不降低标准**。`StorageDriver` / `DriverRegistry` 上移到 `host-core`（或独立 `storage-driver` crate）；`sync-core` 所需的会话加密与设备身份改由 `host-core::ports::{CryptoPort, SessionPort}` 暴露，`kvm-core` 提供实现并注册。
 - **备选与否决**：否决"修改 DESIGN 允许例外"——O1 是本项目相对蓝本的核心改进（防环形依赖），一旦开口会迅速退化；且两处依赖均可用现成的 port trait 模式消解，无技术障碍。
+- **实施修订（2026-09-18）**：`SessionPort` 方案在实施中被否决——运行时 sync↔sync 是唯一对端（kvm 模块从不参与 SYNC 握手），端口化只会把 sync 协议代码搬进 kvm 并引入 async-dyn 体操；改为**机械上移**：信任根（DeviceIdentity/PairStore）与线协议原语（帧编解码/HKDF/FrameCipher）整体上移至 `host-core::{device, wire}`，kvm-core 原路再导出保持 API 不变。存储侧按原案：`StorageDriver`/`FileEntry`/`DriverInfo` 上移 `host-core::storage`，新增 `StoragePort` 由 file-core 实现桥接、宿主注册。
 - **验收**：`cargo tree -p notes-core` 与 `-p sync-core` 中不再出现其他模块 crate；DESIGN O1 逐条可验证。
+- **完成证据（2026-09-18）**：`host-core::device`（X25519 身份 + DPAPI 落盘 + PairStore，4 测试）与 `host-core::wire`（帧编解码 + HKDF 派生 + ChaCha20-Poly1305 FrameCipher，含重放/篡改负例）落地；kvm-core 删除 `identity.rs`、`session.rs` 线协议段改再导出（26 测试 + loopback 全绿）；sync-core 全面切至 host-core 并移除 kvm-core 依赖（11 测试 + loopback）；`host-core::storage::StoragePort` + file-core `FileStoragePort` 桥 + src-tauri 注册，notes-core 移除 file-core 依赖、init 经端口取驱动；回归测试 `module_init_resolves_driver_via_storage_port`（正例经端口注入 + 负例缺端口明确报错）、`storage_port_bridge_resolves_local_driver`。实测 `cargo tree -p notes-core` / `-p sync-core`（normal+build）均无其他模块 crate；`cargo test --workspace` 全绿。
 
 ### D-03 事件总线统一背压 API（O8）
 

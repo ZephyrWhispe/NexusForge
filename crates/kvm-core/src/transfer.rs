@@ -588,7 +588,7 @@ mod tests {
 
     use crate::pairing::{PairCodeManager, PairStore, PairingService};
     use crate::session::{MsgType, SessionEvent, SessionManager};
-    use crate::identity::DeviceIdentity;
+    use host_core::device::DeviceIdentity;
     use std::sync::Mutex as StdMutex;
     use tokio::sync::mpsc;
 

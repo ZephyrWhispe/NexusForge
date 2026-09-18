@@ -41,3 +41,10 @@ impl FileError {
         }
     }
 }
+
+/// D-02：跨模块存储契约统一以 AppError 传播（错误码沿用 FILE_* 系）
+impl From<FileError> for host_core::error::AppError {
+    fn from(e: FileError) -> Self {
+        host_core::error::AppError::module(e.code(), e.to_string(), None)
+    }
+}

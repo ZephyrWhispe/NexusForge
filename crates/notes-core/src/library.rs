@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use file_core::driver::StorageDriver;
+use host_core::storage::StorageDriver;
 use regex::Regex;
 
 use crate::canvas;
@@ -475,7 +475,84 @@ fn rewrite_links(content: &str, old_stem: &str, new_stem: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use file_core::driver::DriverRegistry;
+    use host_core::error::AppError;
+    use host_core::storage::FileEntry;
+
+    /// D-02：notes-core 不再直依 file-core；测试自带最小本地盘驱动
+    pub(crate) struct FsDriver;
+
+    type R<T> = std::result::Result<T, AppError>;
+
+    fn io_err(e: std::io::Error) -> AppError {
+        AppError::module("FILE_OPS_001", e.to_string(), None)
+    }
+
+    impl StorageDriver for FsDriver {
+        fn id(&self) -> &'static str {
+            "local"
+        }
+        fn label(&self) -> String {
+            "本地磁盘(测试)".into()
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            vec![]
+        }
+        fn list(&self, path: &Path) -> R<Vec<FileEntry>> {
+            let mut out = Vec::new();
+            for e in std::fs::read_dir(path).map_err(io_err)? {
+                let e = e.map_err(io_err)?;
+                let md = e.metadata().ok();
+                let name = e.file_name().to_string_lossy().into_owned();
+                out.push(FileEntry {
+                    hidden: name.starts_with('.'),
+                    is_dir: md.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                    size: md.as_ref().map(|m| m.len()).unwrap_or(0),
+                    modified_ms: md
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                    ext: e
+                        .path()
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_lowercase())
+                        .unwrap_or_default(),
+                    name,
+                    path: e.path(),
+                });
+            }
+            Ok(out)
+        }
+        fn mkdir(&self, path: &Path) -> R<()> {
+            std::fs::create_dir_all(path).map_err(io_err)
+        }
+        fn remove(&self, path: &Path, _recycle: bool) -> R<()> {
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).map_err(io_err)
+            } else {
+                std::fs::remove_file(path).map_err(io_err)
+            }
+        }
+        fn rename(&self, from: &Path, to: &Path) -> R<()> {
+            if let Some(p) = to.parent() {
+                std::fs::create_dir_all(p).map_err(io_err)?;
+            }
+            std::fs::rename(from, to).map_err(io_err)
+        }
+        fn read_file(&self, path: &Path) -> R<Vec<u8>> {
+            std::fs::read(path).map_err(io_err)
+        }
+        fn write_file(&self, path: &Path, data: &[u8]) -> R<()> {
+            if let Some(p) = path.parent() {
+                std::fs::create_dir_all(p).map_err(io_err)?;
+            }
+            let tmp = path.with_extension("nf-tmp");
+            std::fs::write(&tmp, data).map_err(io_err)?;
+            std::fs::rename(&tmp, path).map_err(io_err)
+        }
+    }
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("nf_notes_lib_{tag}"));
@@ -486,13 +563,7 @@ mod tests {
 
     fn lib(tag: &str) -> NoteLibrary {
         let d = tmpdir(tag);
-        let reg = DriverRegistry::new();
-        NoteLibrary::open(
-            d.join("vault"),
-            &d.join("notes.db"),
-            reg.get("local").unwrap(),
-        )
-        .unwrap()
+        NoteLibrary::open(d.join("vault"), &d.join("notes.db"), Arc::new(FsDriver)).unwrap()
     }
 
     #[test]
