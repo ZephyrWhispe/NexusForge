@@ -6,8 +6,9 @@ import { reportError } from "../stores/notifications";
 import DibThumb from "../modules/clipboard/DibThumb";
 
 /**
- * 剪切板快速面板（docs/UI-PLAN.md U3-5）：独立置顶小窗。
+ * 剪切板快速面板（docs/UI-PLAN.md U3-5，审查 D-14）：独立置顶小窗。
  * 交互：数字键 1–9 直选粘贴；Esc 隐藏；粘贴后自动隐藏。
+ * 数据：初载一次 + clipboard.* 事件直推（窗口常驻，隐藏期间事件仍在更新列表）。
  */
 const useStyles = makeStyles({
   root: {
@@ -73,22 +74,40 @@ export default function QuickPanel() {
   const [items, setItems] = useState<ClipEntry[]>([]);
 
   useEffect(() => {
-    clipboardSearch({ size: 9 })
-      .then((p) => setItems(p.items))
-      .catch((e) => {
-        setItems([]);
-        reportError(e, { context: "快速面板加载剪贴板失败", dedupeKey: "quickpanel-open" });
-      });
-    const t = window.setInterval(
-      () =>
-        clipboardSearch({ size: 9 })
-          .then((p) => setItems(p.items))
-          .catch((e) =>
-            reportError(e, { context: "快速面板轮询失败", dedupeKey: "quickpanel-poll", toast: false }),
-          ),
-      1500,
-    );
-    return () => window.clearInterval(t);
+    const load = () =>
+      clipboardSearch({ size: 9 })
+        .then((p) => setItems(p.items))
+        .catch((e) => {
+          setItems([]);
+          reportError(e, { context: "快速面板加载剪贴板失败", dedupeKey: "quickpanel-open" });
+        });
+    load();
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen("nf:event", (e) => {
+          const topic = (e.payload as { topic?: string }).topic;
+          if (topic !== "clipboard.captured" && topic !== "clipboard.deleted" && topic !== "clipboard.cleared") return;
+          clipboardSearch({ size: 9 })
+            .then((p) => setItems(p.items))
+            .catch((err) =>
+              reportError(err, { context: "快速面板实时刷新失败", dedupeKey: "quickpanel-event", toast: false }),
+            );
+        }),
+      )
+      .then((u) => {
+        if (disposed) u();
+        else unlisten = u;
+      })
+      .catch((err) =>
+        reportError(err, { context: "快速面板事件订阅失败", dedupeKey: "quickpanel-listen", toast: false }),
+      );
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {

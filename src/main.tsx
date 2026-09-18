@@ -7,6 +7,7 @@ import Toaster from "./components/Toaster";
 import { buildThemeSet } from "./theme/theme";
 import { hostSystemAccent } from "./ipc/client";
 import { reportError } from "./stores/notifications";
+import { useSession, resolveIsLight } from "./stores/session";
 
 /**
  * 窗口角色分发（docs/UI-PLAN.md U2-1 的雏形）：
@@ -25,9 +26,21 @@ window.addEventListener("error", (e) => {
 });
 
 function Root() {
-  const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+  // D-14：明暗 = session store 显式模式优先，auto 跟随系统（matchMedia 实时监听，
+  // OS 切换深浅色时所有窗口即时响应；跨窗口一致性由 session persist 的 storage 同步保证）
+  const themeMode = useSession((s) => s.themeMode);
+  const [systemPrefersLight, setSystemPrefersLight] = React.useState(
+    () => window.matchMedia("(prefers-color-scheme: light)").matches,
+  );
   // U1-3：默认 Windows 蓝先行渲染（避免白屏），系统强调色返回后热替换
   const [themeSet, setThemeSet] = React.useState(() => buildThemeSet(null));
+
+  React.useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const onChange = (e: MediaQueryListEvent) => setSystemPrefersLight(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   React.useEffect(() => {
     let alive = true;
@@ -39,7 +52,7 @@ function Root() {
     };
   }, []);
 
-  const theme = prefersLight ? themeSet.light : themeSet.dark;
+  const theme = resolveIsLight(themeMode, systemPrefersLight) ? themeSet.light : themeSet.dark;
   return (
     <FluentProvider theme={theme}>
       <App windowRole={role} />

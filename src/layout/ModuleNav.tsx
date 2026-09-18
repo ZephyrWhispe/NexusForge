@@ -20,6 +20,7 @@ import {
   FlashRegular,
 } from "@fluentui/react-icons";
 import { MODULES, MODULE_GROUPS, type ModuleDef } from "./modules";
+import { useModuleStatus } from "../stores/modules";
 
 /** 模块导航（docs/DESIGN.md §3.3；P0/P1/P2 分组 + 运行状态点） */
 const useStyles = makeStyles({
@@ -78,13 +79,9 @@ const useStyles = makeStyles({
     borderRadius: "50%",
   },
   dotRun: { background: tokens.colorPaletteGreenForeground1 },
-  dotOff: {
-    background: tokens.colorPaletteDarkOrangeForeground1,
-    marginLeft: "auto",
-    width: "7px",
-    height: "7px",
-    borderRadius: "50%",
-  },
+  dotErr: { background: tokens.colorPaletteRedForeground1 },
+  dotStopped: { background: tokens.colorPaletteDarkOrangeForeground1 },
+  dotUninit: { background: tokens.colorNeutralStroke1 },
   tag: {
     marginLeft: "auto",
     fontSize: tokens.fontSizeBase100,
@@ -120,6 +117,8 @@ interface Props {
 
 export default function ModuleNav({ active, onChange }: Props) {
   const styles = useStyles();
+  // D-14：运行点接真实状态流（host.module_state），不再读 modules.ts 静态 running
+  const states = useModuleStatus((s) => s.states);
   return (
     <nav className={styles.root} aria-label="模块导航">
       {MODULE_GROUPS.map((g) => (
@@ -128,8 +127,19 @@ export default function ModuleNav({ active, onChange }: Props) {
           {MODULES.filter((m) => m.phase === g.phase).map((m: ModuleDef) => {
             const Icon = ICONS[m.id] ?? DocumentRegular;
             const isActive = active === m.id;
+            const st = states[m.id];
+            const dotCls =
+              st === "Running"
+                ? styles.dotRun
+                : st === "Error"
+                  ? styles.dotErr
+                  : st === "Stopped"
+                    ? styles.dotStopped
+                    : st === "Uninitialized"
+                      ? styles.dotUninit
+                      : null;
             return (
-              <Tooltip content={`${m.name}（${m.phase}）`} relationship="label" key={m.id}>
+              <Tooltip content={`${m.name}（${m.phase}${st ? ` · ${st}` : ""}）`} relationship="label" key={m.id}>
                 <button
                   className={`${styles.item} ${isActive ? styles.itemActive : ""}`}
                   onClick={() => onChange(m.id)}
@@ -137,8 +147,8 @@ export default function ModuleNav({ active, onChange }: Props) {
                 >
                   <Icon className={styles.icon} />
                   {m.name}
-                  {m.running ? (
-                    <span className={styles.dotRun} aria-label="运行中" />
+                  {st && dotCls ? (
+                    <span className={`${styles.dot} ${dotCls}`} aria-label={`状态 ${st}`} />
                   ) : (
                     <span className={styles.tag}>{m.phase}</span>
                   )}

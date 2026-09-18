@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
-import { hostModuleRestart, hostModulesStatus, type ModuleStatusDto } from "../ipc/client";
+import { hostModuleRestart, type ModuleState } from "../ipc/client";
+import { useModuleStatus } from "../stores/modules";
 import { notify, reportError, useNotifications } from "../stores/notifications";
 
 /**
- * 状态栏（docs/DESIGN.md §3.5 + §8.2，审查 D-19）：
- * 真实模块健康点（IPC）；Error 态模块渲染为重启按钮（stop→init→start 由宿主执行）；
+ * 状态栏（docs/DESIGN.md §3.5 + §8.2，审查 D-19 / D-14）：
+ * 模块健康点来自 useModuleStatus（host.module_state 事件直推，无轮询）；
+ * Error 态模块渲染为重启按钮（stop→init→start 由宿主执行）；
  * 全局通道有未读错误时显示红点角标，点击回放最近错误。
  */
 const useStyles = makeStyles({
@@ -62,7 +64,7 @@ const useStyles = makeStyles({
   hot: { marginLeft: "auto", color: tokens.colorNeutralForeground2 },
 });
 
-function dotClass(state: ModuleStatusDto["state"]): "dotRun" | "dotErr" | "dotStopped" | "dotUninit" {
+function dotClass(state: ModuleState): "dotRun" | "dotErr" | "dotStopped" | "dotUninit" {
   switch (state) {
     case "Running":
       return "dotRun";
@@ -75,34 +77,20 @@ function dotClass(state: ModuleStatusDto["state"]): "dotRun" | "dotErr" | "dotSt
   }
 }
 
-/** 浏览器预览（无 IPC）时的静态默认展示 */
-const FALLBACK: ModuleStatusDto[] = [
-  { id: "clipboard", name: "clipboard", version: "", priority: 0, state: "Running" },
-  { id: "screenshot", name: "screenshot", version: "", priority: 0, state: "Running" },
-  { id: "ocr", name: "ocr", version: "", priority: 0, state: "Running" },
-  { id: "proxy", name: "proxy", version: "", priority: 0, state: "Stopped" },
-];
+/** 浏览器预览（无宿主事件）时的静态默认展示 */
+const FALLBACK: Record<string, ModuleState> = {
+  clipboard: "Running",
+  screenshot: "Running",
+  ocr: "Running",
+  proxy: "Stopped",
+};
 
 export default function StatusBar() {
   const styles = useStyles();
-  const [modules, setModules] = useState<ModuleStatusDto[] | null>(null);
+  const states = useModuleStatus((s) => s.states);
   const [restarting, setRestarting] = useState<string | null>(null);
   const unseenErrors = useNotifications((s) => s.unseenErrors);
   const flushUnseenErrors = useNotifications((s) => s.flushUnseenErrors);
-
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
-      hostModulesStatus().then((m) => {
-        if (alive && m) setModules(m);
-      });
-    load();
-    const timer = window.setInterval(load, 2000); // 状态轮询：事件直推在 U2-3 接入
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, []);
 
   const restart = (id: string) => {
     setRestarting(id);
@@ -112,25 +100,25 @@ export default function StatusBar() {
       .finally(() => setRestarting(null));
   };
 
-  const list = modules ?? FALLBACK;
+  const list = Object.entries(states).length > 0 ? states : FALLBACK;
   return (
     <div className={styles.root}>
-      {list.map((m) =>
-        m.state === "Error" ? (
+      {Object.entries(list).map(([id, state]) =>
+        state === "Error" ? (
           <button
-            className={`${styles.restart} ${restarting === m.id ? styles.restartBusy : ""}`}
-            key={m.id}
+            className={`${styles.restart} ${restarting === id ? styles.restartBusy : ""}`}
+            key={id}
             disabled={restarting !== null}
             title="该模块已停止，点击重启"
-            onClick={() => restart(m.id)}
+            onClick={() => restart(id)}
           >
             <span className={`${styles.dot} ${styles.dotErr}`} />
-            {restarting === m.id ? `${m.id} 重启中…` : m.id}
+            {restarting === id ? `${id} 重启中…` : id}
           </button>
         ) : (
-          <span className={styles.st} key={m.id} title={`${m.name} · ${m.state}`}>
-            <span className={`${styles.dot} ${styles[dotClass(m.state)]}`} />
-            {m.id}
+          <span className={styles.st} key={id} title={`${id} · ${state}`}>
+            <span className={`${styles.dot} ${styles[dotClass(state)]}`} />
+            {id}
           </span>
         ),
       )}

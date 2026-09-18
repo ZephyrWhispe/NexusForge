@@ -27,6 +27,8 @@ import { MODULES } from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
 import { toggleQuickPanel } from "./quickPanelController";
 import { reportError } from "../stores/notifications";
+import { useSession } from "../stores/session";
+import { startModuleStatusFeed } from "../stores/modules";
 
 /**
  * 主工作台（docs/DESIGN.md §3 像素级布局：40/44/1fr/28 四行 + 228/190 双列导航）。
@@ -92,12 +94,21 @@ function ModuleLoading() {
 
 export default function MainWorkbench() {
   const styles = useStyles();
-  const [active, setActive] = useState("clipboard");
-  const [group, setGroup] = useState("all");
-  const [search, setSearch] = useState("");
+  // D-14：会话态（活跃模块/分组/搜索）入 session store，跨窗口与重启间保持一致
+  const active = useSession((s) => s.activeModule);
+  const setActive = useSession((s) => s.setActiveModule);
+  const group = useSession((s) => s.clipGroup);
+  const setGroup = useSession((s) => s.setClipGroup);
+  const search = useSession((s) => s.clipSearch);
+  const setSearch = useSession((s) => s.setClipSearch);
   const [counts, setCounts] = useState<Record<string, number>>({});
   // 稳定引用：防止 ClipboardPanel 的 load/refreshCounts 因回调重建而循环刷新
   const onCounts = useCallback((c: Record<string, number>) => setCounts(c), []);
+
+  // 模块状态事实源：初始快照 + host.module_state 事件流（StatusBar/ModuleNav 共用）
+  useEffect(() => {
+    startModuleStatusFeed();
+  }, []);
 
   // U2-4/U3-5：全局快捷键 → OS → 事件 → 快速面板 / 截图覆盖层
   useEffect(() => {

@@ -23,7 +23,7 @@
 | D-11 | 编辑器 PDF 保持纯 Rust（lopdf） | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-12 | 同步库归位 `db/sync.db` | 补实现 | P1 | 1 | 已完成 |
 | D-13 | WinOps v1 交付范围收敛为 5 命令 | 改规范 | P2 | 3 | 已裁决（文档生效） |
-| D-14 | 引入 Zustand 三 store，替换轮询与静态状态 | 补实现 | P1 | 1 | 待实施 |
+| D-14 | 引入 Zustand 三 store，替换轮询与静态状态 | 补实现 | P1 | 1 | 已完成 |
 | D-15 | 锁策略统一（parking_lot + 回调无锁快照） | 补实现 | P0 | 2 | 待实施 |
 | D-16 | host-core 收敛公共工具与 ModuleStateCell | 补实现 | P1 | 2 | 待实施 |
 | D-17 | 前端工程门禁（ESLint + Vitest + CI） | 补实现 | P0 | 2 | 待实施 |
@@ -161,6 +161,8 @@
 - **背景**：DESIGN §7 与 UI-PLAN §1 均将 Zustand 列为技术基线，实测 `package.json` 无该依赖；状态以 `useState` 分散在 25 个文件，导致：切模块重复拉取 4 个 IPC、跨窗口主题不同步、`modules.ts` 的 `running: true` 为静态字面量（导航绿点与 StatusBar 真实状态矛盾）、`StatusBar` 2s 轮询与 `QuickPanel` 1.5s 轮询无法移除。
 - **决策**：引入 Zustand，建三个 store：`session`（主题/活跃模块/分组/搜索，`persist` 到 localStorage）、`modules`（由 `nf:event` 驱动的模块状态）、`notifications`（错误与 toast）。
 - **验收**：删除 `StatusBar` 与 `QuickPanel` 的轮询；`modules.ts` 不再含 `running` 字段；主题切换跨窗口实时同步。
+- **实施记录（2026-09-18）**：`src/stores/modules.ts`——`useModuleStatus`（id→ModuleState 映射）+ `startModuleStatusFeed()`（幂等：初值取 `host_modules_status` 快照，此后仅靠既有 `nf:event` 转发中的 `host.module_state` 事件直推，零后端改动）；`ModuleNav` 运行点与 `StatusBar` 健康点改读该 store，未收录模块回退显示阶段标签，浏览器预览（states 空）回退静态 4 模块展示。`src/stores/session.ts`——`themeMode/activeModule/clipGroup` 经 `persist` 入 localStorage（`clipSearch` 为会话内易失态，`partialize` 有意排除）；实测 zustand v5 的 persist **不监听 storage 事件**（原语"persist 自动跨窗口同步"不成立），补 storage 监听 → `useSession.persist.rehydrate()` 桥接实现跨窗口实时同步；OS 深浅色变化另由 main.tsx 的 matchMedia `change` 监听器逐窗口响应（`resolveIsLight` 仲裁 auto）。`notifications` store 已随 D-19 落地，即第三 store。轮询删除：`StatusBar` 2s `host_modules_status` 轮询、`QuickPanel` 1.5s `clipboard_search` 轮询（改为初载一次 + `clipboard.captured/deleted/cleared` 事件直推；窗口常驻隐藏期间事件仍更新列表）。`layout/modules.ts` 的 `running: true` 静态字段连同 14 处字面量删除。
+- **完成证据（2026-09-18）**：`npx tsc --noEmit` 与 `npm run build` 零错误；全仓 `setInterval` 仅剩 VaultPanel 两处倒计时 UI 定时器（非状态轮询）；浏览器双窗口实测（vite dev + 同源第二窗口）：① 导航点击 → localStorage `nf-session` 立即写入 `activeModule:"screenshot"`；② 从窗口 B `setItem` 置 `themeMode:"light"` → 窗口 A（OS 模拟仍为 dark）FluentProvider 背景实时由 `#1c1f26` 翻至 `#eef2f7`，主题切换跨窗口同步达成；③ emulate 深浅色切换单窗口内热替换（matchMedia 监听器生效）；④ 状态栏回退态与导航阶段标签在 states 空时正常渲染，console 无错误（仅 favicon 404）。
 
 ### D-15 锁策略统一（parking_lot + 回调无锁快照）
 

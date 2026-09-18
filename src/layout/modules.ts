@@ -1,30 +1,29 @@
 /** 模块交付阶段（决定导航分组与状态展示） */
 export type ModulePhase = "P0" | "P1" | "P2";
 
-/** 13 模块清单（与 docs/DESIGN.md §3 一致，图标映射见 ModuleNav） */
+/** 13 模块清单（与 docs/DESIGN.md §3 一致，图标映射见 ModuleNav）。
+ * 运行态不在此处（D-14）：真实状态唯一事实源是 stores/modules.ts 的事件流。 */
 export interface ModuleDef {
   id: string;
   name: string;
   phase: ModulePhase;
-  /** P0 模块在阶段一有运行态演示 */
-  running?: boolean;
 }
 
 export const MODULES: ModuleDef[] = [
-  { id: "clipboard", name: "剪切板中枢", phase: "P0", running: true },
-  { id: "screenshot", name: "截图与录屏", phase: "P0", running: true },
-  { id: "ocr", name: "OCR 与翻译", phase: "P0", running: true },
-  { id: "proxy", name: "代理与 VPN", phase: "P1", running: true },
-  { id: "vault", name: "安全与凭据", phase: "P1", running: true },
-  { id: "file", name: "文件与存储", phase: "P1", running: true },
-  { id: "desktop", name: "桌面效率", phase: "P1", running: true },
-  { id: "kvm", name: "键鼠共享", phase: "P1", running: true },
-  { id: "editor", name: "文本与 PDF", phase: "P2", running: true },
-  { id: "notes", name: "笔记与知识", phase: "P2", running: true },
-  { id: "term", name: "终端与运维", phase: "P2", running: true },
-  { id: "sys", name: "系统管理", phase: "P2", running: true },
-  { id: "automation", name: "自动化与拓展", phase: "P2", running: true },
-  { id: "sync", name: "跨设备同步", phase: "P2", running: true },
+  { id: "clipboard", name: "剪切板中枢", phase: "P0" },
+  { id: "screenshot", name: "截图与录屏", phase: "P0" },
+  { id: "ocr", name: "OCR 与翻译", phase: "P0" },
+  { id: "proxy", name: "代理与 VPN", phase: "P1" },
+  { id: "vault", name: "安全与凭据", phase: "P1" },
+  { id: "file", name: "文件与存储", phase: "P1" },
+  { id: "desktop", name: "桌面效率", phase: "P1" },
+  { id: "kvm", name: "键鼠共享", phase: "P1" },
+  { id: "editor", name: "文本与 PDF", phase: "P2" },
+  { id: "notes", name: "笔记与知识", phase: "P2" },
+  { id: "term", name: "终端与运维", phase: "P2" },
+  { id: "sys", name: "系统管理", phase: "P2" },
+  { id: "automation", name: "自动化与拓展", phase: "P2" },
+  { id: "sync", name: "跨设备同步", phase: "P2" },
 ];
 
 export const MODULE_GROUPS: { label: string; phase: ModulePhase }[] = [
