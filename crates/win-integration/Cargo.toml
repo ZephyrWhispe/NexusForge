@@ -73,3 +73,6 @@ features = [
     # PrintWindow 被 Windows 元数据归入 Storage.Xps（windows 0.58 已知归置）
     "Win32_Storage_Xps",
 ]
+
+[dev-dependencies]
+portable-pty = "0.9.0"

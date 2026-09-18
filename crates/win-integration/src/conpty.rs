@@ -131,15 +131,18 @@ impl ConptyPort for ConptyWin {
             CreatePseudoConsole(size, in_read, out_write, 0)
                 .map_err(|e| AppError::module("TERM_PTY_002", format!("CreatePseudoConsole 失败: {e}"), None))?
         };
-        // ConPTY 内部已复制句柄，关闭我们的副本（EchoCon 模式）
+
+        // 3. 子进程（shell 为完整命令行）
+        let env_block = build_env_block(&cfg.env);
+        // 关键（EchoCon 官方顺序）：in_read/out_write 必须在 CreateProcess 之后关闭——
+        // conhost 对句柄的接管发生在子进程创建/属性处理阶段，提前关闭会导致
+        // 读端立即 BrokenPipe（109）→ 零输出（实测踩中，W7 真机验收暴露）
+        let child_result = unsafe { spawn_child(&cfg, hpc, env_block.as_deref()) };
         unsafe {
             let _ = CloseHandle(in_read);
             let _ = CloseHandle(out_write);
         }
-
-        // 3. 子进程（shell 为完整命令行）
-        let env_block = build_env_block(&cfg.env);
-        let (h_process, h_thread) = unsafe { spawn_child(&cfg, hpc, env_block.as_deref()) }?;
+        let (h_process, h_thread) = child_result?;
 
         let inner = Arc::new(SessionInner {
             hpc,
@@ -149,17 +152,29 @@ impl ConptyPort for ConptyWin {
             closed: AtomicBool::new(false),
         });
 
-        // 子进程退出监视线程：cmd 等自然退出后 ConPTY 不会自动关闭（hpc 与 hpc 绑定而非子进程），
+        // 子进程退出监视线程：cmd 等自然退出后 ConPTY 不会自动关闭（hpc 与子进程绑定而非子进程），
         // 必须主动 shutdown → ClosePseudoConsole → 读端 EOF → 会话收尾（幂等，kill 路径共享）
+        //
+        // 关键时序（W7 真机验收踩中）：cmd 退出后 conhost 仍需时间把最终渲染 flush 到
+        // out_write——立即 ClosePseudoConsole 会终止 conhost 截断渲染流（只剩初始帧）。
+        // 顺序：等子进程退出 → 等读线程 EOF（conhost 自行关闭，5s 兜底）→ shutdown 清理
+        let reader_done = Arc::new(AtomicBool::new(false));
         let watcher = Arc::downgrade(&inner);
+        let done_flag = reader_done.clone();
         std::thread::Builder::new()
             .name("nf-pty-watch".into())
             .spawn(move || {
                 // Arc 降级持有：inner 被 kill/reader 回收后监视线程自动结束
                 while let Some(arc) = watcher.upgrade() {
                     let wr = unsafe { WaitForSingleObject(arc.h_process, INFINITE) };
-                    // 自然退出/kill 的统一关闭入口（幂等）
                     let _ = wr;
+                    // 等读线程 EOF（conhost flush 完成；兜底 5s 防挂死）
+                    for _ in 0..100 {
+                        if done_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                     arc.shutdown();
                     return;
                 }
@@ -169,11 +184,13 @@ impl ConptyPort for ConptyWin {
         // 4. 输出线程：同步 ReadFile → blocking_send（EOF = ClosePseudoConsole 触发）
         let (out_tx, output_rx) = mpsc::channel::<Vec<u8>>(512);
         let out_read = SendHandle(out_read);
+        let reader_done_flag = reader_done.clone();
         std::thread::Builder::new()
             .name("nf-pty-read".into())
             .spawn(move || {
                 // 整体捕获 SendHandle（edition 2021 字段级捕获会抓裸 HANDLE 破坏 Send）
                 let out = out_read;
+                let done = reader_done_flag;
                 let mut buf = [0u8; 8192];
                 loop {
                     let mut n: u32 = 0;
@@ -192,6 +209,8 @@ impl ConptyPort for ConptyWin {
                         break;
                     }
                 }
+                // 通知 watcher：读端 EOF（conhost 已自行关闭/被 ClosePseudoConsole 终止）
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
                 unsafe {
                     let _ = CloseHandle(out.0);
                 }
@@ -300,7 +319,8 @@ unsafe fn spawn_child(
         list,
         0,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-        // lpValue = 指向句柄值的指针（不是句柄值本身当地址）
+        // PSEUDOCONSOLE 属性的 lpValue = 指向 HPCON 值的指针（W7 A/B 实测定论：
+        // 传句柄值本身时属性静默失效——cmd 挂回父控制台，输出不到伪终端渲染流）
         Some(std::ptr::from_ref(&hpc.0).cast::<core::ffi::c_void>()),
         std::mem::size_of::<usize>(),
         None,
