@@ -2562,7 +2562,9 @@ pub async fn winops_apply(id: String, state: State<'_, HostState>) -> Result<sys
         .get::<dyn host_core::ports::SysProxyPort>()
         .map(|p| p.is_admin())
         .unwrap_or(false);
-    tauri::async_runtime::spawn_blocking(move || {
+    // 闭包错误类型显式标注 AppError：内部 ensure_up/spawner 都是 AppError，
+    // 靠尾部 map_err(sys_err) 反推会把闭包错误类型定成 SysError 而冲突（E0277）
+    tauri::async_runtime::spawn_blocking(move || -> Result<sys_core::winops::ApplyReport, AppError> {
         let tweaks = sys_core::winops::load_catalog(Some(&external)).map_err(sys_err)?;
         let tweak = tweaks
             .into_iter()
@@ -2601,7 +2603,6 @@ pub async fn winops_apply(id: String, state: State<'_, HostState>) -> Result<sys
     })
     .await
     .map_err(|e| AppError::module("SYS_WINOPS_001", e.to_string(), None))?
-    .map_err(sys_err)
 }
 
 /// 导出 WinOps 审计（审计记录 + 当前备份清单）到 {appData}/winops/exports/，返回文件路径
