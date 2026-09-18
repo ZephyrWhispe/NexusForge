@@ -268,7 +268,7 @@ impl ClipStore {
         Ok(())
     }
 
-    pub fn delete(&self, id: &str) -> Result<Option<String>, AppError> {
+    pub fn delete(&self, id: &str) -> Result<(), AppError> {
         let conn = self.conn.lock().expect("clipboard db 锁");
         let blob: Option<String> = conn
             .query_row(
@@ -281,21 +281,44 @@ impl ClipStore {
             .flatten();
         conn.execute("DELETE FROM clip_entries WHERE id = ?1", params![id])
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-        Ok(blob)
+        drop(conn);
+        // D-05：删记录即删 blob，明文不再永驻磁盘
+        if let Some(b) = blob {
+            self.remove_blob(&b, false);
+        }
+        Ok(())
     }
 
     pub fn clear(&self, keep_pinned: bool) -> Result<u32, AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
-        let n = conn
-            .execute(
-                if keep_pinned {
-                    "DELETE FROM clip_entries WHERE pinned = 0"
-                } else {
-                    "DELETE FROM clip_entries"
-                },
-                [],
+        let (sel_sql, del_sql) = if keep_pinned {
+            (
+                "SELECT blob_path FROM clip_entries WHERE pinned = 0 AND blob_path IS NOT NULL",
+                "DELETE FROM clip_entries WHERE pinned = 0",
             )
-            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        } else {
+            (
+                "SELECT blob_path FROM clip_entries WHERE blob_path IS NOT NULL",
+                "DELETE FROM clip_entries",
+            )
+        };
+        let (blobs, n) = {
+            let conn = self.conn.lock().expect("clipboard db 锁");
+            let blobs: Vec<String> = conn
+                .prepare(sel_sql)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                .query_map([], |r| r.get(0))
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                .filter_map(|r| r.ok())
+                .collect();
+            let n = conn
+                .execute(del_sql, [])
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            (blobs, n)
+        };
+        // D-05：清空 = 覆写删除后 unlink（历史含敏感明文，不留扇区可恢复残片）
+        for b in blobs {
+            self.remove_blob(&b, true);
+        }
         Ok(n as u32)
     }
 
@@ -493,25 +516,126 @@ impl ClipStore {
         Ok(serde_json::Value::Object(counts))
     }
 
-    /// C9 清理：retention_days > 0 时按保留期，再按 max_entries 上限淘汰（置顶除外）
+    /// C9 清理：retention_days > 0 时按保留期，再按 max_entries 上限淘汰（置顶除外）。
+    /// D-05：与手动删除共用"删记录 + 删 blob"实现，杜绝第二条泄漏路径。
     pub fn purge(&self, retention_days: u32, max_entries: u32) -> Result<u32, AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
-        if retention_days > 0 {
-            let cutoff = now_ms() - (retention_days as i64) * 86_400_000;
-            let _ = conn.execute(
-                "DELETE FROM clip_entries WHERE pinned = 0 AND created_at < ?1",
-                params![cutoff],
-            );
-        }
-        let n = conn
-            .execute(
-                r#"DELETE FROM clip_entries WHERE pinned = 0 AND id IN (
+        let cutoff = now_ms() - (retention_days as i64) * 86_400_000;
+        let (blobs_a, blobs_b, n_expired, n_overflow) = {
+            let conn = self.conn.lock().expect("clipboard db 锁");
+            let collect = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Result<Vec<String>, AppError> {
+                Ok(conn
+                    .prepare(sql)
+                    .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                    .query_map(rusqlite::params_from_iter(args.iter()), |r| r.get::<_, String>(0))
+                    .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                    .filter_map(|r| r.ok())
+                    .collect())
+            };
+            let blobs_a = if retention_days > 0 {
+                collect(
+                    "SELECT blob_path FROM clip_entries WHERE pinned = 0 AND created_at < ?1 AND blob_path IS NOT NULL",
+                    &[&cutoff],
+                )?
+            } else {
+                Vec::new()
+            };
+            let n_expired = if retention_days > 0 {
+                conn.execute(
+                    "DELETE FROM clip_entries WHERE pinned = 0 AND created_at < ?1",
+                    params![cutoff],
+                )
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+            } else {
+                0
+            };
+            let blobs_b = collect(
+                r#"SELECT blob_path FROM clip_entries WHERE pinned = 0 AND id IN (
                      SELECT id FROM clip_entries WHERE pinned = 0
-                     ORDER BY created_at DESC LIMIT -1 OFFSET ?1)"#,
-                params![max_entries],
-            )
-            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-        Ok(n as u32)
+                     ORDER BY created_at DESC LIMIT -1 OFFSET ?1) AND blob_path IS NOT NULL"#,
+                &[&max_entries],
+            )?;
+            let n_overflow = conn
+                .execute(
+                    r#"DELETE FROM clip_entries WHERE pinned = 0 AND id IN (
+                         SELECT id FROM clip_entries WHERE pinned = 0
+                         ORDER BY created_at DESC LIMIT -1 OFFSET ?1)"#,
+                    params![max_entries],
+                )
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            (blobs_a, blobs_b, n_expired, n_overflow)
+        };
+        for b in blobs_a.into_iter().chain(blobs_b) {
+            self.remove_blob(&b, true);
+        }
+        Ok((n_expired + n_overflow) as u32)
+    }
+
+    /// D-05 启动期孤儿 blob GC：主表不再引用的文件覆写后清除（含删除失败的补偿）。
+    /// 由模块 init 在 open 后调用一次。
+    pub fn gc_orphan_blobs(&self) -> Result<u32, AppError> {
+        let referenced: std::collections::HashSet<String> = {
+            let conn = self.conn.lock().expect("clipboard db 锁");
+            let mut stmt = conn
+                .prepare("SELECT blob_path FROM clip_entries WHERE blob_path IS NOT NULL")
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        let mut removed = 0;
+        for entry in std::fs::read_dir(&self.blob_dir)
+            .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?
+        {
+            let path = entry.map_err(|e| err("CLIPBOARD_STORAGE_002", e))?.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if referenced.contains(&name) {
+                continue;
+            }
+            tracing::warn!(file = %name, "发现孤儿 blob，覆写清除");
+            self.remove_blob(&name, true);
+            if !path.exists() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// 删 blob 文件（统一出口）。overwrite=true 时先全量覆写再 unlink，
+    /// 使明文/密文不残留可恢复扇区；失败仅告警（下次启动 GC 补偿）。
+    fn remove_blob(&self, name: &str, overwrite: bool) {
+        let path = self.blob_dir.join(name);
+        let result = (|| -> std::io::Result<()> {
+            if overwrite {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
+                    let block = [0u8; 64 * 1024];
+                    let mut left = meta.len();
+                    while left > 0 {
+                        let n = left.min(block.len() as u64) as usize;
+                        f.write_all(&block[..n])?;
+                        left -= n as u64;
+                    }
+                    f.flush()?;
+                    f.sync_all()?;
+                }
+            }
+            match std::fs::remove_file(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                r => r,
+            }
+        })();
+        if let Err(e) = result {
+            tracing::warn!(file = %path.display(), error = %e, "blob 清理失败，留待启动 GC 补偿");
+        }
     }
 }
 
@@ -643,5 +767,85 @@ mod tests {
         assert!(entry.blob_path.is_some(), ">64KB 内容应转 blob");
         let back = s.get_content(&id, |c| Ok(c.to_vec())).unwrap().unwrap();
         assert_eq!(back.len(), big.len());
+    }
+
+    // ---- D-05 blob 生命周期（安全红线，含负例） ----
+
+    fn open_temp_dir(tag: &str) -> (ClipStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nf_clip_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blobs = dir.join("blobs");
+        (ClipStore::open(&dir.join("clipboard.db"), blobs.clone()).unwrap(), blobs)
+    }
+
+    fn blob_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn big(text: &str) -> String {
+        format!("{text}-{}", "x".repeat(BLOB_THRESHOLD + 10))
+    }
+
+    #[test]
+    fn delete_entry_removes_blob_file() {
+        let (s, blobs) = open_temp_dir("d05_del");
+        let id = s.insert(&big("payload"), None, false, None).unwrap();
+        assert_eq!(blob_files(&blobs).len(), 1, "入库应写出 blob");
+        s.delete(&id).unwrap();
+        assert!(
+            !blob_files(&blobs).iter().any(|f| f.ends_with(".txt")),
+            "负例：删除条目后 blob 文件必须不存在（明文不得永驻磁盘）"
+        );
+    }
+
+    #[test]
+    fn clear_removes_all_blobs_and_keeps_pinned_blob() {
+        let (s, blobs) = open_temp_dir("d05_clear");
+        let a = s.insert(&big("a"), None, false, None).unwrap();
+        let _b = s.insert(&big("b"), None, false, None).unwrap();
+        s.pin(&a, true).unwrap();
+        let removed = s.clear(true).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(blob_files(&blobs).len(), 1, "keep_pinned：仅存置顶条目的 blob");
+        let retained = blob_files(&blobs)[0].clone();
+        s.clear(false).unwrap();
+        assert!(
+            blob_files(&blobs).is_empty(),
+            "负例：全量清空后 blobs 目录必须为空"
+        );
+        let _ = retained;
+    }
+
+    #[test]
+    fn startup_gc_removes_orphans_only() {
+        let (s, blobs) = open_temp_dir("d05_gc");
+        let _live = s.insert(&big("live"), None, false, None).unwrap();
+        let live_file = blob_files(&blobs)[0].clone();
+        std::fs::write(blobs.join("orphan-deadbeef.txt"), b"residual plaintext").unwrap();
+        std::fs::write(blobs.join("orphan-image.dib"), b"residual image").unwrap();
+        let removed = s.gc_orphan_blobs().unwrap();
+        assert_eq!(removed, 2, "人为放置的孤儿 blob 应被启动 GC 清除");
+        assert_eq!(blob_files(&blobs), vec![live_file], "被引用 blob 不得误删");
+        // 重入安全：无孤儿时返回 0
+        assert_eq!(s.gc_orphan_blobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn purge_max_entries_removes_blobs() {
+        let (s, blobs) = open_temp_dir("d05_purge");
+        for i in 0..5 {
+            s.insert(&big(&format!("e{i}")), None, false, None).unwrap();
+        }
+        assert_eq!(blob_files(&blobs).len(), 5);
+        let n = s.purge(0, 2).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(blob_files(&blobs).len(), 2, "上限淘汰必须同步删 blob（共用实现）");
+        assert_eq!(s.group_counts().unwrap()["all"].as_i64(), Some(2));
     }
 }

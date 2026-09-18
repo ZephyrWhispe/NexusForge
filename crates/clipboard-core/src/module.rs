@@ -96,6 +96,12 @@ impl Module for ClipboardModule {
             &ctx.app_data_dir.join("db").join("clipboard.db"),
             ctx.app_data_dir.join("blobs").join("clipboard"),
         ).map_err(|e| ModuleError::Storage(e.to_string()))?);
+        // D-05：启动期孤儿 blob GC（删除失败的补偿路径也在此收敛）
+        match store.gc_orphan_blobs() {
+            Ok(n) if n > 0 => tracing::info!(n, "启动清理：已覆写删除孤儿 blob"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "孤儿 blob GC 失败（不影响启动）"),
+        }
         let port = ctx
             .ports
             .get::<dyn ClipboardPort>()
@@ -293,7 +299,7 @@ impl ClipboardModule {
             .pin(id, pinned)
     }
 
-    pub fn delete(&self, id: &str) -> Result<Option<String>, AppError> {
+    pub fn delete(&self, id: &str) -> Result<(), AppError> {
         self.store()
             .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?
             .delete(id)
