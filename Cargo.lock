@@ -121,6 +121,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -195,6 +204,7 @@ name = "automation-core"
 version = "0.1.0"
 dependencies = [
  "host-core",
+ "parking_lot",
  "serde",
  "serde_json",
  "sha2",
@@ -608,6 +618,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "host-core",
+ "parking_lot",
  "regex",
  "rusqlite",
  "rusqlite_migration",
@@ -1155,6 +1166,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "host-core",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1371,6 +1383,7 @@ dependencies = [
  "encoding_rs",
  "host-core",
  "lopdf",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1559,6 +1572,7 @@ dependencies = [
  "base64 0.22.1",
  "host-core",
  "image",
+ "parking_lot",
  "regex",
  "serde",
  "serde_json",
@@ -2222,6 +2236,7 @@ dependencies = [
  "chacha20poly1305",
  "hkdf",
  "jsonschema",
+ "parking_lot",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -2811,6 +2826,7 @@ name = "kvm-core"
 version = "0.1.0"
 dependencies = [
  "host-core",
+ "parking_lot",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -3199,6 +3215,7 @@ dependencies = [
  "kvm-core",
  "notes-core",
  "ocr-core",
+ "parking_lot",
  "proxy-core",
  "rand 0.8.8",
  "screenshot-core",
@@ -3263,6 +3280,7 @@ name = "notes-core"
 version = "0.1.0"
 dependencies = [
  "host-core",
+ "parking_lot",
  "regex",
  "rusqlite",
  "serde",
@@ -3642,6 +3660,7 @@ dependencies = [
  "base64 0.22.1",
  "host-core",
  "image",
+ "parking_lot",
  "serde",
  "serde_json",
  "tokio",
@@ -4155,6 +4174,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "host-core",
+ "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4987,6 +5007,7 @@ dependencies = [
  "chrono",
  "host-core",
  "image",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5629,6 +5650,7 @@ name = "sync-core"
 version = "0.1.0"
 dependencies = [
  "host-core",
+ "parking_lot",
  "rand 0.8.8",
  "rusqlite",
  "serde",
@@ -5665,6 +5687,7 @@ name = "sys-core"
 version = "0.1.0"
 dependencies = [
  "host-core",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -6071,6 +6094,7 @@ dependencies = [
  "async-trait",
  "hex",
  "host-core",
+ "parking_lot",
  "russh",
  "russh-sftp",
  "serde",
@@ -6707,6 +6731,7 @@ dependencies = [
  "chrono",
  "hmac",
  "host-core",
+ "parking_lot",
  "rand 0.8.8",
  "rusqlite",
  "rusqlite_migration",
@@ -7270,8 +7295,10 @@ name = "win-integration"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "arc-swap",
  "host-core",
  "image",
+ "parking_lot",
  "portable-pty",
  "rand 0.8.8",
  "tokio",

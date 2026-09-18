@@ -3,9 +3,10 @@
 //! 生命周期：init 装载身份 + 构造发现服务；start 在专属 tokio Runtime 上
 //! 运行心跳三任务（不依赖宿主是否已有 tokio 上下文）；stop 收割全部任务。
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
 use host_core::device::DeviceIdentity;
 use host_core::error::ModuleError;
@@ -140,19 +141,14 @@ impl KvmModule {
 
     /// 会话句柄查找：客户端会话（outbound）优先，其次服务端注册表
     fn session_to(&self, device_id: &str) -> Option<SessionHandle> {
-        let outbound = self.outbound.read().expect("outbound 锁").clone();
-        let sessions = self.sessions.read().expect("sessions 锁").clone();
+        let outbound = self.outbound.read().clone();
+        let sessions = self.sessions.read().clone();
         session_lookup(sessions.as_ref(), outbound.as_ref(), device_id)
     }
 
     /// IPC：签发一次性配对码，返回 (码, 有效期毫秒)
     pub fn issue_pair_code(&self) -> Result<(String, u64), ModuleError> {
-        let codes = self
-            .codes
-            .read()
-            .expect("codes 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let codes = self.codes.read().clone().ok_or(ModuleError::NotReady)?;
         Ok(codes.issue())
     }
 
@@ -162,14 +158,9 @@ impl KvmModule {
         addr: std::net::SocketAddr,
         code: &str,
     ) -> Result<PairedPeer, ModuleError> {
-        let pairing = self
-            .pairing
-            .read()
-            .expect("pairing 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let pairing = self.pairing.read().clone().ok_or(ModuleError::NotReady)?;
         // 读守卫显式绑定到函数尾（临时值不可跨语句借用——工程教训见记忆）
-        let running_guard = self.running.read().expect("running 锁");
+        let running_guard = self.running.read();
         let rt = running_guard
             .as_ref()
             .map(|r| &r._rt)
@@ -182,12 +173,7 @@ impl KvmModule {
 
     /// IPC：解除配对
     pub fn unpair(&self, device_id: &str) -> Result<bool, ModuleError> {
-        let pairing = self
-            .pairing
-            .read()
-            .expect("pairing 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let pairing = self.pairing.read().clone().ok_or(ModuleError::NotReady)?;
         pairing
             .unpair(device_id)
             .map_err(|e| ModuleError::Stop(e.to_string()))
@@ -195,42 +181,26 @@ impl KvmModule {
 
     /// IPC：已配对设备列表
     pub fn paired_peers(&self) -> Result<Vec<PairedPeer>, ModuleError> {
-        let pairing = self
-            .pairing
-            .read()
-            .expect("pairing 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let pairing = self.pairing.read().clone().ok_or(ModuleError::NotReady)?;
         Ok(pairing.paired_peers())
     }
 
     /// IPC：已发现邻居列表
     pub fn discovered_peers(&self) -> Result<Vec<crate::discovery::PeerInfo>, ModuleError> {
-        let discovery = self
-            .discovery
-            .read()
-            .expect("discovery 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let discovery = self.discovery.read().clone().ok_or(ModuleError::NotReady)?;
         Ok(discovery.peers_snapshot())
     }
 
     /// IPC：向已配对设备发起客户端会话（connect_to）。返回对端 device_id。
     /// 会话句柄登记入 outbound 表（Closed 事件时自动移除）。
     pub fn connect_to(&self, addr: std::net::SocketAddr) -> Result<String, ModuleError> {
-        let sessions = self
-            .sessions
-            .read()
-            .expect("sessions 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let sessions = self.sessions.read().clone().ok_or(ModuleError::NotReady)?;
         let ev_tx = self
             .session_events
             .read()
-            .expect("session_events 锁")
             .clone()
             .ok_or(ModuleError::NotReady)?;
-        let running_guard = self.running.read().expect("running 锁");
+        let running_guard = self.running.read();
         let rt = running_guard
             .as_ref()
             .map(|r| &r._rt)
@@ -240,8 +210,8 @@ impl KvmModule {
             .map_err(|e| ModuleError::Start(e.to_string()))?;
         drop(running_guard);
         let device_id = handle.device_id.clone();
-        if let Some(outbound) = self.outbound.read().expect("outbound 锁").as_ref() {
-            let mut map = outbound.lock().expect("outbound 表锁");
+        if let Some(outbound) = self.outbound.read().as_ref() {
+            let mut map = outbound.lock();
             // 同设备旧会话关断，替换为新句柄
             if let Some(old) = map.insert(device_id.clone(), handle) {
                 old.close();
@@ -255,7 +225,7 @@ impl KvmModule {
         let handle = self
             .session_to(device_id)
             .ok_or_else(|| ModuleError::Start(format!("设备 {device_id} 无活跃会话")))?;
-        let running_guard = self.running.read().expect("running 锁");
+        let running_guard = self.running.read();
         let rt = running_guard
             .as_ref()
             .map(|r| &r._rt)
@@ -270,18 +240,8 @@ impl KvmModule {
         let handle = self
             .session_to(device_id)
             .ok_or_else(|| ModuleError::Start(format!("设备 {device_id} 无活跃会话")))?;
-        let rt = self
-            .rt_handle
-            .read()
-            .expect("rt_handle 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
-        let bus = self
-            .bus
-            .read()
-            .expect("bus 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let rt = self.rt_handle.read().clone().ok_or(ModuleError::NotReady)?;
+        let bus = self.bus.read().clone().ok_or(ModuleError::NotReady)?;
         rt.spawn(async move {
             let on_progress = {
                 let bus = bus.clone();
@@ -313,14 +273,14 @@ impl KvmModule {
     /// IPC：活跃会话列表（服务端接入 + 本端发起；device_id, device_name, role）
     pub fn session_list(&self) -> Vec<serde_json::Value> {
         let mut list = Vec::new();
-        if let Some(outbound) = self.outbound.read().expect("outbound 锁").as_ref() {
-            for h in outbound.lock().expect("outbound 表锁").values() {
+        if let Some(outbound) = self.outbound.read().as_ref() {
+            for h in outbound.lock().values() {
                 list.push(serde_json::json!({
                     "device_id": h.device_id, "device_name": h.device_name, "role": "client",
                 }));
             }
         }
-        if let Some(sessions) = self.sessions.read().expect("sessions 锁").as_ref() {
+        if let Some(sessions) = self.sessions.read().as_ref() {
             for (device_id, device_name) in sessions.active_sessions() {
                 list.push(serde_json::json!({
                     "device_id": device_id, "device_name": device_name, "role": "server",
@@ -343,7 +303,7 @@ impl KvmModule {
             };
             edges.insert(device_id, edge);
         }
-        self.edge_switch.lock().expect("edge 锁").set_edges(edges);
+        self.edge_switch.lock().set_edges(edges);
         Ok(())
     }
 
@@ -351,7 +311,6 @@ impl KvmModule {
     pub fn edge_map(&self) -> HashMap<String, String> {
         self.edge_switch
             .lock()
-            .expect("edge 锁")
             .edges()
             .iter()
             .map(|(id, e)| {
@@ -368,7 +327,7 @@ impl KvmModule {
 
     /// IPC：控制状态（role: idle/controlling/controlled + 上下文）
     pub fn control_state(&self) -> serde_json::Value {
-        let es = self.edge_switch.lock().expect("edge 锁");
+        let es = self.edge_switch.lock();
         match es.controlling_device() {
             Some(device_id) => serde_json::json!({ "role": "controlling", "device_id": device_id }),
             None if self.controlled.load(Ordering::Relaxed) => {
@@ -380,12 +339,7 @@ impl KvmModule {
 
     /// IPC：手动释放控制权（UI 切回按钮；受控中/空闲时为 no-op）
     pub fn release_control(&self) -> Result<(), ModuleError> {
-        let tx = self
-            .cmd_tx
-            .read()
-            .expect("cmd_tx 锁")
-            .clone()
-            .ok_or(ModuleError::NotReady)?;
+        let tx = self.cmd_tx.read().clone().ok_or(ModuleError::NotReady)?;
         let _ = tx.send(Cmd::Release("manual".into()));
         Ok(())
     }
@@ -405,9 +359,9 @@ impl Module for KvmModule {
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
         let crypto = ctx.ports.get::<dyn CryptoPort>();
         // K7 输入端口（缺失时边缘切换降级关闭：仅发现/配对/传输可用）
-        *self.hook.write().expect("hook 锁") = ctx.ports.get::<dyn InputHookPort>();
-        *self.inject.write().expect("inject 锁") = ctx.ports.get::<dyn InputInjectPort>();
-        *self.screen.write().expect("screen 锁") = ctx.ports.get::<dyn ScreenInfoPort>();
+        *self.hook.write() = ctx.ports.get::<dyn InputHookPort>();
+        *self.inject.write() = ctx.ports.get::<dyn InputInjectPort>();
+        *self.screen.write() = ctx.ports.get::<dyn ScreenInfoPort>();
         let dir = Self::data_dir(&ctx);
         let identity = Arc::new(DeviceIdentity::load_or_create(&dir, crypto)?);
         tracing::info!(
@@ -419,12 +373,12 @@ impl Module for KvmModule {
         let bus = ctx.event_bus.clone();
 
         // ① 发现服务（K1）：在线/离线 → EventBus
-        let screen_port = self.screen.read().expect("screen 锁").clone();
+        let screen_port = self.screen.read().clone();
         let own_screen = screen_port
             .as_ref()
             .and_then(|s| s.virtual_desktop().ok())
             .unwrap_or_default();
-        *self.own_screen.write().expect("own_screen 锁") = Some(own_screen);
+        *self.own_screen.write() = Some(own_screen);
         let discovery = DiscoveryService::new(
             OwnIdentity {
                 device_id: identity.device_id.clone(),
@@ -468,13 +422,13 @@ impl Module for KvmModule {
         let incoming_dir = dir.join("incoming");
         let transfers = Arc::new(TransferManager::new(&incoming_dir));
 
-        *self.bus.write().expect("bus 锁") = Some(bus);
-        *self.discovery.write().expect("discovery 锁") = Some(discovery);
-        *self.codes.write().expect("codes 锁") = Some(codes);
-        *self.pairing.write().expect("pairing 锁") = Some(pairing);
-        *self.identity.write().expect("identity 锁") = Some(identity);
-        *self.store.write().expect("store 锁") = Some(store);
-        *self.transfers.write().expect("transfers 锁") = Some(transfers);
+        *self.bus.write() = Some(bus);
+        *self.discovery.write() = Some(discovery);
+        *self.codes.write() = Some(codes);
+        *self.pairing.write() = Some(pairing);
+        *self.identity.write() = Some(identity);
+        *self.store.write() = Some(store);
+        *self.transfers.write() = Some(transfers);
         self.state.store(STATE_STOPPED, Ordering::SeqCst);
         Ok(())
     }
@@ -486,19 +440,16 @@ impl Module for KvmModule {
         let discovery = self
             .discovery
             .read()
-            .expect("discovery 锁")
             .clone()
             .ok_or_else(|| ModuleError::Start("start 先于 init".into()))?;
         let pairing = self
             .pairing
             .read()
-            .expect("pairing 锁")
             .clone()
             .ok_or_else(|| ModuleError::Start("start 先于 init".into()))?;
         let bus = self
             .bus
             .read()
-            .expect("bus 锁")
             .clone()
             .ok_or_else(|| ModuleError::Start("start 先于 init".into()))?;
 
@@ -518,33 +469,30 @@ impl Module for KvmModule {
             .block_on(async { tokio::net::TcpListener::bind(("0.0.0.0", tcp_port)).await })
             .map_err(|e| ModuleError::Start(format!("会话端口 {tcp_port} 绑定失败: {e}")))?;
         let bus_for_pairing = bus.clone();
-        let paired_cb: crate::pairing::PairedCb = Arc::new(std::sync::Mutex::new(Some(Box::new(
-            move |peer: PairedPeer| {
+        let paired_cb: crate::pairing::PairedCb = Arc::new(parking_lot::Mutex::new(Some(
+            Box::new(move |peer: PairedPeer| {
                 let _ = bus_for_pairing.publish(Event::new(
                     "kvm.paired",
                     "kvm",
                     serde_json::json!({ "peer": peer, "paired": true }),
                 ));
-            },
-        ))));
+            }),
+        )));
 
         // SESSION_PORT 单监听分流：PairRequest→K2 配对；Hello→K3 会话
         let identity = self
             .identity
             .read()
-            .expect("identity 锁")
             .clone()
             .ok_or_else(|| ModuleError::Start("start 先于 init".into()))?;
         let store = self
             .store
             .read()
-            .expect("store 锁")
             .clone()
             .ok_or_else(|| ModuleError::Start("start 先于 init".into()))?;
         let transfers = self
             .transfers
             .read()
-            .expect("transfers 锁")
             .clone()
             .ok_or_else(|| ModuleError::Start("start 先于 init".into()))?;
         let own_device_id = identity.device_id.clone();
@@ -559,7 +507,7 @@ impl Module for KvmModule {
         let outbound_for_ev = outbound.clone();
         let transfers_for_ev = transfers.clone();
         // K7 受控端：注入端口 + 受控标志（InputEvent/控制帧处理用）
-        let inject_for_ev = self.inject.read().expect("inject 锁").clone();
+        let inject_for_ev = self.inject.read().clone();
         let controlled_for_ev = self.controlled.clone();
         let edge_for_ev = self.edge_switch.clone();
         rt.spawn(async move {
@@ -574,11 +522,9 @@ impl Module for KvmModule {
                     }
                     SessionEvent::Closed { device_id, reason } => {
                         // 客户端角色会话出表；服务端会话由 SessionManager 自行移除
-                        if let Some(map) = outbound_for_ev.lock().ok().as_mut() {
-                            map.remove(&device_id);
-                        }
+                        outbound_for_ev.lock().remove(&device_id);
                         // K7：会话断开必须复位控制状态（控制中 → 强制释放；受控中 → 复位）
-                        edge_for_ev.lock().expect("edge 锁").force_release("session");
+                        edge_for_ev.lock().force_release("session");
                         controlled_for_ev.store(false, Ordering::Relaxed);
                         let _ = bus_for_sessions.publish(Event::new(
                             "kvm.session_state",
@@ -781,12 +727,8 @@ impl Module for KvmModule {
         });
 
         // ---- K7 输入捕获 + 转发 worker（端口缺失则降级：仅发现/配对/传输）----
-        let hook_port = self.hook.read().expect("hook 锁").clone();
-        let own_screen = self
-            .own_screen
-            .read()
-            .expect("own_screen 锁")
-            .unwrap_or_default();
+        let hook_port = self.hook.read().clone();
+        let own_screen = self.own_screen.read().unwrap_or_default();
         if let (Some(hook), true) = (hook_port, own_screen.w > 0 && own_screen.h > 0) {
             let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
             // 钩子回调：仅决策（<5ms），IO 全部投递 worker
@@ -795,7 +737,7 @@ impl Module for KvmModule {
             let rect = own_screen;
             hook.start_capture(Box::new(move |ev: &RawInput| {
                 let decision = {
-                    let mut es = es_for_cb.lock().expect("edge 锁");
+                    let mut es = es_for_cb.lock();
                     es.on_local_event(ev, &rect)
                 };
                 match decision {
@@ -805,7 +747,6 @@ impl Module for KvmModule {
                         // 目标设备取自状态机（锁外快查）
                         let device = es_for_cb
                             .lock()
-                            .expect("edge 锁")
                             .controlling_device()
                             .unwrap_or_default()
                             .to_string();
@@ -849,9 +790,9 @@ impl Module for KvmModule {
                             if matches!(ev, RawInput::MouseMove { .. }) {
                                 let peer_screen =
                                     discovery_w.peer(&device).map(|p| p.screen).unwrap_or_default();
-                                let release = es_w.lock().expect("edge 锁").should_release(&peer_screen);
+                                let release = es_w.lock().should_release(&peer_screen);
                                 if release {
-                                    es_w.lock().expect("edge 锁").force_release("edge");
+                                    es_w.lock().force_release("edge");
                                     let payload = serde_json::to_vec(&ControlReleasePayload {
                                         by: own_id.clone(),
                                         reason: "edge".into(),
@@ -877,7 +818,7 @@ impl Module for KvmModule {
                             match session_lookup(Some(&sessions_w), Some(&outbound_w), &device) {
                                 Some(handle) => {
                                     let edge =
-                                        es_w.lock().expect("edge 锁").edges().get(&device).copied();
+                                        es_w.lock().edges().get(&device).copied();
                                     let payload = serde_json::to_vec(&ControlTakePayload {
                                         by: own_id.clone(),
                                         edge: edge.unwrap_or(Edge::Right),
@@ -897,12 +838,12 @@ impl Module for KvmModule {
                                             }),
                                         ));
                                     } else {
-                                        es_w.lock().expect("edge 锁").force_release("session");
+                                        es_w.lock().force_release("session");
                                     }
                                 }
                                 None => {
                                     // 目标无会话：立即归还本地控制（状态机已 Controlling）
-                                    es_w.lock().expect("edge 锁").force_release("no-session");
+                                    es_w.lock().force_release("no-session");
                                     let _ = bus_w.publish(Event::new(
                                         "kvm.control_state",
                                         "kvm",
@@ -913,8 +854,8 @@ impl Module for KvmModule {
                         }
                         Cmd::Release(reason) => {
                             // 手动释放：找出当前受控设备发 ControlRelease
-                            let device = es_w.lock().expect("edge 锁").controlling_device().map(str::to_string);
-                            es_w.lock().expect("edge 锁").force_release(&reason);
+                            let device = es_w.lock().controlling_device().map(str::to_string);
+                            es_w.lock().force_release(&reason);
                             if let Some(device) = device {
                                 if let Some(handle) =
                                     session_lookup(Some(&sessions_w), Some(&outbound_w), &device)
@@ -942,18 +883,18 @@ impl Module for KvmModule {
                     }
                 }
             });
-            *self.cmd_tx.write().expect("cmd_tx 锁") = Some(cmd_tx);
+            *self.cmd_tx.write() = Some(cmd_tx);
             tracing::info!("K7 输入捕获与边缘切换已启动");
         } else {
             tracing::warn!("输入钩子或屏幕信息端口缺失，K7 边缘切换降级关闭");
         }
 
-        *self.sessions.write().expect("sessions 锁") = Some(session_mgr);
-        *self.outbound.write().expect("outbound 锁") = Some(outbound);
-        *self.session_events.write().expect("session_events 锁") = Some(ev_tx);
-        *self.rt_handle.write().expect("rt_handle 锁") = Some(rt.handle().clone());
+        *self.sessions.write() = Some(session_mgr);
+        *self.outbound.write() = Some(outbound);
+        *self.session_events.write() = Some(ev_tx);
+        *self.rt_handle.write() = Some(rt.handle().clone());
 
-        *self.running.write().expect("running 锁") = Some(Running {
+        *self.running.write() = Some(Running {
             _rt: rt,
             discovery: discovery_handle,
             sessions: sessions_handle,
@@ -965,21 +906,18 @@ impl Module for KvmModule {
 
     fn stop(&self) -> Result<(), ModuleError> {
         // K7：先停输入捕获（钩子卸载），复位控制状态
-        if let Some(hook) = self.hook.read().expect("hook 锁").as_ref() {
+        if let Some(hook) = self.hook.read().as_ref() {
             let _ = hook.stop_capture();
         }
         self.controlled.store(false, Ordering::Relaxed);
-        self.edge_switch
-            .lock()
-            .expect("edge 锁")
-            .force_release("module-stop");
+        self.edge_switch.lock().force_release("module-stop");
         // 客户端会话句柄先行关断（Drop 发 close 信号）
-        *self.outbound.write().expect("outbound 锁") = None;
-        *self.session_events.write().expect("session_events 锁") = None;
-        *self.rt_handle.write().expect("rt_handle 锁") = None;
-        *self.cmd_tx.write().expect("cmd_tx 锁") = None;
-        *self.sessions.write().expect("sessions 锁") = None;
-        if let Some(running) = self.running.write().expect("running 锁").take() {
+        *self.outbound.write() = None;
+        *self.session_events.write() = None;
+        *self.rt_handle.write() = None;
+        *self.cmd_tx.write() = None;
+        *self.sessions.write() = None;
+        if let Some(running) = self.running.write().take() {
             // shutdown 需 await：abort 路径由 Drop 兜底（同步上下文）
             drop(running);
         }
@@ -1026,7 +964,7 @@ fn session_lookup(
     device_id: &str,
 ) -> Option<SessionHandle> {
     if let Some(outbound) = outbound {
-        if let Some(h) = outbound.lock().ok().and_then(|m| m.get(device_id).cloned()) {
+        if let Some(h) = outbound.lock().get(device_id).cloned() {
             return Some(h);
         }
     }
@@ -1043,8 +981,8 @@ async fn send_ack_to(
 ) {
     let handle = outbound
         .lock()
-        .ok()
-        .and_then(|m| m.get(device_id).cloned())
+        .get(device_id)
+        .cloned()
         .or_else(|| sessions.get_handle(device_id));
     let Some(handle) = handle else {
         tracing::debug!(device_id, "回 Ack 时会话已断开，放弃");

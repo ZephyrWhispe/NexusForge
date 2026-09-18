@@ -4,9 +4,9 @@
 //! - EOL 混合检测后**整文件统一**（CRLF/LF/LF→CRLF 由 UI 明示）
 //! - 大文件阈值：>5MB 建议关语法高亮、>50MB 只读（E2 前端执行，open 返回 size）
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 
 use encoding_rs::{Encoding, UTF_8};
 
@@ -134,21 +134,18 @@ impl EditorSessions {
             big_file: size > BIG_FILE_HIGHLIGHT,
             readonly: size > HUGE_FILE_READONLY,
         };
-        self.sessions
-            .write()
-            .map_err(|_| EditorError::Encoding("会话锁污染".into()))?
-            .insert(
-                id,
-                Session {
-                    path: path.to_path_buf(),
-                    encoding,
-                    eol,
-                    eol_mixed,
-                    dirty: false,
-                    size,
-                    content,
-                },
-            );
+        self.sessions.write().insert(
+            id,
+            Session {
+                path: path.to_path_buf(),
+                encoding,
+                eol,
+                eol_mixed,
+                dirty: false,
+                size,
+                content,
+            },
+        );
         Ok(info)
     }
 
@@ -273,15 +270,15 @@ impl EditorSessions {
         })
     }
 
-    fn lock(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Session>> {
-        self.sessions.write().expect("会话锁污染")
+    fn lock(&self) -> parking_lot::RwLockWriteGuard<'_, HashMap<String, Session>> {
+        self.sessions.write()
     }
 }
 
 // ---- 内部辅助 ----
 
 struct SessionMutGuard<'a> {
-    inner: std::sync::RwLockWriteGuard<'a, HashMap<String, Session>>,
+    inner: parking_lot::RwLockWriteGuard<'a, HashMap<String, Session>>,
     id: String,
 }
 

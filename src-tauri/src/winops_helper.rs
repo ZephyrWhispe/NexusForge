@@ -6,7 +6,8 @@
 //! - helper 120s 空闲自退后：connect 失败 → 重新 spawn（新 token）→ UAC 再弹一次
 //! - RoutingRegistry：HKLM 动作走 helper、其余本地（规格路由契约：HKLM 一律 HelperClient）
 
-use std::sync::{Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::OnceLock;
 
 use host_core::error::AppError;
 use host_core::ports::{
@@ -32,7 +33,7 @@ fn new_token() -> String {
 
 /// 确保 helper 已拉起（token 就绪）；未拉起则 spawn（UAC 弹窗）
 pub fn ensure_up(spawner: &dyn HelperSpawnPort) -> Result<(), AppError> {
-    if token_cell().lock().unwrap().is_some() {
+    if token_cell().lock().is_some() {
         return Ok(());
     }
     spawn_new(spawner)
@@ -62,7 +63,7 @@ fn spawn_new(spawner: &dyn HelperSpawnPort) -> Result<(), AppError> {
         idle_exit_secs: 120,
     };
     spawner.spawn(&spec)?; // UAC 弹窗；取消/失败 → SYS_HELPER_002
-    *token_cell().lock().unwrap() = Some(token);
+    *token_cell().lock() = Some(token);
     Ok(())
 }
 
@@ -140,7 +141,6 @@ fn call_once(pipe: &str, token: &str, method: &str, params: &Value) -> Result<Va
 fn helper_call(method: &str, params: Value) -> Result<Value, AppError> {
     let token = token_cell()
         .lock()
-        .unwrap()
         .clone()
         .ok_or_else(|| AppError::module("SYS_HELPER_001", "Helper 未初始化", None))?;
     let pipe = h::pipe_name_for(std::process::id());

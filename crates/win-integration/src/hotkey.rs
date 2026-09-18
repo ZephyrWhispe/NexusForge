@@ -3,9 +3,10 @@
 //! 专用线程：隐藏窗口 + GetMessage 循环。register/unregister 请求经通道投递，
 //! PostMessage(WM_APP) 唤醒消息循环处理；WM_HOTKEY → dispatcher(os_id) + handlers。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -64,14 +65,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let shared = &*(raw as *const Shared);
             let os_id = wparam.0 as i32;
             tracing::info!(os_id, "WM_HOTKEY 到达");
-            if let Ok(d) = shared.dispatcher.lock() {
+            {
+                let d = shared.dispatcher.lock();
                 if let Some(f) = d.as_ref() {
                     f(os_id);
                 } else {
                     tracing::warn!("WM_HOTKEY 到达但 dispatcher 未设置");
                 }
             }
-            if let Ok(h) = shared.handlers.lock() {
+            {
+                let h = shared.handlers.lock();
                 if let Some(f) = h.get(&os_id) {
                     f();
                 }
@@ -85,7 +88,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         if raw != 0 {
             let shared = &*(raw as *const Shared);
             let pending: Vec<Req> = {
-                let mut guard = shared.req_rx.lock().unwrap();
+                let mut guard = shared.req_rx.lock();
                 let mut v = Vec::new();
                 while let Ok(req) = guard.as_mut().expect("req_rx 已被线程取走").try_recv() {
                     v.push(req);
@@ -168,7 +171,8 @@ impl HotkeyWin {
                     Arc::into_raw(shared_thread.clone()) as isize,
                 );
                 // 就绪信号：hwnd 必须写回 shared（register 依赖它投递 WM_APP 唤醒消息循环）
-                if let Ok(mut g) = shared_thread.hwnd.lock() {
+                {
+                    let mut g = shared_thread.hwnd.lock();
                     *g = Some(SendHwnd(hwnd.0 as usize));
                 }
                 let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
@@ -181,7 +185,7 @@ impl HotkeyWin {
         // 等待窗口就绪（超时不致命：后续 register 仍会失败并给出错误码）
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
-            if shared.hwnd.lock().unwrap().is_some() {
+            if shared.hwnd.lock().is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -210,7 +214,7 @@ impl HotkeyWinPort for HotkeyWin {
                 resp: tx,
             })
             .map_err(|e| AppError::module("WIN_HOTKEY_004", e.to_string(), None))?;
-        if let Some(h) = self.shared.hwnd.lock().unwrap().as_ref() {
+        if let Some(h) = self.shared.hwnd.lock().as_ref() {
             let _ = unsafe { PostMessageW(h.get(), WM_APP, WPARAM(0), LPARAM(0)) };
         }
         rx.recv_timeout(std::time::Duration::from_secs(2))
@@ -225,7 +229,7 @@ impl HotkeyWinPort for HotkeyWin {
                 resp: tx,
             })
             .map_err(|e| AppError::module("WIN_HOTKEY_004", e.to_string(), None))?;
-        if let Some(h) = self.shared.hwnd.lock().unwrap().as_ref() {
+        if let Some(h) = self.shared.hwnd.lock().as_ref() {
             let _ = unsafe { PostMessageW(h.get(), WM_APP, WPARAM(0), LPARAM(0)) };
         }
         rx.recv_timeout(std::time::Duration::from_secs(2))
@@ -233,7 +237,8 @@ impl HotkeyWinPort for HotkeyWin {
     }
 
     fn set_dispatcher(&self, dispatcher: Arc<dyn Fn(i32) + Send + Sync>) {
-        if let Ok(mut d) = self.shared.dispatcher.lock() {
+        {
+            let mut d = self.shared.dispatcher.lock();
             *d = Some(dispatcher);
         }
     }

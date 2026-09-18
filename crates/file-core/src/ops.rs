@@ -8,12 +8,13 @@
 //! - 断点续传：Copy/Move 记录 (file_index, bytes_done)，resume 时 seek 续传
 //! - 删除：recycle=true 走 [`RecycleBinPort`]（SHFileOperationW 回收站），无端口降级直删
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use host_core::ports::RecycleBinPort;
@@ -205,15 +206,12 @@ impl OpQueue {
             handles.push(std::thread::spawn(move || {
                 // 快照更新包装：active() 永远拿到最新状态（每 worker 构造一次）
                 let sink: ProgressFn = Arc::new(move |p: OpProgress| {
-                    latest
-                        .lock()
-                        .expect("ops 进度表锁")
-                        .insert(p.op_id.clone(), p.clone());
+                    latest.lock().insert(p.op_id.clone(), p.clone());
                     cb(p);
                 });
                 loop {
                     // 持锁阻塞 recv：有 job 的 worker 取走后立即放锁，其余 worker 依次排队
-                    let job = { rx.lock().expect("ops 队列锁").recv() };
+                    let job = { rx.lock().recv() };
                     let Ok(job) = job else { return }; // 发送端关闭 → 退出
                     run_job(job, &sink);
                 }
@@ -262,10 +260,7 @@ impl OpQueue {
             },
         )?;
         let ctl = Arc::new(OpControl::new());
-        self.ctls
-            .lock()
-            .expect("ops 控制表锁")
-            .insert(op_id.clone(), ctl.clone());
+        self.ctls.lock().insert(op_id.clone(), ctl.clone());
         let progress = OpProgress {
             op_id: op_id.clone(),
             kind: spec.kind,
@@ -278,10 +273,7 @@ impl OpQueue {
             error: None,
         };
         (self.cb)(progress.clone());
-        self.latest
-            .lock()
-            .expect("ops 进度表锁")
-            .insert(op_id.clone(), progress);
+        self.latest.lock().insert(op_id.clone(), progress);
         self.tx
             .as_ref()
             .expect("队列发送端存活")
@@ -344,7 +336,6 @@ impl OpQueue {
     fn ctl(&self, op_id: &str) -> Result<Arc<OpControl>, FileError> {
         self.ctls
             .lock()
-            .expect("ops 控制表锁")
             .get(op_id)
             .cloned()
             .ok_or_else(|| FileError::NoSuchOp(op_id.to_owned()))
@@ -352,13 +343,7 @@ impl OpQueue {
 
     /// 活跃/近期操作快照
     pub fn active(&self) -> Vec<OpProgress> {
-        let mut v: Vec<OpProgress> = self
-            .latest
-            .lock()
-            .expect("ops 进度表锁")
-            .values()
-            .cloned()
-            .collect();
+        let mut v: Vec<OpProgress> = self.latest.lock().values().cloned().collect();
         v.sort_by(|a, b| a.op_id.cmp(&b.op_id));
         v
     }

@@ -126,12 +126,12 @@ fn parse_log_stream(body: &[u8]) -> String {
 mod tests {
     use super::*;
     use host_core::ports::HttpResp;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     /// 内存假 Docker（HTTP 解析已单测，这里测 API 封装语义）
     struct FakeDocker {
         responses: Mutex<Vec<HttpResp>>,
-        last_path: std::sync::Mutex<String>,
+        last_path: parking_lot::Mutex<String>,
     }
     impl FakeDocker {
         fn new(status: u16, body: &[u8]) -> Self {
@@ -140,7 +140,7 @@ mod tests {
                     status,
                     body: body.to_vec(),
                 }]),
-                last_path: std::sync::Mutex::new(String::new()),
+                last_path: parking_lot::Mutex::new(String::new()),
             }
         }
     }
@@ -151,10 +151,9 @@ mod tests {
             path: &str,
             _body: Option<&str>,
         ) -> std::result::Result<HttpResp, AppError> {
-            *self.last_path.lock().unwrap() = path.to_string();
+            *self.last_path.lock() = path.to_string();
             self.responses
                 .lock()
-                .unwrap()
                 .pop()
                 .ok_or_else(|| AppError::module("TERM_DOCKER_001", "no response", None))
         }
@@ -170,14 +169,14 @@ mod tests {
         assert_eq!(list[0].id, "abcdef123456");
         assert_eq!(list[0].state, "running");
         // all=1 参数
-        assert!(d.last_path.lock().unwrap().contains("all=1"));
+        assert!(d.last_path.lock().contains("all=1"));
     }
 
     #[test]
     fn lifecycle_maps_status() {
         let d = FakeDocker::new(204, b"");
         assert!(container_lifecycle(&d, "abc", true).is_ok());
-        assert!(d.last_path.lock().unwrap().contains("/start"));
+        assert!(d.last_path.lock().contains("/start"));
         // 304 = 已是目标状态
         let d = FakeDocker::new(304, b"");
         assert!(container_lifecycle(&d, "abc", false).is_ok());

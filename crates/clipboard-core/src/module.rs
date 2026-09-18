@@ -1,7 +1,8 @@
 //! ClipboardModule：Module trait 实现 + start 时挂接捕获管线（docs/impl/02 C3/C7）
 
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::{AppError, ModuleError};
@@ -18,7 +19,7 @@ pub struct ClipboardModule {
     db_dir: RwLock<Option<std::path::PathBuf>>,
     store: RwLock<Option<Arc<ClipStore>>>,
     /// 回写标志：clipboard_paste 先置位，管线回调据此丢弃自回写事件（防循环）
-    write_back: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    write_back: Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
     port: RwLock<Option<Arc<dyn ClipboardPort>>>,
     crypto: RwLock<Option<Arc<dyn CryptoPort>>>,
     bus: RwLock<Option<Arc<EventBus>>>,
@@ -35,7 +36,7 @@ impl ClipboardModule {
         Self {
             db_dir: RwLock::new(None),
             store: RwLock::new(None),
-            write_back: Arc::new(std::sync::Mutex::new(None)),
+            write_back: Arc::new(parking_lot::Mutex::new(None)),
             port: RwLock::new(None),
             crypto: RwLock::new(None),
             bus: RwLock::new(None),
@@ -47,11 +48,11 @@ impl ClipboardModule {
     }
 
     pub fn store(&self) -> Option<Arc<ClipStore>> {
-        self.store.read().ok().and_then(|g| g.clone())
+        self.store.read().clone()
     }
 
     pub fn port(&self) -> Option<Arc<dyn ClipboardPort>> {
-        self.port.read().ok().and_then(|g| g.clone())
+        self.port.read().clone()
     }
 
     pub fn config(&self) -> Arc<AsyncMutex<ClipboardConfig>> {
@@ -60,15 +61,15 @@ impl ClipboardModule {
 
     /// clipboard_paste：先置回写标志（防循环），再写剪贴板
     pub fn write_back(&self, content: &host_core::ports::ClipContent) -> Result<(), AppError> {
-        if let Ok(mut g) = self.write_back.lock() {
+        {
+            let mut g = self.write_back.lock();
             *g = Some(std::time::Instant::now());
         }
-        let port = self
-            .port
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .ok_or(AppError::module("CLIPBOARD_PASTE_001", "模块未就绪", None))?;
+        let port = self.port.read().clone().ok_or(AppError::module(
+            "CLIPBOARD_PASTE_001",
+            "模块未就绪",
+            None,
+        ))?;
         port.write(content)
     }
 }
@@ -119,26 +120,11 @@ impl Module for ClipboardModule {
             .get::<dyn CryptoPort>()
             .ok_or_else(|| err("CLIPBOARD_INIT_002", "CryptoPort 未注册（信封加密缺失）"))?;
 
-        *self
-            .db_dir
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.app_data_dir.clone());
-        *self
-            .store
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(store);
-        *self
-            .port
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(port);
-        *self
-            .crypto
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(crypto);
-        *self
-            .bus
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self.db_dir.write() = Some(ctx.app_data_dir.clone());
+        *self.store.write() = Some(store);
+        *self.port.write() = Some(port);
+        *self.crypto.write() = Some(crypto);
+        *self.bus.write() = Some(ctx.event_bus.clone());
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -146,12 +132,8 @@ impl Module for ClipboardModule {
     fn start(&self) -> Result<(), ModuleError> {
         // S3：捕获管线在 start 挂接（与 stop 对称），而非 init——否则 restart（stop→init→start）
         // 每轮都新增一个不退出的 worker 线程 + 一份 DB 连接
-        let already = self
-            .pipeline
-            .read()
-            .ok()
-            .and_then(|g| g.as_ref().map(|_| ()));
-        if already.is_none() {
+        let already = self.pipeline.read().is_some();
+        if !already {
             let port = self
                 .port()
                 .ok_or_else(|| ModuleError::Start("ClipboardPort 未就绪".into()))?;
@@ -161,14 +143,12 @@ impl Module for ClipboardModule {
             let crypto = self
                 .crypto
                 .read()
-                .ok()
-                .and_then(|g| g.clone())
+                .clone()
                 .ok_or_else(|| ModuleError::Start("CryptoPort 未就绪".into()))?;
             let bus = self
                 .bus
                 .read()
-                .ok()
-                .and_then(|g| g.clone())
+                .clone()
                 .ok_or_else(|| ModuleError::Start("event bus 未就绪".into()))?;
             let handle = CapturePipeline::start(
                 port,
@@ -179,10 +159,7 @@ impl Module for ClipboardModule {
                 self.write_back.clone(),
             )
             .map_err(|e| ModuleError::Start(e.to_string()))?;
-            *self
-                .pipeline
-                .write()
-                .map_err(|_| ModuleError::Start("锁污染".into()))? = Some(handle);
+            *self.pipeline.write() = Some(handle);
         }
         // 启动 C9 清理线程
         self.start_cleanup();
@@ -196,21 +173,20 @@ impl Module for ClipboardModule {
         if let Some(port) = self.port() {
             let _ = port.stop_listener();
         }
-        if let Ok(mut g) = self.pipeline.write() {
+        {
+            let mut g = self.pipeline.write();
             if let Some(handle) = g.take() {
                 handle.shutdown();
             }
         }
         // 停止清理线程（置取消标志；线程 sleep 期间会滞后响应，可接受）
-        if let Ok(cancel) = self.cleanup_cancel.read() {
+        {
+            let cancel = self.cleanup_cancel.read();
             if let Some(flag) = cancel.as_ref() {
                 flag.store(3, Ordering::SeqCst);
             }
         }
-        *self
-            .cleanup_cancel
-            .write()
-            .map_err(|_| ModuleError::Stop("锁污染".into()))? = None;
+        *self.cleanup_cancel.write() = None;
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -283,7 +259,7 @@ impl HotkeyProvider for ClipboardModule {
     }
 
     fn hotkey_actions(&self) -> Vec<HotkeyAction> {
-        let bus = self.bus.read().ok().and_then(|g| g.clone());
+        let bus = self.bus.read().clone();
         let Some(bus) = bus else {
             return vec![]; // init 前不提供动作
         };
@@ -305,13 +281,14 @@ impl ClipboardModule {
     /// C9 定时清理线程（docs/impl/02 C9）：start 时启动，每 6h 执行一次 purge；
     /// 用 std::thread + 取消标志（start 在 spawn_blocking 内被调用，无 tokio 上下文）
     fn start_cleanup(&self) {
-        let already = self.cleanup_cancel.read().ok().and_then(|g| g.clone());
+        let already = self.cleanup_cancel.read().clone();
         if already.is_some() {
             return; // 幂等：restart 时 stop 已清空，此分支防御
         }
         let Some(store) = self.store() else { return };
         let cancel = Arc::new(AtomicU8::new(0));
-        if let Ok(mut g) = self.cleanup_cancel.write() {
+        {
+            let mut g = self.cleanup_cancel.write();
             *g = Some(cancel.clone());
         }
         let config = self.config.clone();
@@ -392,16 +369,11 @@ impl ClipboardModule {
         let store =
             self.store()
                 .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?;
-        let crypto = self
-            .crypto
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .ok_or(AppError::module(
-                "CLIPBOARD_QUERY_001",
-                "CryptoPort 未就绪",
-                None,
-            ))?;
+        let crypto = self.crypto.read().clone().ok_or(AppError::module(
+            "CLIPBOARD_QUERY_001",
+            "CryptoPort 未就绪",
+            None,
+        ))?;
         store.get_content(id, move |c| crypto.unprotect(c))
     }
 
@@ -411,16 +383,11 @@ impl ClipboardModule {
         let store =
             self.store()
                 .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?;
-        let crypto = self
-            .crypto
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .ok_or(AppError::module(
-                "CLIPBOARD_QUERY_001",
-                "CryptoPort 未就绪",
-                None,
-            ))?;
+        let crypto = self.crypto.read().clone().ok_or(AppError::module(
+            "CLIPBOARD_QUERY_001",
+            "CryptoPort 未就绪",
+            None,
+        ))?;
         match store.get_payload(id)? {
             Some(Payload::SecretB64(b64)) => {
                 use base64::Engine;

@@ -5,8 +5,9 @@
 //! - `set_*` 必须先过注册的 JSON Schema（jsonschema crate）再原子写，随后广播 `host.config_changed`
 //! - 文件写入一律"临时文件 + rename"（docs/IMPLEMENTATION.md 通用规约 5）
 
+use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -108,18 +109,11 @@ impl ConfigStore {
 
     /// 模块 init 时登记自己的配置 schema（设置中心自动渲染的数据源）
     pub fn register_schema(&self, module: &str, schema: serde_json::Value) {
-        self.schemas
-            .write()
-            .expect("schema 表写锁")
-            .insert(module.to_owned(), schema);
+        self.schemas.write().insert(module.to_owned(), schema);
     }
 
     pub fn schema_of(&self, module: &str) -> Option<serde_json::Value> {
-        self.schemas
-            .read()
-            .expect("schema 表读锁")
-            .get(module)
-            .cloned()
+        self.schemas.read().get(module).cloned()
     }
 
     pub fn get_module(&self, id: &str) -> Result<serde_json::Value, AppError> {

@@ -4,8 +4,9 @@
 //! - stop：**停内核 + 还原系统代理**（安全语义优先，进程退出的兜底还原点之一）
 //! - panic hook 还原由 src-tauri state.rs 经 host-core crash::add_recovery_hook 注册
 
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::error::ModuleError;
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
@@ -28,7 +29,7 @@ impl ProxyModule {
 
     /// IPC 层入口（全部命令经此取服务；未 init 返回 None）
     pub fn service(&self) -> Option<Arc<ProxyService>> {
-        self.service.read().ok().and_then(|g| g.clone())
+        self.service.read().clone()
     }
 }
 
@@ -56,10 +57,7 @@ impl Module for ProxyModule {
             .ok_or_else(|| ModuleError::Init("SysProxyPort 未注册".into()))?;
         let svc = ProxyService::open(&ctx.app_data_dir, ctx.event_bus.clone(), sp)
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
-        *self
-            .service
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(svc);
+        *self.service.write() = Some(svc);
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }

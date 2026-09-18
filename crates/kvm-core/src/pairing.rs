@@ -12,8 +12,9 @@
 //!
 //! 后续会话（K3）以 paired.json 的指纹白名单为准入依据。
 
+use parking_lot::Mutex;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::RngCore;
@@ -66,7 +67,7 @@ impl PairCodeManager {
     /// 签发新码：6 位数字（CSPRNG）。返回 (码, 有效期毫秒)
     pub fn issue(&self) -> (String, u64) {
         let code = format!("{:06}", rand::rngs::OsRng.next_u32() % 1_000_000);
-        *self.active.lock().expect("pair code 锁") = Some(ActiveCode {
+        *self.active.lock() = Some(ActiveCode {
             code: code.clone(),
             expires: Instant::now() + CODE_TTL,
             attempts: 0,
@@ -77,7 +78,7 @@ impl PairCodeManager {
 
     /// 校验并消费一次性码。错误尝试累计（达到 MAX_ATTEMPTS 作废）。
     pub fn validate(&self, code: &str) -> Result<(), CodeError> {
-        let mut guard = self.active.lock().expect("pair code 锁");
+        let mut guard = self.active.lock();
         let Some(active) = guard.as_mut() else {
             return Err(CodeError::Mismatch);
         };
@@ -109,7 +110,6 @@ impl PairCodeManager {
     pub fn has_active(&self) -> bool {
         self.active
             .lock()
-            .expect("pair code 锁")
             .as_ref()
             .map(|c| !c.used && Instant::now() < c.expires)
             .unwrap_or(false)
@@ -232,7 +232,7 @@ impl PairingService {
                                 _ => return,
                             };
                             if let Some(peer) = svc.handle_pair_conn(stream, first).await {
-                                if let Some(f) = cb.lock().unwrap().as_ref() {
+                                if let Some(f) = cb.lock().as_ref() {
                                     f(peer);
                                 }
                             }
@@ -518,9 +518,7 @@ mod tests {
         let _handle = svc_b
             .accept_loop(
                 listener,
-                Arc::new(Mutex::new(Some(Box::new(move |p| {
-                    sink.lock().unwrap().push(p)
-                })))),
+                Arc::new(Mutex::new(Some(Box::new(move |p| sink.lock().push(p))))),
             )
             .await;
 
@@ -534,7 +532,7 @@ mod tests {
         // 双方都落盘
         assert!(store_a.is_paired(&id_b.device_id));
         assert!(store_b.is_paired(&id_a.device_id));
-        assert_eq!(paired_sink.lock().unwrap().len(), 1);
+        assert_eq!(paired_sink.lock().len(), 1);
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
     }

@@ -86,15 +86,15 @@ fn recycle_mode_collects_exact_paths_for_recovery() {
     }
     // 回收站模拟：记录删除列表（真实 RecycleBinPort 由 win-integration SHFileOperation 承载，
     // 系统回收站可恢复语义由 FOF_ALLOWUNDO 保证——此处验收列表精确性）
-    let deleted = std::sync::Mutex::new(Vec::<PathBuf>::new());
+    let deleted = parking_lot::Mutex::new(Vec::<PathBuf>::new());
     let result = execute_target(&t, now(), true, &|paths: &[PathBuf]| {
-        deleted.lock().unwrap().extend(paths.iter().cloned());
+        deleted.lock().extend(paths.iter().cloned());
         Ok(paths.len() as u32)
     })
     .unwrap();
     assert_eq!(result.0, 3);
 
-    let mut got = deleted.into_inner().unwrap();
+    let mut got = deleted.into_inner();
     got.sort();
     expect_paths.sort();
     assert_eq!(

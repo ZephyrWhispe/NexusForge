@@ -5,7 +5,8 @@
 //! q<3 重置间隔 1 天（reps 归零）；否则 reps+1，
 //! 间隔 = reps==1 → 1 天 / reps==2 → 6 天 / 之后 → round(上轮间隔 × EF')。
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -57,9 +58,7 @@ pub struct CardStore {
 impl CardStore {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Result<Self> {
         {
-            let c = conn
-                .lock()
-                .map_err(|_| NoteError::Db("卡片连接锁污染".into()))?;
+            let c = conn.lock();
             c.execute_batch(
                 "CREATE TABLE IF NOT EXISTS cards (
                     id TEXT PRIMARY KEY,
@@ -178,8 +177,8 @@ impl CardStore {
         Ok(())
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().expect("cards 连接锁污染")
+    fn lock(&self) -> parking_lot::MutexGuard<'_, Connection> {
+        self.conn.lock()
     }
 }
 

@@ -24,7 +24,7 @@
 | D-12 | 同步库归位 `db/sync.db` | 补实现 | P1 | 1 | 已完成 |
 | D-13 | WinOps v1 交付范围收敛为 5 命令 | 改规范 | P2 | 3 | 已裁决（文档生效） |
 | D-14 | 引入 Zustand 三 store，替换轮询与静态状态 | 补实现 | P1 | 1 | 已完成 |
-| D-15 | 锁策略统一（parking_lot + 回调无锁快照） | 补实现 | P0 | 2 | 待实施 |
+| D-15 | 锁策略统一（parking_lot + 回调无锁快照） | 补实现 | P0 | 2 | 已完成 |
 | D-16 | host-core 收敛公共工具与 ModuleStateCell | 补实现 | P1 | 2 | 待实施 |
 | D-17 | 前端工程门禁（ESLint + Vitest + CI） | 补实现 | P0 | 2 | 已完成 |
 | D-18 | 前端组件基线 + 破坏性操作统一二次确认 | 补实现 | P1 | 2 | 待实施 |
@@ -171,6 +171,8 @@
 - **背景**：静态扫描统计 `.lock().unwrap()/expect()` **约 186 处**；其中运行期高风险点包括事件总线（`crates/host-core/src/events.rs:136-166`，poison 后全模块发布崩溃）、剪贴板连接锁（14 处）、代理还原路径（`crates/proxy-core/src/sysproxy.rs:153-160`）、以及**在低级输入钩子回调内取锁**（`crates/win-integration/src/input.rs:111`，阻塞会导致系统级输入卡顿）。
 - **决策**：全局改用 `parking_lot::Mutex/RwLock`（无 poison 语义）；输入钩子的回调改用 `ArcSwap` 无锁快照，**禁止在 hook 回调内获取任何 std 锁**。
 - **理由**：poison 会让 DESIGN §8.2 的"模块 Error 可重启"变成"重启后首个 `lock()` 立即再 panic"，属实质功能缺陷而非风格问题；`parking_lot` 替换成本低、无 API 破坏。
+- **实施记录**：56 个文件、全部 std `Mutex/RwLock` 换为 `parking_lot`（tokio `AsyncMutex` 保留——本无 poison 语义；`nexusforge-helper` 无锁未涉及）。186 处 `.lock().unwrap()/expect("…锁污染")` 全部消失；衍生清理：32 处 `*self.X.write().map_err(|_| ModuleError::Init("锁污染"))? =` 端口注入样板、perf.rs 四个 `SYS_PERF_003 锁污染` 错误路径（parking_lot 下取锁不可能失败，改为直接 `Ok(...)`）、notes/sync/desktop 的 `.read().ok().and_then(|g| g.clone())` Option 链改 `.read().clone()`。钩子回调（`keyboard_proc/mouse_proc`）改 `ArcSwap<Option<Cb>>::load()` 无锁快照，`start_capture/stop_capture` 经 `store()` 发布/清除；钩子线程自身的 `thread_id/req_rx/hooks` 仍用 parking_lot Mutex（非回调路径）。
+- **完成证据**：`cargo fmt --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` 45 套件全绿。回归测试两枚：`events.rs::publish_survives_panic_under_lock`（持总线写锁的线程 panic 后发布/订阅仍正常——std 语义下此测试必失败，正是 poison 级联缺陷的正面证据）；`input.rs::hook_cb_visible_via_lockfree_snapshot`（start 后回调经 ArcSwap 立即可见、stop 后清除）。脚本误伤两处非锁同名方法（`SysProxyPort::read()` trait 方法、`VaultService::lock()` 领域方法）已由编译器全部捕获并恢复 `.unwrap()`，最终 `grep` 复核：残留 12 处 unwrap 均为这两类领域方法而非锁。
 
 ### D-16 host-core 收敛公共工具与 ModuleStateCell
 

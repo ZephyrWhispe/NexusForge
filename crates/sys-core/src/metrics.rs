@@ -3,8 +3,8 @@
 //! 采样值来自 PerfPort（win-integration PDH 实现，WMI 太慢已规避）；
 //! 清理扫描/包管理均不在此处（见 clean.rs / pkg.rs）。
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::Mutex;
 
 use host_core::ports::PerfPort;
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ impl MetricsBuffer {
             net_bps,
             disks,
         };
-        let mut buf = self.buf.lock().expect("metrics 锁污染");
+        let mut buf = self.buf.lock();
         if buf.len() >= BUFFER_CAP {
             buf.pop_front();
         }
@@ -78,16 +78,11 @@ impl MetricsBuffer {
 
     /// 全部历史（旧 → 新）
     pub fn history(&self) -> Vec<MetricsPoint> {
-        self.buf
-            .lock()
-            .expect("metrics 锁污染")
-            .iter()
-            .cloned()
-            .collect()
+        self.buf.lock().iter().cloned().collect()
     }
 
     pub fn len(&self) -> usize {
-        self.buf.lock().expect("metrics 锁污染").len()
+        self.buf.lock().len()
     }
 
     #[allow(dead_code)]

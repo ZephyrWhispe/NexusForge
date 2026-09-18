@@ -13,8 +13,11 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -59,8 +62,10 @@ struct Shared {
     thread_id: Mutex<Option<u32>>,
     /// 请求接收端（钩子线程专用；Sender 由 InputHookWin 持有）
     req_rx: Mutex<Option<std::sync::mpsc::Receiver<Req>>>,
-    /// 用户回调（start_capture 设置，stop 清除）
-    cb: Mutex<Option<Cb>>,
+    /// 用户回调（start_capture 设置，stop 清除）。
+    /// D-15：钩子回调内禁止取锁——低级钩子在系统输入路径上同步执行，
+    /// 任何锁等待都会拖慢全局输入，故用 ArcSwap 无锁快照。
+    cb: ArcSwap<Option<Cb>>,
     /// [键盘钩子, 鼠标钩子]
     hooks: Mutex<[Option<SendHook>; 2]>,
     /// 节流时间基准
@@ -111,8 +116,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 },
                 _ => return,
             };
-            // 临时守卫显式绑定（if-let 判定式临时值存活到块尾，会压长 borrow 生命周期）
-            let cb_guard = shared.cb.lock().expect("输入回调锁");
+            // ArcSwap 无锁快照（D-15）：守卫只借用快照，不取任何锁
+            let cb_guard = shared.cb.load();
             if let Some(cb) = cb_guard.as_ref() {
                 if !cb(&ev) {
                     suppress = true;
@@ -189,7 +194,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 // 水平滚轮等 v1 不捕获（透传）
                 _ => return,
             };
-            let cb_guard = shared.cb.lock().expect("输入回调锁");
+            let cb_guard = shared.cb.load();
             if let Some(cb) = cb_guard.as_ref() {
                 if !cb(&ev) {
                     suppress = true;
@@ -205,7 +210,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
 fn hook_thread(shared: Arc<Shared>) {
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
-    if let Ok(mut g) = shared.thread_id.lock() {
+    {
+        let mut g = shared.thread_id.lock();
         *g = Some(unsafe { GetCurrentThreadId() });
     }
     let mut msg = MSG::default();
@@ -214,7 +220,7 @@ fn hook_thread(shared: Arc<Shared>) {
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
             if msg.message == WM_APP {
                 let reqs: Vec<Req> = {
-                    let mut guard = shared.req_rx.lock().expect("req 锁");
+                    let mut guard = shared.req_rx.lock();
                     let mut v = Vec::new();
                     while let Ok(req) = guard.as_mut().expect("req_rx 已被线程取走").try_recv()
                     {
@@ -234,7 +240,7 @@ fn hook_thread(shared: Arc<Shared>) {
 fn handle_req(shared: &Shared, req: Req) {
     match req {
         Req::Start { resp } => {
-            let mut hooks = shared.hooks.lock().expect("hooks 锁");
+            let mut hooks = shared.hooks.lock();
             if hooks[0].is_some() || hooks[1].is_some() {
                 let _ = resp.send(Err(AppError::module(
                     "WIN_INPUT_001",
@@ -275,14 +281,14 @@ fn handle_req(shared: &Shared, req: Req) {
             }
         }
         Req::Stop { resp } => {
-            let mut hooks = shared.hooks.lock().expect("hooks 锁");
+            let mut hooks = shared.hooks.lock();
             if let Some(h) = hooks[0].take() {
                 let _ = unsafe { UnhookWindowsHookEx(h.0) };
             }
             if let Some(h) = hooks[1].take() {
                 let _ = unsafe { UnhookWindowsHookEx(h.0) };
             }
-            *shared.cb.lock().expect("输入回调锁") = None;
+            shared.cb.store(Arc::new(None));
             let _ = resp.send(Ok(()));
             // 不退出消息循环：钩子线程须保活以支持 stop 后重新 start（PostQuitMessage
             // 会让 GetMessageW 返回 0 → 线程死亡，后续 Start 请求永久无响应）
@@ -302,7 +308,7 @@ impl InputHookWin {
         let shared = Arc::new(Shared {
             thread_id: Mutex::new(None),
             req_rx: Mutex::new(Some(req_rx)),
-            cb: Mutex::new(None),
+            cb: ArcSwap::from_pointee(None),
             hooks: Mutex::new([None, None]),
             epoch: Instant::now(),
             last_move_ms: AtomicU64::new(0),
@@ -315,7 +321,7 @@ impl InputHookWin {
         // 等待钩子线程就绪（tid 写回）
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if shared.thread_id.lock().expect("tid 锁").is_some() {
+            if shared.thread_id.lock().is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -335,7 +341,6 @@ impl InputHookWin {
             .shared
             .thread_id
             .lock()
-            .expect("tid 锁")
             .ok_or_else(|| AppError::module("WIN_INPUT_005", "钩子线程未就绪", None))?;
         unsafe { PostThreadMessageW(tid, WM_APP, WPARAM(0), LPARAM(0)) }
             .map_err(|e| AppError::module("WIN_INPUT_004", e.to_string(), None))?;
@@ -350,7 +355,7 @@ impl InputHookPort for InputHookWin {
         cb: Box<dyn Fn(&RawInput) -> bool + Send + Sync>,
     ) -> Result<(), AppError> {
         // 先挂回调再启动（首帧即有回调）
-        *self.shared.cb.lock().expect("输入回调锁") = Some(Arc::from(cb));
+        self.shared.cb.store(Arc::new(Some(Arc::from(cb))));
         self.call(|resp| Req::Start { resp })
     }
 
@@ -578,6 +583,21 @@ mod tests {
         // 停止后可重新启动
         hook.start_capture(Box::new(|_| true)).unwrap();
         hook.stop_capture().unwrap();
+    }
+
+    /// D-15 回归：回调经 ArcSwap 无锁快照发布——start 后钩子侧立即可见、
+    /// stop 后立即清除（回调路径禁止取任何锁，锁等待会拖慢系统全局输入）
+    #[test]
+    fn hook_cb_visible_via_lockfree_snapshot() {
+        let hook = InputHookWin::new().unwrap();
+        assert!(hook.shared.cb.load().is_none(), "初始无回调");
+        hook.start_capture(Box::new(|_| true)).unwrap();
+        assert!(
+            hook.shared.cb.load().is_some(),
+            "start 后回调须经无锁快照可见"
+        );
+        hook.stop_capture().unwrap();
+        assert!(hook.shared.cb.load().is_none(), "stop 后回调必须清除");
     }
 
     /// 虚拟桌面矩形冒烟（有显示器的机器必然 w/h > 0）

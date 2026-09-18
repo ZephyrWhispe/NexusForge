@@ -4,9 +4,10 @@
 //! - start：启动 1s 采样线程（sys.metrics）+ WinOps 回归检测（WUB 式防自愈，sys.verify_result）
 //! - 无全局快捷键 ability；WinOps Tweak 引擎（docs/impl/08）数据面经 Port 注入
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus};
@@ -91,11 +92,11 @@ impl SysModule {
     }
 
     pub fn recycle(&self) -> Option<Arc<dyn RecycleBinPort>> {
-        self.recycle.read().ok().and_then(|g| g.clone())
+        self.recycle.read().clone()
     }
 
     fn publish_metrics(&self, point: &MetricsPoint) {
-        if let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) {
+        if let Some(bus) = self.bus.read().clone() {
             bus.publish(Event::new(
                 "sys.metrics",
                 "sys",
@@ -108,16 +109,10 @@ impl SysModule {
     /// 采样线程（start 在后台调用；1s 采样 → 缓冲 + 事件节流 1s）
     fn start_sampler(&self) {
         let already = self.sample_cancel.swap(false, Ordering::SeqCst);
-        if already
-            && self
-                .sample_thread
-                .read()
-                .map(|g| g.is_some())
-                .unwrap_or(false)
-        {
+        if already && self.sample_thread.read().is_some() {
             return; // 线程仍在跑，cancel 复位即可
         }
-        let Some(perf) = self.perf.read().ok().and_then(|g| g.clone()) else {
+        let Some(perf) = self.perf.read().clone() else {
             return;
         };
         let cancel = self.sample_cancel.clone();
@@ -141,7 +136,7 @@ impl SysModule {
                 }
             })
             .ok();
-        *self.sample_thread.write().expect("采样线程句柄锁污染") = handle;
+        *self.sample_thread.write() = handle;
     }
 
     /// 采样线程需要访问 &self 的发布/缓冲（模块生命周期 = 进程级，bootstrap 后常驻）
@@ -152,11 +147,11 @@ impl SysModule {
     /// WinOps 回归检测（docs/impl/08 §3.3 W4：WUB 式防自愈，v1 不做守护任务）。
     /// start 后台执行一次：备份原值 vs 当前值比对，回归 → sys.verify_result 事件（UI 黄条）。
     fn start_regression_check(&self) {
-        let face = match self.winops.read().ok().and_then(|g| g.clone()) {
+        let face = match self.winops.read().clone() {
             Some(f) => f,
             None => return,
         };
-        let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) else {
+        let Some(bus) = self.bus.read().clone() else {
             return;
         };
         let dir = self.app_data_dir.clone();
@@ -209,24 +204,11 @@ impl Module for SysModule {
             .ports
             .get::<dyn PerfPort>()
             .ok_or_else(|| ModuleError::Init("PerfPort 未注册".into()))?;
-        *self
-            .perf
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(perf);
-        *self
-            .recycle
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? =
-            ctx.ports.get::<dyn RecycleBinPort>();
-        *self
-            .bus
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self.perf.write() = Some(perf);
+        *self.recycle.write() = ctx.ports.get::<dyn RecycleBinPort>();
+        *self.bus.write() = Some(ctx.event_bus.clone());
         // WinOps 数据面快照（注册缺失容忍——回归检测按 None 跳过对应比对）
-        *self
-            .winops
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(WinopsFace {
+        *self.winops.write() = Some(WinopsFace {
             registry: ctx
                 .ports
                 .get::<dyn RegistryOps>()

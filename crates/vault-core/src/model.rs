@@ -4,8 +4,9 @@
 //! fields JSON 与 totp_secret 整体加密（[`crate::crypto::seal_field`]），库表只见密文。
 //! 加解密在 [`crate::vault::VaultService`]（唯一持 DEK 处），Store 只搬运 Row。
 
+use parking_lot::Mutex;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use host_core::error::AppError;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -136,7 +137,7 @@ impl VaultStore {
             name: name.into(),
             created_at: now_ms(),
         };
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO folders (id, name, created_at) VALUES (?1, ?2, ?3)",
             params![folder.id, folder.name, folder.created_at],
@@ -146,7 +147,7 @@ impl VaultStore {
     }
 
     pub fn list_folders(&self) -> Result<Vec<Folder>, AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         let mut stmt = conn
             .prepare("SELECT id, name, created_at FROM folders ORDER BY created_at")
             .map_err(|e| db_err("VAULT_DB_005", e))?;
@@ -164,7 +165,7 @@ impl VaultStore {
     }
 
     pub fn rename_folder(&self, id: &str, name: &str) -> Result<bool, AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         let n = conn
             .execute(
                 "UPDATE folders SET name = ?2 WHERE id = ?1",
@@ -176,7 +177,7 @@ impl VaultStore {
 
     /// 删除文件夹：条目 folder_id 置 NULL（ON DELETE SET NULL），条目保留
     pub fn delete_folder(&self, id: &str) -> Result<bool, AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         let n = conn
             .execute("DELETE FROM folders WHERE id = ?1", params![id])
             .map_err(|e| db_err("VAULT_DB_007", e))?;
@@ -186,7 +187,7 @@ impl VaultStore {
     // ---- 条目 ----
 
     pub fn insert_entry(&self, row: &EntryRow) -> Result<(), AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO entries (id, folder_id, title, favorite, fields_ct, totp_ct, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -206,7 +207,7 @@ impl VaultStore {
     }
 
     pub fn update_entry(&self, row: &EntryRow) -> Result<bool, AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         let n = conn
             .execute(
                 "UPDATE entries SET folder_id = ?2, title = ?3, favorite = ?4, fields_ct = ?5,
@@ -226,7 +227,7 @@ impl VaultStore {
     }
 
     pub fn delete_entry(&self, id: &str) -> Result<bool, AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         let n = conn
             .execute("DELETE FROM entries WHERE id = ?1", params![id])
             .map_err(|e| db_err("VAULT_DB_010", e))?;
@@ -239,7 +240,7 @@ impl VaultStore {
         folder_id: Option<&str>,
         search: Option<&str>,
     ) -> Result<Vec<EntryRow>, AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         let mut sql = String::from(
             "SELECT id, folder_id, title, favorite, fields_ct, totp_ct, created_at, updated_at FROM entries",
         );
@@ -286,7 +287,7 @@ impl VaultStore {
     }
 
     pub fn get_entry(&self, id: &str) -> Result<Option<EntryRow>, AppError> {
-        let conn = self.conn.lock().expect("vault db 锁");
+        let conn = self.conn.lock();
         conn.query_row(
             "SELECT id, folder_id, title, favorite, fields_ct, totp_ct, created_at, updated_at
              FROM entries WHERE id = ?1",

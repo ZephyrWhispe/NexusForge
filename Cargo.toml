@@ -22,6 +22,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# D-15：全局锁策略（parking_lot 无 poison 语义）+ 钩子回调无锁快照
+parking_lot = "0.12"
+arc-swap = "1"
+
 # file-core（docs/impl/05 F1–F7）
 walkdir = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -6,6 +6,7 @@ authors.workspace = true
 description = "剪切板中枢：捕获管线 / 敏感过滤 / 智能分组 / SQLite(FTS5) 存储"
 
 [dependencies]
+parking_lot = { workspace = true }
 host-core = { path = "../host-core" }
 serde.workspace = true
 serde_json.workspace = true

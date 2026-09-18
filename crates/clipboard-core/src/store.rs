@@ -5,8 +5,9 @@
 //! - 去重插入：命中 content_hash → 置顶 + usage_count+1
 //! - >64KB 内容写 blob 文件（DESIGN O4），主表存引用
 
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use host_core::error::AppError;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -93,7 +94,7 @@ impl ClipStore {
     ) -> Result<String, AppError> {
         let hash = content_hash(text);
         let now = now_ms();
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let existing: Option<String> = conn
             .query_row(
                 "SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1",
@@ -142,7 +143,7 @@ impl ClipStore {
     ) -> Result<String, AppError> {
         let hash = content_hash(encrypted_b64);
         let id = uuid::Uuid::now_v7().to_string();
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         conn.execute(
             r#"INSERT INTO clip_entries
                (id, content_type, content, content_hash, origin, source_app, pinned, group_name, secret, created_at)
@@ -159,7 +160,7 @@ impl ClipStore {
         id: &str,
         unprotect: impl Fn(&[u8]) -> Result<Vec<u8>, AppError>,
     ) -> Result<Option<String>, AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let row: Option<(String, Option<String>, i64)> = conn
             .query_row(
                 "SELECT content, blob_path, secret FROM clip_entries WHERE id = ?1",
@@ -190,7 +191,7 @@ impl ClipStore {
     pub fn search(&self, q: &SearchQuery) -> Result<Page<ClipEntry>, AppError> {
         let size = q.size.unwrap_or(50).min(200) as i64;
         let page = q.page.unwrap_or(0) as i64;
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
 
         let where_parts = build_filters(q);
         let where_sql = if where_parts.is_empty() {
@@ -300,7 +301,7 @@ impl ClipStore {
     }
 
     pub fn pin(&self, id: &str, pinned: bool) -> Result<(), AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE clip_entries SET pinned = ?2 WHERE id = ?1",
             params![id, pinned as i64],
@@ -310,7 +311,7 @@ impl ClipStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let blob: Option<String> = conn
             .query_row(
                 "SELECT blob_path FROM clip_entries WHERE id = ?1",
@@ -343,7 +344,7 @@ impl ClipStore {
             )
         };
         let (blobs, n) = {
-            let conn = self.conn.lock().expect("clipboard db 锁");
+            let conn = self.conn.lock();
             let blobs: Vec<String> = conn
                 .prepare(sel_sql)
                 .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
@@ -364,7 +365,7 @@ impl ClipStore {
     }
 
     pub fn push_stack(&self, id: &str) -> Result<(), AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let pos: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(position), 0) + 1 FROM paste_stack",
@@ -381,7 +382,7 @@ impl ClipStore {
     }
 
     pub fn pop_stack(&self) -> Result<Option<String>, AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let id: Option<String> = conn
             .query_row(
                 "SELECT entry_id FROM paste_stack ORDER BY position DESC LIMIT 1",
@@ -410,7 +411,7 @@ impl ClipStore {
         source_app: Option<&str>,
     ) -> Result<String, AppError> {
         let hash = content_hash_bytes(bytes);
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let existing: Option<String> = conn
             .query_row(
                 "SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1",
@@ -463,7 +464,7 @@ impl ClipStore {
     ) -> Result<String, AppError> {
         let hash = content_hash(content);
         let now = now_ms();
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let existing: Option<String> = conn
             .query_row(
                 "SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1",
@@ -493,7 +494,7 @@ impl ClipStore {
 
     /// 条目载荷（paste 用）：文本 / 图片原始字节
     pub fn get_payload(&self, id: &str) -> Result<Option<Payload>, AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let row: Option<(String, Option<String>, Option<String>, i64)> = conn
             .query_row(
                 "SELECT content_type, content, blob_path, secret FROM clip_entries WHERE id = ?1",
@@ -535,7 +536,7 @@ impl ClipStore {
 
     /// 分组计数（SubNav 角标；text=无分组文本，secret 按 secret 标记，files 单独）
     pub fn group_counts(&self) -> Result<serde_json::Value, AppError> {
-        let conn = self.conn.lock().expect("clipboard db 锁");
+        let conn = self.conn.lock();
         let mut counts = serde_json::Map::new();
         let mut total = 0u32;
 
@@ -592,7 +593,7 @@ impl ClipStore {
     pub fn purge(&self, retention_days: u32, max_entries: u32) -> Result<u32, AppError> {
         let cutoff = now_ms() - (retention_days as i64) * 86_400_000;
         let (blobs_a, blobs_b, n_expired, n_overflow) = {
-            let conn = self.conn.lock().expect("clipboard db 锁");
+            let conn = self.conn.lock();
             let collect =
                 |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Result<Vec<String>, AppError> {
                     Ok(conn
@@ -648,7 +649,7 @@ impl ClipStore {
     /// 由模块 init 在 open 后调用一次。
     pub fn gc_orphan_blobs(&self) -> Result<u32, AppError> {
         let referenced: std::collections::HashSet<String> = {
-            let conn = self.conn.lock().expect("clipboard db 锁");
+            let conn = self.conn.lock();
             let mut stmt = conn
                 .prepare("SELECT blob_path FROM clip_entries WHERE blob_path IS NOT NULL")
                 .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;

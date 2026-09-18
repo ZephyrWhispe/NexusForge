@@ -6,6 +6,7 @@ authors.workspace = true
 description = "截图与贴图模块：捕获任务、选区确认、历史记录、Pin 贴图（docs/impl/03）"
 
 [dependencies]
+parking_lot = { workspace = true }
 host-core = { path = "../host-core" }
 tokio.workspace = true
 serde.workspace = true

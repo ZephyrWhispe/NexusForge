@@ -62,7 +62,7 @@ pub struct CapturePipeline {
     bus: Arc<EventBus>,
     crypto: Arc<dyn CryptoPort>,
     config: Arc<AsyncMutex<ClipboardConfig>>,
-    write_back_at: Arc<std::sync::Mutex<Option<Instant>>>,
+    write_back_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     insert_counter: std::sync::atomic::AtomicU32,
 }
 
@@ -77,7 +77,7 @@ impl CapturePipeline {
         bus: Arc<EventBus>,
         crypto: Arc<dyn CryptoPort>,
         config: Arc<AsyncMutex<ClipboardConfig>>,
-        write_back: Arc<std::sync::Mutex<Option<Instant>>>,
+        write_back: Arc<parking_lot::Mutex<Option<Instant>>>,
     ) -> Result<PipelineHandle, AppError> {
         let (tx, rx) = mpsc::channel::<(host_core::ports::ClipContent, Option<String>)>();
         let pipeline = Arc::new(Self {
@@ -101,10 +101,7 @@ impl CapturePipeline {
                 return;
             }
             // 回写窗口内的事件丢弃（自回写会再次触发 WM_CLIPBOARDUPDATE）
-            let in_window = wb
-                .lock()
-                .ok()
-                .and_then(|g| *g)
+            let in_window = (*wb.lock())
                 .map(|t| t.elapsed() < WRITE_BACK_WINDOW)
                 .unwrap_or(false);
             if in_window {
@@ -138,7 +135,8 @@ impl CapturePipeline {
 
     /// write 前调用：记录回写窗口起点
     pub fn mark_write_back(&self) {
-        if let Ok(mut g) = self.write_back_at.lock() {
+        {
+            let mut g = self.write_back_at.lock();
             *g = Some(Instant::now());
         }
     }
@@ -327,7 +325,7 @@ fn futures_now(cfg: &AsyncMutex<ClipboardConfig>) -> ClipboardConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     use host_core::ports::ClipContent;
 
@@ -343,7 +341,7 @@ mod tests {
             &self,
             cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>,
         ) -> Result<(), AppError> {
-            *self.cb.lock().unwrap() = Some(cb);
+            *self.cb.lock() = Some(cb);
             Ok(())
         }
         fn write(&self, _content: &ClipContent) -> Result<(), AppError> {
@@ -394,7 +392,7 @@ mod tests {
     }
 
     fn fire(port: &FakeClipboard, text: &str) {
-        let cb = port.cb.lock().unwrap();
+        let cb = port.cb.lock();
         let Some(f) = cb.as_ref() else { return };
         f(
             ClipContent::Text {
@@ -477,7 +475,7 @@ mod tests {
         )
         .unwrap();
 
-        *write_back.lock().unwrap() = Some(Instant::now());
+        *write_back.lock() = Some(Instant::now());
         fire(&port, "in-window-must-be-dropped");
         std::thread::sleep(WRITE_BACK_WINDOW + Duration::from_millis(150));
         fire(&port, "out-of-window-captured");

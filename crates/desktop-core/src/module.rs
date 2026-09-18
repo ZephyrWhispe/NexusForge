@@ -4,9 +4,10 @@
 //! - start：启动提醒轮询线程（30s take_due → desktop.remind_due 事件）
 //! - 快捷键：Alt+Q 呼出启动器 / Ctrl+Alt+N 呼出速记条（事件 → 前端建窗，同 quickpanel 模式）
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::ModuleError;
@@ -58,7 +59,7 @@ impl DesktopModule {
     }
 
     pub fn note_store(&self) -> Option<Arc<NoteStore>> {
-        self.notes.read().ok().and_then(|g| g.clone())
+        self.notes.read().clone()
     }
 
     pub fn desktop_dir(&self) -> &std::path::Path {
@@ -76,14 +77,13 @@ impl DesktopModule {
             .get(id)
             .map_err(|e| ModuleError::Init(e.to_string()))?;
         self.index.record_launch(id);
-        let bus = self.bus.read().ok().and_then(|g| g.clone());
+        let bus = self.bus.read().clone();
         match item.kind {
             ItemKind::App => {
                 let shell = self
                     .shell
                     .read()
-                    .ok()
-                    .and_then(|g| g.clone())
+                    .clone()
                     .ok_or_else(|| ModuleError::Init("ShellPort 未注册".into()))?;
                 shell
                     .shell_execute(&item.path)
@@ -107,19 +107,13 @@ impl DesktopModule {
     /// 提醒轮询线程（start 在 spawn_blocking 内被调用，无 tokio 上下文 → std::thread）
     fn start_remind_loop(&self) {
         let already = self.remind_cancel.swap(false, Ordering::SeqCst);
-        if already
-            && self
-                .remind_thread
-                .read()
-                .map(|g| g.is_some())
-                .unwrap_or(false)
-        {
+        if already && self.remind_thread.read().is_some() {
             // 线程仍在跑（cancel 复位即可），不重复拉起
             return;
         }
         let cancel = self.remind_cancel.clone();
         let notes = self.note_store();
-        let bus = self.bus.read().ok().and_then(|g| g.clone());
+        let bus = self.bus.read().clone();
         let (Some(notes), Some(bus)) = (notes, bus) else {
             return;
         };
@@ -154,7 +148,7 @@ impl DesktopModule {
                 Err(e) => tracing::warn!(error = %e, "提醒轮询失败"),
             }
         });
-        *self.remind_thread.write().expect("提醒线程句柄写锁") = Some(handle);
+        *self.remind_thread.write() = Some(handle);
     }
 }
 
@@ -190,18 +184,9 @@ impl Module for DesktopModule {
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
         let notes = NoteStore::open(&ctx.app_data_dir.join("db").join("desktop.db"))
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
-        *self
-            .notes
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(notes));
-        *self
-            .bus
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
-        *self
-            .shell
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = ctx.ports.get::<dyn ShellPort>();
+        *self.notes.write() = Some(Arc::new(notes));
+        *self.bus.write() = Some(ctx.event_bus.clone());
+        *self.shell.write() = ctx.ports.get::<dyn ShellPort>();
 
         // D1：同步构建索引（bootstrap_modules 在后台任务里调用 init，不阻塞 UI）
         let total = self
@@ -292,7 +277,7 @@ impl HotkeyProvider for DesktopModule {
     }
 
     fn hotkey_actions(&self) -> Vec<HotkeyAction> {
-        let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) else {
+        let Some(bus) = self.bus.read().clone() else {
             return vec![];
         };
         let bus1 = bus.clone();

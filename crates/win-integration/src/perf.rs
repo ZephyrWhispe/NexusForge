@@ -3,8 +3,9 @@
 //! 实现内部持有 PDH query 与 1s 采样线程，缓存最新快照——get_* 直接读值
 //! （文档要求：WMI 太慢，用 PDH 1s 采样）。
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -73,7 +74,8 @@ impl PdhWin {
                     let net = read_array_sum(net).unwrap_or(0.0);
                     let (mem_used, mem_total) = read_memory();
                     let disks = read_disks();
-                    if let Ok(mut s) = snap_clone.lock() {
+                    {
+                        let mut s = snap_clone.lock();
                         s.cpu = cpu.clamp(0.0, 100.0);
                         s.net_bps = net.max(0.0);
                         s.mem_used = mem_used;
@@ -97,7 +99,8 @@ impl PdhWin {
 impl Drop for PdhWin {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
-        if let Ok(mut t) = self.thread.lock() {
+        {
+            let mut t = self.thread.lock();
             if let Some(h) = t.take() {
                 let _ = h.join();
             }
@@ -107,31 +110,20 @@ impl Drop for PdhWin {
 
 impl PerfPort for PdhWin {
     fn cpu_percent(&self) -> Result<f64, AppError> {
-        self.snapshot
-            .lock()
-            .map(|s| s.cpu)
-            .map_err(|_| AppError::module("SYS_PERF_003", "采样快照锁污染".to_string(), None))
+        Ok(self.snapshot.lock().cpu)
     }
 
     fn mem_bytes(&self) -> Result<(u64, u64), AppError> {
-        self.snapshot
-            .lock()
-            .map(|s| (s.mem_used, s.mem_total))
-            .map_err(|_| AppError::module("SYS_PERF_003", "采样快照锁污染".to_string(), None))
+        let s = self.snapshot.lock();
+        Ok((s.mem_used, s.mem_total))
     }
 
     fn disk_spaces(&self) -> Result<Vec<DiskSpace>, AppError> {
-        self.snapshot
-            .lock()
-            .map(|s| s.disks.clone())
-            .map_err(|_| AppError::module("SYS_PERF_003", "采样快照锁污染".to_string(), None))
+        Ok(self.snapshot.lock().disks.clone())
     }
 
     fn net_bps(&self) -> Result<f64, AppError> {
-        self.snapshot
-            .lock()
-            .map(|s| s.net_bps)
-            .map_err(|_| AppError::module("SYS_PERF_003", "采样快照锁污染".to_string(), None))
+        Ok(self.snapshot.lock().net_bps)
     }
 }
 

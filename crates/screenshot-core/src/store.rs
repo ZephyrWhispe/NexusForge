@@ -2,8 +2,8 @@
 //!
 //! 独立 SQLite 库文件（DESIGN O3：每模块一库）。
 
+use parking_lot::Mutex;
 use std::path::Path;
-use std::sync::Mutex;
 
 use host_core::error::AppError;
 use rusqlite::Connection;
@@ -46,7 +46,7 @@ impl ShotStore {
     }
 
     pub fn insert(&self, item: &ShotItem) -> Result<(), AppError> {
-        let conn = self.conn.lock().expect("ShotStore 连接锁");
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO shots(id, created_ms, width, height, file, ocr_text)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
@@ -65,7 +65,7 @@ impl ShotStore {
 
     /// 关联 OCR 识别文本（识别在截图完成之后发生时回填）
     pub fn set_ocr_text(&self, id: &str, text: &str) -> Result<(), AppError> {
-        let conn = self.conn.lock().expect("ShotStore 连接锁");
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE shots SET ocr_text = ?2 WHERE id = ?1",
             rusqlite::params![id, text],
@@ -75,7 +75,7 @@ impl ShotStore {
     }
 
     pub fn list(&self, q: &HistoryQuery) -> Result<Page<ShotItem>, AppError> {
-        let conn = self.conn.lock().expect("ShotStore 连接锁");
+        let conn = self.conn.lock();
         let size = q.size.clamp(1, 100);
         let page = q.page.max(1);
         let total: u32 = conn

@@ -6,9 +6,10 @@
 //! - SFTP：每次操作独立 channel + sftp subsystem（v1 简化，不复用连接池）
 //! - 私钥走路径引用（不复制内容进 vault）；密码由 UI 现场输入不入库
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -75,23 +76,18 @@ impl KnownHosts {
 
     /// 查询已记录指纹
     pub fn get(&self, host: &str, port: u16) -> Option<String> {
-        self.map
-            .read()
-            .expect("known_hosts 锁污染")
-            .get(&Self::key(host, port))
-            .cloned()
+        self.map.read().get(&Self::key(host, port)).cloned()
     }
 
     /// 记录/更新指纹（UI 明确接受后调用）
     pub fn accept(&self, host: &str, port: u16, fingerprint: &str) -> Result<()> {
         self.map
             .write()
-            .expect("known_hosts 锁污染")
             .insert(Self::key(host, port), fingerprint.to_string());
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(TermError::Io)?;
         }
-        let data = serde_json::to_vec_pretty(&*self.map.read().expect("known_hosts 锁污染"))
+        let data = serde_json::to_vec_pretty(&*self.map.read())
             .map_err(|e| TermError::BadState(format!("known_hosts 序列化失败: {e}")))?;
         std::fs::write(&self.path, data).map_err(TermError::Io)?;
         Ok(())
@@ -99,14 +95,9 @@ impl KnownHosts {
 
     /// 删除记录（用户确认主机重建后允许重连）
     pub fn remove(&self, host: &str, port: u16) -> Result<bool> {
-        let removed = self
-            .map
-            .write()
-            .expect("known_hosts 锁污染")
-            .remove(&Self::key(host, port))
-            .is_some();
+        let removed = self.map.write().remove(&Self::key(host, port)).is_some();
         if removed {
-            let data = serde_json::to_vec_pretty(&*self.map.read().expect("known_hosts 锁污染"))
+            let data = serde_json::to_vec_pretty(&*self.map.read())
                 .map_err(|e| TermError::BadState(format!("known_hosts 序列化失败: {e}")))?;
             std::fs::write(&self.path, data).map_err(TermError::Io)?;
         }
@@ -118,7 +109,6 @@ impl KnownHosts {
         let mut v: Vec<(String, String)> = self
             .map
             .read()
-            .expect("known_hosts 锁污染")
             .iter()
             .map(|(k, fp)| (k.clone(), fp.clone()))
             .collect();
@@ -128,7 +118,7 @@ impl KnownHosts {
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.map.read().expect("known_hosts 锁污染").len()
+        self.map.read().len()
     }
 
     #[cfg(test)]

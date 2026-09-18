@@ -5,8 +5,9 @@
 //! - 新注册者 priority 更小 → 替换既有注册（旧归属者被通知性日志记录）
 //! - 有 HotkeyWinPort 时同步调用 OS 注册；OS 失败 → `HOST_HOTKEY_002`
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::capability::HotkeyBinding;
 use crate::codes;
@@ -50,14 +51,14 @@ impl HotkeyManager {
 
     /// 安装 OS 分发器（幂等）：WM_HOTKEY → os_id → on_fire
     fn ensure_dispatcher(&self, win: &Arc<dyn HotkeyWinPort>) {
-        let mut installed = self.dispatcher_installed.write().expect("dispatcher 写锁");
+        let mut installed = self.dispatcher_installed.write();
         if *installed {
             return;
         }
         // os_map 为 Arc<RwLock>：分发器闭包每次触发时取读锁
         let os_map = Arc::clone(&self.os_map);
         win.set_dispatcher(Arc::new(move |os_id| {
-            if let Some(fire) = os_map.read().expect("os_map 读锁").get(&os_id) {
+            if let Some(fire) = os_map.read().get(&os_id) {
                 fire();
             }
         }));
@@ -81,7 +82,7 @@ impl HotkeyManager {
         // 注意：读锁必须在块内释放——if-let 判定式的临时守卫会存活到块尾，
         // 块内 unregister 取写锁会造成自锁（本文件曾因此死锁，见 git 历史）。
         let old_combo = {
-            let guard = self.by_id.read().expect("by_id 读锁");
+            let guard = self.by_id.read();
             guard.get(&binding.id).cloned()
         };
         if let Some(old_combo) = old_combo {
@@ -91,7 +92,7 @@ impl HotkeyManager {
         }
 
         let displaced = {
-            let combos = self.by_combo.write().expect("by_combo 写锁");
+            let combos = self.by_combo.write();
             match combos.get(&combo) {
                 Some(existing) if existing.priority <= owner_priority => {
                     return Err(AppError::Permission {
@@ -112,7 +113,7 @@ impl HotkeyManager {
         // OS 层注册（若端口已就绪）
         if let Some(win) = self.ports.get::<dyn HotkeyWinPort>() {
             self.ensure_dispatcher(&win);
-            let mut next = self.next_os_id.write().expect("os id 写锁");
+            let mut next = self.next_os_id.write();
             let os_id = *next;
             *next += 1;
             win.register(os_id, binding.modifiers, binding.vk)
@@ -127,13 +128,10 @@ impl HotkeyManager {
                         hint,
                     }
                 })?;
-            self.os_map
-                .write()
-                .expect("os_map 写锁")
-                .insert(os_id, on_fire.clone());
+            self.os_map.write().insert(os_id, on_fire.clone());
         }
 
-        let mut combos = self.by_combo.write().expect("by_combo 写锁");
+        let mut combos = self.by_combo.write();
         combos.insert(
             combo.clone(),
             Owner {
@@ -143,10 +141,7 @@ impl HotkeyManager {
             },
         );
         drop(combos);
-        self.by_id
-            .write()
-            .expect("by_id 写锁")
-            .insert(binding.id, combo);
+        self.by_id.write().insert(binding.id, combo);
         if let Some(m) = displaced {
             tracing::warn!(displaced = %m, "模块快捷键被更高优先级注册替换");
         }
@@ -154,15 +149,15 @@ impl HotkeyManager {
     }
 
     pub fn unregister(&self, binding_id: &str) -> Result<(), AppError> {
-        let combo = self.by_id.write().expect("by_id 写锁").remove(binding_id);
+        let combo = self.by_id.write().remove(binding_id);
         if let Some(combo) = combo {
-            self.by_combo.write().expect("by_combo 写锁").remove(&combo);
+            self.by_combo.write().remove(&combo);
         }
         Ok(())
     }
 
     pub fn owner_of(&self, modifiers: u32, vk: u32) -> Option<(String, String)> {
-        let combos = self.by_combo.read().expect("by_combo 读锁");
+        let combos = self.by_combo.read();
         combos
             .get(&Self::combo(modifiers, vk))
             .map(|o| (o.module.clone(), o.binding.label.clone()))

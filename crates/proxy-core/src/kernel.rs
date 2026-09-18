@@ -5,12 +5,13 @@
 //! - 意外退出语义：回调由 [`ProxyService`](crate::service) 挂接 —— 立即还原系统代理
 //!   （内核死亡 + 系统代理仍指向死端口 = 用户断网最高危场景）
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{ProxyError, Result};
@@ -65,13 +66,13 @@ impl KernelHandle {
 
     /// 挂接日志回调（每行调用；service 内转 proxy.log_line 事件）。启动前后均可挂。
     pub fn set_log_cb(&self, cb: LogCb) {
-        *self.cb_slot.lock().expect("日志回调槽锁") = Some(cb);
+        *self.cb_slot.lock() = Some(cb);
     }
 
     /// 停止内核（守护线程 kill + wait 后返回；不触发 on_exit）
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
-        if let Some(g) = self.guard.lock().expect("守护线程句柄锁").take() {
+        if let Some(g) = self.guard.lock().take() {
             let _ = g.join();
         }
     }
@@ -82,7 +83,7 @@ impl KernelHandle {
     }
 
     pub fn logs_snapshot(&self, limit: usize) -> Vec<LogLine> {
-        let logs = self.logs.lock().expect("日志缓冲锁");
+        let logs = self.logs.lock();
         let skip = logs.len().saturating_sub(limit);
         logs.iter().skip(skip).cloned().collect()
     }
@@ -184,13 +185,13 @@ fn spawn_log_reader(
             let reader = std::io::BufReader::new(pipe);
             for line in reader.lines().map_while(std::result::Result::ok) {
                 {
-                    let mut buf = logs.lock().expect("日志缓冲锁");
+                    let mut buf = logs.lock();
                     if buf.len() >= LOG_CAP {
                         buf.pop_front();
                     }
                     buf.push_back(LogLine::now(line.clone()));
                 }
-                if let Some(cb) = cb_slot.lock().expect("日志回调槽锁").clone() {
+                if let Some(cb) = cb_slot.lock().clone() {
                     cb(&line);
                 }
             }
@@ -270,7 +271,7 @@ mod tests {
             .start(
                 Path::new("unused"),
                 Arc::new(move |code| {
-                    *fired2.lock().unwrap() = Some(code);
+                    *fired2.lock() = Some(code);
                 }),
             )
             .unwrap();
@@ -282,7 +283,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!h.alive(), "进程应已退出");
-        assert_eq!(*fired.lock().unwrap(), Some(7), "on_exit 应收到退出码 7");
+        assert_eq!(*fired.lock(), Some(7), "on_exit 应收到退出码 7");
     }
 
     #[test]
@@ -294,7 +295,7 @@ mod tests {
             .start(
                 Path::new("unused"),
                 Arc::new(move |_| {
-                    *fired2.lock().unwrap() = true;
+                    *fired2.lock() = true;
                 }),
             )
             .unwrap();
@@ -302,7 +303,7 @@ mod tests {
         h.stop();
         assert!(!h.alive(), "stop 后守护线程应已结束");
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!*fired.lock().unwrap(), "主动 stop 不应触发 on_exit");
+        assert!(!*fired.lock(), "主动 stop 不应触发 on_exit");
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! - stop：立即锁定（DEK wipe），安全语义优先
 //! - V4 Windows Hello / V5 自动锁后续轮次接入（start 时挂计时器）
 
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::error::ModuleError;
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
@@ -27,7 +28,7 @@ impl VaultModule {
 
     /// IPC 层入口（全部命令经此取服务；未 init 返回 None）
     pub fn service(&self) -> Option<Arc<VaultService>> {
-        self.service.read().ok().and_then(|g| g.clone())
+        self.service.read().clone()
     }
 }
 
@@ -51,10 +52,7 @@ impl Module for VaultModule {
     fn init(&self, ctx: Arc<ModuleContext>) -> Result<(), ModuleError> {
         let svc = VaultService::open(&ctx.app_data_dir)
             .map_err(|e| ModuleError::Storage(e.to_string()))?;
-        *self
-            .service
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(svc));
+        *self.service.write() = Some(Arc::new(svc));
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }

@@ -132,7 +132,8 @@ pub fn has_backup(proxy_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     /// 内存版 SysProxyPort（免注册表单测）
     #[derive(Clone)]
@@ -156,17 +157,17 @@ mod tests {
 
     impl SysProxyPort for MockSp {
         fn read(&self) -> std::result::Result<SysProxyState, host_core::error::AppError> {
-            Ok(self.state.lock().unwrap().clone())
+            Ok(self.state.lock().clone())
         }
         fn write(
             &self,
             state: &SysProxyState,
         ) -> std::result::Result<(), host_core::error::AppError> {
-            *self.state.lock().unwrap() = state.clone();
+            *self.state.lock() = state.clone();
             Ok(())
         }
         fn refresh(&self) -> std::result::Result<(), host_core::error::AppError> {
-            *self.refreshes.lock().unwrap() += 1;
+            *self.refreshes.lock() += 1;
             Ok(())
         }
         fn is_admin(&self) -> bool {
@@ -187,7 +188,7 @@ mod tests {
         let dir = tmpdir("enable");
         let sp = MockSp::new();
         // 用户原本开着另一个代理
-        *sp.state.lock().unwrap() = SysProxyState {
+        *sp.state.lock() = SysProxyState {
             enable: true,
             server: "192.168.1.5:7890".into(),
             bypass: "<local>".into(),
@@ -205,7 +206,7 @@ mod tests {
     fn restore_recovers_original_then_clears_backup() {
         let dir = tmpdir("restore");
         let sp = MockSp::new();
-        *sp.state.lock().unwrap() = SysProxyState {
+        *sp.state.lock() = SysProxyState {
             enable: true,
             server: "192.168.1.5:7890".into(),
             bypass: "<local>".into(),
@@ -238,7 +239,7 @@ mod tests {
     fn backup_is_idempotent_across_cycles() {
         let dir = tmpdir("idem");
         let sp = MockSp::new();
-        *sp.state.lock().unwrap() = SysProxyState {
+        *sp.state.lock() = SysProxyState {
             enable: true,
             server: "orig:1".into(),
             bypass: String::new(),

@@ -5,9 +5,10 @@
 //! 上移至 host_core::wire（KVM 与 SYNC 共用的宿主级协议契约），此处原样
 //! 再导出，kvm_core::session::* 公开 API 不变。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -381,10 +382,7 @@ fn spawn_session(
                     },
                 }
             };
-            registry_reader
-                .lock()
-                .expect("会话注册表锁")
-                .remove(&device_id_reader);
+            registry_reader.lock().remove(&device_id_reader);
             let _ = events_reader.send(SessionEvent::Closed {
                 device_id: device_id_reader,
                 reason: reason.into(),
@@ -450,7 +448,6 @@ impl SessionManager {
         let mut list: Vec<(String, String)> = self
             .registry
             .lock()
-            .expect("会话注册表锁")
             .values()
             .map(|h| (h.device_id.clone(), h.device_name.clone()))
             .collect();
@@ -460,11 +457,7 @@ impl SessionManager {
 
     /// 取服务端会话句柄（仅注册表内的服务端接入会话；客户端会话句柄归调用方）
     pub fn get_handle(&self, device_id: &str) -> Option<SessionHandle> {
-        self.registry
-            .lock()
-            .expect("会话注册表锁")
-            .get(device_id)
-            .cloned()
+        self.registry.lock().get(device_id).cloned()
     }
 
     /// 接入循环：accept → 读首帧 → 分流。on_paired 转发 K2 配对成功回调。
@@ -510,7 +503,7 @@ impl SessionManager {
         match first.msg_type {
             MsgType::PairRequest => {
                 if let Some(peer) = self.pairing.handle_pair_conn(stream, first).await {
-                    if let Some(f) = on_paired.lock().expect("paired cb 锁").as_ref() {
+                    if let Some(f) = on_paired.lock().as_ref() {
                         f(peer);
                     }
                 }
@@ -531,10 +524,7 @@ impl SessionManager {
                         events.clone(),
                     );
                     // 服务端持有句柄保活；reader 退出时自动移除
-                    mgr.registry
-                        .lock()
-                        .expect("会话注册表锁")
-                        .insert(peer.device_id.clone(), handle);
+                    mgr.registry.lock().insert(peer.device_id.clone(), handle);
                     let _ = events.send(SessionEvent::Established {
                         device_id: peer.device_id.clone(),
                         device_name: peer.device_name.clone(),

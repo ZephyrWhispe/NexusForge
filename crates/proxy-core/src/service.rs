@@ -5,8 +5,9 @@
 //! - TUN 与系统代理**互斥**：开 TUN 前强制还原系统代理
 //! - 所有还原走 `sysproxy::restore*`（备份优先，绝不猜用户原值）
 
+use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use host_core::events::{Event, EventBus};
@@ -165,13 +166,13 @@ impl ProxyService {
                 tracing::warn!(error = %e, "启动扫描还原系统代理失败");
                 false
             });
-        *svc.restored_last_run.write().expect("还原标志写锁") = restored;
+        *svc.restored_last_run.write() = restored;
 
         Ok(svc)
     }
 
     pub fn status(&self) -> StatusDto {
-        let inner = self.inner.read().expect("代理内部状态读锁");
+        let inner = self.inner.read();
         let manifest = sidecar::read_manifest(&self.bin_dir());
         StatusDto {
             mode: inner.mode.as_str().into(),
@@ -185,7 +186,7 @@ impl ProxyService {
             kernel_installed: self.bin_dir().join("sing-box.exe").is_file(),
             kernel_version: manifest.map(|m| m.kernel_version),
             has_backup: sysproxy::has_backup(&self.proxy_dir),
-            restored_last_run: *self.restored_last_run.read().expect("还原标志读锁"),
+            restored_last_run: *self.restored_last_run.read(),
         }
     }
 
@@ -237,7 +238,7 @@ impl ProxyService {
     // ---------------- 订阅管理（PR3） ----------------
 
     pub fn subs(&self) -> Vec<Sub> {
-        self.inner.read().expect("代理内部状态读锁").subs.clone()
+        self.inner.read().subs.clone()
     }
 
     pub fn sub_add(&self, name: &str, url: &str) -> Result<Sub> {
@@ -255,14 +256,14 @@ impl ProxyService {
             updated_ms: 0,
             node_count: 0,
         };
-        let mut inner = self.inner.write().expect("代理内部状态写锁");
+        let mut inner = self.inner.write();
         inner.subs.push(sub.clone());
         self.save_subs(&inner)?;
         Ok(sub)
     }
 
     pub fn sub_remove(&self, id: &str) -> Result<bool> {
-        let mut inner = self.inner.write().expect("代理内部状态写锁");
+        let mut inner = self.inner.write();
         let before = inner.subs.len();
         inner.subs.retain(|s| s.id != id);
         let removed = inner.subs.len() != before;
@@ -277,7 +278,7 @@ impl ProxyService {
     /// 拉取并解析订阅（PR3）；内容持久化到 subs/（敏感，不进日志）
     pub async fn sub_update(&self, id: &str) -> Result<Sub> {
         let url = {
-            let inner = self.inner.read().expect("代理内部状态读锁");
+            let inner = self.inner.read();
             inner
                 .subs
                 .iter()
@@ -293,7 +294,7 @@ impl ProxyService {
         // 持久化节点文件 + 更新元数据
         std::fs::write(self.sub_nodes_path(id), serde_json::to_vec(&nodes)?)?;
         let sub = {
-            let mut inner = self.inner.write().expect("代理内部状态写锁");
+            let mut inner = self.inner.write();
             inner.nodes.retain(|n| n.sub_id != id);
             inner.nodes.extend(nodes);
             let idx = inner
@@ -306,13 +307,13 @@ impl ProxyService {
             sub.node_count = node_count;
             sub.clone()
         };
-        self.save_subs(&self.inner.read().expect("代理内部状态读锁"))?;
+        self.save_subs(&self.inner.read())?;
         self.publish_nodes();
         Ok(sub)
     }
 
     pub fn nodes(&self) -> Vec<NodeDto> {
-        let inner = self.inner.read().expect("代理内部状态读锁");
+        let inner = self.inner.read();
         inner
             .nodes
             .iter()
@@ -329,11 +330,7 @@ impl ProxyService {
     // ---------------- 直连规则 ----------------
 
     pub fn direct_rules(&self) -> Vec<String> {
-        self.inner
-            .read()
-            .expect("代理内部状态读锁")
-            .direct_domains
-            .clone()
+        self.inner.read().direct_domains.clone()
     }
 
     pub fn set_direct_rules(&self, rules: Vec<String>) -> Result<()> {
@@ -347,7 +344,7 @@ impl ProxyService {
             self.proxy_dir.join(RULES_FILE),
             serde_json::to_vec(&cleaned)?,
         )?;
-        self.inner.write().expect("代理内部状态写锁").direct_domains = cleaned;
+        self.inner.write().direct_domains = cleaned;
         Ok(())
     }
 
@@ -356,7 +353,7 @@ impl ProxyService {
         if port == 0 {
             return Err(ProxyError::BadState("端口不能为 0".into()));
         }
-        let mut inner = self.inner.write().expect("代理内部状态写锁");
+        let mut inner = self.inner.write();
         inner.mixed_port = port;
         std::fs::write(
             self.proxy_dir.join(STATE_FILE),
@@ -381,10 +378,10 @@ impl ProxyService {
         // TUN → System 切换：先停旧内核
         self.restart_with_config(false)?;
         // 系统代理：备份原值 → 写入我们的 mixed 入站
-        let port = self.inner.read().expect("代理内部状态读锁").mixed_port;
+        let port = self.inner.read().mixed_port;
         sysproxy::enable(&self.proxy_dir, self.sp.as_ref(), port)?;
         {
-            let mut inner = self.inner.write().expect("代理内部状态写锁");
+            let mut inner = self.inner.write();
             inner.mode = Mode::System;
         }
         self.publish_state();
@@ -404,7 +401,7 @@ impl ProxyService {
         // 互斥：TUN 接管全流量，系统代理必须还原（否则双重代理）
         sysproxy::restore_quiet(&self.proxy_dir, self.sp.as_ref());
         self.restart_with_config(true)?;
-        let mut inner = self.inner.write().expect("代理内部状态写锁");
+        let mut inner = self.inner.write();
         inner.mode = Mode::Tun;
         drop(inner);
         self.publish_state();
@@ -414,7 +411,7 @@ impl ProxyService {
 
     fn stop_kernel_and_restore(&self) -> Result<()> {
         {
-            let mut inner = self.inner.write().expect("代理内部状态写锁");
+            let mut inner = self.inner.write();
             if let Some(h) = inner.handle.take() {
                 h.stop();
             }
@@ -429,7 +426,7 @@ impl ProxyService {
     /// 用当前节点重新生成配置并（重）启内核；起后健康探活 3s
     fn restart_with_config(self: &Arc<Self>, tun: bool) -> Result<()> {
         let (nodes, direct, port) = {
-            let inner = self.inner.read().expect("代理内部状态读锁");
+            let inner = self.inner.read();
             (
                 inner.nodes.clone(),
                 inner.direct_domains.clone(),
@@ -438,7 +435,7 @@ impl ProxyService {
         };
         // 停旧内核（模式切换）
         {
-            let mut inner = self.inner.write().expect("代理内部状态写锁");
+            let mut inner = self.inner.write();
             if let Some(h) = inner.handle.take() {
                 h.stop();
             }
@@ -502,7 +499,7 @@ impl ProxyService {
                 "内核启动后未就绪（配置错误？详见日志页）".into(),
             ));
         }
-        self.inner.write().expect("代理内部状态写锁").handle = Some(handle);
+        self.inner.write().handle = Some(handle);
         self.publish_state();
         Ok(())
     }
@@ -516,7 +513,7 @@ impl ProxyService {
 
     /// TCP 连接延迟（v1 轻量方案；每节点并发、3s 超时）
     pub async fn delay_test(&self) -> Vec<NodeDelayDto> {
-        let nodes = self.inner.read().expect("代理内部状态读锁").nodes.clone();
+        let nodes = self.inner.read().nodes.clone();
         let mut tasks = Vec::with_capacity(nodes.len());
         for n in nodes {
             tasks.push(tokio::spawn(async move {
@@ -553,7 +550,7 @@ impl ProxyService {
     }
 
     pub fn logs(&self, limit: usize) -> Vec<LogLine> {
-        let inner = self.inner.read().expect("代理内部状态读锁");
+        let inner = self.inner.read();
         inner
             .handle
             .as_ref()
@@ -598,7 +595,7 @@ impl ProxyService {
     }
 
     fn publish_nodes(&self) {
-        let inner = self.inner.read().expect("代理内部状态读锁");
+        let inner = self.inner.read();
         self.bus
             .publish(Event::new(
                 "proxy.nodes_changed",
@@ -650,7 +647,8 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use host_core::ports::SysProxyState;
-    use std::sync::{Arc as StdArc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc as StdArc;
 
     #[derive(Clone)]
     struct MockSp {
@@ -667,13 +665,13 @@ mod tests {
 
     impl SysProxyPort for MockSp {
         fn read(&self) -> std::result::Result<SysProxyState, host_core::error::AppError> {
-            Ok(self.state.lock().unwrap().clone())
+            Ok(self.state.lock().clone())
         }
         fn write(
             &self,
             state: &SysProxyState,
         ) -> std::result::Result<(), host_core::error::AppError> {
-            *self.state.lock().unwrap() = state.clone();
+            *self.state.lock() = state.clone();
             Ok(())
         }
         fn refresh(&self) -> std::result::Result<(), host_core::error::AppError> {

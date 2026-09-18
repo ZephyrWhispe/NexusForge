@@ -4,8 +4,9 @@
 //!   （如还原系统代理）→ 交还默认 hook 重新输出 panic
 //! - 启动扫描：上一次崩溃痕迹、`pending_ops/` 未完成操作（文件操作断点续传的恢复入口）
 
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// 恢复钩子签名（如：还原系统代理注册表设置）
 pub type RecoveryHook = Arc<dyn Fn() + Send + Sync>;
@@ -14,7 +15,7 @@ static HOOKS: Mutex<Vec<RecoveryHook>> = Mutex::new(Vec::new());
 
 /// 注册恢复钩子（幂等：同一指针不去重，调用方自行保证）
 pub fn add_recovery_hook(hook: RecoveryHook) {
-    HOOKS.lock().expect("恢复钩子表写锁").push(hook);
+    HOOKS.lock().push(hook);
 }
 
 /// 安装全局 panic hook。必须在应用最早期调用（早于任何模块 start）。
@@ -40,7 +41,7 @@ pub fn install_panic_hook(app_data_dir: PathBuf) {
             serde_json::to_string_pretty(&report).unwrap_or_default(),
         );
         // 恢复钩子尽力执行（单个钩子失败不影响其余）
-        for hook in HOOKS.lock().expect("恢复钩子表读锁").iter() {
+        for hook in HOOKS.lock().iter() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook()));
         }
         default_hook(info);
@@ -117,7 +118,7 @@ mod tests {
         install_panic_hook(dir.clone());
         let fired = Arc::new(Mutex::new(false));
         let fired2 = fired.clone();
-        add_recovery_hook(Arc::new(move || *fired2.lock().unwrap() = true));
+        add_recovery_hook(Arc::new(move || *fired2.lock() = true));
 
         let result = std::panic::catch_unwind(|| panic!("hook 测试 panic"));
         assert!(result.is_err(), "panic 应继续传播");
@@ -128,7 +129,7 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.path()))
             .collect();
         assert!(!files.is_empty(), "崩溃文件应已写入");
-        assert!(*fired.lock().unwrap(), "恢复钩子应已执行");
+        assert!(*fired.lock(), "恢复钩子应已执行");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -6,9 +6,10 @@
 //!   { u64 FileReferenceNumber, u64 ParentFileReferenceNumber, u32 FileNameLength(字节), WCHAR FileName[] }
 //! - v1：构建 FRN→(PFRN,name) 全量映射（5 分钟 TTL 缓存），命中后回溯父链拼绝对路径
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use host_core::error::AppError;
@@ -85,7 +86,7 @@ impl UsnIndexPort for UsnIndex {
 
 impl UsnIndex {
     fn frn_map(&self, drive: &str) -> Result<Arc<FrnMap>, AppError> {
-        let mut guard = self.cache.lock().expect("USN 缓存锁");
+        let mut guard = self.cache.lock();
         if let Some((at, cached_drive, map)) = guard.as_ref() {
             if *at + CACHE_TTL > Instant::now() && cached_drive == drive {
                 return Ok(map.clone());

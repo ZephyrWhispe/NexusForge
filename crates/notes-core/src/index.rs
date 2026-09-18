@@ -3,9 +3,10 @@
 //! 真相源 = 磁盘 .md 文件；本库只是**可全量重建的索引**（notes/tags/links 三表）。
 //! path 统一为 `/` 分隔的库内相对路径（跨平台 JOIN key 稳定）。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rusqlite::{params, Connection};
 
@@ -237,8 +238,8 @@ impl NoteIndex {
         Ok(())
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().expect("notes.db 连接锁污染")
+    fn lock(&self) -> parking_lot::MutexGuard<'_, Connection> {
+        self.conn.lock()
     }
 }
 

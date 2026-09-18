@@ -6,6 +6,7 @@ authors.workspace = true
 description = "文件与存储模块核心（docs/impl/05 F1–F7）：浏览/操作队列/冲突/预览/搜索/驱动/重命名"
 
 [dependencies]
+parking_lot = { workspace = true }
 host-core = { path = "../host-core" }
 tokio.workspace = true
 serde.workspace = true

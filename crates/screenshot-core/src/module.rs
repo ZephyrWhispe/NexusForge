@@ -8,10 +8,11 @@
 //! - 最终合成图由前端 canvas 导出（预览即导出），Rust 侧 skia/ab_glyph 渲染延后；
 //! - 录屏（P7）独立里程碑交付。
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::{AppError, ModuleError};
@@ -81,7 +82,7 @@ impl ScreenshotModule {
     }
 
     fn app_data(&self) -> Option<PathBuf> {
-        self.app_data_dir.read().ok().and_then(|g| g.clone())
+        self.app_data_dir.read().clone()
     }
 
     /// pins.json 原子写（临时文件 + rename，规约 5）
@@ -110,7 +111,7 @@ impl ScreenshotModule {
             .filter(|p| dir.join(&p.file).is_file())
             .collect();
         let dropped = {
-            let mut g = self.pins.lock().expect("pins 锁");
+            let mut g = self.pins.lock();
             *g = alive.clone();
             alive.len()
         };
@@ -148,26 +149,11 @@ impl Module for ScreenshotModule {
             .get::<dyn ClipboardPort>()
             .ok_or_else(|| ModuleError::Init("ClipboardPort 未注册".into()))?;
 
-        *self
-            .app_data_dir
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.app_data_dir.clone());
-        *self
-            .store
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(store);
-        *self
-            .capture
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(capture);
-        *self
-            .clipboard
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(clipboard);
-        *self
-            .bus
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self.app_data_dir.write() = Some(ctx.app_data_dir.clone());
+        *self.store.write() = Some(store);
+        *self.capture.write() = Some(capture);
+        *self.clipboard.write() = Some(clipboard);
+        *self.bus.write() = Some(ctx.event_bus.clone());
         self.restore_pins();
         self.state.store(1, Ordering::SeqCst);
         Ok(())
@@ -179,7 +165,7 @@ impl Module for ScreenshotModule {
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
-        self.pending.lock().expect("pending 锁").clear();
+        self.pending.lock().clear();
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -244,7 +230,7 @@ impl HotkeyProvider for ScreenshotModule {
     }
 
     fn hotkey_actions(&self) -> Vec<HotkeyAction> {
-        let bus = self.bus.read().ok().and_then(|g| g.clone());
+        let bus = self.bus.read().clone();
         let Some(bus) = bus else { return vec![] };
         vec![HotkeyAction {
             binding_id: "screenshot.region".into(),
@@ -269,8 +255,7 @@ impl ScreenshotModule {
         let capture = self
             .capture
             .read()
-            .ok()
-            .and_then(|g| g.clone())
+            .clone()
             .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "模块未就绪"))?;
         let frame = capture.capture(CaptureTarget::FullScreen { monitor: 0 })?;
         if util::is_black_frame(&frame) {
@@ -290,7 +275,7 @@ impl ScreenshotModule {
             })
             .unwrap_or((0, 0, frame.width as i32, frame.height as i32));
         let task_id = uuid::Uuid::now_v7().to_string();
-        let mut pending = self.pending.lock().expect("pending 锁");
+        let mut pending = self.pending.lock();
         pending.clear(); // 单任务模型：替换遗留任务，释放旧帧内存
         pending.insert(
             task_id.clone(),
@@ -311,7 +296,7 @@ impl ScreenshotModule {
 
     /// 覆盖层取背景帧（PNG Base64，编码一次后缓存）
     pub fn task_info(&self, task_id: &str) -> Result<TaskInfoDto, AppError> {
-        let mut pending = self.pending.lock().expect("pending 锁");
+        let mut pending = self.pending.lock();
         let task = pending
             .get_mut(task_id)
             .ok_or_else(|| mod_err("SCREENSHOT_STATE_002", "任务不存在或已结束"))?;
@@ -335,7 +320,7 @@ impl ScreenshotModule {
 
     /// 选区确认：裁剪 + 编码（阻塞，命令层 spawn_blocking）
     pub fn confirm(&self, task_id: &str, rect: ConfirmRect) -> Result<CropDto, AppError> {
-        let pending = self.pending.lock().expect("pending 锁");
+        let pending = self.pending.lock();
         let task = pending
             .get(task_id)
             .ok_or_else(|| mod_err("SCREENSHOT_STATE_002", "任务不存在或已结束"))?;
@@ -357,7 +342,7 @@ impl ScreenshotModule {
     }
 
     pub fn discard(&self, task_id: &str) {
-        self.pending.lock().expect("pending 锁").remove(task_id);
+        self.pending.lock().remove(task_id);
     }
 
     /// 完成：解码前端合成图 → 执行动作（copy/save/pin）→ 入历史 → 发事件
@@ -412,11 +397,11 @@ impl ScreenshotModule {
             file: file.clone(),
             ocr_text: None,
         };
-        if let Some(store) = self.store.read().ok().and_then(|g| g.clone()) {
+        if let Some(store) = self.store.read().clone() {
             store.insert(&item).ok();
         }
 
-        if let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) {
+        if let Some(bus) = self.bus.read().clone() {
             bus.publish(Event::new(
                 "screenshot.taken",
                 "screenshot",
@@ -437,8 +422,7 @@ impl ScreenshotModule {
         let clipboard = self
             .clipboard
             .read()
-            .ok()
-            .and_then(|g| g.clone())
+            .clone()
             .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "ClipboardPort 未就绪"))?;
         clipboard.write(&host_core::ports::ClipContent::Image {
             format: "png".into(),
@@ -525,7 +509,7 @@ impl ScreenshotModule {
             file: file_rel,
         };
         {
-            let mut pins = self.pins.lock().expect("pins 锁");
+            let mut pins = self.pins.lock();
             pins.push(record);
             let snapshot = pins.clone();
             drop(pins);
@@ -540,7 +524,6 @@ impl ScreenshotModule {
     pub fn pins(&self) -> Vec<PinDto> {
         self.pins
             .lock()
-            .expect("pins 锁")
             .iter()
             .map(|p| PinDto {
                 id: p.id.clone(),
@@ -555,7 +538,7 @@ impl ScreenshotModule {
     }
 
     pub fn pin_get(&self, id: &str) -> Result<PinDataDto, AppError> {
-        let pins = self.pins.lock().expect("pins 锁");
+        let pins = self.pins.lock();
         let record = pins
             .iter()
             .find(|p| p.id == id)
@@ -578,7 +561,7 @@ impl ScreenshotModule {
     }
 
     pub fn pin_update(&self, id: &str, zoom: f32, opacity: f32) -> Result<(), AppError> {
-        let mut pins = self.pins.lock().expect("pins 锁");
+        let mut pins = self.pins.lock();
         let record = pins
             .iter_mut()
             .find(|p| p.id == id)
@@ -594,7 +577,7 @@ impl ScreenshotModule {
 
     pub fn pin_close(&self, id: &str) -> Result<(), AppError> {
         let removed = {
-            let mut pins = self.pins.lock().expect("pins 锁");
+            let mut pins = self.pins.lock();
             let old = pins.len();
             pins.retain(|p| p.id != id);
             let snapshot = pins.clone();
@@ -615,13 +598,13 @@ impl ScreenshotModule {
 
     /// OCR 文本回填（识别完成后由 ocr 命令层调用；仅记录，失败静默）
     pub fn record_ocr_text(&self, task_id: &str, text: &str) {
-        if let Some(store) = self.store.read().ok().and_then(|g| g.clone()) {
+        if let Some(store) = self.store.read().clone() {
             store.set_ocr_text(task_id, text).ok();
         }
     }
 
     /// 历史库句柄（screenshot_history_list IPC 用）
     pub fn history_store(&self) -> Option<Arc<ShotStore>> {
-        self.store.read().ok().and_then(|g| g.clone())
+        self.store.read().clone()
     }
 }

@@ -6,8 +6,9 @@
 //! - 提醒调度：模块后台线程 `take_due` 轮询 → 发 `desktop.remind_due` 事件
 //!   （Task Scheduler 注册列为后续里程碑）
 
+use parking_lot::Mutex;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -76,10 +77,7 @@ impl NoteStore {
             done: false,
             created_ms: now_ms,
         };
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO notes (id, content, tags, remind_at, reminded, done, created_ms)
              VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
@@ -97,10 +95,7 @@ impl NoteStore {
 
     /// 列表（新→旧；include_done=false 排除已完成）
     pub fn list(&self, include_done: bool) -> Result<Vec<Note>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(if include_done {
                 "SELECT id, content, tags, remind_at, reminded, done, created_ms FROM notes ORDER BY created_ms DESC"
@@ -117,10 +112,7 @@ impl NoteStore {
     }
 
     pub fn set_done(&self, id: &str, done: bool) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self.conn.lock();
         let n = conn
             .execute(
                 "UPDATE notes SET done = ?2 WHERE id = ?1",
@@ -131,10 +123,7 @@ impl NoteStore {
     }
 
     pub fn remove(&self, id: &str) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self.conn.lock();
         let n = conn
             .execute("DELETE FROM notes WHERE id = ?1", params![id])
             .map_err(|e| DesktopError::Db(e.to_string()))?;
@@ -144,10 +133,7 @@ impl NoteStore {
     /// 取走全部到期提醒（remind_at <= now 且未提醒未完成），并标记已提醒。
     /// 供后台轮询调用（模块层串行调用，无并发竞争）。
     pub fn take_due(&self, now_ms: i64) -> Result<Vec<Note>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT id, content, tags, remind_at, reminded, done, created_ms FROM notes
@@ -168,10 +154,7 @@ impl NoteStore {
 
     /// 提醒时间（单条查询，测试/展示用）
     pub fn get(&self, id: &str) -> Result<Option<Note>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| DesktopError::Db("锁污染".into()))?;
+        let conn = self.conn.lock();
         conn.query_row(
             "SELECT id, content, tags, remind_at, reminded, done, created_ms FROM notes WHERE id = ?1",
             params![id],

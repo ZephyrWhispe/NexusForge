@@ -6,8 +6,8 @@
 //!   因此消费端必须"收到事件后拉取最新状态"，不得依赖逐条回放；
 //! - 去抖订阅：同 (topic, payload.key) 在窗口期内只投递最后一条，UI 消费用。
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -136,7 +136,7 @@ impl EventBus {
                 Some("在 host-core/src/events.rs 的 TOPIC_REGISTRY 中补充该主题"),
             ));
         }
-        let mut channels = self.channels.write().expect("事件总线写锁");
+        let mut channels = self.channels.write();
         if channels.contains_key(topic) {
             return Ok(()); // 幂等
         }
@@ -148,7 +148,7 @@ impl EventBus {
     /// 发布事件。无订阅者时静默成功；通道满由消费端以 Lagged 感知（背压策略）
     pub fn publish(&self, event: Event) -> Result<(), AppError> {
         let tx = {
-            let guard = self.channels.read().expect("事件总线读锁");
+            let guard = self.channels.read();
             guard.get(event.topic).cloned()
         }
         .ok_or_else(|| {
@@ -166,7 +166,7 @@ impl EventBus {
     /// 普通订阅：逐条投递；消费端必须处理 `RecvError::Lagged`（重新拉取最新状态）
     pub fn subscribe(&self, topic: &str) -> Result<broadcast::Receiver<Event>, AppError> {
         let tx = {
-            let guard = self.channels.read().expect("事件总线读锁");
+            let guard = self.channels.read();
             guard.get(topic).cloned()
         }
         .ok_or_else(|| {
@@ -304,6 +304,27 @@ mod tests {
         let bus = EventBus::new();
         let err = bus.publish(Event::new("not.a.topic", "x", json!(null)));
         assert_eq!(err.unwrap_err().code(), codes::host::HOST_EVENT_001);
+    }
+
+    /// D-15 回归：std 锁持锁 panic 会 poison → 之后每次 `.write().unwrap()` 级联
+    /// panic，一次偶发毒化即令全模块发布瘫痪；parking_lot 无 poison 语义，
+    /// 持写锁线程panic后总线必须照常发布/订阅。
+    #[test]
+    fn publish_survives_panic_under_lock() {
+        let bus = Arc::new(EventBus::new());
+        let b = bus.clone();
+        let h = std::thread::spawn(move || {
+            let _g = b.channels.write();
+            panic!("持锁 panic");
+        });
+        assert!(h.join().is_err(), "前置：线程必须真的 panic 在持锁期间");
+        bus.subscribe("clipboard.captured").unwrap();
+        bus.publish(Event::new(
+            "clipboard.captured",
+            "clipboard",
+            json!({ "id": "after-poison" }),
+        ))
+        .unwrap();
     }
 
     #[tokio::test]

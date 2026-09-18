@@ -7,9 +7,10 @@
 //! - 规则持久化：{appData}/automation/rules.json（规则量级小，JSON 足够；可全量重载）
 //! - A4：Schedule 规则同步注册 Windows 计划任务（TaskSchdPort；应用不运行也触发 --run-rule）
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus, TOPIC_REGISTRY};
@@ -54,13 +55,13 @@ impl HostActionHandler {
     }
 
     pub fn attach_shell(&self, shell: Arc<dyn ShellPort>) {
-        *self.shell.write().expect("shell 锁污染") = Some(shell);
+        *self.shell.write() = Some(shell);
     }
 
     /// 注入 WASM 运行时 + 插件库（A5/A6；init 时调用）
     pub fn attach_wasm(&self, runtime: Arc<WasmRuntime>, plugins: Arc<PluginStore>) {
-        *self.runtime.write().expect("runtime 锁污染") = Some(runtime);
-        *self.plugins.write().expect("plugins 锁污染") = Some(plugins);
+        *self.runtime.write() = Some(runtime);
+        *self.plugins.write() = Some(plugins);
     }
 
     /// RunScript path 解析："plugin:{id}" → 插件库加载（含 sha256 复验）；否则按文件路径直读
@@ -73,7 +74,6 @@ impl HostActionHandler {
             let store = self
                 .plugins
                 .read()
-                .expect("plugins 锁污染")
                 .clone()
                 .ok_or_else(|| AutomationError::Action("插件库未初始化".into()))?;
             let manifest = store.manifest_of(id)?;
@@ -120,7 +120,6 @@ impl ActionHandler for HostActionHandler {
         let shell = self
             .shell
             .read()
-            .expect("shell 锁污染")
             .clone()
             .ok_or_else(|| AutomationError::Action("ShellPort 未注册".into()))?;
         shell
@@ -158,7 +157,6 @@ impl ActionHandler for HostActionHandler {
         let runtime = self
             .runtime
             .read()
-            .expect("runtime 锁污染")
             .clone()
             .ok_or_else(|| AutomationError::Action("WASM 运行时未初始化".into()))?;
         let (wasm, func, caps) = self.resolve_wasm(path, func)?;
@@ -207,15 +205,15 @@ impl AutomationModule {
 
     /// IPC 层入口
     pub fn rules(&self) -> Vec<Rule> {
-        self.rules.read().expect("规则锁污染").clone()
+        self.rules.read().clone()
     }
 
     pub fn engine(&self) -> Option<Arc<RuleEngine>> {
-        self.engine.read().ok().and_then(|g| g.clone())
+        self.engine.read().clone()
     }
 
     pub fn plugin_store(&self) -> Option<Arc<PluginStore>> {
-        self.plugins.read().ok().and_then(|g| g.clone())
+        self.plugins.read().clone()
     }
 
     /// S4 回归观测：当前存活的 dispatcher 订阅任务数
@@ -226,7 +224,7 @@ impl AutomationModule {
     /// 保存规则（新增/覆盖）；校验 + 持久化 + 计划任务同步（A4）
     pub fn save_rule(&self, rule: Rule) -> crate::error::Result<()> {
         rule.validate()?;
-        let mut rules = self.rules.write().expect("规则锁污染");
+        let mut rules = self.rules.write();
         rules.retain(|r| r.id != rule.id);
         rules.push(rule);
         let snapshot = rules.clone();
@@ -240,7 +238,7 @@ impl AutomationModule {
     }
 
     pub fn delete_rule(&self, id: &str) -> crate::error::Result<bool> {
-        let mut rules = self.rules.write().expect("规则锁污染");
+        let mut rules = self.rules.write();
         let before = rules.len();
         rules.retain(|r| r.id != id);
         let removed = rules.len() < before;
@@ -249,7 +247,7 @@ impl AutomationModule {
         if removed {
             self.persist(&snapshot)?;
             // 规则删除 → 计划任务一并移除（幂等）
-            if let Some(ts) = self.taskschd.read().expect("任务锁污染").clone() {
+            if let Some(ts) = self.taskschd.read().clone() {
                 if let Err(e) = ts.remove(&task_name_for(id)) {
                     tracing::warn!(rule = %id, error = %e, "计划任务移除失败");
                 }
@@ -260,7 +258,7 @@ impl AutomationModule {
 
     /// 启停规则（A4：停用 → 移除计划任务；启用 Schedule → 注册计划任务）
     pub fn toggle_rule(&self, id: &str, enabled: bool) -> crate::error::Result<bool> {
-        let mut rules = self.rules.write().expect("规则锁污染");
+        let mut rules = self.rules.write();
         let mut changed = false;
         for r in rules.iter_mut() {
             if r.id == id {
@@ -282,7 +280,7 @@ impl AutomationModule {
     /// A4：规则 ↔ Windows 计划任务同步（enable+Schedule → ensure_daily；否则 remove）
     /// 失败仅告警不阻断规则保存（应用内定时仍生效）
     fn sync_task(&self, rule: &Rule) {
-        let Some(ts) = self.taskschd.read().expect("任务锁污染").clone() else {
+        let Some(ts) = self.taskschd.read().clone() else {
             return;
         };
         let name = task_name_for(&rule.id);
@@ -321,7 +319,7 @@ impl AutomationModule {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        *self.rules.write().expect("规则锁污染") = rules;
+        *self.rules.write() = rules;
     }
 
     /// Startup 规则触发
@@ -337,7 +335,7 @@ impl AutomationModule {
 
     /// dispatcher：订阅全部主题 → 匹配规则 → 求值 → 执行（automation 自产事件跳过，防自环）
     fn start_dispatcher(&self) {
-        let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) else {
+        let Some(bus) = self.bus.read().clone() else {
             return;
         };
         let Some(engine) = self.engine() else { return };
@@ -345,9 +343,9 @@ impl AutomationModule {
         // S4：本轮协作文档/停机信道重建；调度线程持"本次运行"取消令牌——
         // 旧线程保留已被 stop 置真的旧令牌，重启窗口内不会误复活
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        *self.shutdown.write().expect("停机信道锁污染") = Some(shutdown_tx);
+        *self.shutdown.write() = Some(shutdown_tx);
         let sched_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        *self.cancel.write().expect("取消令牌锁污染") = sched_token.clone();
+        *self.cancel.write() = sched_token.clone();
         // 事件订阅任务（tokio——bootstrap 在 runtime 内 start）
         for (topic, _) in TOPIC_REGISTRY {
             let Ok(mut rx) = bus.subscribe(topic) else {
@@ -380,7 +378,6 @@ impl AutomationModule {
                                 // 规则快照读取（触发时点的启用规则）
                                 let matched: Vec<Rule> = rules
                                     .read()
-                                    .expect("规则锁污染")
                                     .iter()
                                     .filter(|r| r.enabled && r.matches_event(topic_static) && r.when_passes(&payload))
                                     .cloned()
@@ -418,7 +415,6 @@ impl AutomationModule {
                     }
                     let due: Vec<Rule> = rules
                         .read()
-                        .expect("规则锁污染")
                         .iter()
                         .filter(|r| {
                             r.enabled
@@ -433,7 +429,7 @@ impl AutomationModule {
                 }
             })
             .ok();
-        *self.thread.write().expect("调度线程句柄锁污染") = handle;
+        *self.thread.write() = handle;
     }
 }
 
@@ -510,28 +506,12 @@ impl Module for AutomationModule {
         let runtime = Arc::new(WasmRuntime::new().map_err(|e| ModuleError::Init(e.to_string()))?);
         let plugins = Arc::new(PluginStore::new(&ctx.app_data_dir));
         handler.attach_wasm(runtime, plugins.clone());
-        *self
-            .plugins
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(plugins);
+        *self.plugins.write() = Some(plugins);
         // A4：计划任务端口（未注册仅告警——应用内定时仍生效）
-        *self
-            .taskschd
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = ctx.ports.get::<dyn TaskSchdPort>();
-        *self
-            .handler
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(handler.clone());
-        *self
-            .engine
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? =
-            Some(Arc::new(RuleEngine::new(handler)));
-        *self
-            .bus
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self.taskschd.write() = ctx.ports.get::<dyn TaskSchdPort>();
+        *self.handler.write() = Some(handler.clone());
+        *self.engine.write() = Some(Arc::new(RuleEngine::new(handler)));
+        *self.bus.write() = Some(ctx.event_bus.clone());
         self.load_rules();
         self.state.store(1, Ordering::SeqCst);
         Ok(())
@@ -547,10 +527,11 @@ impl Module for AutomationModule {
     fn stop(&self) -> Result<(), ModuleError> {
         // S4：置"本次运行"的调度取消令牌 + 通知 dispatcher 任务协作退出。
         // 令牌为每轮 start 新建的 Arc，旧线程持旧令牌不受下一轮复位影响（重启无复活/无叠加）。
-        if let Ok(g) = self.cancel.read() {
+        {
+            let g = self.cancel.read();
             g.store(true, Ordering::SeqCst);
         }
-        if let Some(tx) = self.shutdown.write().expect("停机信道锁污染").take() {
+        if let Some(tx) = self.shutdown.write().take() {
             let _ = tx.send(true);
         }
         self.state.store(1, Ordering::SeqCst);
@@ -597,8 +578,8 @@ mod tests {
         let m = AutomationModule::new(&dir);
         let bus = Arc::new(EventBus::new());
         let handler = Arc::new(HostActionHandler::new(bus.clone()));
-        *m.engine.write().unwrap() = Some(Arc::new(RuleEngine::new(handler)));
-        *m.bus.write().unwrap() = Some(bus.clone());
+        *m.engine.write() = Some(Arc::new(RuleEngine::new(handler)));
+        *m.bus.write() = Some(bus.clone());
 
         let total = TOPIC_REGISTRY.len();
         assert!(total > 0);

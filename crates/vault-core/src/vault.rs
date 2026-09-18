@@ -5,8 +5,8 @@
 //! - lock：DEK 立即 wipe（Drop 兜底）；此后全部数据操作拒绝
 //! - Argon2 慢操作**不持锁**执行（锁内只读快照/写结果）
 
+use parking_lot::{Mutex, RwLock};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use host_core::error::AppError;
@@ -81,7 +81,7 @@ impl VaultService {
     }
 
     pub fn state(&self) -> VaultState {
-        match &*self.inner.lock().expect("vault inner 锁") {
+        match &*self.inner.lock() {
             Inner::Uninitialized => VaultState::Uninitialized,
             Inner::Locked | Inner::Cooling { .. } => VaultState::Locked,
             Inner::Unlocked { .. } => VaultState::Unlocked,
@@ -90,12 +90,12 @@ impl VaultService {
 
     /// 头部快照（IPC 展示 KDF 参数 / vault_id；无机密）
     pub fn header(&self) -> Option<VaultHeader> {
-        self.header.read().expect("header 锁").clone()
+        self.header.read().clone()
     }
 
     /// 当前冷却剩余秒数（Locked 且 Cooling 时 > 0）
     pub fn lockout_remaining_secs(&self) -> u64 {
-        let inner = self.inner.lock().expect("vault inner 锁");
+        let inner = self.inner.lock();
         match &*inner {
             Inner::Cooling { until } => until.saturating_duration_since(Instant::now()).as_secs(),
             _ => 0,
@@ -108,7 +108,7 @@ impl VaultService {
         master_password: &str,
         kdf: Option<KdfParams>,
     ) -> Result<VaultHeader, AppError> {
-        let mut inner = self.inner.lock().expect("vault inner 锁");
+        let mut inner = self.inner.lock();
         if !matches!(&*inner, Inner::Uninitialized) {
             return Err(err("VAULT_STATE_001", "保险库已存在，不能重复创建"));
         }
@@ -117,7 +117,7 @@ impl VaultService {
             None => crypto::create_vault(master_password)?,
         };
         self.persist_header(&header)?;
-        *self.header.write().expect("header 锁") = Some(header.clone());
+        *self.header.write() = Some(header.clone());
         *inner = Inner::Unlocked { dek };
         Ok(header)
     }
@@ -126,7 +126,7 @@ impl VaultService {
     pub fn unlock(&self, master_password: &str) -> Result<(), AppError> {
         // 锁内快照，锁外慢操作（Argon2 可达数百 ms～秒级）
         let attempts_snapshot = {
-            let inner = self.inner.lock().expect("vault inner 锁");
+            let inner = self.inner.lock();
             match &*inner {
                 Inner::Uninitialized => {
                     return Err(err("VAULT_STATE_002", "保险库未创建"));
@@ -149,14 +149,14 @@ impl VaultService {
             .ok_or_else(|| err("VAULT_META_003", "头部缺失"))?;
         match crypto::unwrap_dek(&header, master_password) {
             Ok(dek) => {
-                let mut inner = self.inner.lock().expect("vault inner 锁");
+                let mut inner = self.inner.lock();
                 self.store_attempts(0);
                 *inner = Inner::Unlocked { dek };
                 Ok(())
             }
             Err(e) => {
                 let attempts = attempts_snapshot + 1;
-                let mut inner = self.inner.lock().expect("vault inner 锁");
+                let mut inner = self.inner.lock();
                 if attempts >= MAX_ATTEMPTS {
                     self.store_attempts(0);
                     let until = Instant::now() + LOCKOUT;
@@ -177,7 +177,7 @@ impl VaultService {
 
     /// 锁定：DEK 立即清零（内存密钥生命周期终点；阶段二验收项）
     pub fn lock(&self) -> Result<(), AppError> {
-        let mut inner = self.inner.lock().expect("vault inner 锁");
+        let mut inner = self.inner.lock();
         match std::mem::replace(&mut *inner, Inner::Locked) {
             Inner::Unlocked { mut dek } => {
                 dek.wipe(); // Drop 兜底，这里显式清零
@@ -198,7 +198,7 @@ impl VaultService {
             .ok_or_else(|| err("VAULT_META_003", "头部缺失"))?;
         let header2 = crypto::change_master_password(&header, old, new)?;
         self.persist_header(&header2)?;
-        *self.header.write().expect("header 锁") = Some(header2.clone());
+        *self.header.write() = Some(header2.clone());
         Ok(header2)
     }
 
@@ -206,11 +206,11 @@ impl VaultService {
 
     fn attempts_snapshot(&self) -> u32 {
         // 由 unlock 在 inner 锁外调用：独立小锁避免与 inner 互相嵌套
-        self.attempts.lock().expect("attempts 锁").to_owned()
+        self.attempts.lock().to_owned()
     }
 
     fn store_attempts(&self, v: u32) {
-        *self.attempts.lock().expect("attempts 锁") = v;
+        *self.attempts.lock() = v;
     }
 
     fn persist_header(&self, header: &VaultHeader) -> Result<(), AppError> {
@@ -229,7 +229,7 @@ impl VaultService {
 
     fn dek(&self) -> Result<SecretKey, AppError> {
         // DEK 拷贝一份给调用方（SecretKey 是 32B 值语义；原件仍由服务持有）
-        let inner = self.inner.lock().expect("vault inner 锁");
+        let inner = self.inner.lock();
         match &*inner {
             Inner::Unlocked { dek } => Ok(SecretKey::new(*dek.expose())),
             _ => Err(err("VAULT_LOCKED_001", "密码库处于锁定状态")),

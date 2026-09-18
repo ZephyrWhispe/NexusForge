@@ -5,8 +5,9 @@
 //! value = 实体 JSON 快照（notes: {content, title}；删除 = {"deleted": true}）。
 //! 同步 = 交换游标 → 拉取缺失 → 本地应用（LWW，见 engine.rs）。
 
+use parking_lot::Mutex;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -77,7 +78,7 @@ impl OpLog {
 
     /// 追加变更（op_id 主键 → INSERT OR IGNORE 幂等；重复推送无副作用）
     pub fn append(&self, e: &OpEntry) -> Result<()> {
-        let conn = self.conn.lock().expect("op_log 锁污染");
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT OR IGNORE INTO op_log (op_id, entity, entity_id, ts, device, value)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -96,7 +97,7 @@ impl OpLog {
 
     /// 拉取指定设备产出的变更（ts 升序；pull 响应方查自己的产出，push 方查自产）
     pub fn ops_of_device(&self, device: &str, since_ts: i64, limit: usize) -> Result<Vec<OpEntry>> {
-        let conn = self.conn.lock().expect("op_log 锁污染");
+        let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT op_id, entity, entity_id, ts, device, value FROM op_log
@@ -112,7 +113,7 @@ impl OpLog {
 
     /// 实体当前最新变更（LWW 对比用）
     pub fn latest_for(&self, entity: &str, entity_id: &str) -> Result<Option<OpEntry>> {
-        let conn = self.conn.lock().expect("op_log 锁污染");
+        let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT op_id, entity, entity_id, ts, device, value FROM op_log
@@ -129,7 +130,7 @@ impl OpLog {
 
     /// 设备游标（从该设备已收到的最大 ts）
     pub fn cursor(&self, device: &str) -> i64 {
-        let conn = self.conn.lock().expect("op_log 锁污染");
+        let conn = self.conn.lock();
         conn.query_row(
             "SELECT last_ts FROM cursors WHERE device = ?1",
             rusqlite::params![device],
@@ -140,7 +141,7 @@ impl OpLog {
 
     /// 推进游标（只进不退）
     pub fn set_cursor(&self, device: &str, ts: i64) -> Result<()> {
-        let conn = self.conn.lock().expect("op_log 锁污染");
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO cursors (device, last_ts) VALUES (?1, ?2)
              ON CONFLICT(device) DO UPDATE SET last_ts = MAX(last_ts, ?2)",
@@ -152,7 +153,7 @@ impl OpLog {
 
     /// op 总数（状态面板）
     pub fn count(&self) -> u64 {
-        let conn = self.conn.lock().expect("op_log 锁污染");
+        let conn = self.conn.lock();
         conn.query_row("SELECT COUNT(*) FROM op_log", [], |r| r.get::<_, i64>(0))
             .unwrap_or(0) as u64
     }

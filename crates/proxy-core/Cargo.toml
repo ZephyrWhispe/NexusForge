@@ -6,6 +6,7 @@ authors.workspace = true
 description = "代理与 VPN 框架（docs/impl/05 PR1–PR6）：内核编排 / Sidecar 管理 / 订阅解析 / 配置生成 / 系统代理切换与还原"
 
 [dependencies]
+parking_lot = { workspace = true }
 host-core = { path = "../host-core" }
 tokio = { workspace = true }
 serde = { workspace = true }

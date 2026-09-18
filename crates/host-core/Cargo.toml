@@ -6,6 +6,7 @@ authors.workspace = true
 description = "NexusForge 宿主核心：模块注册表 / 事件总线 / 配置中心 / 生命周期管理"
 
 [dependencies]
+parking_lot = { workspace = true }
 jsonschema = "0.26"
 base64 = { workspace = true }
 chacha20poly1305 = { workspace = true }

@@ -7,9 +7,10 @@
 //!
 //! socket 经 socket2 设 SO_REUSEADDR：同机多实例（验收/测试）可同端口共存。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -142,28 +143,18 @@ impl DiscoveryService {
 
     /// 设置发现事件回调（在线/离线）；须在 run 之前调用
     pub fn set_event_cb(&self, cb: Box<dyn Fn(PeerEvent) + Send + Sync>) {
-        *self.event_cb.lock().expect("event_cb 锁") = Some(cb);
+        *self.event_cb.lock() = Some(cb);
     }
 
     /// 邻居快照（按 device_id 排序，供 IPC/UI）
     pub fn peers_snapshot(&self) -> Vec<PeerInfo> {
-        let mut list: Vec<PeerInfo> = self
-            .peers
-            .lock()
-            .expect("peers 锁")
-            .values()
-            .map(|e| e.info.clone())
-            .collect();
+        let mut list: Vec<PeerInfo> = self.peers.lock().values().map(|e| e.info.clone()).collect();
         list.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         list
     }
 
     pub fn peer(&self, device_id: &str) -> Option<PeerInfo> {
-        self.peers
-            .lock()
-            .expect("peers 锁")
-            .get(device_id)
-            .map(|e| e.info.clone())
+        self.peers.lock().get(device_id).map(|e| e.info.clone())
     }
 
     /// 启动心跳发送 / 接收 / 离线收割三任务
@@ -252,7 +243,7 @@ impl DiscoveryService {
             return; // 组播环回的自发文
         }
         let event = {
-            let mut peers = self.peers.lock().expect("peers 锁");
+            let mut peers = self.peers.lock();
             match peers.get(&hb.device_id) {
                 Some(existing) if existing.seq >= hb.seq => return, // 乱序旧包
                 _ => {}
@@ -289,7 +280,7 @@ impl DiscoveryService {
     /// 离线收割：超时未更新 → 移除 + 发布离线
     fn reap(&self) {
         let dead: Vec<String> = {
-            let mut peers = self.peers.lock().expect("peers 锁");
+            let mut peers = self.peers.lock();
             let deadline = self.config.offline_after;
             let dead: Vec<String> = peers
                 .iter()
@@ -308,7 +299,7 @@ impl DiscoveryService {
     }
 
     fn emit(&self, ev: PeerEvent) {
-        if let Some(cb) = self.event_cb.lock().expect("event_cb 锁").as_ref() {
+        if let Some(cb) = self.event_cb.lock().as_ref() {
             cb(ev);
         }
     }
@@ -379,7 +370,7 @@ mod tests {
 
         let events_b: Arc<Mutex<Vec<PeerEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let ev_sink = events_b.clone();
-        svc_b.set_event_cb(Box::new(move |ev| ev_sink.lock().unwrap().push(ev)));
+        svc_b.set_event_cb(Box::new(move |ev| ev_sink.lock().push(ev)));
 
         let _h_a = svc_a.clone().run().await.unwrap();
         let _h_b = svc_b.clone().run().await.unwrap();
@@ -405,7 +396,7 @@ mod tests {
         let events_a2: Arc<Mutex<Vec<PeerEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let ev_sink2 = events_a2.clone();
         let svc_a2 = DiscoveryService::new(own("device-a"), test_config(port));
-        svc_a2.set_event_cb(Box::new(move |ev| ev_sink2.lock().unwrap().push(ev)));
+        svc_a2.set_event_cb(Box::new(move |ev| ev_sink2.lock().push(ev)));
         // 手动注入一条"已存在"的邻居，随后静默
         let fake = PeerInfo {
             device_id: "ghost".into(),
@@ -432,7 +423,7 @@ mod tests {
         let h_a2 = svc_a2.clone().run().await.unwrap();
         tokio::time::sleep(Duration::from_millis(700)).await;
         {
-            let evs = events_a2.lock().unwrap();
+            let evs = events_a2.lock();
             assert!(
                 evs.iter()
                     .any(|e| matches!(e, PeerEvent::Offline(id) if id == "ghost")),

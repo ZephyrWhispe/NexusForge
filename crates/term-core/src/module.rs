@@ -4,9 +4,10 @@
 //! - stop：强制回收全部会话（docs/impl/06 风险标注：ConPTY 句柄泄漏最常见缺陷）
 //! - 无全局快捷键 ability
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::error::ModuleError;
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
@@ -39,7 +40,7 @@ impl TermModule {
     }
 
     pub fn ssh(&self) -> Option<Arc<SshService>> {
-        self.ssh.read().ok().and_then(|g| g.clone())
+        self.ssh.read().clone()
     }
 }
 
@@ -63,10 +64,7 @@ impl Module for TermModule {
 
         let ssh = SshService::new(self.app_data_dir.join("term").join("known_hosts.json"))
             .map_err(|e| ModuleError::Init(e.to_string()))?;
-        *self
-            .ssh
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(ssh));
+        *self.ssh.write() = Some(Arc::new(ssh));
 
         self.state.store(1, Ordering::SeqCst);
         Ok(())

@@ -6,10 +6,11 @@
 //! （落后 > 4MB 暂停拉取，docs/impl/06 T2）。
 //! 终端内容敏感：默认不进日志（仅记录会话 id 与错误）。
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::events::{Event, EventBus};
 use host_core::ports::{ConptyPort, PtyHandle, TermCfg};
@@ -97,7 +98,7 @@ impl SessionState {
     /// 终止会话（幂等）
     pub fn kill(&self) {
         if self.alive.swap(false, Ordering::SeqCst) {
-            if let Some(k) = self.kill.write().expect("会话 kill 锁污染").take() {
+            if let Some(k) = self.kill.write().take() {
                 (k.0)();
             }
         }
@@ -142,14 +143,13 @@ impl TermSessions {
 
     /// 模块 init 注入
     pub fn attach(&self, conpty: Arc<dyn ConptyPort>, bus: Arc<EventBus>) {
-        *self.conpty.write().expect("conpty 锁污染") = Some(conpty);
-        *self.bus.write().expect("bus 锁污染") = Some(bus);
+        *self.conpty.write() = Some(conpty);
+        *self.bus.write() = Some(bus);
     }
 
     fn bus(&self) -> Result<Arc<EventBus>> {
         self.bus
             .read()
-            .expect("bus 锁污染")
             .clone()
             .ok_or_else(|| TermError::BadState("事件总线未就绪".into()))
     }
@@ -157,7 +157,6 @@ impl TermSessions {
     fn conpty(&self) -> Result<Arc<dyn ConptyPort>> {
         self.conpty
             .read()
-            .expect("conpty 锁污染")
             .clone()
             .ok_or_else(|| TermError::BadState("ConPTY 未就绪".into()))
     }
@@ -165,7 +164,6 @@ impl TermSessions {
     pub fn list(&self) -> Vec<SessionInfo> {
         self.sessions
             .read()
-            .expect("会话表锁污染")
             .values()
             .map(|s| SessionInfo {
                 id: s.id.clone(),
@@ -181,7 +179,6 @@ impl TermSessions {
     pub fn get(&self, id: &str) -> Result<Arc<SessionState>> {
         self.sessions
             .read()
-            .expect("会话表锁污染")
             .get(id)
             .cloned()
             .ok_or_else(|| TermError::NoSuchSession(id.to_string()))
@@ -291,11 +288,7 @@ impl TermSessions {
             output_rx, kill, ..
         } = handle;
         let mut out_rx = output_rx;
-        state
-            .kill
-            .write()
-            .expect("会话 kill 锁污染")
-            .replace(KillFn(kill));
+        state.kill.write().replace(KillFn(kill));
 
         // reader：8ms 批处理 + 单批 64KB 切分 + 背压（T2）
         let reader_state = state.clone();
@@ -346,7 +339,7 @@ impl TermSessions {
             }
             // EOF：标记死亡 + 回收 + 发退出事件
             reader_state.alive.store(false, Ordering::SeqCst);
-            if let Some(k) = reader_state.kill.write().expect("会话 kill 锁污染").take() {
+            if let Some(k) = reader_state.kill.write().take() {
                 (k.0)();
             }
             bus.publish(Event::new(
@@ -357,14 +350,10 @@ impl TermSessions {
             .ok();
         });
 
-        self.sessions
-            .write()
-            .expect("会话表锁污染")
-            .insert(id.clone(), state);
+        self.sessions.write().insert(id.clone(), state);
         // 顺带清理死会话
         self.sessions
             .write()
-            .expect("会话表锁污染")
             .retain(|_, s| s.alive.load(Ordering::SeqCst));
 
         Ok(SessionInfo {
@@ -392,7 +381,7 @@ impl TermSessions {
 
     /// 模块 stop：强制回收全部会话（docs/impl/06 风险标注）
     pub fn kill_all(&self) {
-        let mut sessions = self.sessions.write().expect("会话表锁污染");
+        let mut sessions = self.sessions.write();
         for s in sessions.values() {
             s.kill();
         }

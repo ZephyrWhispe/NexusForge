@@ -24,13 +24,13 @@ pub struct NotesModule {
 }
 
 // RwLock<Option<Arc<NoteLibrary>>> 的轻量别名（避免逐处写泛型）
-type RwLockOption = std::sync::RwLock<Option<Arc<NoteLibrary>>>;
+type RwLockOption = parking_lot::RwLock<Option<Arc<NoteLibrary>>>;
 
 impl NotesModule {
     pub fn new(app_data_dir: &std::path::Path) -> Self {
         Self {
             state: AtomicU8::new(0),
-            library: std::sync::RwLock::new(None),
+            library: parking_lot::RwLock::new(None),
             root: app_data_dir.join("notes"),
             db_path: app_data_dir.join("db").join("notes.db"),
         }
@@ -38,7 +38,7 @@ impl NotesModule {
 
     /// IPC 层入口（init 后可用）
     pub fn library(&self) -> Option<Arc<NoteLibrary>> {
-        self.library.read().ok().and_then(|g| g.clone())
+        self.library.read().clone()
     }
 
     pub fn root(&self) -> &std::path::Path {
@@ -81,10 +81,7 @@ impl Module for NotesModule {
             ),
             Err(e) => tracing::warn!(error = %e, "笔记索引同步失败（UI 可手动 reindex）"),
         }
-        *self
-            .library
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(lib));
+        *self.library.write() = Some(Arc::new(lib));
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }

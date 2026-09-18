@@ -4,9 +4,10 @@
 //! 两模块在同机共享同一身份与配对表（docs/impl/05 K2 / impl/07 SYNC1），故定义在
 //! host-core，模块 crate 一律经此消费，杜绝模块间直接依赖（DESIGN O1）。
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -202,51 +203,36 @@ impl PairStore {
     }
 
     pub fn is_paired(&self, device_id: &str) -> bool {
-        self.peers.read().expect("peers 锁").contains_key(device_id)
+        self.peers.read().contains_key(device_id)
     }
 
     pub fn get(&self, device_id: &str) -> Option<PairedPeer> {
-        self.peers.read().expect("peers 锁").get(device_id).cloned()
+        self.peers.read().get(device_id).cloned()
     }
 
     /// 指纹白名单校验（K3 会话准入）
     pub fn verify_fingerprint(&self, device_id: &str, fingerprint: &str) -> bool {
         self.peers
             .read()
-            .expect("peers 锁")
             .get(device_id)
             .map(|p| p.fingerprint == fingerprint)
             .unwrap_or(false)
     }
 
     pub fn all(&self) -> Vec<PairedPeer> {
-        let mut list: Vec<PairedPeer> = self
-            .peers
-            .read()
-            .expect("peers 锁")
-            .values()
-            .cloned()
-            .collect();
+        let mut list: Vec<PairedPeer> = self.peers.read().values().cloned().collect();
         list.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         list
     }
 
     /// 登记配对记录（K2 配对流程写入；sync-core 测试/对账也复用）
     pub fn upsert(&self, peer: PairedPeer) -> Result<(), AppError> {
-        self.peers
-            .write()
-            .expect("peers 锁")
-            .insert(peer.device_id.clone(), peer);
+        self.peers.write().insert(peer.device_id.clone(), peer);
         self.persist()
     }
 
     pub fn remove(&self, device_id: &str) -> Result<bool, AppError> {
-        let removed = self
-            .peers
-            .write()
-            .expect("peers 锁")
-            .remove(device_id)
-            .is_some();
+        let removed = self.peers.write().remove(device_id).is_some();
         if removed {
             self.persist()?;
         }

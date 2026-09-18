@@ -10,9 +10,10 @@
 //! 防死环：远端应用走 NoteLibrary 直调（不发 notes.changed——该事件由 IPC 层发布），
 //! 本地订阅仅记录用户操作产生的变更。
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
 use host_core::error::ModuleError;
@@ -246,7 +247,7 @@ impl SyncModule {
 
     /// 宿主注入变更应用器（src-tauri：NoteLibrary 投影）
     pub fn attach_applier(&self, applier: Arc<dyn ChangeApplier>) {
-        *self.applier.write().expect("applier 锁污染") = Some(applier);
+        *self.applier.write() = Some(applier);
     }
 
     /// 监听端口注入（测试随机端口）
@@ -308,13 +309,7 @@ impl SyncModule {
 
     /// op_log 状态（面板统计）
     pub fn status(&self) -> serde_json::Value {
-        let count = self
-            .log
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .map(|l| l.count())
-            .unwrap_or(0);
+        let count = self.log.read().clone().map(|l| l.count()).unwrap_or(0);
         serde_json::json!({ "op_count": count, "port": self.port.load(Ordering::SeqCst) })
     }
 
@@ -324,18 +319,16 @@ impl SyncModule {
             identity: self
                 .identity
                 .read()
-                .expect("identity 锁污染")
                 .clone()
                 .ok_or_else(|| SyncError::NotReady("设备身份未就绪".into()))?,
             store: self.store.clone(),
             log: self
                 .log
                 .read()
-                .expect("log 锁污染")
                 .clone()
                 .ok_or_else(|| SyncError::NotReady("op_log 未就绪".into()))?,
-            applier: self.applier.read().expect("applier 锁污染").clone(),
-            bus: self.bus.read().expect("bus 锁污染").clone(),
+            applier: self.applier.read().clone(),
+            bus: self.bus.read().clone(),
         }))
     }
 
@@ -422,20 +415,11 @@ impl Module for SyncModule {
         let crypto = ctx.ports.get::<dyn host_core::ports::CryptoPort>();
         let identity = DeviceIdentity::load_or_create(&ctx.app_data_dir.join("kvm"), crypto)
             .map_err(|e| ModuleError::Init(e.to_string()))?;
-        *self
-            .identity
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(identity));
+        *self.identity.write() = Some(Arc::new(identity));
         self.migrate_legacy_db_path();
         let log = OpLog::open(&self.db_path).map_err(|e| ModuleError::Init(e.to_string()))?;
-        *self
-            .log
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(log));
-        *self
-            .bus
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self.log.write() = Some(Arc::new(log));
+        *self.bus.write() = Some(ctx.event_bus.clone());
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
@@ -451,7 +435,7 @@ impl Module for SyncModule {
         let ctx_listen = ctx.clone();
         tokio::spawn(async move { SyncModule::accept_loop(ctx_listen, port, cancel).await });
         // SYNC2：订阅本地变更（notes.changed → op_log 快照）
-        if let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) {
+        if let Some(bus) = self.bus.read().clone() {
             if let Ok(mut rx) = bus.subscribe("notes.changed") {
                 let ctx2 = ctx.clone();
                 tokio::spawn(async move {

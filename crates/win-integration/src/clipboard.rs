@@ -3,7 +3,8 @@
 //! 读取优先级：CF_UNICODETEXT → CF_DIB（图片）→ CF_HDROP（文件）；
 //! 来源应用：GetClipboardOwner → QueryFullProcessImageNameW → 进程文件名。
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
@@ -60,9 +61,7 @@ unsafe fn release_cb(hwnd: HWND) {
         return;
     }
     let cb: Cb = *Box::from_raw(raw as *mut Cb);
-    if let Ok(mut g) = cb.lock() {
-        *g = None;
-    }
+    *cb.lock() = None;
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
 }
 
@@ -77,10 +76,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let content = read_clipboard_content();
             let app = read_source_app();
             if let Some(content) = content {
-                if let Ok(guard) = cb.lock() {
-                    if let Some(f) = guard.as_ref() {
-                        f(content, app);
-                    }
+                let guard = cb.lock();
+                if let Some(f) = guard.as_ref() {
+                    f(content, app);
                 }
             }
         }
@@ -289,7 +287,8 @@ impl ClipboardPort for WindowsClipboard {
                     let _ = ready_tx.send(Err(()));
                     return;
                 }
-                if let Ok(mut g) = shared.lock() {
+                {
+                    let mut g = shared.lock();
                     *g = Some(hwnd.0 as usize);
                 }
                 let _ = ready_tx.send(Ok(()));
@@ -300,7 +299,8 @@ impl ClipboardPort for WindowsClipboard {
                 }
                 // 收尾（S3）：注销监听、清句柄登记、回收回调（释放管线 Sender）、销毁窗口
                 let _ = RemoveClipboardFormatListener(hwnd);
-                if let Ok(mut g) = shared.lock() {
+                {
+                    let mut g = shared.lock();
                     if *g == Some(hwnd.0 as usize) {
                         *g = None;
                     }
@@ -317,7 +317,7 @@ impl ClipboardPort for WindowsClipboard {
     }
 
     fn stop_listener(&self) -> Result<(), AppError> {
-        let raw = self.listener.lock().ok().and_then(|mut g| g.take());
+        let raw = self.listener.lock().take();
         if let Some(raw) = raw {
             unsafe {
                 // 异步投递：目标线程 wndproc 收到后 PostQuitMessage，消息循环退出并自行收尾

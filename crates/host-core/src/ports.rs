@@ -5,9 +5,10 @@
 //! - Windows 实现集中在 win-integration crate，通过 [`Ports`] 注册；
 //! - 全部方法为同步签名：阻塞调用由调用方（模块）放入 spawn_blocking。
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -523,7 +524,6 @@ impl Ports {
     pub fn register<T: ?Sized + Port>(&self, impl_: Arc<T>) {
         self.inner
             .write()
-            .expect("Ports 注册表写锁")
             .insert(std::any::TypeId::of::<T>(), Arc::new(PortBox(impl_)) as _);
     }
 
@@ -531,7 +531,6 @@ impl Ports {
     pub fn get<T: ?Sized + Port>(&self) -> Option<Arc<T>> {
         self.inner
             .read()
-            .expect("Ports 注册表读锁")
             .get(&std::any::TypeId::of::<T>())
             .and_then(|any| any.clone().downcast::<PortBox<T>>().ok())
             .map(|boxed| boxed.0.clone())
@@ -541,7 +540,6 @@ impl Ports {
     pub fn register_multi<T: ?Sized + Port>(&self, impl_: Arc<T>) {
         self.multi
             .write()
-            .expect("Ports 多实例注册表写锁")
             .entry(std::any::TypeId::of::<T>())
             .or_default()
             .push(Arc::new(PortBox(impl_)) as _);
@@ -551,7 +549,6 @@ impl Ports {
     pub fn get_all<T: ?Sized + Port>(&self) -> Vec<Arc<T>> {
         self.multi
             .read()
-            .expect("Ports 多实例注册表读锁")
             .get(&std::any::TypeId::of::<T>())
             .map(|v| {
                 v.iter()

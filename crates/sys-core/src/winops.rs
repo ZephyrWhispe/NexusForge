@@ -887,8 +887,8 @@ impl AuditStore {
 mod tests {
     use super::*;
     use host_core::ports::ServiceInfo;
+    use parking_lot::Mutex;
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
     /// 内存注册表（BAVR 语义测试）
     #[derive(Default)]
@@ -899,7 +899,6 @@ mod tests {
         fn set(&self, key: &str, name: &str, v: RegValue) {
             self.values
                 .lock()
-                .unwrap()
                 .insert((key.to_string(), name.to_string()), v);
         }
     }
@@ -912,7 +911,6 @@ mod tests {
             Ok(self
                 .values
                 .lock()
-                .unwrap()
                 .get(&(key.to_string(), name.to_string()))
                 .cloned()
                 .map(|v| (v, true))
@@ -926,7 +924,6 @@ mod tests {
         ) -> std::result::Result<(), host_core::error::AppError> {
             self.values
                 .lock()
-                .unwrap()
                 .insert((key.to_string(), name.to_string()), value.clone());
             Ok(())
         }
@@ -937,7 +934,6 @@ mod tests {
         ) -> std::result::Result<(), host_core::error::AppError> {
             self.values
                 .lock()
-                .unwrap()
                 .remove(&(key.to_string(), name.to_string()));
             Ok(())
         }
@@ -950,10 +946,7 @@ mod tests {
     }
     impl FakeServices {
         fn set(&self, name: &str, st: StartType, running: bool) {
-            self.services
-                .lock()
-                .unwrap()
-                .insert(name.to_string(), (st, running));
+            self.services.lock().insert(name.to_string(), (st, running));
         }
     }
     impl ServiceCtlPort for FakeServices {
@@ -961,7 +954,7 @@ mod tests {
             &self,
             name: &str,
         ) -> std::result::Result<ServiceInfo, host_core::error::AppError> {
-            let m = self.services.lock().unwrap();
+            let m = self.services.lock();
             m.get(name)
                 .map(|&(st, running)| ServiceInfo {
                     name: name.into(),
@@ -977,7 +970,7 @@ mod tests {
             name: &str,
             st: StartType,
         ) -> std::result::Result<(), host_core::error::AppError> {
-            let mut m = self.services.lock().unwrap();
+            let mut m = self.services.lock();
             let e = m.get_mut(name).ok_or_else(|| {
                 host_core::error::AppError::module("T", format!("服务 {name} 不存在"), None)
             })?;
@@ -985,7 +978,7 @@ mod tests {
             Ok(())
         }
         fn stop(&self, name: &str) -> std::result::Result<(), host_core::error::AppError> {
-            let mut m = self.services.lock().unwrap();
+            let mut m = self.services.lock();
             let e = m.get_mut(name).ok_or_else(|| {
                 host_core::error::AppError::module("T", format!("服务 {name} 不存在"), None)
             })?;
@@ -993,7 +986,7 @@ mod tests {
             Ok(())
         }
         fn start(&self, name: &str) -> std::result::Result<(), host_core::error::AppError> {
-            let mut m = self.services.lock().unwrap();
+            let mut m = self.services.lock();
             let e = m.get_mut(name).ok_or_else(|| {
                 host_core::error::AppError::module("T", format!("服务 {name} 不存在"), None)
             })?;
@@ -1015,14 +1008,14 @@ mod tests {
             &self,
             path: &str,
         ) -> std::result::Result<Option<bool>, host_core::error::AppError> {
-            Ok(self.tasks.lock().unwrap().get(path).copied())
+            Ok(self.tasks.lock().get(path).copied())
         }
         fn set_enabled(
             &self,
             path: &str,
             enabled: bool,
         ) -> std::result::Result<(), host_core::error::AppError> {
-            let mut m = self.tasks.lock().unwrap();
+            let mut m = self.tasks.lock();
             if m.contains_key(path) {
                 m.insert(path.to_string(), enabled);
                 Ok(())
@@ -1053,7 +1046,6 @@ mod tests {
         ) -> std::result::Result<u32, host_core::error::AppError> {
             self.calls
                 .lock()
-                .unwrap()
                 .push((path.to_string(), recursive, skip_recent_hours));
             Ok(3)
         }
@@ -1065,7 +1057,6 @@ mod tests {
         ) -> std::result::Result<String, host_core::error::AppError> {
             self.execs
                 .lock()
-                .unwrap()
                 .push(format!("{program} {args:?} {timeout_ms}"));
             Ok("ok".into())
         }
@@ -1073,21 +1064,18 @@ mod tests {
             &self,
             description: &str,
         ) -> std::result::Result<(), host_core::error::AppError> {
-            self.restore_points
-                .lock()
-                .unwrap()
-                .push(description.to_string());
+            self.restore_points.lock().push(description.to_string());
             Ok(())
         }
         fn empty_working_set(&self) -> std::result::Result<u32, host_core::error::AppError> {
-            *self.working_sets.lock().unwrap() += 1;
+            *self.working_sets.lock() += 1;
             Ok(5)
         }
         fn repair(
             &self,
             kind: host_core::ports::RepairKind,
         ) -> std::result::Result<String, host_core::error::AppError> {
-            self.execs.lock().unwrap().push(format!("repair:{kind:?}"));
+            self.execs.lock().push(format!("repair:{kind:?}"));
             Ok("ok".into())
         }
         fn defender_realtime(
@@ -1096,7 +1084,6 @@ mod tests {
         ) -> std::result::Result<(), host_core::error::AppError> {
             self.execs
                 .lock()
-                .unwrap()
                 .push(format!("defender_realtime:{disable}"));
             Ok(())
         }
@@ -1111,7 +1098,7 @@ mod tests {
     }
     impl FakeAppx {
         fn install(&self, name: &str) {
-            self.installed.lock().unwrap().push(name.to_string());
+            self.installed.lock().push(name.to_string());
         }
     }
     impl AppxPort for FakeAppx {
@@ -1120,7 +1107,7 @@ mod tests {
             name_filter: &str,
         ) -> std::result::Result<Vec<host_core::ports::AppxPackage>, host_core::error::AppError>
         {
-            let m = self.installed.lock().unwrap();
+            let m = self.installed.lock();
             Ok(m.iter()
                 .filter(|n| n.starts_with(name_filter))
                 .map(|n| host_core::ports::AppxPackage {
@@ -1133,14 +1120,11 @@ mod tests {
             &self,
             name_filter: &str,
         ) -> std::result::Result<u32, host_core::error::AppError> {
-            let mut m = self.installed.lock().unwrap();
+            let mut m = self.installed.lock();
             let before = m.len();
             m.retain(|n| !n.starts_with(name_filter));
             let n = (before - m.len()) as u32;
-            self.removed_current
-                .lock()
-                .unwrap()
-                .push(name_filter.to_string());
+            self.removed_current.lock().push(name_filter.to_string());
             Ok(n)
         }
         fn remove_provisioned(
@@ -1149,7 +1133,6 @@ mod tests {
         ) -> std::result::Result<u32, host_core::error::AppError> {
             self.removed_provisioned
                 .lock()
-                .unwrap()
                 .push(name_filter.to_string());
             Ok(1)
         }
@@ -1431,7 +1414,7 @@ mod tests {
     fn task_action_bavr_roundtrip_and_missing() {
         let fp = FakePorts::new();
         let path = r"\Microsoft\Windows\Test\Sample";
-        fp.task.tasks.lock().unwrap().insert(path.into(), true);
+        fp.task.tasks.lock().insert(path.into(), true);
         let ports = fp.ports();
         let t = Tweak {
             id: "task_off".into(),
@@ -1586,11 +1569,7 @@ mod tests {
             "结束后服务应已拉起"
         );
         assert!(fp.svc.query("bits").unwrap().running);
-        assert_eq!(
-            fp.maint.calls.lock().unwrap().len(),
-            1,
-            "clean_dir 调用一次"
-        );
+        assert_eq!(fp.maint.calls.lock().len(), 1, "clean_dir 调用一次");
         // 备份：Service 条目带 was_running + FileClean 占位
         let svc_items = report
             .backup
@@ -1726,8 +1705,8 @@ mod tests {
         assert_eq!(states[0].1, ScanState::NotApplied);
         let report = apply(&ports, &t, true).unwrap();
         assert!(report.verified, "移除后包不在 → action_applied=true");
-        assert_eq!(fp.appx.removed_current.lock().unwrap().len(), 1);
-        assert_eq!(fp.appx.removed_provisioned.lock().unwrap().len(), 1);
+        assert_eq!(fp.appx.removed_current.lock().len(), 1);
+        assert_eq!(fp.appx.removed_provisioned.lock().len(), 1);
         // 备份：两条 Appx 条目 was_installed=true；restore 不报错（Store 重装提示）
         assert!(report.backup.iter().all(|b| matches!(
             b,
@@ -1807,9 +1786,9 @@ mod tests {
         };
         let report = apply(&ports, &t, true).unwrap();
         assert!(report.verified);
-        assert_eq!(fp.maint.execs.lock().unwrap().len(), 1, "Exec 调用一次");
-        assert_eq!(fp.maint.restore_points.lock().unwrap().len(), 1);
-        assert_eq!(*fp.maint.working_sets.lock().unwrap(), 1);
+        assert_eq!(fp.maint.execs.lock().len(), 1, "Exec 调用一次");
+        assert_eq!(fp.maint.restore_points.lock().len(), 1);
+        assert_eq!(*fp.maint.working_sets.lock(), 1);
         // 备份：3 条 Exec 占位；restore 空操作不报错
         assert_eq!(
             report

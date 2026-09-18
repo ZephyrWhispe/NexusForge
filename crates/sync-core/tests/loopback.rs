@@ -3,8 +3,9 @@
 //! 两台 SyncModule（独立临时 appData + 互配信任根 + 假数据集 applier）：
 //! A 记录变更 → sync_with(B) → B 数据集收敛 → B 记录变更 → A 反向拉取收敛。
 
+use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use host_core::device::{b64_encode, DeviceIdentity, PairStore, PairedPeer};
 use host_core::events::EventBus;
@@ -25,11 +26,10 @@ impl FakeStore {
     fn put(&self, id: &str, content: &str) {
         self.data
             .lock()
-            .unwrap()
             .insert(id.to_string(), serde_json::json!({ "content": content }));
     }
     fn get(&self, id: &str) -> Option<serde_json::Value> {
-        self.data.lock().unwrap().get(id).cloned()
+        self.data.lock().get(id).cloned()
     }
 }
 impl ChangeApplier for FakeStore {
@@ -42,14 +42,11 @@ impl ChangeApplier for FakeStore {
         id: &str,
         value: &serde_json::Value,
     ) -> sync_core::Result<()> {
-        self.data
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), value.clone());
+        self.data.lock().insert(id.to_string(), value.clone());
         Ok(())
     }
     fn apply_delete(&self, _entity: &str, id: &str) -> sync_core::Result<()> {
-        self.data.lock().unwrap().remove(id);
+        self.data.lock().remove(id);
         Ok(())
     }
 }

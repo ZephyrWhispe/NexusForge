@@ -5,8 +5,9 @@
 //! 本地驱动实现与注册表。v1 内置 LocalDriver（本地盘/UNC）；smb/ftp/webdav/s3
 //! 经 rclone sidecar 包装驱动在后续里程碑接入（注册表已留扩展位）。
 
+use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::error::AppError;
 use host_core::storage::StoragePort;
@@ -108,24 +109,18 @@ impl DriverRegistry {
 
     /// 注册驱动（同 id 重复注册以最后者为准）
     pub fn register(&self, driver: Arc<dyn StorageDriver>) {
-        let mut v = self.drivers.write().expect("驱动注册表写锁");
+        let mut v = self.drivers.write();
         v.retain(|d| d.id() != driver.id());
         v.push(driver);
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn StorageDriver>> {
-        self.drivers
-            .read()
-            .expect("驱动注册表读锁")
-            .iter()
-            .find(|d| d.id() == id)
-            .cloned()
+        self.drivers.read().iter().find(|d| d.id() == id).cloned()
     }
 
     pub fn list(&self) -> Vec<DriverInfo> {
         self.drivers
             .read()
-            .expect("驱动注册表读锁")
             .iter()
             .map(|d| DriverInfo {
                 id: d.id().to_owned(),

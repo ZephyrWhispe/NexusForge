@@ -88,8 +88,9 @@ impl SyncEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use serde_json::json;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     /// 内存数据集（HashMap 投影）
     #[derive(Default)]
@@ -98,17 +99,14 @@ mod tests {
     }
     impl ChangeApplier for FakeStore {
         fn snapshot(&self, _entity: &str, id: &str) -> Result<Option<serde_json::Value>> {
-            Ok(self.data.lock().unwrap().get(id).cloned())
+            Ok(self.data.lock().get(id).cloned())
         }
         fn apply_upsert(&self, _entity: &str, id: &str, value: &serde_json::Value) -> Result<()> {
-            self.data
-                .lock()
-                .unwrap()
-                .insert(id.to_string(), value.clone());
+            self.data.lock().insert(id.to_string(), value.clone());
             Ok(())
         }
         fn apply_delete(&self, _entity: &str, id: &str) -> Result<()> {
-            self.data.lock().unwrap().remove(id);
+            self.data.lock().remove(id);
             Ok(())
         }
     }
@@ -141,21 +139,21 @@ mod tests {
             SyncEngine::apply_remote(&l, &store, &o1).unwrap(),
             ApplyOutcome::Applied
         );
-        assert_eq!(store.data.lock().unwrap()["a.md"]["content"], "v1");
+        assert_eq!(store.data.lock()["a.md"]["content"], "v1");
         // 旧 ts 到达 → LostLww，数据集不动
         let o0 = op("r0", "a.md", 50, "devB", "old");
         assert_eq!(
             SyncEngine::apply_remote(&l, &store, &o0).unwrap(),
             ApplyOutcome::LostLww
         );
-        assert_eq!(store.data.lock().unwrap()["a.md"]["content"], "v1");
+        assert_eq!(store.data.lock()["a.md"]["content"], "v1");
         // 更新 ts → 覆盖
         let o2 = op("r2", "a.md", 200, "devB", "v2");
         assert_eq!(
             SyncEngine::apply_remote(&l, &store, &o2).unwrap(),
             ApplyOutcome::Applied
         );
-        assert_eq!(store.data.lock().unwrap()["a.md"]["content"], "v2");
+        assert_eq!(store.data.lock()["a.md"]["content"], "v2");
         // 重放同 op → Noop
         assert_eq!(
             SyncEngine::apply_remote(&l, &store, &o2).unwrap(),
@@ -174,7 +172,7 @@ mod tests {
             SyncEngine::apply_remote(&l, &store, &incoming).unwrap(),
             ApplyOutcome::Applied
         );
-        assert_eq!(store.data.lock().unwrap()["b.md"]["content"], "from-b");
+        assert_eq!(store.data.lock()["b.md"]["content"], "from-b");
         // 反向：本地 device 字典序更大 → incoming 输
         let l2 = log("tie2");
         let store2 = FakeStore::default();
@@ -188,7 +186,7 @@ mod tests {
             SyncEngine::apply_remote(&l2, &store2, &incoming).unwrap(),
             ApplyOutcome::LostLww
         );
-        assert_eq!(store2.data.lock().unwrap()["c.md"]["content"], "local-z");
+        assert_eq!(store2.data.lock()["c.md"]["content"], "local-z");
     }
 
     #[test]
@@ -210,7 +208,7 @@ mod tests {
             SyncEngine::apply_remote(&l, &store, &del).unwrap(),
             ApplyOutcome::Applied
         );
-        assert!(store.data.lock().unwrap().get("d.md").is_none());
+        assert!(store.data.lock().get("d.md").is_none());
     }
 
     #[test]

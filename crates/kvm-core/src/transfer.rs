@@ -11,10 +11,10 @@
 //!   已收块直接跳过（seek 覆写等价，位图去重避免重复落盘）。
 //! - **终验**：全部块集齐后流式重算 SHA256 与 FileMeta比对，不符 Ack 失败。
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -346,7 +346,7 @@ impl TransferManager {
             return Ok(MetaOutcome::Completed { final_path });
         }
 
-        let mut transfers = self.transfers.lock().expect("传输表锁");
+        let mut transfers = self.transfers.lock();
         if let Some(incoming) = transfers.get(&meta.transfer_id) {
             // 重入：同哈希续传，仅更新位图快照返回
             let received = incoming.received.len() as u64;
@@ -388,7 +388,7 @@ impl TransferManager {
         let (sha, index, data) = decode_chunk(payload)?;
         let transfer_id = hex_str(&sha);
         let done = {
-            let mut transfers = self.transfers.lock().expect("传输表锁");
+            let mut transfers = self.transfers.lock();
             let incoming = transfers.get_mut(&transfer_id).ok_or_else(|| {
                 AppError::module("KVM_TRANSFER_012", "收到未建档的 FileChunk", None)
             })?;
@@ -416,7 +416,7 @@ impl TransferManager {
         };
         if !done {
             let (received, total) = {
-                let transfers = self.transfers.lock().expect("传输表锁");
+                let transfers = self.transfers.lock();
                 match transfers.get(&transfer_id) {
                     Some(i) => (i.received.len() as u64, i.meta.total_chunks),
                     None => {
@@ -440,7 +440,6 @@ impl TransferManager {
         let incoming = self
             .transfers
             .lock()
-            .expect("传输表锁")
             .remove(transfer_id)
             .ok_or_else(|| AppError::module("KVM_TRANSFER_012", "终验时传输条目缺失", None))?;
         let part = self.part_path(transfer_id);
@@ -691,7 +690,7 @@ mod tests {
     use crate::pairing::{PairCodeManager, PairStore, PairingService};
     use crate::session::{MsgType, SessionEvent, SessionManager};
     use host_core::device::DeviceIdentity;
-    use std::sync::Mutex as StdMutex;
+    use parking_lot::Mutex as StdMutex;
     use tokio::sync::mpsc;
 
     fn temp_dir_tag(tag: &str) -> PathBuf {

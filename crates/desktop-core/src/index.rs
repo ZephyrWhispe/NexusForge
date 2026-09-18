@@ -4,9 +4,9 @@
 //! - usage 频次持久化 `{appData}/desktop/usage.json`（count + 最近使用毫秒）
 //! - launch 语义：App → 调用方 ShellExecuteW；Action → 调用方发对应事件
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -145,8 +145,8 @@ impl LauncherIndex {
         items.dedup_by(|a, b| a.id == b.id);
 
         let total = items.len();
-        *self.items.write().expect("索引写锁") = items;
-        *self.indexed.write().expect("索引标志写锁") = true;
+        *self.items.write() = items;
+        *self.indexed.write() = true;
         total
     }
 
@@ -167,18 +167,18 @@ impl LauncherIndex {
             topic: Some(topic),
             payload: Some(payload),
         };
-        let mut items = self.items.write().expect("索引写锁");
+        let mut items = self.items.write();
         items.retain(|i| i.id != item.id);
         items.push(item);
     }
 
     /// 搜索（D1+D2）：打分排序取前 limit 条。频次权重带 30 天衰减。
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<LauncherHit>> {
-        if !*self.indexed.read().expect("索引标志读锁") {
+        if !*self.indexed.read() {
             return Err(DesktopError::NotIndexed);
         }
-        let items = self.items.read().expect("索引读锁").clone();
-        let usage = self.usage.read().expect("频次读锁").clone();
+        let items = self.items.read().clone();
+        let usage = self.usage.read().clone();
         let now = now_ms();
 
         let mut hits: Vec<LauncherHit> = items
@@ -207,13 +207,14 @@ impl LauncherIndex {
     /// 记录一次启动（频次 +1 并持久化）
     pub fn record_launch(&self, id: &str) {
         {
-            let mut usage = self.usage.write().expect("频次写锁");
+            let mut usage = self.usage.write();
             let u = usage.entry(id.to_string()).or_default();
             u.count += 1;
             u.last_ms = now_ms();
         }
         // 持久化失败仅记日志（频次属可丢数据）
-        if let Ok(map) = self.usage.read() {
+        {
+            let map = self.usage.read();
             if let Err(e) = std::fs::write(
                 &self.usage_file,
                 serde_json::to_vec(&*map).unwrap_or_default(),
@@ -225,12 +226,11 @@ impl LauncherIndex {
 
     /// 取条目（launch 用）
     pub fn get(&self, id: &str) -> Result<IndexItem> {
-        if !*self.indexed.read().expect("索引标志读锁") {
+        if !*self.indexed.read() {
             return Err(DesktopError::NotIndexed);
         }
         self.items
             .read()
-            .expect("索引读锁")
             .iter()
             .find(|i| i.id == id)
             .cloned()
@@ -239,10 +239,7 @@ impl LauncherIndex {
 
     /// 索引状态（UI 展示）
     pub fn status(&self) -> (bool, usize) {
-        (
-            *self.indexed.read().expect("索引标志读锁"),
-            self.items.read().expect("索引读锁").len(),
-        )
+        (*self.indexed.read(), self.items.read().len())
     }
 }
 

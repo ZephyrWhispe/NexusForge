@@ -5,8 +5,9 @@
 //! - 全局快捷键 Ctrl+Alt+O → 呼出 overlay（mode=ocr，选区后自动识别）；
 //! - 事件联动（screenshot.ocr_requested → ocr.completed）保留主题，插件阶段接入。
 
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
 use host_core::error::{AppError, ModuleError};
@@ -48,8 +49,7 @@ impl OcrModule {
         let port = self
             .port
             .read()
-            .ok()
-            .and_then(|g| g.clone())
+            .clone()
             .ok_or_else(|| mod_err("OCR_STATE_001", "模块未就绪"))?;
         let (w, h, rgba) = decode_rgba(&req.image_b64)?;
 
@@ -67,7 +67,7 @@ impl OcrModule {
         let result = pipeline.run(&frame, &req.langs)?;
 
         // 关联历史回填（经截图模块暴露的记录接口由命令层调用；此处只发事件）
-        if let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) {
+        if let Some(bus) = self.bus.read().clone() {
             bus.publish(Event::new(
                 "ocr.completed",
                 "ocr",
@@ -84,7 +84,7 @@ impl OcrModule {
 
     /// 引擎状态（O8：start 时探测，此处读缓存）
     pub fn status(&self) -> EngineStatusDto {
-        let langs = self.languages.read().map(|g| g.clone()).unwrap_or_default();
+        let langs = self.languages.read().clone();
         EngineStatusDto {
             engines: vec![EngineInfo {
                 id: "win-ocr".into(),
@@ -118,24 +118,19 @@ impl Module for OcrModule {
             .ports
             .get::<dyn OcrPort>()
             .ok_or_else(|| ModuleError::Init("OcrPort 未注册（win-integration 缺失）".into()))?;
-        *self
-            .port
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(port);
-        *self
-            .bus
-            .write()
-            .map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        *self.port.write() = Some(port);
+        *self.bus.write() = Some(ctx.event_bus.clone());
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
         // 探测可用语言（失败不阻断启动，识别时给出可操作错误）
-        if let Some(port) = self.port.read().ok().and_then(|g| g.clone()) {
+        if let Some(port) = self.port.read().clone() {
             match port.available_languages() {
                 Ok(langs) => {
-                    if let Ok(mut g) = self.languages.write() {
+                    {
+                        let mut g = self.languages.write();
                         *g = langs;
                     }
                     tracing::info!(count = g_count(&self.languages), "win-ocr 语言探测完成");
@@ -162,7 +157,7 @@ impl Module for OcrModule {
 }
 
 fn g_count(langs: &RwLock<Vec<String>>) -> usize {
-    langs.read().map(|g| g.len()).unwrap_or(0)
+    langs.read().len()
 }
 
 impl HotkeyProvider for OcrModule {
@@ -177,7 +172,7 @@ impl HotkeyProvider for OcrModule {
     }
 
     fn hotkey_actions(&self) -> Vec<HotkeyAction> {
-        let bus = self.bus.read().ok().and_then(|g| g.clone());
+        let bus = self.bus.read().clone();
         let Some(bus) = bus else { return vec![] };
         vec![HotkeyAction {
             binding_id: "ocr.region".into(),

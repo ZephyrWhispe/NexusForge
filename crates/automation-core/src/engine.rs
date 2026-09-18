@@ -2,9 +2,10 @@
 //! Action 失败按 retry(2, 指数) 后进入死信（UI 可查/重放）。
 //! 风暴防护（docs/impl/07 风险标注）：规则冷却表 + automation 自产事件不再触发规则（深度上限的 v1 等效实现）。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,7 @@ impl CooldownTable {
         } else {
             cooldown_secs
         };
-        let mut table = self.last_fired.lock().expect("冷却表锁污染");
+        let mut table = self.last_fired.lock();
         let gate_ms = cooldown * 1000;
         if let Some(&last) = table.get(rule_id) {
             if now_ms - last < gate_ms as i64 {
@@ -160,7 +161,7 @@ impl RuleEngine {
             run_action(self.handler.as_ref(), action, rule, now_ms, &mut dead);
         }
         if !dead.is_empty() {
-            let mut queue = self.dead.lock().expect("死信锁污染");
+            let mut queue = self.dead.lock();
             queue.extend(dead);
             let overflow = queue.len().saturating_sub(DEAD_LETTER_CAP);
             if overflow > 0 {
@@ -171,13 +172,13 @@ impl RuleEngine {
 
     /// 死信列表（旧 → 新）
     pub fn dead_letters(&self) -> Vec<DeadLetter> {
-        self.dead.lock().expect("死信锁污染").clone()
+        self.dead.lock().clone()
     }
 
     /// 重放死信（重试成功则移除；失败保留）
     pub fn replay(&self, dead_id: &str, rule: &Rule) -> std::result::Result<(), AutomationError> {
         let action = {
-            let queue = self.dead.lock().expect("死信锁污染");
+            let queue = self.dead.lock();
             queue
                 .iter()
                 .find(|d| d.id == dead_id)
@@ -191,12 +192,12 @@ impl RuleEngine {
         let mut dead = Vec::new();
         // 先移除旧条目再执行（执行失败会以新 id 重新入队）
         {
-            let mut queue = self.dead.lock().expect("死信锁污染");
+            let mut queue = self.dead.lock();
             queue.retain(|d| d.id != dead_id);
         }
         run_action(self.handler.as_ref(), &action, rule, now_ms, &mut dead);
         if !dead.is_empty() {
-            self.dead.lock().expect("死信锁污染").extend(dead);
+            self.dead.lock().extend(dead);
         }
         Ok(())
     }
@@ -235,10 +236,7 @@ mod tests {
         }
         fn publish(&self, topic: &str, payload: serde_json::Value) -> Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.publish_log
-                .lock()
-                .unwrap()
-                .push(format!("{topic}:{payload}"));
+            self.publish_log.lock().push(format!("{topic}:{payload}"));
             Ok(())
         }
         fn ipc_command(&self, _module: &str, _cmd: &str, _args: &serde_json::Value) -> Result<()> {

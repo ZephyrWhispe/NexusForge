@@ -169,7 +169,8 @@ fn wasm_err(e: wasmtime::Error) -> AutomationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     #[derive(Default)]
     struct FakeHost {
@@ -177,7 +178,7 @@ mod tests {
     }
     impl WasmHost for FakeHost {
         fn log(&self, msg: &str) {
-            self.logs.lock().unwrap().push(msg.to_string());
+            self.logs.lock().push(msg.to_string());
         }
         fn open_url(&self, _url: &str) -> Result<()> {
             Err(AutomationError::Action("open 未授权于测试".into()))
@@ -219,7 +220,7 @@ mod tests {
         // wat feature：Module::new 接受 wat 文本（以 \0asm 开头才按二进制解析）
         rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), &host)
             .unwrap();
-        assert_eq!(*host.logs.lock().unwrap(), vec!["hello plugin".to_string()]);
+        assert_eq!(*host.logs.lock(), vec!["hello plugin".to_string()]);
     }
 
     #[test]

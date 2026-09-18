@@ -7,8 +7,9 @@
 //! - **启动不互相阻断**：某模块 init 失败只记录结果，其余模块继续；
 //! - **停止限时**：stop 超过 [`STOP_TIMEOUT`] 视为失败并标记 Error。
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::timeout;
@@ -59,7 +60,6 @@ impl ModuleRegistry {
     pub fn infos(&self) -> Vec<ModuleInfo> {
         self.order
             .read()
-            .expect("注册序读锁")
             .iter()
             .filter_map(|id| self.get(id).map(|m| m.info()))
             .collect()
@@ -69,7 +69,7 @@ impl ModuleRegistry {
     pub fn register(&self, module: Arc<dyn Module>) -> Result<(), AppError> {
         let id = module.info().id.to_owned();
         {
-            let mut modules = self.modules.write().expect("注册表写锁");
+            let mut modules = self.modules.write();
             if modules.contains_key(&id) {
                 return Err(AppError::module(
                     codes::host::HOST_REGISTRY_002,
@@ -79,16 +79,13 @@ impl ModuleRegistry {
             }
             modules.insert(id.clone(), module);
         }
-        self.order.write().expect("注册序写锁").push(id.clone());
-        self.states
-            .write()
-            .expect("状态表写锁")
-            .insert(id, ModuleState::Uninitialized);
+        self.order.write().push(id.clone());
+        self.states.write().insert(id, ModuleState::Uninitialized);
         Ok(())
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn Module>> {
-        self.modules.read().expect("注册表读锁").get(id).cloned()
+        self.modules.read().get(id).cloned()
     }
 
     /// 按注册顺序初始化全部模块。单个失败不阻断其余模块。
@@ -96,7 +93,7 @@ impl ModuleRegistry {
         &self,
         ctx: Arc<ModuleContext>,
     ) -> Vec<(String, Result<(), ModuleError>)> {
-        *self.ctx.write().expect("上下文写锁") = Some(ctx.clone());
+        *self.ctx.write() = Some(ctx.clone());
         let modules = self.ordered();
         let mut results = Vec::with_capacity(modules.len());
         for (id, module) in modules {
@@ -140,7 +137,7 @@ impl ModuleRegistry {
 
     /// 逆序停止全部模块
     pub async fn stop_all(&self) {
-        let mut ids = self.order.read().expect("注册序读锁").clone();
+        let mut ids = self.order.read().clone();
         ids.reverse();
         for id in ids {
             if let Some(m) = self.get(&id) {
@@ -158,18 +155,13 @@ impl ModuleRegistry {
                 None,
             )
         })?;
-        let ctx = self
-            .ctx
-            .read()
-            .expect("上下文读锁")
-            .clone()
-            .ok_or_else(|| {
-                AppError::module(
-                    codes::host::HOST_CONFIG_001,
-                    "宿主尚未初始化，无法重启模块",
-                    None,
-                )
-            })?;
+        let ctx = self.ctx.read().clone().ok_or_else(|| {
+            AppError::module(
+                codes::host::HOST_CONFIG_001,
+                "宿主尚未初始化，无法重启模块",
+                None,
+            )
+        })?;
         // restart 中 stop 失败不阻断：继续 init/start 重建该模块
         let _ = self.stop_one(id, module.clone()).await;
         self.init_one(id, module.clone(), ctx).await?;
@@ -181,13 +173,11 @@ impl ModuleRegistry {
     pub fn status_all(&self) -> Vec<(String, ModuleState)> {
         self.order
             .read()
-            .expect("注册序读锁")
             .iter()
             .map(|id| {
                 let st = self
                     .states
                     .read()
-                    .expect("状态表读锁")
                     .get(id)
                     .copied()
                     .unwrap_or(ModuleState::Uninitialized);
@@ -201,17 +191,13 @@ impl ModuleRegistry {
     fn ordered(&self) -> Vec<(String, Arc<dyn Module>)> {
         self.order
             .read()
-            .expect("注册序读锁")
             .iter()
             .filter_map(|id| self.get(id).map(|m| (id.clone(), m)))
             .collect()
     }
 
     fn set_state(&self, id: &str, state: ModuleState) {
-        self.states
-            .write()
-            .expect("状态表写锁")
-            .insert(id.to_owned(), state);
+        self.states.write().insert(id.to_owned(), state);
     }
 
     async fn report_failure(&self, id: &str, e: &ModuleError) {
@@ -312,7 +298,7 @@ impl ModuleRegistry {
     }
 
     async fn publish_state(&self, id: &str) {
-        if let Some(state) = self.states.read().expect("状态表读锁").get(id).copied() {
+        if let Some(state) = self.states.read().get(id).copied() {
             self.bus
                 .publish(Event::new(
                     "host.module_state",
