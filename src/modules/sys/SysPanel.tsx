@@ -9,6 +9,10 @@ import {
   Checkbox,
   Spinner,
 } from "@fluentui/react-components";
+import Section from "../../components/Section";
+import Tabs from "../../components/Tabs";
+import InlineError from "../../components/InlineError";
+import { confirmAction } from "../../stores/confirm";
 import {
   parseAppError,
   sysCleanExecute,
@@ -46,34 +50,9 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "120px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
-  ok: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
-  tab: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    padding: "4px 10px",
-    borderRadius: tokens.borderRadiusMedium,
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    cursor: "pointer",
-    fontSize: tokens.fontSizeBase200,
-  },
-  tabActive: {
-    backgroundColor: tokens.colorNeutralBackground3Hover,
-    border: `1px solid ${tokens.colorBrandForeground1}`,
-  },
   chart: {
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusMedium,
@@ -92,14 +71,6 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
     gap: "8px",
-  },
-  confirm: {
-    border: `1px solid ${tokens.colorPaletteYellowForeground1}`,
-    borderRadius: tokens.borderRadiusMedium,
-    padding: "8px 12px",
-    backgroundColor: tokens.colorNeutralBackground2,
-    fontFamily: "Consolas, monospace",
-    fontSize: tokens.fontSizeBase200,
   },
   log: {
     fontFamily: "Consolas, monospace",
@@ -158,7 +129,6 @@ export default function SysPanel() {
   const [pkgs, setPkgs] = useState<PkgEntryDto[]>([]);
   const [pkgFilter, setPkgFilter] = useState("");
   const [pkgsLoading, setPkgsLoading] = useState(false);
-  const [pending, setPending] = useState<{ source: string; action: string; id: string; cmd: string } | null>(null);
   const [output, setOutput] = useState<string[]>([]);
 
   // ---- 系统调整（WinOps Tweak，M16 W1）----
@@ -238,6 +208,19 @@ export default function SysPanel() {
 
   const doExecute = useCallback(async () => {
     setErr(null);
+    if (
+      !(await confirmAction({
+        title: "执行系统清理",
+        impact: [
+          `已勾选 ${selected.size} 项清理目标`,
+          useRecycle ? "文件移入回收站，可从回收站恢复" : "未勾选回收站：文件将被直接删除，不可恢复",
+        ],
+        detail: "24h 内修改的文件已被白名单跳过。",
+        danger: !useRecycle,
+        confirmLabel: "开始清理",
+      }))
+    )
+      return;
     try {
       const n = await sysCleanExecute([...selected], useRecycle);
       setMsg(`已清理 ${n} 个文件${useRecycle ? "（移入回收站，可恢复）" : ""}`);
@@ -247,32 +230,30 @@ export default function SysPanel() {
     }
   }, [selected, useRecycle, doScan, fail]);
 
-  const confirmAction = useCallback(
+  const doPkgAction = useCallback(
     async (source: string, action: string, id: string) => {
       setErr(null);
       try {
         const cmd = await sysPkgCmdPreview(source, action, id);
+        if (
+          !(await confirmAction({
+            title: `包管理操作（${action === "install" ? "安装" : action === "uninstall" ? "卸载" : "全部升级"}）`,
+            impact: [`${source} · ${action}${id ? ` ${id}` : ""}`],
+            command: cmd,
+            danger: action !== "install",
+          }))
+        )
+          return;
         setOutput([]);
-        setPending({ source, action, id, cmd });
+        const lines = await sysPkgAction(source, action, id);
+        setMsg(`${action} 完成（${lines.length} 行输出）`);
+        if (action !== "upgrade_all") await loadPkgs();
       } catch (e) {
         fail(e);
       }
     },
-    [fail],
+    [loadPkgs, fail],
   );
-
-  const runAction = useCallback(async () => {
-    if (!pending) return;
-    setErr(null);
-    try {
-      const lines = await sysPkgAction(pending.source, pending.action, pending.id);
-      setMsg(`${pending.action} 完成（${lines.length} 行输出）`);
-      setPending(null);
-      if (pending.action !== "upgrade_all") await loadPkgs();
-    } catch (e) {
-      fail(e);
-    }
-  }, [pending, loadPkgs, fail]);
 
   // ---- 系统调整（WinOps）----
   const doTweakScan = useCallback(async () => {
@@ -290,6 +271,17 @@ export default function SysPanel() {
 
   const doTweakApply = useCallback(
     async (id: string) => {
+      const name = tweaks.find(([w]) => w.id === id)?.[0].name ?? id;
+      if (
+        !(await confirmAction({
+          title: `应用系统调整「${name}」`,
+          impact: ["将修改 1 项系统设置"],
+          detail: "原值自动备份（BAVR），校验失败自动回滚。",
+          danger: false,
+          confirmLabel: "应用",
+        }))
+      )
+        return;
       setBusyTweak(id);
       setErr(null);
       try {
@@ -302,11 +294,22 @@ export default function SysPanel() {
         setBusyTweak(null);
       }
     },
-    [doTweakScan, fail],
+    [tweaks, doTweakScan, fail],
   );
 
   const doTweakRollback = useCallback(
     async (id: string) => {
+      const name = tweaks.find(([w]) => w.id === id)?.[0].name ?? id;
+      if (
+        !(await confirmAction({
+          title: `回滚系统调整「${name}」`,
+          impact: ["将恢复该设置到最近一次应用前的状态"],
+          detail: "当前值将被覆盖。",
+          danger: false,
+          confirmLabel: "回滚",
+        }))
+      )
+        return;
       setBusyTweak(id);
       setErr(null);
       try {
@@ -319,7 +322,7 @@ export default function SysPanel() {
         setBusyTweak(null);
       }
     },
-    [doTweakScan, fail],
+    [tweaks, doTweakScan, fail],
   );
 
   // W7 审计导出：审计记录 + 备份清单 → {appData}/winops/exports/
@@ -348,26 +351,23 @@ export default function SysPanel() {
 
   return (
     <div className={styles.root}>
-      <div className={styles.row}>
-        <button className={`${styles.tab} ${tab === "monitor" ? styles.tabActive : ""}`} onClick={() => setTab("monitor")}>
-          资源监控
-        </button>
-        <button className={`${styles.tab} ${tab === "clean" ? styles.tabActive : ""}`} onClick={() => setTab("clean")}>
-          系统清理
-        </button>
-        <button className={`${styles.tab} ${tab === "pkg" ? styles.tabActive : ""}`} onClick={() => setTab("pkg")}>
-          包管理
-        </button>
-        <button className={`${styles.tab} ${tab === "tweaks" ? styles.tabActive : ""}`} onClick={() => setTab("tweaks")}>
-          系统调整
-        </button>
-      </div>
+      <Tabs
+        ariaLabel="系统管理视图"
+        value={tab}
+        onChange={setTab}
+        items={[
+          { id: "monitor", label: "资源监控" },
+          { id: "clean", label: "系统清理" },
+          { id: "pkg", label: "包管理" },
+          { id: "tweaks", label: "系统调整" },
+        ]}
+      />
 
-      {msg && <Text className={styles.ok}>{msg}</Text>}
-      {err && <Text className={styles.error}>{err}</Text>}
+      <InlineError text={msg} tone="success" />
+      <InlineError text={err} />
 
       {tab === "monitor" && (
-        <div className={styles.section}>
+        <Section>
           {!latest && <Spinner size="tiny" />}
           {latest && (
             <Text className={styles.muted}>
@@ -387,11 +387,11 @@ export default function SysPanel() {
             </div>
           </div>
           <Text className={styles.muted}>1s PDH 采样 · 保留最近 300 点 · 无数据时确认模块已启动</Text>
-        </div>
+        </Section>
       )}
 
       {tab === "clean" && (
-        <div className={styles.section}>
+        <Section>
           <div className={styles.row}>
             <Button appearance="primary" size="small" onClick={() => void doScan()}>
               {scanning ? "扫描中…" : "扫描"}
@@ -443,11 +443,11 @@ export default function SysPanel() {
             ))}
             {scan.length === 0 && <Text className={styles.muted}>点击「扫描」统计各目录可回收空间（24h 内修改的文件自动跳过）</Text>}
           </div>
-        </div>
+        </Section>
       )}
 
       {tab === "pkg" && (
-        <div className={styles.section}>
+        <Section>
           <div className={styles.row}>
             <Text size={200} weight="semibold">
               源：
@@ -471,7 +471,7 @@ export default function SysPanel() {
               size="small"
               onClick={() => {
                 const src = sources.find((s) => s.available);
-                if (src) void confirmAction(src.id, "upgrade_all", "");
+                if (src) void doPkgAction(src.id, "upgrade_all", "");
                 else setErr("无可用包管理器");
               }}
             >
@@ -501,14 +501,14 @@ export default function SysPanel() {
                 <Button
                   size="small"
                   appearance="subtle"
-                  onClick={() => void confirmAction(p.source, "install", p.id)}
+                  onClick={() => void doPkgAction(p.source, "install", p.id)}
                 >
                   安装
                 </Button>
                 <Button
                   size="small"
                   appearance="subtle"
-                  onClick={() => void confirmAction(p.source, "uninstall", p.id)}
+                  onClick={() => void doPkgAction(p.source, "uninstall", p.id)}
                 >
                   卸载
                 </Button>
@@ -518,28 +518,14 @@ export default function SysPanel() {
               <Text className={styles.muted}>点击「刷新清单」获取已装软件（需要 winget/scoop/choco 至少一个可用）</Text>
             )}
           </div>
-          {pending && (
-            <>
-              <div className={styles.confirm}>{pending.cmd}</div>
-              <div className={styles.row}>
-                <Text className={styles.muted}>确认执行以上确切命令？</Text>
-                <Button size="small" appearance="primary" onClick={() => void runAction()}>
-                  确认执行
-                </Button>
-                <Button size="small" appearance="subtle" onClick={() => setPending(null)}>
-                  取消
-                </Button>
-              </div>
-            </>
-          )}
           {output.length > 0 && (
             <div className={styles.log}>{output.slice(-30).join("\n")}</div>
           )}
-        </div>
+        </Section>
       )}
 
       {tab === "tweaks" && (
-        <div className={styles.section}>
+        <Section>
           {regressed.length > 0 && (
             <div
               style={{
@@ -629,7 +615,7 @@ export default function SysPanel() {
               <Text className={styles.muted}>点击「扫描」检查各调整项的当前状态（目录支持外置扩展：{`{appData}/winops/catalog/*.json`}）</Text>
             )}
           </div>
-        </div>
+        </Section>
       )}
     </div>
   );

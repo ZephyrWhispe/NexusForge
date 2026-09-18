@@ -5,10 +5,16 @@ import {
   Text,
   Badge,
   Button,
-  Input,
   Checkbox,
-  Select,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Divider,
+  Input,
+  Select,
   Spinner,
 } from "@fluentui/react-components";
 import {
@@ -43,7 +49,10 @@ import {
   type VaultStatusDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 密码库面板（docs/impl/05 V7，M5 v1）三态渲染：
@@ -77,11 +86,6 @@ const useStyles = makeStyles({
   },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  error: {
-    color: tokens.colorPaletteRedForeground1,
-    fontSize: tokens.fontSizeBase200,
-    whiteSpace: "pre-wrap",
-  },
   columns: {
     display: "grid",
     gridTemplateColumns: "200px 1fr",
@@ -132,26 +136,6 @@ const useStyles = makeStyles({
     color: tokens.colorBrandForeground1,
   },
   otpBar: { height: "3px", borderRadius: "2px", backgroundColor: tokens.colorNeutralStroke2 },
-  dialogScrim: {
-    position: "fixed",
-    inset: 0,
-    backgroundColor: "rgba(0,0,0,0.4)",
-    display: "grid",
-    placeItems: "center",
-    zIndex: 100,
-  },
-  dialog: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    backgroundColor: tokens.colorNeutralBackground1,
-    padding: "20px 24px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-    width: "520px",
-    maxHeight: "80vh",
-    overflowY: "auto",
-  },
 });
 
 function errText(e: unknown): string {
@@ -246,15 +230,39 @@ interface EditorState {
   genDigits: boolean;
   genSymbols: boolean;
   genAmbiguous: boolean;
+  /** 打开时表单内容的序列化快照（脏检测基线，D-18：关闭丢失需确认） */
+  initial: string;
+}
+
+/** 编辑对话框内容 = 生成器参数以外的部分（生成器只是填值工具，不算表单内容） */
+export function serializeEditorForm(e: {
+  entry: VaultEntryDto | null;
+  title: string;
+  favorite: boolean;
+  totpSecret: string;
+  fields: EntryFieldDto[];
+}): string {
+  return JSON.stringify({
+    entry: e.entry?.id ?? null,
+    title: e.title,
+    favorite: e.favorite,
+    totpSecret: e.totpSecret,
+    fields: e.fields,
+  });
+}
+
+/** 打开时的空态/原值快照与当前内容不一致即为脏（纯函数，随 D-18 回归测试） */
+export function isEditorDirty(editor: EditorState): boolean {
+  return serializeEditorForm(editor) !== editor.initial;
 }
 
 function emptyEditor(): EditorState {
-  return {
+  const base = {
     entry: null,
     title: "",
     favorite: false,
     totpSecret: "",
-    fields: [{ key: "password", kind: "password", value: "" }],
+    fields: [{ key: "password", kind: "password", value: "" }] as EntryFieldDto[],
     genLength: 16,
     genUpper: true,
     genLower: true,
@@ -262,6 +270,7 @@ function emptyEditor(): EditorState {
     genSymbols: true,
     genAmbiguous: false,
   };
+  return { ...base, initial: serializeEditorForm(base) };
 }
 
 const KIND_LABELS: Record<EntryFieldDto["kind"], string> = {
@@ -271,6 +280,23 @@ const KIND_LABELS: Record<EntryFieldDto["kind"], string> = {
   otp: "动态码密钥",
   text: "文本",
 };
+
+function editorFromEntry(entry: VaultEntryDto): EditorState {
+  const base = {
+    entry,
+    title: entry.title,
+    favorite: entry.favorite,
+    totpSecret: entry.totp_secret ?? "",
+    fields: entry.fields.map((f) => ({ ...f })),
+    genLength: 16,
+    genUpper: true,
+    genLower: true,
+    genDigits: true,
+    genSymbols: true,
+    genAmbiguous: false,
+  };
+  return { ...base, initial: serializeEditorForm(base) };
+}
 
 export default function VaultPanel() {
   const styles = useStyles();
@@ -290,6 +316,7 @@ export default function VaultPanel() {
   const [entries, setEntries] = useState<VaultEntryDto[]>([]);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
+  const [loaded, setLoaded] = useState(false);
   const reloadRef = useRef<() => void>(() => undefined);
 
   const refresh = useCallback(async () => {
@@ -307,6 +334,8 @@ export default function VaultPanel() {
       }
     } catch (err) {
       setLoadErr(errText(err));
+    } finally {
+      setLoaded(true);
     }
   }, [activeFolder]);
   reloadRef.current = () => void refresh();
@@ -395,9 +424,67 @@ export default function VaultPanel() {
     }
   };
 
-  const doDeleteEntry = async (id: string) => {
-    await vaultEntryDelete(id).catch((e) => reportError(e, { context: "删除条目失败" }));
+  const doDeleteEntry = async (entry: VaultEntryDto) => {
+    if (
+      !(await confirmAction({
+        title: "删除凭据条目",
+        impact: [
+          `「${entry.title}」及其 ${entry.fields.length} 个加密字段将永久删除`,
+          ...(entry.totp_secret ? ["TOTP 动态码密钥一并删除"] : []),
+        ],
+        detail: "密码库无回收站，删除后不可恢复。",
+        confirmLabel: "删除",
+      }))
+    )
+      return;
+    try {
+      await vaultEntryDelete(entry.id);
+    } catch (e) {
+      reportError(e, { context: "删除条目失败" });
+    }
     await refresh();
+  };
+
+  /** 文件夹删除影响面：DTO 不含条目数，现拉取该夹条目计数（D-18 要求展示影响面） */
+  const doDeleteFolder = async (f: VaultFolderDto) => {
+    let count: number | null = null;
+    try {
+      count = (await vaultEntries(f.id, null)).length;
+    } catch (e) {
+      reportError(e, { context: "文件夹条目统计失败", dedupeKey: "vault-folder-count" });
+    }
+    if (
+      !(await confirmAction({
+        title: "删除文件夹",
+        impact: [
+          `将删除文件夹「${f.name}」`,
+          count === null
+            ? "其中条目将移至「全部条目」（条目保留）"
+            : `其中 ${count} 个条目将移至「全部条目」（条目保留）`,
+        ],
+        confirmLabel: "删除文件夹",
+      }))
+    )
+      return;
+    await vaultFolderDelete(f.id).catch((e) => reportError(e, { context: "删除文件夹失败" }));
+    if (activeFolder === f.id) setActiveFolder("all");
+    await refresh();
+  };
+
+  /** 关闭编辑对话框：表单有未保存修改时经 ConfirmDialog 确认丢弃（D-18） */
+  const closeEditor = async () => {
+    if (!editor) return;
+    if (
+      isEditorDirty(editor) &&
+      !(await confirmAction({
+        title: editor.entry ? "放弃未保存的修改" : "放弃新建条目",
+        impact: [editor.title.trim() ? `「${editor.title.trim()}」` : "（未命名条目）"],
+        detail: "当前表单内容尚未保存，关闭后将丢失。",
+        confirmLabel: "放弃并关闭",
+      }))
+    )
+      return;
+    setEditor(null);
   };
 
   const doAddFolder = async () => {
@@ -432,7 +519,7 @@ export default function VaultPanel() {
   if (!status) {
     return (
       <div className={styles.root}>
-        {loadErr ? <Text className={styles.error}>{loadErr}</Text> : <Spinner label="加载密码库状态…" />}
+        {loadErr ? <InlineError text={loadErr} /> : <Spinner label="加载密码库状态…" />}
       </div>
     );
   }
@@ -458,7 +545,7 @@ export default function VaultPanel() {
               value={pwConfirm}
               onChange={(_, d) => setPwConfirm(d.value)}
             />
-            {formErr && <Text className={styles.error}>{formErr}</Text>}
+            <InlineError text={formErr} />
             <Button appearance="primary" disabled={busy} onClick={() => void doCreate()}>
               {busy ? "正在创建…" : "创建保险库"}
             </Button>
@@ -491,7 +578,7 @@ export default function VaultPanel() {
                 尝试次数过多，{lockoutLeft}s 后可重试
               </Badge>
             )}
-            {formErr && <Text className={styles.error}>{formErr}</Text>}
+            <InlineError text={formErr} />
             <Button
               appearance="primary"
               disabled={busy || lockoutLeft > 0}
@@ -541,17 +628,16 @@ export default function VaultPanel() {
               role="button"
               tabIndex={0}
               onKeyDown={keyActivate(() => setActiveFolder(f.id))}
-              title="再次点击删除文件夹（条目保留）"
-              onDoubleClick={() => void vaultFolderDelete(f.id).then(() => refresh())}
             >
               <Text truncate>{f.name}</Text>
               <Button
                 appearance="subtle"
                 size="small"
                 icon={<DeleteRegular />}
+                title="删除文件夹"
                 onClick={(e) => {
                   e.stopPropagation();
-                  void vaultFolderDelete(f.id).then(() => refresh());
+                  void doDeleteFolder(f);
                 }}
               />
             </div>
@@ -570,8 +656,8 @@ export default function VaultPanel() {
         </div>
 
         <div className={styles.entryList}>
-          {entries.length === 0 && (
-            <Text className={styles.muted}>暂无条目，点击「新建条目」添加。</Text>
+          {(loaded && entries.length === 0) && (
+            <EmptyState text="暂无条目，点击「新建条目」添加。" />
           )}
           {entries.map((entry) => (
             <div key={entry.id} className={styles.entry}>
@@ -584,21 +670,7 @@ export default function VaultPanel() {
                 <Button
                   appearance="subtle"
                   size="small"
-                  onClick={() =>
-                    setEditor({
-                      entry,
-                      title: entry.title,
-                      favorite: entry.favorite,
-                      totpSecret: entry.totp_secret ?? "",
-                      fields: entry.fields.map((f) => ({ ...f })),
-                      genLength: 16,
-                      genUpper: true,
-                      genLower: true,
-                      genDigits: true,
-                      genSymbols: true,
-                      genAmbiguous: false,
-                    })
-                  }
+                  onClick={() => setEditor(editorFromEntry(entry))}
                 >
                   编辑
                 </Button>
@@ -606,7 +678,7 @@ export default function VaultPanel() {
                   appearance="subtle"
                   size="small"
                   icon={<DeleteRegular />}
-                  onClick={() => void doDeleteEntry(entry.id)}
+                  onClick={() => void doDeleteEntry(entry)}
                 />
               </div>
               {entry.fields.map((f, i) => (
@@ -619,12 +691,13 @@ export default function VaultPanel() {
       </div>
 
       {editor && (
-        // 遮罩点击关闭：role=presentation 声明纯装饰容器，键盘等价（Esc 关窗）随 D-18 ConfirmDialog 基线统一落地
-        <div className={styles.dialogScrim} role="presentation" onClick={() => setEditor(null)}>
-          <div className={styles.dialog} role="presentation" onClick={(e) => e.stopPropagation()}>
-            <Text size={400} weight="semibold">
-              {editor.entry ? "编辑条目" : "新建条目"}
-            </Text>
+        // 条目编辑对话框（D-18）：Fluent Dialog 自带焦点陷阱/Esc/遮罩关闭；
+        // 所有关闭路径统一走 closeEditor()，未保存修改先经 ConfirmDialog 确认
+        <Dialog open onOpenChange={() => void closeEditor()}>
+          <DialogSurface>
+            <DialogBody>
+              <DialogTitle>{editor.entry ? "编辑条目" : "新建条目"}</DialogTitle>
+              <DialogContent>
             <Input
               placeholder="标题（如 GitHub）"
               value={editor.title}
@@ -759,16 +832,17 @@ export default function VaultPanel() {
               value={editor.totpSecret}
               onChange={(_, d) => setEditor({ ...editor, totpSecret: d.value })}
             />
-            {formErr && <Text className={styles.error}>{formErr}</Text>}
-            <div className={styles.row}>
-              <span style={{ flex: 1 }} />
-              <Button onClick={() => setEditor(null)}>取消</Button>
-              <Button appearance="primary" disabled={busy} onClick={() => void doSaveEntry()}>
-                {busy ? "保存中…" : "保存"}
-              </Button>
-            </div>
-          </div>
-        </div>
+            <InlineError text={formErr} />
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={() => void closeEditor()}>取消</Button>
+                <Button appearance="primary" disabled={busy} onClick={() => void doSaveEntry()}>
+                  {busy ? "保存中…" : "保存"}
+                </Button>
+              </DialogActions>
+            </DialogBody>
+          </DialogSurface>
+        </Dialog>
       )}
     </div>
   );

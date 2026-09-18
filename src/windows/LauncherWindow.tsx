@@ -8,6 +8,7 @@ import {
   type DesktopLauncherHitDto,
 } from "../ipc/client";
 import { reportError } from "../stores/notifications";
+import InlineError from "../components/InlineError";
 import { keyActivate } from "../a11y";
 
 /**
@@ -56,7 +57,8 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
   },
   empty: { padding: "24px", textAlign: "center", color: tokens.colorNeutralForeground3 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200, padding: "0 16px 8px" },
+  // 仅管布局留白：红字/字号由 InlineError 提供（D-18 错误样式去重）
+  errorRow: { padding: "0 16px 8px" },
 });
 
 const KIND_LABEL: Record<DesktopLauncherHitDto["kind"], string> = {
@@ -154,7 +156,11 @@ export default function LauncherWindow() {
         // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus
       />
-      {error && <div className={styles.error}>{error}</div>}
+      {error && (
+        <div className={styles.errorRow}>
+          <InlineError text={error} />
+        </div>
+      )}
       <div className={styles.list} ref={listRef}>
         {hits.length === 0 && !error ? (
           <div className={styles.empty}>

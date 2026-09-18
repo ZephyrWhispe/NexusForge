@@ -129,7 +129,7 @@ export default function StatusBar() {
         </button>
       )}
       <span className={styles.st}>SQLite WAL · 就绪</span>
-      <span className={styles.hot}>Enter 粘贴 · Del 删除 · Ctrl+P 置顶</span>
+      <span className={styles.hot}>Enter 粘贴</span>
     </div>
   );
 }

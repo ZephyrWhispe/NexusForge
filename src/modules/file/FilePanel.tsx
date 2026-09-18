@@ -31,11 +31,15 @@ import {
   type OpProgressDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 文件与存储面板（docs/impl/05 F，M6 v1）：
  * ① 盘符/面包屑/目录列表导航 ② 选中复制/移动/删除入队（Ask 冲突预扫描）
  * ③ operation.progress 事件驱动的操作队列 ④ 新建目录。
+ * 删除与「全部覆盖」属破坏性操作，一律经 confirmAction 二次确认（审查 D-18）。
  */
 const useStyles = makeStyles({
   root: {
@@ -74,7 +78,6 @@ const useStyles = makeStyles({
   },
   opRow: { display: "flex", alignItems: "center", gap: "8px" },
   bar: { flex: 1, minWidth: "120px" },
-  err: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
   conflictBox: {
     border: `1px solid ${tokens.colorPaletteYellowBorder1}`,
     borderRadius: tokens.borderRadiusMedium,
@@ -99,6 +102,14 @@ function fmtTime(ms: number): string {
   return d.toLocaleString("zh-CN", { hour12: false });
 }
 
+/** 确认框影响面点名（D-18）：取文件名并截断为"前 N 个 + 等 M 项" */
+function namePreview(paths: string[], max = 3): string {
+  const names = paths.map((p) => p.split(/[\\/]/).pop() || p);
+  if (names.length === 0) return "（无）";
+  const head = names.slice(0, max).join("、");
+  return names.length > max ? `${head} 等 ${names.length} 项` : head;
+}
+
 const OP_KIND_LABEL: Record<string, string> = {
   copy: "复制",
   move: "移动",
@@ -112,10 +123,17 @@ export default function FilePanel() {
   const [cwd, setCwd] = useState<string | null>(null);
   const [crumbs, setCrumbs] = useState<[string, string][]>([]);
   const [entries, setEntries] = useState<FileEntryDto[]>([]);
+  // 首轮目录读取是否落定（成功或失败）：未落定前列表渲染加载态而非"目录为空"（D-18 假空态修正）
+  const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<ConflictItemDto[] | null>(null);
-  const [pendingSpec, setPendingSpec] = useState<{ kind: "copy" | "move"; dst: string } | null>(null);
+  // 冲突挂起的操作：srcs 一并暂存，避免决议时读到已变动的当前选中集（确认框按此计数）
+  const [pendingSpec, setPendingSpec] = useState<{
+    kind: "copy" | "move";
+    dst: string;
+    srcs: string[];
+  } | null>(null);
   const [ops, setOps] = useState<OpProgressDto[]>([]);
   const [mkdirName, setMkdirName] = useState("");
   const [dstInput, setDstInput] = useState("");
@@ -138,6 +156,8 @@ export default function FilePanel() {
         setError(null);
       } catch (e) {
         applyError(e, "目录读取失败");
+      } finally {
+        setLoaded(true);
       }
     },
     [applyError],
@@ -219,18 +239,37 @@ export default function FilePanel() {
       setError("请在「目标目录」输入框填写目标路径");
       return;
     }
+    const srcs = [...selected];
+    // 删除入队（D-18）：单击即删改为全局确认框，影响面按选中数/目录/文件名点名。
+    // 本面板 delete 固定 recycle=true（见下方 fileEnqueue 的 recycle 实参），故承诺"移入回收站"。
+    if (kind === "delete") {
+      const dirCount = entries.filter((e) => selected.has(e.path) && e.is_dir).length;
+      if (
+        !(await confirmAction({
+          title: "删除文件",
+          impact: [
+            `将删除 ${srcs.length} 个条目（${dirCount} 个目录 / ${srcs.length - dirCount} 个文件）`,
+            `所在目录：${cwd}`,
+            `包含：${namePreview(srcs)}`,
+          ],
+          detail: "条目移入系统回收站（目录连同其内容整体移入），可从回收站还原；本面板不提供永久删除。",
+          confirmLabel: "移入回收站",
+        }))
+      )
+        return;
+    }
     const target = kind === "delete" ? dst : dstInput.trim();
     try {
       const res = await fileEnqueue({
         kind,
-        srcs: [...selected],
+        srcs,
         dst: target,
         policy,
         recycle: kind === "delete",
       });
       if (res.conflicts.length > 0 && res.op_id === null) {
         setConflicts(res.conflicts);
-        setPendingSpec({ kind: kind as "copy" | "move", dst: target });
+        setPendingSpec({ kind: kind as "copy" | "move", dst: target, srcs });
         return;
       }
       setError(null);
@@ -242,11 +281,29 @@ export default function FilePanel() {
 
   const resolveConflicts = async (policy: "skip" | "overwrite" | "rename") => {
     if (!pendingSpec) return;
-    setConflicts(null);
     const spec = pendingSpec;
+    const items = conflicts ?? [];
+    // 覆盖决议（D-18）：目标同名文件被原地重写且不进回收站 → 确认后才入队；
+    // 取消则保留冲突框，可改选「重命名保留两者」或「全部跳过」。
+    if (policy === "overwrite") {
+      if (
+        !(await confirmAction({
+          title: "覆盖同名文件",
+          impact: [
+            `将覆盖 ${items.length} 个已存在的目标文件`,
+            `目标目录：${spec.dst}`,
+            `被覆盖：${namePreview(items.map((c) => c.dst))}`,
+          ],
+          detail: "覆盖为原地重写，被覆盖的原件不进回收站且无法找回；需保留两侧请改选「重命名保留两者」。",
+          confirmLabel: "全部覆盖",
+        }))
+      )
+        return;
+    }
+    setConflicts(null);
     setPendingSpec(null);
     try {
-      await fileEnqueue({ kind: spec.kind, srcs: [...selected], dst: spec.dst, policy });
+      await fileEnqueue({ kind: spec.kind, srcs: spec.srcs, dst: spec.dst, policy });
       void refreshOps();
     } catch (e) {
       applyError(e, "操作入队失败");
@@ -363,7 +420,7 @@ export default function FilePanel() {
           删除
         </Button>
         <span style={{ flex: 1 }} />
-        {error && <span className={styles.err}>{error}</span>}
+        <InlineError text={error} />
       </div>
 
       {/* 冲突决议（F3：Ask 预扫描，"应用到全部"） */}
@@ -470,9 +527,14 @@ export default function FilePanel() {
             {entries.length === 0 && (
               <TableRow>
                 <TableCell>
-                  <Text size={300} className={styles.muted}>
-                    {cwd ? "目录为空" : "正在加载…"}
-                  </Text>
+                  <EmptyState
+                    text={
+                      cwd
+                        ? "该目录没有可见条目：双击条目进入子目录，或用上方面包屑/盘符切换位置"
+                        : "选择盘符或双击目录即可浏览"
+                    }
+                    loading={!loaded}
+                  />
                 </TableCell>
               </TableRow>
             )}

@@ -4,6 +4,7 @@ import { FluentProvider } from "@fluentui/react-components";
 import "./styles/global.css";
 import App from "./App";
 import Toaster from "./components/Toaster";
+import ConfirmDialogHost from "./components/ConfirmDialog";
 import { buildThemeSet } from "./theme/theme";
 import { hostSystemAccent } from "./ipc/client";
 import { reportError } from "./stores/notifications";
@@ -57,6 +58,7 @@ function Root() {
     <FluentProvider theme={theme}>
       <App windowRole={role} />
       <Toaster />
+      <ConfirmDialogHost />
     </FluentProvider>
   );
 }

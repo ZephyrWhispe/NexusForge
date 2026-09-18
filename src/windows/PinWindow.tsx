@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { makeStyles, tokens } from "@fluentui/react-components";
+import { Button, makeStyles, tokens } from "@fluentui/react-components";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
 import { screenshotPinGet, screenshotPinUpdate, screenshotPinClose, type PinDataDto } from "../ipc/client";
 import { reportError } from "../stores/notifications";
+import InlineError from "../components/InlineError";
 
 /**
  * 贴图置顶窗口（docs/impl/03 P6）：
  * 滚轮缩放（0.2–5.0）、Alt+滚轮透明度（0.2–1.0）、按住拖拽移动、双击关闭。
  * 缩放/透明度变化即时持久化（pins.json），重启由主窗口 restorePins() 恢复。
+ *
+ * D-18 核查（关闭无需二次确认）：贴图 PNG 在宿主 action_pin 建图时即落盘
+ * {appData}/pins/{id}.png，本窗只是该文件的只读视图（screenshotPinGet），
+ * 缩放/透明度每次变化都同步写 pins.json —— 窗内不存在"未保存"态可丢；
+ * 双击/右键/Esc 是 P6 规定的快捷退出手势，加确认框只会打扰日常使用。
  */
 const useStyles = makeStyles({
   root: {
@@ -40,6 +46,14 @@ const useStyles = makeStyles({
   },
   hintVisible: {
     opacity: 1,
+  },
+  errorBox: {
+    padding: "12px",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: "10px",
+    backgroundColor: tokens.colorNeutralBackground1,
   },
 });
 
@@ -138,9 +152,11 @@ export default function PinWindow() {
 
   if (error) {
     return (
-      <div style={{ padding: 12, color: tokens.colorNeutralForeground1 }}>
-        <div>{error}</div>
-        <button onClick={() => getCurrentWindow().close()}>关闭</button>
+      <div className={styles.errorBox}>
+        <InlineError text={error} />
+        <Button size="small" onClick={() => void getCurrentWindow().close()}>
+          关闭
+        </Button>
       </div>
     );
   }

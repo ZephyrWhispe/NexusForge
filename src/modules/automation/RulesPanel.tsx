@@ -27,6 +27,11 @@ import {
   type TriggerDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
+import Section from "../../components/Section";
+import Tabs from "../../components/Tabs";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 自动化面板（docs/impl/07 A1–A3，M14 v1）：
@@ -44,34 +49,9 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "120px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
-  ok: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
-  tab: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    padding: "4px 10px",
-    borderRadius: tokens.borderRadiusMedium,
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    cursor: "pointer",
-    fontSize: tokens.fontSizeBase200,
-  },
-  tabActive: {
-    backgroundColor: tokens.colorNeutralBackground3Hover,
-    border: `1px solid ${tokens.colorBrandForeground1}`,
-  },
   list: {
     display: "flex",
     flexDirection: "column",
@@ -318,9 +298,22 @@ export default function RulesPanel() {
     }
   };
 
-  const remove = async (id: string) => {
+  const remove = async (r: RuleDto) => {
+    // 破坏性操作（D-18）：点名规则 + 触发/动作影响面，确认后再删
+    if (
+      !(await confirmAction({
+        title: "删除规则",
+        impact: [
+          `将删除规则「${r.name}」`,
+          `触发：${triggerLabel(r.on)} · 动作 ${r.then.length} 个${r.when ? " · 含 when 条件" : ""}`,
+        ],
+        detail: "规则定义将从自动化引擎卸载，历史死信不受影响；如需再次使用须重新创建。",
+        confirmLabel: "删除",
+      }))
+    )
+      return;
     try {
-      await automationDeleteRule(id);
+      await automationDeleteRule(r.id);
       setNotice("规则已删除");
       await load();
     } catch (e) {
@@ -350,9 +343,27 @@ export default function RulesPanel() {
     }
   };
 
-  const removePlugin = async (id: string) => {
+  const removePlugin = async (p: PluginInfoDto) => {
+    // 破坏性操作（D-18）：点名插件 + 引用它、将失效的规则动作数
+    const refs = rules.filter((r) =>
+      r.then.some((a) => a.kind === "run_script" && a.path === `plugin:${p.id}`),
+    ).length;
+    if (
+      !(await confirmAction({
+        title: "删除插件",
+        impact: [
+          `将卸载插件「${p.name}」（${p.id} · v${p.version}）`,
+          `${refs} 条规则引用 plugin:${p.id}`,
+        ],
+        detail: refs
+          ? "删除后上述规则的「执行 WASM 插件」动作将失败；插件目录与 wasm 一并移除，不可恢复。"
+          : "删除插件目录与 wasm 文件，不可恢复；如需再次使用须重新安装。",
+        confirmLabel: "删除",
+      }))
+    )
+      return;
     try {
-      await automationPluginRemove(id);
+      await automationPluginRemove(p.id);
       setNotice("插件已删除");
       await load();
     } catch (e) {
@@ -363,18 +374,16 @@ export default function RulesPanel() {
   return (
     <div className={styles.root}>
       <div className={styles.row}>
-        <button className={`${styles.tab} ${tab === "rules" ? styles.tabActive : ""}`} onClick={() => setTab("rules")}>
-          规则（{rules.length}）
-        </button>
-        <button className={`${styles.tab} ${tab === "dead" ? styles.tabActive : ""}`} onClick={() => setTab("dead")}>
-          死信（{dead.length}）
-        </button>
-        <button
-          className={`${styles.tab} ${tab === "plugins" ? styles.tabActive : ""}`}
-          onClick={() => setTab("plugins")}
-        >
-          插件（{plugins.length}）
-        </button>
+        <Tabs
+          ariaLabel="自动化视图"
+          value={tab}
+          onChange={setTab}
+          items={[
+            { id: "rules", label: `规则（${rules.length}）` },
+            { id: "dead", label: `死信（${dead.length}）` },
+            { id: "plugins", label: `插件（${plugins.length}）` },
+          ]}
+        />
         <div style={{ flex: 1 }} />
         {tab === "rules" && (
           <Button appearance="primary" size="small" onClick={() => setForm({ ...EMPTY_FORM })}>
@@ -386,15 +395,14 @@ export default function RulesPanel() {
         </Button>
       </div>
 
-      {error && <Text className={styles.error}>{error}</Text>}
-      {!error && notice && <Text className={styles.ok}>{notice}</Text>}
+      <InlineError text={error} />
+      <InlineError text={notice} tone="success" />
       {loading ? (
         <Spinner size="tiny" />
       ) : tab === "rules" ? (
         <>
           {form && (
-            <div className={styles.section}>
-              <Text weight="semibold">{form.id ? "编辑规则" : "新建规则"}</Text>
+            <Section title={form.id ? "编辑规则" : "新建规则"}>
               <div className={styles.row}>
                 <div className={styles.field}>
                   <Text className={styles.label}>名称</Text>
@@ -517,16 +525,15 @@ export default function RulesPanel() {
                   常用主题：clipboard.captured / clipboard.pasted / ocr.completed / notes.changed / desktop.remind_due
                 </Text>
               </div>
-            </div>
+            </Section>
           )}
 
-          <div className={styles.section}>
-            <div className={styles.row}>
-              <Text weight="semibold">规则清单</Text>
-              <Badge appearance="outline">触发时求值 when → 冷却通过 → 串行执行</Badge>
-            </div>
+          <Section
+            title="规则清单"
+            actions={<Badge appearance="outline">触发时求值 when → 冷却通过 → 串行执行</Badge>}
+          >
             {rules.length === 0 ? (
-              <Text className={styles.muted}>暂无规则——点击「新建规则」创建第一条自动化。</Text>
+              <EmptyState text="暂无规则——点击「新建规则」创建第一条自动化。" />
             ) : (
               <div className={styles.list}>
                 {rules.map((r) => (
@@ -549,23 +556,22 @@ export default function RulesPanel() {
                     <Button size="small" onClick={() => setForm(ruleToForm(r))}>
                       编辑
                     </Button>
-                    <Button size="small" appearance="subtle" onClick={() => void remove(r.id)}>
+                    <Button size="small" appearance="subtle" onClick={() => void remove(r)}>
                       删除
                     </Button>
                   </div>
                 ))}
               </div>
             )}
-          </div>
+          </Section>
         </>
       ) : tab === "dead" ? (
-        <div className={styles.section}>
-          <div className={styles.row}>
-            <Text weight="semibold">死信队列</Text>
-            <Badge appearance="outline">动作重试耗尽后进入此处</Badge>
-          </div>
+        <Section
+          title="死信队列"
+          actions={<Badge appearance="outline">动作重试耗尽后进入此处</Badge>}
+        >
           {dead.length === 0 ? (
-            <Text className={styles.muted}>队列为空——所有动作执行成功。</Text>
+            <EmptyState text="队列为空——所有动作执行成功。" />
           ) : (
             <div className={styles.list}>
               {dead.map((d) => (
@@ -589,13 +595,12 @@ export default function RulesPanel() {
               ))}
             </div>
           )}
-        </div>
+        </Section>
       ) : (
-        <div className={styles.section}>
-          <div className={styles.row}>
-            <Text weight="semibold">插件管理</Text>
-            <Badge appearance="outline">wasmtime 沙箱 · 64MB 内存 + fuel 限额</Badge>
-          </div>
+        <Section
+          title="插件管理"
+          actions={<Badge appearance="outline">wasmtime 沙箱 · 64MB 内存 + fuel 限额</Badge>}
+        >
           <Text className={styles.muted}>
             安装 = 本地插件目录（含 manifest.json + entry wasm，sha256 校验）；权限 open/notify 映射宿主函数白名单，log 恒可用。规则动作路径填 plugin:{"{id}"}。
           </Text>
@@ -612,7 +617,7 @@ export default function RulesPanel() {
             </Button>
           </div>
           {plugins.length === 0 ? (
-            <Text className={styles.muted}>暂无已安装插件。</Text>
+            <EmptyState text="暂无已安装插件。" />
           ) : (
             <div className={styles.list}>
               {plugins.map((p) => (
@@ -636,14 +641,14 @@ export default function RulesPanel() {
                       entry {p.entry} · func {p.func} · sha256 {p.sha256.slice(0, 12)}…
                     </Text>
                   </div>
-                  <Button size="small" appearance="subtle" onClick={() => void removePlugin(p.id)}>
+                  <Button size="small" appearance="subtle" onClick={() => void removePlugin(p)}>
                     删除
                   </Button>
                 </div>
               ))}
             </div>
           )}
-        </div>
+        </Section>
       )}
     </div>
   );

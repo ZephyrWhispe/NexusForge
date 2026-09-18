@@ -36,7 +36,12 @@ import {
   type TermSessionDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
+import Section from "../../components/Section";
+import Tabs from "../../components/Tabs";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 终端与运维面板（docs/impl/06 T1–T6，M11 v1）：
@@ -55,20 +60,9 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "120px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
-  ok: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
   tab: {
     display: "flex",
     alignItems: "center",
@@ -322,10 +316,27 @@ export default function TerminalPanel() {
   }, [sshHost, sshPort, sshUser, sshAuth, fail]);
 
   const killSession = useCallback(
-    async (id: string) => {
+    async (s: TermSessionDto) => {
+      // 破坏性操作（D-18）：点名会话标题 + 连接类型，确认后立即杀进程
+      const kind = s.kind;
+      const kindDesc =
+        kind.kind === "ssh"
+          ? `SSH · ${kind.user}@${kind.host}:${kind.port}`
+          : kind.kind === "wsl"
+            ? `WSL · ${kind.distro}`
+            : "本地终端";
+      if (
+        !(await confirmAction({
+          title: "结束终端会话",
+          impact: [`将结束会话「${s.title}」`, `类型：${kindDesc}`],
+          detail: "进程将立即终止，未保存的会话内容丢失。",
+          confirmLabel: "结束会话",
+        }))
+      )
+        return;
       try {
-        await termKill(id);
-        termsRef.current.delete(id);
+        await termKill(s.id);
+        termsRef.current.delete(s.id);
         await refreshSessions();
       } catch (e) {
         fail(e);
@@ -376,22 +387,41 @@ export default function TerminalPanel() {
     [loadContainers, fail],
   );
 
+  // 停止容器（D-18）：中断容器内服务但可重启、数据卷保留 → 属可逆操作，danger=false
+  const stopContainer = useCallback(
+    async (c: DockerContainerDto) => {
+      if (
+        !(await confirmAction({
+          title: "停止容器",
+          impact: `将停止容器「${c.name}」`,
+          detail: `镜像 ${c.image}；停止后容器内服务中断，数据卷保留，可随时「启动」恢复。`,
+          danger: false,
+          confirmLabel: "停止",
+        }))
+      )
+        return;
+      await lifecycle(c.id, false);
+    },
+    [lifecycle],
+  );
+
   return (
     <div className={styles.root}>
-      <div className={styles.row}>
-        <button className={`${styles.tab} ${tab === "term" ? styles.tabActive : ""}`} onClick={() => setTab("term")}>
-          终端（{sessions.filter((s) => s.alive).length} 活跃）
-        </button>
-        <button className={`${styles.tab} ${tab === "docker" ? styles.tabActive : ""}`} onClick={() => setTab("docker")}>
-          Docker
-        </button>
-      </div>
+      <Tabs
+        ariaLabel="终端视图"
+        value={tab}
+        onChange={setTab}
+        items={[
+          { id: "term", label: `终端（${sessions.filter((s) => s.alive).length} 活跃）` },
+          { id: "docker", label: "Docker" },
+        ]}
+      />
 
-      {msg && <Text className={styles.ok}>{msg}</Text>}
-      {err && <Text className={styles.error}>{err}</Text>}
+      <InlineError text={msg} tone="success" />
+      <InlineError text={err} />
 
       {tab === "term" && (
-        <div className={styles.section}>
+        <Section>
           <div className={styles.row}>
             <Input
               className={styles.grow}
@@ -445,11 +475,11 @@ export default function TerminalPanel() {
                   style={{ marginLeft: 4, color: tokens.colorNeutralForeground3 }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    void killSession(s.id);
+                    void killSession(s);
                   }}
                   role="button"
                   tabIndex={0}
-                  onKeyDown={keyActivate(() => void killSession(s.id))}
+                  onKeyDown={keyActivate(() => void killSession(s))}
                 >
                   ✕
                 </span>
@@ -524,23 +554,21 @@ export default function TerminalPanel() {
               </Button>
             </div>
           )}
-        </div>
+        </Section>
       )}
 
       {tab === "docker" && (
-        <div className={styles.section}>
-          <div className={styles.row}>
-            <Text size={300} weight="semibold">
-              容器（Docker Desktop 需运行中）
-            </Text>
-            <div className={styles.grow} />
+        <Section
+          title="容器（Docker Desktop 需运行中）"
+          actions={
             <Button size="small" onClick={() => void loadContainers()}>
               刷新
             </Button>
-          </div>
+          }
+        >
           {dockerLoading && <Spinner size="tiny" />}
           {containers && containers.length === 0 && !dockerLoading && (
-            <Text className={styles.muted}>无容器（或 Docker Engine 不可达）</Text>
+            <EmptyState text="无容器（或 Docker Engine 不可达）" />
           )}
           <div className={styles.list}>
             {(containers ?? []).map((c) => (
@@ -556,7 +584,7 @@ export default function TerminalPanel() {
                 </Text>
                 <div className={styles.grow} />
                 {c.state === "running" ? (
-                  <Button size="small" appearance="subtle" onClick={() => void lifecycle(c.id, false)}>
+                  <Button size="small" appearance="subtle" onClick={() => void stopContainer(c)}>
                     停止
                   </Button>
                 ) : (
@@ -584,7 +612,7 @@ export default function TerminalPanel() {
               <div className={styles.logs}>{logsText || "（无输出）"}</div>
             </div>
           )}
-        </div>
+        </Section>
       )}
     </div>
   );

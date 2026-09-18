@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { makeStyles, tokens, Text, Badge, Tooltip } from "@fluentui/react-components";
+import { makeStyles, tokens, Tooltip } from "@fluentui/react-components";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   clipboardSearch,
@@ -11,7 +11,9 @@ import {
   type ClipSearchQuery,
 } from "../../ipc/client";
 import { IN_TAURI } from "../../ipc/env";
-import { reportError } from "../../stores/notifications";
+import { notify, reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
+import EmptyState from "../../components/EmptyState";
 import DibThumb from "./DibThumb";
 import { keyActivate } from "../../a11y";
 
@@ -78,24 +80,6 @@ const useStyles = makeStyles({
     cursor: "pointer",
     ":hover": { backgroundColor: tokens.colorNeutralBackground3Hover, color: tokens.colorNeutralForeground1 },
   },
-  empty: {
-    flex: 1,
-    display: "grid",
-    placeItems: "center",
-    textAlign: "center",
-    color: tokens.colorNeutralForeground3,
-  },
-  toast: {
-    position: "fixed",
-    right: "16px",
-    bottom: "40px",
-    padding: "10px 16px",
-    borderRadius: tokens.borderRadiusLarge,
-    backgroundColor: tokens.colorNeutralBackground3,
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    boxShadow: tokens.shadow16,
-    zIndex: 30,
-  },
 });
 
 const GROUP_LABEL: Record<string, string> = {
@@ -130,20 +114,20 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
   const [entries, setEntries] = useState<ClipEntry[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(0);
-  const [toast, setToast] = useState<string | null>(null);
+  // 首轮查询是否已落定（成功或失败）：未落定前不渲染引导文案（D-18 假空态修正）
+  const [loaded, setLoaded] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
-
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast(null), 2600);
-  }, []);
 
   const load = useCallback(
     async (p: number, append: boolean) => {
-      const res = await clipboardSearch(clipSearchParams(search, group, p));
-      setEntries((prev) => (append ? [...prev, ...res.items] : res.items));
-      setHasMore(res.has_more);
-      setPage(p);
+      try {
+        const res = await clipboardSearch(clipSearchParams(search, group, p));
+        setEntries((prev) => (append ? [...prev, ...res.items] : res.items));
+        setHasMore(res.has_more);
+        setPage(p);
+      } finally {
+        setLoaded(true);
+      }
     },
     [search, group],
   );
@@ -158,9 +142,9 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
 
   // 搜索/分组变化 → 重置首页
   useEffect(() => {
-    load(0, false).catch(() => showToast("加载失败：模块未就绪或 DB 异常"));
+    load(0, false).catch(() => notify("error", "加载失败", "模块未就绪或 DB 异常"));
     refreshCounts();
-  }, [load, showToast, refreshCounts]);
+  }, [load, refreshCounts]);
 
   // U3-6 实时更新：clipboard.captured → 刷新首页
   useEffect(() => {
@@ -199,126 +183,134 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
 
   const doPaste = (e: ClipEntry) =>
     clipboardPaste(e.id)
-      .then(() => showToast(`已写入剪贴板（回写窗口 ${"500ms"} 内不重复记录）`))
-      .catch(() => showToast("粘贴失败"));
+      .then(() => notify("success", "已写入剪贴板", "回写窗口 500ms 内不重复记录"))
+      .catch(() => notify("error", "粘贴失败"));
   const doPin = (e: ClipEntry) =>
     clipboardPin(e.id, !e.pinned)
       .then(() => load(page, false))
-      .catch(() => showToast("置顶失败"));
-  const doDelete = (e: ClipEntry) =>
-    clipboardDelete(e.id)
-      .then(() => load(0, false))
-      .catch(() => showToast("删除失败"));
+      .catch(() => notify("error", "置顶失败"));
+
+  // 行内删除（D-18）：单击即删改为经全局 ConfirmDialog，影响面点名到条目
+  const doDelete = async (e: ClipEntry) => {
+    const raw = e.preview.trim();
+    const preview = raw.length > 40 ? `${raw.slice(0, 40)}…` : raw;
+    if (
+      !(await confirmAction({
+        title: "删除剪贴板记录",
+        impact: [
+          "将删除 1 条剪贴板记录",
+          e.secret ? "敏感条目（加密信封，内容不在此显示）" : `内容预览：${preview || "（无预览）"}`,
+          e.pinned ? "该条目为置顶收藏" : "",
+        ].filter(Boolean),
+        detail: "删除后不可恢复；图片条目的 blob 与敏感条目的密文一并清理。",
+        confirmLabel: "删除",
+      }))
+    )
+      return;
+    try {
+      await clipboardDelete(e.id);
+      notify("success", "已删除 1 条记录");
+      await load(0, false);
+    } catch {
+      notify("error", "删除失败");
+    }
+  };
 
   return (
-    <>
-      <div className={styles.list} ref={listRef}>
-        {entries.length === 0 ? (
-          <div className={styles.empty}>
-            <div>
-              <Text size={400} weight="semibold" block>
-                没有匹配的记录
-              </Text>
-              <Text size={300} block style={{ marginTop: "8px" }}>
-                复制任意内容后，这里会显示历史记录（文本实时捕获）。
-              </Text>
-            </div>
-          </div>
-        ) : (
-          <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-            {virtualizer.getVirtualItems().map((vi) => {
-              const e = entries[vi.index];
-              const isCode = e.group === "code" || e.group === "json";
-              return (
-                <div
-                  key={e.id}
-                  data-index={vi.index}
-                  ref={virtualizer.measureElement}
-                  className={styles.entry}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
-                  onClick={() => doPaste(e)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={keyActivate(() => doPaste(e))}
-                >
-                  {e.content_type === "image" && <DibThumb id={e.id} />}
-                  <div className={styles.body}>
-                    <div className={styles.row1}>
-                      {e.pinned && <span className={`${styles.chip} ${styles.chipPin}`}>★ 置顶</span>}
-                      {e.secret ? (
-                        <span className={`${styles.chip} ${styles.chipSecret}`}>已加密</span>
-                      ) : (
-                        e.group && <span className={styles.chip}>{GROUP_LABEL[e.group] ?? e.group}</span>
-                      )}
-                      {e.source_app && <span className={styles.src}>{e.source_app}</span>}
-                      <span className={styles.time}>{fmtTime(e.created_at)}</span>
-                    </div>
-                    <div className={`${styles.preview} ${isCode ? styles.mono : ""}`}>{e.preview}</div>
+    <div className={styles.list} ref={listRef}>
+      {entries.length === 0 ? (
+        <EmptyState
+          text="没有匹配的记录：复制任意内容后这里会显示历史（文本实时捕获）。"
+          loading={!loaded}
+        />
+      ) : (
+        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {virtualizer.getVirtualItems().map((vi) => {
+            const e = entries[vi.index];
+            const isCode = e.group === "code" || e.group === "json";
+            return (
+              <div
+                key={e.id}
+                data-index={vi.index}
+                ref={virtualizer.measureElement}
+                className={styles.entry}
+                style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
+                onClick={() => doPaste(e)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={keyActivate(() => doPaste(e))}
+              >
+                {e.content_type === "image" && <DibThumb id={e.id} />}
+                <div className={styles.body}>
+                  <div className={styles.row1}>
+                    {e.pinned && <span className={`${styles.chip} ${styles.chipPin}`}>★ 置顶</span>}
+                    {e.secret ? (
+                      <span className={`${styles.chip} ${styles.chipSecret}`}>已加密</span>
+                    ) : (
+                      e.group && <span className={styles.chip}>{GROUP_LABEL[e.group] ?? e.group}</span>
+                    )}
+                    {e.source_app && <span className={styles.src}>{e.source_app}</span>}
+                    <span className={styles.time}>{fmtTime(e.created_at)}</span>
                   </div>
-                  <div className={styles.ops}>
-                    <Tooltip content="粘贴" relationship="label">
-                      <button
-                        className={styles.opBtn}
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          doPaste(e);
-                        }}
-                        aria-label="粘贴"
-                      >
-                        ⏎
-                      </button>
-                    </Tooltip>
-                    <Tooltip content="置顶" relationship="label">
-                      <button
-                        className={styles.opBtn}
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          doPin(e);
-                        }}
-                        aria-label="置顶"
-                      >
-                        ☆
-                      </button>
-                    </Tooltip>
-                    <Tooltip content="删除" relationship="label">
-                      <button
-                        className={styles.opBtn}
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          doDelete(e);
-                        }}
-                        aria-label="删除"
-                      >
-                        ✕
-                      </button>
-                    </Tooltip>
-                  </div>
+                  <div className={`${styles.preview} ${isCode ? styles.mono : ""}`}>{e.preview}</div>
                 </div>
-              );
-            })}
-          </div>
-        )}
-        {hasMore && (
-          <div style={{ textAlign: "center", padding: "12px" }}>
-            <button
-              className={styles.opBtn}
-              style={{ width: "auto", padding: "0 14px", border: `1px solid ${tokens.colorNeutralStroke1}` }}
-              onClick={() => load(page + 1, true)}
-            >
-              加载更多
-            </button>
-          </div>
-        )}
-      </div>
-      {toast && (
-        <div className={styles.toast}>
-          <Badge appearance="filled" color="success">
-            ✓
-          </Badge>{" "}
-          {toast}
+                <div className={styles.ops}>
+                  <Tooltip content="粘贴" relationship="label">
+                    <button
+                      className={styles.opBtn}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        doPaste(e);
+                      }}
+                      aria-label="粘贴"
+                    >
+                      ⏎
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="置顶" relationship="label">
+                    <button
+                      className={styles.opBtn}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        doPin(e);
+                      }}
+                      aria-label="置顶"
+                    >
+                      ☆
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="删除" relationship="label">
+                    <button
+                      className={styles.opBtn}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        void doDelete(e);
+                      }}
+                      aria-label="删除"
+                    >
+                      ✕
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
-    </>
+      {hasMore && (
+        <div style={{ textAlign: "center", padding: "12px" }}>
+          <button
+            className={styles.opBtn}
+            style={{ width: "auto", padding: "0 14px", border: `1px solid ${tokens.colorNeutralStroke1}` }}
+            onClick={() =>
+              void load(page + 1, true).catch(() => notify("error", "加载失败", "模块未就绪或 DB 异常"))
+            }
+          >
+            加载更多
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

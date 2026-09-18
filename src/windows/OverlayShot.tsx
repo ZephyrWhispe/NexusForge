@@ -16,6 +16,8 @@ import {
   type AnnotationDto,
 } from "../ipc/client";
 import { reportError } from "../stores/notifications";
+import { confirmAction, type ConfirmOptions } from "../stores/confirm";
+import InlineError from "../components/InlineError";
 import { cancelOverlay } from "./overlayController";
 
 /**
@@ -155,6 +157,17 @@ const useStyles = makeStyles({
     alignItems: "center",
     gap: "8px",
   },
+  // 操作错误条外壳：红字本体由 InlineError 提供（D-18 错误样式去重）
+  errBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "6px 12px",
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground2,
+    border: `1px solid ${tokens.colorPaletteRedBorder1}`,
+    maxWidth: "86vw",
+  },
 });
 
 type Stage = "select" | "edit";
@@ -162,6 +175,16 @@ type Tool = AnnotationDto["kind"];
 
 const COLORS = ["#ff4d4f", "#ffb020", "#52c41a", "#1677ff", "#ffffff"];
 const WIDTHS = [2, 4, 8];
+/** 确认框用的工具全名（工具条上是单字缩写，不足以说明丢了什么） */
+const TOOL_NAME: Record<Tool, string> = {
+  pen: "画笔",
+  rect: "矩形",
+  ellipse: "椭圆",
+  arrow: "箭头",
+  text: "文字",
+  mosaic: "马赛克",
+  number: "序号",
+};
 
 /** CSS 坐标 → 抓帧物理坐标（窗口铺满虚拟桌面，比例恒定） */
 function cssToPhysical(css: number, physical: number, view: number): number {
@@ -297,17 +320,59 @@ export default function OverlayShot() {
     void cancelOverlay(taskId);
   }, [task]);
 
-  // Esc 取消（select 阶段直接关窗；edit 阶段回选区）
+  /** 确认框在开：对话框的 Esc/Enter 会同时冒泡到本窗全局快捷键，须让位 */
+  const confirmPending = useRef(false);
+  const askConfirm = useCallback(async (opts: ConfirmOptions) => {
+    confirmPending.current = true;
+    try {
+      return await confirmAction(opts);
+    } finally {
+      confirmPending.current = false;
+    }
+  }, []);
+
+  /**
+   * 回选区（「重选」按钮与 edit 阶段 Esc 共用，D-18）：有未导出标注时先经全局
+   * 确认框点名影响面；无标注即刻回退（空手退出覆盖层不该被打断）。
+   */
+  const discardToSelect = useCallback(async () => {
+    const anns = annsRef.current;
+    if (anns.length > 0) {
+      const byKind = new Map<Tool, number>();
+      for (const a of anns) byKind.set(a.kind, (byKind.get(a.kind) ?? 0) + 1);
+      const impact = [
+        `将丢弃未导出的标注 ${anns.length} 处：${[...byKind]
+          .map(([k, n]) => `${TOOL_NAME[k]} ${n}`)
+          .join("、")}`,
+      ];
+      if (redoRef.current.length > 0) impact.push(`已撤销待重做 ${redoRef.current.length} 处`);
+      if (crop) impact.push(`当前裁剪图 ${crop.width}×${crop.height} 与选区一并丢弃`);
+      if (
+        !(await askConfirm({
+          title: "放弃当前标注并重新选区",
+          impact,
+          detail:
+            "标注只活在本页的合成预览里：未点「完成/复制/保存/贴图」导出就不会进截图历史，放弃后无法恢复。",
+          confirmLabel: "放弃标注",
+        }))
+      )
+        return;
+    }
+    annsRef.current = [];
+    redoRef.current = [];
+    setStackCounts({ undo: 0, redo: 0 });
+    setStage("select");
+    setRect(null);
+  }, [askConfirm, crop]);
+
+  // Esc 取消（select 阶段直接关窗；edit 阶段回选区，有标注则先确认）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (confirmPending.current) return;
       if (e.key === "Escape") {
         e.preventDefault();
-        if (stage === "edit") {
-          setStage("select");
-          setRect(null);
-        } else {
-          cancel();
-        }
+        if (stage === "edit") void discardToSelect();
+        else cancel();
       }
       if (e.key === "Enter" && stage === "select" && rect && rect.w > 4 && rect.h > 4) {
         e.preventDefault();
@@ -332,7 +397,7 @@ export default function OverlayShot() {
     // undo/redo/confirmSelection 为 ref-only 普通函数（每次渲染新身份），入依赖表
     // 会导致每帧重挂监听且行为不变；stage/rect/cancel 已在表内保证语义快照
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, rect, cancel]);
+  }, [stage, rect, cancel, discardToSelect]);
 
   /** 选区确认：物理坐标裁剪 → 进入编辑阶段（ocr 模式自动识别） */
   const confirmSelection = useCallback(async () => {
@@ -993,27 +1058,14 @@ export default function OverlayShot() {
         <Button size="small" onClick={() => void runOcr()} disabled={ocrBusy || busy}>
           OCR
         </Button>
-        <Button size="small" onClick={() => setStage("select")} disabled={busy}>
+        <Button size="small" onClick={() => void discardToSelect()} disabled={busy}>
           重选
         </Button>
       </div>
 
       {actionError && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "6px 12px",
-            borderRadius: tokens.borderRadiusLarge,
-            backgroundColor: tokens.colorNeutralBackground2,
-            border: `1px solid ${tokens.colorPaletteRedBorder1}`,
-            maxWidth: "86vw",
-          }}
-        >
-          <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>
-            {actionError}
-          </Text>
+        <div className={styles.errBar}>
+          <InlineError text={actionError} />
           <Button size="small" onClick={() => setActionError(null)}>
             知道了
           </Button>

@@ -35,6 +35,10 @@ import {
   type ProxySubDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
+import Section from "../../components/Section";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 代理面板（docs/impl/05 PR6，M7 v1）：
@@ -52,21 +56,10 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
-  sectionHead: { display: "flex", alignItems: "center", gap: "8px" },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   modeBtn: { minWidth: "96px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
   logBox: {
     maxHeight: "180px",
     overflowY: "auto",
@@ -98,6 +91,9 @@ export default function ProxyPanel() {
   const [subUrl, setSubUrl] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
+  // 首轮数据/日志是否落定：未落定前空列表渲染加载态而非"暂无"文案（D-18 假空态修正）
+  const [loaded, setLoaded] = useState(false);
+  const [logsLoaded, setLogsLoaded] = useState(false);
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -116,6 +112,8 @@ export default function ProxyPanel() {
       setError("");
     } catch (e) {
       if (mounted.current) setError(parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      if (mounted.current) setLoaded(true);
     }
   }, []);
 
@@ -125,6 +123,8 @@ export default function ProxyPanel() {
       if (mounted.current) setLogs(lines);
     } catch (e) {
       reportError(e, { context: "内核日志拉取失败", dedupeKey: "proxy-logs", toast: false });
+    } finally {
+      if (mounted.current) setLogsLoaded(true);
     }
   }, []);
 
@@ -192,29 +192,54 @@ export default function ProxyPanel() {
       if (mounted.current) setDelays(map);
     });
 
+  // 删除订阅（D-18）：连带其下全部节点配置一并消失，影响面按 node_count 明示
+  const removeSub = async (sub: ProxySubDto) => {
+    if (
+      !(await confirmAction({
+        title: "删除订阅",
+        impact: [
+          `将删除订阅「${sub.name}」及其 ${sub.node_count} 个节点`,
+          sub.node_count > 0
+            ? "这些节点将从节点列表与测速结果中移除"
+            : "该订阅尚未拉取到节点",
+        ],
+        detail: "订阅 URL 与已解析的节点配置一并删除，需重新添加并拉取才能恢复。",
+        confirmLabel: "删除",
+      }))
+    )
+      return;
+    await run(`sub-del-${sub.id}`, async () => {
+      await proxySubRemove(sub.id);
+      await refresh();
+    });
+  };
+
   const st = status;
 
   return (
     <div className={styles.root}>
       {st?.restored_last_run && (
-        <div className={styles.section}>
+        <Section>
           <Text size={200}>
             检测到上次异常退出残留的系统代理，启动时已自动还原为你的原始设置。
           </Text>
-        </div>
+        </Section>
       )}
 
       {/* 模式三态 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">运行模式</Text>
-          {st && (
-            <Badge appearance={st.kernel_running ? "filled" : "outline"} color={st.kernel_running ? "success" : "subtle"}>
-              {st.kernel_running ? "内核运行中" : "内核已停止"}
-            </Badge>
-          )}
-          {st?.has_backup && <Badge appearance="outline">存在原设置备份</Badge>}
-        </div>
+      <Section
+        title="运行模式"
+        actions={
+          <>
+            {st && (
+              <Badge appearance={st.kernel_running ? "filled" : "outline"} color={st.kernel_running ? "success" : "subtle"}>
+                {st.kernel_running ? "内核运行中" : "内核已停止"}
+              </Badge>
+            )}
+            {st?.has_backup && <Badge appearance="outline">存在原设置备份</Badge>}
+          </>
+        }
+      >
         <div className={styles.row}>
           {(["off", "system", "tun"] as const).map((m) => (
             <Button
@@ -237,21 +262,24 @@ export default function ProxyPanel() {
             {st.mode === "tun" ? " · TUN 与系统代理互斥（已自动还原系统代理）" : ""}
           </span>
         )}
-      </div>
+      </Section>
 
       {/* 内核安装 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">sing-box 内核</Text>
-          {st?.kernel_installed ? (
-            <Badge appearance="outline">v{st.kernel_version ?? "?"}</Badge>
-          ) : (
-            <Badge appearance="outline" color="warning">
-              未安装
-            </Badge>
-          )}
-          {st?.wintun_installed && <Badge appearance="outline">wintun 已装</Badge>}
-        </div>
+      <Section
+        title="sing-box 内核"
+        actions={
+          <>
+            {st?.kernel_installed ? (
+              <Badge appearance="outline">v{st.kernel_version ?? "?"}</Badge>
+            ) : (
+              <Badge appearance="outline" color="warning">
+                未安装
+              </Badge>
+            )}
+            {st?.wintun_installed && <Badge appearance="outline">wintun 已装</Badge>}
+          </>
+        }
+      >
         <div className={styles.row}>
           <Button
             size="small"
@@ -272,14 +300,15 @@ export default function ProxyPanel() {
         <span className={styles.muted}>
           内核按需下载，不随软件分发；仅支持本地编排，不内置任何节点/订阅。
         </span>
-      </div>
+      </Section>
 
       {/* 订阅管理 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">订阅</Text>
+      <Section
+        title="订阅"
+        actions={
           <span className={styles.muted}>自行添加分享链接或订阅地址（ss/vmess/trojan/vless）</span>
-        </div>
+        }
+      >
         <div className={styles.row}>
           <Input
             className={styles.grow}
@@ -336,30 +365,25 @@ export default function ProxyPanel() {
             <Button
               size="small"
               disabled={busy !== ""}
-              onClick={() =>
-                run(`sub-del-${s.id}`, async () => {
-                  await proxySubRemove(s.id);
-                  await refresh();
-                })
-              }
+              onClick={() => void removeSub(s)}
             >
               删除
             </Button>
           </div>
         ))}
-      </div>
+      </Section>
 
       {/* 节点列表 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">节点</Text>
-          <span className={styles.grow} />
+      <Section
+        title="节点"
+        actions={
           <Button size="small" disabled={busy !== "" || nodes.length === 0} onClick={testDelays}>
             {busy === "delay" ? "测速中…" : "测速（TCP）"}
           </Button>
-        </div>
+        }
+      >
         {nodes.length === 0 ? (
-          <span className={styles.muted}>暂无节点：请先添加订阅并拉取</span>
+          <EmptyState text="暂无节点：请先添加订阅并拉取" loading={!loaded} />
         ) : (
           <Table size="small">
             <TableBody>
@@ -395,14 +419,15 @@ export default function ProxyPanel() {
             </TableBody>
           </Table>
         )}
-      </div>
+      </Section>
 
       {/* 直连规则 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">直连域名</Text>
+      <Section
+        title="直连域名"
+        actions={
           <span className={styles.muted}>每行一个后缀，命中即不走代理（重新切换模式后生效）</span>
-        </div>
+        }
+      >
         <Textarea
           value={rulesText}
           onChange={(_, d) => setRulesText(d.value)}
@@ -423,20 +448,20 @@ export default function ProxyPanel() {
             保存规则
           </Button>
         </div>
-      </div>
+      </Section>
 
       {/* 内核日志 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">内核日志</Text>
-          <span className={styles.grow} />
+      <Section
+        title="内核日志"
+        actions={
           <Button size="small" onClick={() => void refreshLogs()}>
             刷新
           </Button>
-        </div>
+        }
+      >
         <div className={styles.logBox}>
           {logs.length === 0 ? (
-            <span className={styles.muted}>暂无日志（内核未启动或未产生输出）</span>
+            <EmptyState text="暂无日志（内核未启动或未产生输出）" loading={!logsLoaded} />
           ) : (
             logs.map((l, i) => (
               <div key={`${l.ts_ms}-${i}`} className={styles.mono}>
@@ -445,9 +470,9 @@ export default function ProxyPanel() {
             ))
           )}
         </div>
-      </div>
+      </Section>
 
-      {error && <span className={styles.error}>{error}</span>}
+      <InlineError text={error} />
     </div>
   );
 }

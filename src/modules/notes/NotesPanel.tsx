@@ -6,7 +6,6 @@ import {
   Badge,
   Button,
   Input,
-  Spinner,
   Dropdown,
   Option,
 } from "@fluentui/react-components";
@@ -39,7 +38,12 @@ import {
   type NoteMetaDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
+import Section from "../../components/Section";
+import Tabs from "../../components/Tabs";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 笔记与知识面板（docs/impl/06 N1–N5，M10 v1）：
@@ -59,34 +63,9 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "160px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
-  ok: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
-  tab: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    padding: "4px 10px",
-    borderRadius: tokens.borderRadiusMedium,
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    cursor: "pointer",
-    fontSize: tokens.fontSizeBase200,
-  },
-  tabActive: {
-    backgroundColor: tokens.colorNeutralBackground3Hover,
-    border: `1px solid ${tokens.colorBrandForeground1}`,
-  },
   split: { display: "grid", gridTemplateColumns: "300px 1fr", gap: "12px", alignItems: "start" },
   list: {
     display: "flex",
@@ -324,6 +303,18 @@ export default function NotesPanel() {
   const deleteNote = useCallback(async () => {
     if (!active) return;
     setErr(null);
+    if (
+      !(await confirmAction({
+        title: "删除笔记",
+        impact: [`将删除笔记「${active}」`],
+        detail:
+          backlinks.length > 0
+            ? `磁盘 .md 文件将被删除且不可恢复；有 ${backlinks.length} 条反链指向它，删除后这些 [[链接]] 将悬空。`
+            : "磁盘 .md 文件将被删除且不可恢复。",
+        confirmLabel: "删除",
+      }))
+    )
+      return;
     try {
       await notesDelete(active);
       setActive(null);
@@ -333,7 +324,7 @@ export default function NotesPanel() {
     } catch (e) {
       fail(e);
     }
-  }, [active, refreshList, fail]);
+  }, [active, backlinks.length, refreshList, fail]);
 
   const renameNote = useCallback(async () => {
     if (!active || !newName.trim()) return;
@@ -341,6 +332,16 @@ export default function NotesPanel() {
     const name = newName.trim();
     const target = `${dir}${name.endsWith(".md") ? name : `${name}.md`}`;
     setErr(null);
+    if (
+      !(await confirmAction({
+        title: "重命名笔记",
+        impact: [`「${active}」 → 「${target}」`],
+        detail: `全库 [[双链]] 引用将同步改写（当前 ${links.length} 出链 / ${backlinks.length} 反链受影响）。`,
+        danger: false,
+        confirmLabel: "重命名",
+      }))
+    )
+      return;
     try {
       await notesRename(active, target);
       setNewName("");
@@ -350,7 +351,7 @@ export default function NotesPanel() {
     } catch (e) {
       fail(e);
     }
-  }, [active, newName, refreshList, openNote, fail]);
+  }, [active, newName, links.length, backlinks.length, refreshList, openNote, fail]);
 
   // ---- 复习动作 ----
   const grade = useCallback(
@@ -382,6 +383,27 @@ export default function NotesPanel() {
       fail(e);
     }
   }, [cardFront, cardBack, active, refreshReview, fail]);
+
+  const deleteCard = useCallback(
+    async (c: NoteCardDto) => {
+      if (
+        !(await confirmAction({
+          title: "删除复习卡片",
+          impact: [`「${c.front}」将从卡片库删除`],
+          detail: "复习进度（间隔/E/F）一并丢失，不可恢复。",
+          confirmLabel: "删除",
+        }))
+      )
+        return;
+      try {
+        await notesCardDelete(c.id);
+        await refreshReview();
+      } catch (e) {
+        fail(e);
+      }
+    },
+    [refreshReview, fail],
+  );
 
   // ---- 画布动作 ----
   const loadCanvas = useCallback(
@@ -486,8 +508,23 @@ export default function NotesPanel() {
     }
   }, [canvasDir, doc]);
 
-  const removeSelected = useCallback(() => {
+  const removeSelected = useCallback(async () => {
     if (!selNode) return;
+    const node = doc.nodes.find((n) => n.id === selNode);
+    const edgeCount = doc.edges.filter((e) => e.from === selNode || e.to === selNode).length;
+    if (
+      !(await confirmAction({
+        title: "删除画布节点",
+        impact: [
+          `将删除节点「${node?.text ?? node?.ref ?? selNode}」`,
+          `${edgeCount} 条关联连线将一并删除`,
+        ],
+        detail: "点击「保存画布」前不会写盘，但本视图内不撤销。",
+        danger: false,
+        confirmLabel: "删除",
+      }))
+    )
+      return;
     void saveCanvas({
       ...doc,
       nodes: doc.nodes.filter((n) => n.id !== selNode),
@@ -509,15 +546,16 @@ export default function NotesPanel() {
   return (
     <div className={styles.root}>
       <div className={styles.row}>
-        <button className={`${styles.tab} ${tab === "notes" ? styles.tabActive : ""}`} onClick={() => setTab("notes")}>
-          笔记（{all.length}）
-        </button>
-        <button className={`${styles.tab} ${tab === "review" ? styles.tabActive : ""}`} onClick={() => setTab("review")}>
-          复习（{queue.length} 到期）
-        </button>
-        <button className={`${styles.tab} ${tab === "canvas" ? styles.tabActive : ""}`} onClick={() => setTab("canvas")}>
-          画布
-        </button>
+        <Tabs
+          ariaLabel="笔记视图"
+          value={tab}
+          onChange={setTab}
+          items={[
+            { id: "notes", label: `笔记（${all.length}）` },
+            { id: "review", label: `复习（${queue.length} 到期）` },
+            { id: "canvas", label: "画布" },
+          ]}
+        />
         <div className={styles.grow} />
         <Button
           size="small"
@@ -534,12 +572,11 @@ export default function NotesPanel() {
         </Button>
       </div>
 
-      {msg && <Text className={styles.ok}>{msg}</Text>}
-      {err && <Text className={styles.error}>{err}</Text>}
-      {loading && <Spinner size="tiny" />}
+      <InlineError text={msg} tone="success" />
+      <InlineError text={err} />
 
       {tab === "notes" && (
-        <div className={styles.section}>
+        <Section>
           <div className={styles.row}>
             <Input
               className={styles.grow}
@@ -590,7 +627,9 @@ export default function NotesPanel() {
                   </Text>
                 </div>
               ))}
-              {!loading && shown.length === 0 && <Text className={styles.muted}>暂无笔记</Text>}
+              {(loading || shown.length === 0) && (
+                <EmptyState text="暂无笔记：在上方输入名称新建，或点「重建索引」扫描磁盘 .md" loading={loading} />
+              )}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
               {active ? (
@@ -661,11 +700,11 @@ export default function NotesPanel() {
               )}
             </div>
           </div>
-        </div>
+        </Section>
       )}
 
       {tab === "review" && (
-        <div className={styles.section}>
+        <Section>
           <div className={styles.row}>
             <Input className={styles.grow} placeholder="卡片正面" value={cardFront} onChange={(_, d) => setCardFront(d.value)} />
             <Input className={styles.grow} placeholder="卡片背面（可空）" value={cardBack} onChange={(_, d) => setCardBack(d.value)} />
@@ -715,21 +754,17 @@ export default function NotesPanel() {
                   {c.due_ms <= Date.now() ? "已到期" : new Date(c.due_ms).toLocaleDateString()}
                 </Text>
                 <div className={styles.grow} />
-                <Button
-                  size="small"
-                  appearance="subtle"
-                  onClick={() => void notesCardDelete(c.id).then(refreshReview).catch(fail)}
-                >
+                <Button size="small" appearance="subtle" onClick={() => void deleteCard(c)}>
                   删除
                 </Button>
               </div>
             ))}
           </div>
-        </div>
+        </Section>
       )}
 
       {tab === "canvas" && (
-        <div className={styles.section}>
+        <Section>
           <div className={styles.row}>
             <Dropdown
               className={styles.grow}
@@ -770,7 +805,7 @@ export default function NotesPanel() {
             >
               从选中节点连线
             </Button>
-            <Button size="small" appearance="subtle" onClick={removeSelected}>
+            <Button size="small" appearance="subtle" onClick={() => void removeSelected()}>
               删除选中
             </Button>
             <Button size="small" appearance="primary" onClick={() => void saveCanvas(doc)}>
@@ -825,7 +860,7 @@ export default function NotesPanel() {
               </Text>
             )}
           </div>
-        </div>
+        </Section>
       )}
     </div>
   );

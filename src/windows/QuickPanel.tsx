@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clipboardSearch, clipboardPaste, type ClipEntry } from "../ipc/client";
 import { reportError } from "../stores/notifications";
 import DibThumb from "../modules/clipboard/DibThumb";
+import EmptyState from "../components/EmptyState";
 import { keyActivate } from "../a11y";
 
 /**
@@ -73,6 +74,8 @@ function hideWindow() {
 export default function QuickPanel() {
   const styles = useStyles();
   const [items, setItems] = useState<ClipEntry[]>([]);
+  // 首轮加载是否落定（成功或失败）：未落定前渲染加载态而非"暂无历史"（D-18 假空态修正）
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     const load = () =>
@@ -81,7 +84,8 @@ export default function QuickPanel() {
         .catch((e) => {
           setItems([]);
           reportError(e, { context: "快速面板加载剪贴板失败", dedupeKey: "quickpanel-open" });
-        });
+        })
+        .finally(() => setLoaded(true));
     load();
     if (!("__TAURI_INTERNALS__" in window)) return;
     let unlisten: (() => void) | null = null;
@@ -134,9 +138,7 @@ export default function QuickPanel() {
       </div>
       <div className={styles.list}>
         {items.length === 0 && (
-          <Text style={{ padding: "12px 16px", color: tokens.colorNeutralForeground3 }}>
-            暂无历史 — 复制任意内容后这里会出现最近的 9 条
-          </Text>
+          <EmptyState text="暂无历史 — 复制任意内容后这里会出现最近的 9 条" loading={!loaded} />
         )}
         {items.map((e, i) => (
           <div

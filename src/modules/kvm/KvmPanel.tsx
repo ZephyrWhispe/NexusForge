@@ -33,6 +33,10 @@ import {
   type SessionDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
+import Section from "../../components/Section";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 键鼠共享面板（docs/impl/05 K8，M4 v1）：
@@ -49,20 +53,6 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
-  sectionHead: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-  },
   row: {
     display: "flex",
     alignItems: "center",
@@ -77,10 +67,6 @@ const useStyles = makeStyles({
   },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
-  error: {
-    color: tokens.colorPaletteRedForeground1,
-    fontSize: tokens.fontSizeBase200,
-  },
 });
 
 const fmtFp = (fp: string) => (fp.length > 16 ? `${fp.slice(0, 8)}…${fp.slice(-8)}` : fp);
@@ -97,6 +83,8 @@ export default function KvmPanel() {
   const [pairInput, setPairInput] = useState<Record<string, string>>({});
   const [error, setError] = useState<string>("");
   const [busy, setBusy] = useState<string>("");
+  // 首轮刷新是否落定：未落定前两个设备列表渲染加载态而非"暂无"文案（D-18 假空态修正）
+  const [loaded, setLoaded] = useState(false);
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -117,6 +105,8 @@ export default function KvmPanel() {
       setError("");
     } catch (e) {
       if (mounted.current) setError(parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      if (mounted.current) setLoaded(true);
     }
   }, []);
 
@@ -215,9 +205,26 @@ export default function KvmPanel() {
     }
   };
 
-  const doUnpair = async (deviceId: string) => {
+  // 解除配对（D-18）：删除双向凭据属破坏性操作，单击即改 → 全局确认框点名设备
+  const doUnpair = async (device: PairedPeerDto) => {
+    const inSession = sessions.some((s) => s.device_id === device.device_id);
+    if (
+      !(await confirmAction({
+        title: "解除设备配对",
+        impact: [
+          `将解除与「${device.device_name}」的配对（1 台设备）`,
+          `设备 ID ${device.device_id} · 指纹 ${fmtFp(device.fingerprint)}`,
+          `该设备的共享边缘设置 ${edgeMap[device.device_id] ? "将一并失效" : "未设置"}`,
+        ],
+        detail:
+          `双向凭据与指纹信任将从本机配对库中删除，${inSession ? "进行中的键鼠会话同时中断；" : ""}` +
+          "对端也需重新走一次性码流程才能再次配对（本端码不影响）。",
+        confirmLabel: "解除配对",
+      }))
+    )
+      return;
     try {
-      await kvmUnpair(deviceId);
+      await kvmUnpair(device.device_id);
       setError("");
       await refresh();
     } catch (e) {
@@ -243,29 +250,32 @@ export default function KvmPanel() {
   return (
     <div className={styles.root}>
       {/* ① 控制状态 + 本端配对码 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">控制状态</Text>
-          {control.role === "controlling" && (
-            <Badge appearance="filled" color="brand">
-              正在控制 {control.device_id}
-            </Badge>
-          )}
-          {control.role === "controlled" && (
-            <Badge appearance="filled" color="warning">
-              被对端控制
-            </Badge>
-          )}
-          {control.role === "idle" && <Badge appearance="outline">空闲</Badge>}
-          {control.role === "controlling" && (
-            <Button size="small" onClick={() => void kvmReleaseControl()}>
-              切回本机
-            </Button>
-          )}
-          <span className={styles.muted}>
-            切回方式：鼠标移回对端共享边缘（优先）· Ctrl+Alt+Shift+Q
-          </span>
-        </div>
+      <Section
+        title="控制状态"
+        actions={
+          <>
+            {control.role === "controlling" && (
+              <Badge appearance="filled" color="brand">
+                正在控制 {control.device_id}
+              </Badge>
+            )}
+            {control.role === "controlled" && (
+              <Badge appearance="filled" color="warning">
+                被对端控制
+              </Badge>
+            )}
+            {control.role === "idle" && <Badge appearance="outline">空闲</Badge>}
+            {control.role === "controlling" && (
+              <Button size="small" onClick={() => void kvmReleaseControl()}>
+                切回本机
+              </Button>
+            )}
+          </>
+        }
+      >
+        <span className={styles.muted}>
+          切回方式：鼠标移回对端共享边缘（优先）· Ctrl+Alt+Shift+Q
+        </span>
         <div className={styles.row}>
           <Text>本端配对码（对端输入用，2 分钟有效）：</Text>
           <span className={styles.code}>{pairCode || "——————"}</span>
@@ -273,23 +283,27 @@ export default function KvmPanel() {
         <Text size={200} className={styles.muted}>
           配对流程：两端都打开键鼠共享页 → 一端点"配对"并输入另一端显示的 6 位码 → 双向指纹校验完成。
         </Text>
-      </div>
+      </Section>
 
-      {error && <div className={styles.error}>{error}</div>}
+      <InlineError text={error} />
 
       {/* ② 发现的未配对设备 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">发现的设备</Text>
-          <Badge appearance="outline">{unpaired.length}</Badge>
-          <Button size="small" appearance="subtle" onClick={() => void refresh()}>
-            刷新
-          </Button>
-        </div>
+      <Section
+        title="发现的设备"
+        actions={
+          <>
+            <Badge appearance="outline">{unpaired.length}</Badge>
+            <Button size="small" appearance="subtle" onClick={() => void refresh()}>
+              刷新
+            </Button>
+          </>
+        }
+      >
         {unpaired.length === 0 ? (
-          <Text size={200} className={styles.muted}>
-            局域网内暂未发现未配对设备（对端需运行 NexusForge 且键鼠共享已启动）
-          </Text>
+          <EmptyState
+            text="局域网内暂未发现未配对设备（对端需运行 NexusForge 且键鼠共享已启动）"
+            loading={!loaded}
+          />
         ) : (
           <Table size="small">
             <TableBody>
@@ -326,18 +340,18 @@ export default function KvmPanel() {
             </TableBody>
           </Table>
         )}
-      </div>
+      </Section>
 
       {/* ③ 已配对设备：连接 / 边缘映射 / 解除 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">已配对设备</Text>
-          <Badge appearance="outline">{paired.length}</Badge>
-        </div>
+      <Section
+        title="已配对设备"
+        actions={<Badge appearance="outline">{paired.length}</Badge>}
+      >
         {paired.length === 0 ? (
-          <Text size={200} className={styles.muted}>
-            尚未配对任何设备
-          </Text>
+          <EmptyState
+            text="尚未配对任何设备"
+            loading={!loaded}
+          />
         ) : (
           <Table size="small">
             <TableHeader>
@@ -396,7 +410,7 @@ export default function KvmPanel() {
                       >
                         {busy === d.device_id ? "连接中…" : "连接"}
                       </Button>
-                      <Button size="small" onClick={() => void doUnpair(d.device_id)}>
+                      <Button size="small" onClick={() => void doUnpair(d)}>
                         解除配对
                       </Button>
                     </div>
@@ -406,17 +420,16 @@ export default function KvmPanel() {
             </TableBody>
           </Table>
         )}
-      </div>
+      </Section>
 
       {/* ④ 边缘切换说明 */}
-      <div className={styles.section}>
-        <Text weight="semibold">边缘切换工作方式</Text>
+      <Section title="边缘切换工作方式">
         <Text size={200} className={styles.muted}>
           为设备设置"共享边缘"后（如 设备 B = 本机右缘），本机鼠标推到屏幕右缘即开始用键鼠控制
           B（本机输入被转发，B 端注入执行）；B 的鼠标移到它的左缘（回移）即切回本机，或随时按
           Ctrl+Alt+Shift+Q 切回。边缘映射会话建立后即时生效。
         </Text>
-      </div>
+      </Section>
     </div>
   );
 }

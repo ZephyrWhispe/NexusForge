@@ -16,12 +16,16 @@ import {
   type PairedPeerDto,
   type SyncStatusDto,
 } from "../../ipc/client";
+import Section from "../../components/Section";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 跨设备同步面板（docs/impl/07 SYNC1–SYNC4，M15 v1）：
  * - 拓扑：局域网 P2P（信任根复用 KVM 配对；端到端加密）
  * - 数据集 v1 = 笔记库；密码库永不自动同步
  * - 冲突：LWW 自动解 + sync.conflict 事件通知
+ * 面板内无删除/解绑类操作（解除配对只在「键鼠共享」面板做，D-18 已在那里加确认）。
  */
 const useStyles = makeStyles({
   root: {
@@ -33,15 +37,6 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   item: {
     padding: "6px 8px",
@@ -52,8 +47,6 @@ const useStyles = makeStyles({
   },
   itemBody: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "2px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
-  ok: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
   mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
 });
 
@@ -65,6 +58,8 @@ export default function SyncPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  // 首轮加载是否落定：未落定前空列表渲染加载态而非引导文案（D-18 假空态修正）
+  const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -74,6 +69,8 @@ export default function SyncPanel() {
       setError("");
     } catch (e) {
       setError(parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      setLoaded(true);
     }
   }, []);
 
@@ -100,20 +97,23 @@ export default function SyncPanel() {
 
   return (
     <div className={styles.root}>
-      {error && <Text className={styles.error}>{error}</Text>}
-      {!error && notice && <Text className={styles.ok}>{notice}</Text>}
+      <InlineError text={error} />
+      {!error && <InlineError text={notice} tone="success" />}
 
-      <div className={styles.section}>
-        <div className={styles.row}>
-          <Text weight="semibold">同步状态</Text>
-          {status && (
-            <>
-              <Badge appearance="outline">变更记录 {status.op_count} 条</Badge>
-              <Badge appearance="outline">监听 :{status.port}</Badge>
-            </>
-          )}
-          {busy && <Spinner size="tiny" />}
-        </div>
+      <Section
+        title="同步状态"
+        actions={
+          <>
+            {status && (
+              <>
+                <Badge appearance="outline">变更记录 {status.op_count} 条</Badge>
+                <Badge appearance="outline">监听 :{status.port}</Badge>
+              </>
+            )}
+            {busy && <Spinner size="tiny" />}
+          </>
+        }
+      >
         <div className={styles.row}>
           <Input
             size="small"
@@ -124,21 +124,24 @@ export default function SyncPanel() {
           />
           <Text className={styles.muted}>对端地址（局域网 IP + 端口）；两端须已通过「键鼠共享」配对。</Text>
         </div>
-      </div>
+      </Section>
 
-      <div className={styles.section}>
-        <div className={styles.row}>
-          <Text weight="semibold">配对设备（{peers.length}）</Text>
-          <Badge appearance="outline">E2E 加密 · LWW 冲突自动解</Badge>
-          <div style={{ flex: 1 }} />
-          <Button size="small" onClick={() => void load()}>
-            刷新
-          </Button>
-        </div>
+      <Section
+        title={`配对设备（${peers.length}）`}
+        actions={
+          <>
+            <Badge appearance="outline">E2E 加密 · LWW 冲突自动解</Badge>
+            <Button size="small" onClick={() => void load()}>
+              刷新
+            </Button>
+          </>
+        }
+      >
         {peers.length === 0 ? (
-          <Text className={styles.muted}>
-            暂无配对设备——先在「键鼠共享」模块完成配对（同步复用其信任根，无需二次配对）。
-          </Text>
+          <EmptyState
+            text="暂无配对设备——先在「键鼠共享」模块完成配对（同步复用其信任根，无需二次配对）。"
+            loading={!loaded}
+          />
         ) : (
           peers.map((p) => (
             <div key={p.device_id} className={styles.item}>
@@ -162,15 +165,14 @@ export default function SyncPanel() {
             </div>
           ))
         )}
-      </div>
+      </Section>
 
-      <div className={styles.section}>
-        <Text weight="semibold">同步范围</Text>
+      <Section title="同步范围">
         <Text className={styles.muted}>
           v1 数据集：笔记库（新建/修改/删除实时入变更流）。密码库条目**永不**自动同步（仅手动导出加密包）。
           冲突策略：同一笔记双向修改按时间戳取最新（LWW），被覆盖一侧以 sync.conflict 事件提示。
         </Text>
-      </div>
+      </Section>
     </div>
   );
 }

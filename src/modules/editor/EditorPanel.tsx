@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   makeStyles,
   tokens,
-  Text,
   Badge,
   Button,
   Input,
@@ -26,8 +25,11 @@ import {
   type PdfInfoDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
 import { languageForPath, monaco } from "../../monaco/setup";
-import { keyActivate } from "../../a11y";
+import Section from "../../components/Section";
+import InlineError from "../../components/InlineError";
+import EmptyState from "../../components/EmptyState";
 
 /**
  * 文本与 PDF 面板（docs/impl/06 E1–E4，M9 v1）：
@@ -36,6 +38,7 @@ import { keyActivate } from "../../a11y";
  *   脏后 3s 防抖 autosave（.nforge-autosave 崩溃恢复草稿）
  * - E3 Markdown 分栏预览（滚动比例同步）
  * - E4 PDF：合并/拆分/压缩/水印（lopdf，压缩结果更大自动保留原文件）
+ * - D-18：脏缓冲区关闭、PDF 原地改写（压缩/水印）一律经 confirmAction 二次确认
  */
 const useStyles = makeStyles({
   root: {
@@ -47,23 +50,12 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  section: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
-    backgroundColor: tokens.colorNeutralBackground1,
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-  },
-  sectionHead: { display: "flex", alignItems: "center", gap: "8px" },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "240px" },
-  muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  error: { color: tokens.colorPaletteRedForeground1, fontSize: tokens.fontSizeBase200 },
-  ok: { color: tokens.colorPaletteGreenForeground1, fontSize: tokens.fontSizeBase200 },
   warn: { color: tokens.colorPaletteMarigoldForeground1, fontSize: tokens.fontSizeBase200 },
   tabs: { display: "flex", gap: "4px", flexWrap: "wrap" },
+  // 标签胶囊 = 容器（边框/底色）+ 真 button 标签 + 真 button 关闭钮：
+  // 关闭钮不能嵌套在标签 button 内（按钮内不可有交互内容），故外层为容器而非 button
   tab: {
     display: "flex",
     alignItems: "center",
@@ -71,10 +63,35 @@ const useStyles = makeStyles({
     padding: "4px 10px",
     borderRadius: tokens.borderRadiusMedium,
     border: `1px solid ${tokens.colorNeutralStroke1}`,
-    cursor: "pointer",
     fontSize: tokens.fontSizeBase200,
   },
   tabActive: { backgroundColor: tokens.colorNeutralBackground3Hover, border: `1px solid ${tokens.colorBrandForeground1}` },
+  tabLabel: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    minWidth: 0,
+    padding: 0,
+    border: "none",
+    backgroundColor: "transparent",
+    color: "inherit",
+    fontFamily: "inherit",
+    fontSize: "inherit",
+    cursor: "pointer",
+  },
+  tabClose: {
+    padding: "0 2px",
+    border: "none",
+    borderRadius: tokens.borderRadiusSmall,
+    backgroundColor: "transparent",
+    color: tokens.colorNeutralForeground3,
+    fontFamily: "inherit",
+    fontSize: "inherit",
+    lineHeight: "1",
+    cursor: "pointer",
+    ":hover": { color: tokens.colorPaletteRedForeground1 },
+  },
+  dirtyDot: { color: tokens.colorPaletteMarigoldForeground1 },
   editorWrap: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
@@ -95,6 +112,11 @@ const useStyles = makeStyles({
   },
 });
 
+/** 确认框影响面点名（D-18）：绝对路径 → 文件名，兼容 \ 与 / */
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
 export default function EditorPanel() {
   const styles = useStyles();
   const [openPath, setOpenPath] = useState("");
@@ -105,6 +127,8 @@ export default function EditorPanel() {
   const [busy, setBusy] = useState("");
   const [mdPreview, setMdPreview] = useState(true);
   const [mdHtml, setMdHtml] = useState("");
+  // 首轮会话列表是否落定（成功或失败）：未落定前编辑区渲染加载态而非引导文案（D-18 假空态修正）
+  const [loaded, setLoaded] = useState(false);
 
   const editorHostRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
@@ -215,9 +239,19 @@ export default function EditorPanel() {
   }, [mdHtml, activeId]);
 
   const refreshSessions = useCallback(async () => {
-    const list = await editorSessions();
-    if (mounted.current) setSessions(list);
+    try {
+      const list = await editorSessions();
+      if (mounted.current) setSessions(list);
+    } finally {
+      // 失败同样算"已落定"：调用方（run/挂载 effect）负责把错误显示出来
+      if (mounted.current) setLoaded(true);
+    }
   }, []);
+
+  // 挂载即拉取会话列表：此前仅在 open/save/close 之后刷新，重进面板时标签条与后端实态不符
+  useEffect(() => {
+    void refreshSessions().catch((e) => setError(parseAppError(e)?.data.message ?? String(e)));
+  }, [refreshSessions]);
 
   const run = useCallback(async (key: string, action: () => Promise<unknown>) => {
     setBusy(key);
@@ -250,12 +284,25 @@ export default function EditorPanel() {
       );
     });
 
-  const doClose = (id: string) =>
-    run(`close-${id}`, async () => {
-      await editorClose(id);
-      if (activeId === id) setActiveId("");
+  // 关闭会话（D-18）：后端 close() 会销毁缓冲区并删除 .nforge-autosave 草稿，
+  // 未保存内容彻底丢失 → 脏缓冲区必须二次确认，干净的直接关不打扰。
+  const doClose = async (s: EditorSessionInfoDto) => {
+    if (
+      s.dirty &&
+      !(await confirmAction({
+        title: "关闭未保存的缓冲区",
+        impact: [`「${s.name}」有未保存修改，关闭将丢失更改`],
+        detail: "关闭会销毁编辑器缓冲区并删除 .nforge-autosave 草稿文件，磁盘上仍是上次保存的内容。",
+        confirmLabel: "放弃并关闭",
+      }))
+    )
+      return;
+    await run(`close-${s.id}`, async () => {
+      await editorClose(s.id);
+      if (activeId === s.id) setActiveId("");
       await refreshSessions();
     });
+  };
 
   // Ctrl+S 保存当前会话
   useEffect(() => {
@@ -287,31 +334,74 @@ export default function EditorPanel() {
       if (pdfPath.trim()) setPdfInfoState(await pdfInfo(pdfPath.trim()));
     });
 
+  // 压缩（D-18）：有收益时新文件 rename 覆盖源 PDF 且不留备份 → 先确认
+  const doCompress = async () => {
+    const path = pdfPath.trim();
+    if (
+      !(await confirmAction({
+        title: "压缩 PDF",
+        impact: [`将原地重写「${baseName(path)}」`],
+        detail: "压缩有收益时结果文件直接替换原文件且不保留备份；若变大则自动保留原文件。",
+        confirmLabel: "压缩",
+      }))
+    )
+      return;
+    await pdfRun("pdf-compress", async () => {
+      const r = await pdfCompress(path);
+      setStatus(`压缩完成：${(r.size / 1024).toFixed(0)} KB（若更大已自动保留原文件）`);
+    });
+  };
+
+  // 水印（D-18）：逐页盖印后直接 save 回源路径，属不可逆的原文件改写 → 先确认
+  const doWatermark = async () => {
+    const path = pdfPath.trim();
+    const text = wmText.trim();
+    if (
+      !(await confirmAction({
+        title: "写入 PDF 水印",
+        impact: [
+          `将逐页叠加水印并覆盖保存「${baseName(path)}」`,
+          `水印文本：${text}`,
+          pdfInfoState ? `影响页数：${pdfInfoState.pages} 页` : "页数未知：可先取消并点「信息」读取",
+        ],
+        detail: "水印写回源文件本身，不生成副本，写入后无法撤销。",
+        confirmLabel: "写入水印",
+      }))
+    )
+      return;
+    await pdfRun("pdf-wm", async () => {
+      await pdfWatermark(path, text);
+      setStatus("水印已写入");
+    });
+  };
+
   return (
     <div className={styles.root}>
       {/* E1 会话管理 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">文本编辑</Text>
-          {active && (
-            <>
-              <Badge appearance="outline">{active.encoding_label}</Badge>
-              <Badge appearance="outline">{active.eol.toUpperCase()}</Badge>
-              {active.dirty && <Badge appearance="filled" color="warning">未保存</Badge>}
-              {active.big_file && <Badge appearance="outline">大文件·已关高亮</Badge>}
-              {active.readonly && <Badge appearance="filled" color="danger">只读</Badge>}
-              {active.eol_mixed && (
-                <span className={styles.warn}>检测到混合行尾，保存将整文件统一为 {active.eol.toUpperCase()}</span>
-              )}
-            </>
-          )}
-          <span className={styles.grow} />
-          {active && active.dirty && (
-            <Button size="small" appearance="primary" disabled={busy !== ""} onClick={() => doSave(active.id)}>
-              保存（Ctrl+S）
-            </Button>
-          )}
-        </div>
+      <Section
+        title="文本编辑"
+        actions={
+          <>
+            {active && (
+              <>
+                <Badge appearance="outline">{active.encoding_label}</Badge>
+                <Badge appearance="outline">{active.eol.toUpperCase()}</Badge>
+                {active.dirty && <Badge appearance="filled" color="warning">未保存</Badge>}
+                {active.big_file && <Badge appearance="outline">大文件·已关高亮</Badge>}
+                {active.readonly && <Badge appearance="filled" color="danger">只读</Badge>}
+                {active.eol_mixed && (
+                  <span className={styles.warn}>检测到混合行尾，保存将整文件统一为 {active.eol.toUpperCase()}</span>
+                )}
+              </>
+            )}
+            {active && active.dirty && (
+              <Button size="small" appearance="primary" disabled={busy !== ""} onClick={() => doSave(active.id)}>
+                保存（Ctrl+S）
+              </Button>
+            )}
+          </>
+        }
+      >
         <div className={styles.row}>
           <Input
             className={styles.grow}
@@ -333,30 +423,27 @@ export default function EditorPanel() {
           )}
         </div>
         {sessions.length > 0 && (
-          <div className={styles.tabs} role="tablist">
+          <div className={styles.tabs} role="tablist" aria-label="已打开的缓冲区">
             {sessions.map((s) => (
-              <div
-                key={s.id}
-                className={`${styles.tab} ${s.id === activeId ? styles.tabActive : ""}`}
-                onClick={() => setActiveId(s.id)}
-                role="tab"
-                tabIndex={0}
-                onKeyDown={keyActivate(() => setActiveId(s.id))}
-                aria-selected={s.id === activeId}
-              >
-                {s.dirty && <span style={{ color: tokens.colorPaletteMarigoldForeground1 }}>●</span>}
-                {s.name}
-                <span
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void doClose(s.id);
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={keyActivate(() => void doClose(s.id))}
+              <div key={s.id} className={`${styles.tab} ${s.id === activeId ? styles.tabActive : ""}`}>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={s.id === activeId}
+                  className={styles.tabLabel}
+                  onClick={() => setActiveId(s.id)}
+                >
+                  {s.dirty && <span className={styles.dirtyDot}>●</span>}
+                  {s.name}
+                </button>
+                <button
+                  type="button"
+                  className={styles.tabClose}
+                  aria-label={`关闭 ${s.name}`}
+                  onClick={() => void doClose(s)}
                 >
                   ✕
-                </span>
+                </button>
               </div>
             ))}
           </div>
@@ -374,22 +461,24 @@ export default function EditorPanel() {
             ) : null}
           </div>
         ) : (
-          <span className={styles.muted}>
-            输入路径打开文件；&gt;5MB 自动关闭语法高亮，&gt;50MB 只读；修改后 3s 自动存草稿（.nforge-autosave）
-          </span>
+          <EmptyState
+            text="输入路径打开文件；>5MB 自动关闭语法高亮，>50MB 只读；修改后 3s 自动存草稿（.nforge-autosave）"
+            loading={!loaded}
+          />
         )}
-      </div>
+      </Section>
 
       {/* E4 PDF 工具 */}
-      <div className={styles.section}>
-        <div className={styles.sectionHead}>
-          <Text weight="semibold">PDF 工具</Text>
-          {pdfInfoState && (
+      <Section
+        title="PDF 工具"
+        actions={
+          pdfInfoState && (
             <Badge appearance="outline">
               {pdfInfoState.pages} 页 · {(pdfInfoState.size / 1024).toFixed(0)} KB
             </Badge>
-          )}
-        </div>
+          )
+        }
+      >
         <div className={styles.row}>
           <Input
             className={styles.grow}
@@ -420,12 +509,7 @@ export default function EditorPanel() {
           <Button
             size="small"
             disabled={busy !== "" || pdfPath.trim() === ""}
-            onClick={() =>
-              pdfRun("pdf-compress", async () => {
-                const r = await pdfCompress(pdfPath.trim());
-                setStatus(`压缩完成：${(r.size / 1024).toFixed(0)} KB（若更大已自动保留原文件）`);
-              })
-            }
+            onClick={() => void doCompress()}
           >
             压缩
           </Button>
@@ -439,12 +523,7 @@ export default function EditorPanel() {
           <Button
             size="small"
             disabled={busy !== "" || pdfPath.trim() === "" || wmText.trim() === ""}
-            onClick={() =>
-              pdfRun("pdf-wm", async () => {
-                await pdfWatermark(pdfPath.trim(), wmText.trim());
-                setStatus("水印已写入");
-              })
-            }
+            onClick={() => void doWatermark()}
           >
             水印
           </Button>
@@ -478,11 +557,11 @@ export default function EditorPanel() {
             合并
           </Button>
         </div>
-      </div>
+      </Section>
 
       {busy && <Spinner size="tiny" label="处理中…" />}
-      {status && <span className={styles.ok}>{status}</span>}
-      {error && <span className={styles.error}>{error}</span>}
+      <InlineError text={status} tone="success" />
+      <InlineError text={error} />
     </div>
   );
 }
