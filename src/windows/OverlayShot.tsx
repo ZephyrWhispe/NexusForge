@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { makeStyles, tokens, Button, Text } from "@fluentui/react-components";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import {
@@ -761,12 +761,20 @@ export default function OverlayShot() {
           const { openPinWindow } = await import("./overlayController");
           const pw = crop?.width ?? 200;
           const ph = crop?.height ?? 200;
-          const dpr = window.devicePixelRatio || 1;
+          // D-23：贴图居中于截图所在显示器（currentMonitor 给出该窗口的物理矩形；
+          // crop 宽高本就是物理像素，无需再乘 devicePixelRatio——旧式 screen.width×dpr
+          // 恒以主屏为基准，混合 DPI 双屏时副屏截图的贴图必落在错误显示器）
+          const mon = await currentMonitor();
+          const cx = mon
+            ? mon.position.x + Math.round((mon.size.width - pw) / 2)
+            : Math.round(((window.screen.width * (window.devicePixelRatio || 1)) - pw) / 2);
+          const cy = mon
+            ? mon.position.y + Math.round((mon.size.height - ph) / 2)
+            : Math.round(((window.screen.height * (window.devicePixelRatio || 1)) - ph) / 2);
           await openPinWindow({
             id: result.pin_id,
-            // 物理像素居中（screen 是 CSS 像素，需乘 dpr）
-            x: Math.round((window.screen.width * dpr) / 2 - pw / 2),
-            y: Math.round((window.screen.height * dpr) / 2 - ph / 2),
+            x: cx,
+            y: cy,
             width: pw,
             height: ph,
             zoom: 1,

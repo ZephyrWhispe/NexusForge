@@ -342,14 +342,15 @@ pub fn ocr_engine_status(state: State<'_, HostState>) -> ocr_core::types::Engine
     state.ocr.status()
 }
 
-/// OCR 结果"复制全部"（走 ClipboardPort，写入剪贴板并进入剪贴板历史）
+/// OCR 结果"复制全部"（D-10：走剪贴板回写窗口写入系统剪贴板，
+/// 置 500ms 自捕获抑制，不产生新历史条目）
 #[tauri::command]
 pub async fn ocr_copy_text(text: String, state: State<'_, HostState>) -> Result<(), AppError> {
     use host_core::ports::ClipContent;
-    let screenshot = state.screenshot.clone();
+    let clipboard = state.clipboard.clone();
     let bus = state.bus.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        screenshot.copy_text(&ClipContent::Text { text, html: None })
+        clipboard.write_back(&ClipContent::Text { text, html: None })
     })
     .await
     .map_err(|e| AppError::module("OCR_RUN_004", e.to_string(), None))??;

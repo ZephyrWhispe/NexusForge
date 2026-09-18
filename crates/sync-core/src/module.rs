@@ -224,7 +224,7 @@ impl SyncModule {
             identity: RwLock::new(None),
             store: Arc::new(store),
             port: AtomicU16::new(DEFAULT_SYNC_PORT),
-            db_path: app_data_dir.join("sync").join("sync.db"),
+            db_path: app_data_dir.join("db").join("sync.db"),
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -237,6 +237,41 @@ impl SyncModule {
     /// 监听端口注入（测试随机端口）
     pub fn set_port(&self, port: u16) {
         self.port.store(port, Ordering::SeqCst);
+    }
+
+    /// D-12：本模块 SQLite 库路径（宿主 O3 归位断言用）
+    pub fn db_path(&self) -> &std::path::Path {
+        &self.db_path
+    }
+
+    /// D-12 一次性归位：旧路径 {appData}/sync/sync.db → {appData}/db/sync.db。
+    /// 仅当新路径不存在且旧文件存在时搬移（含 WAL/SHM 伴生文件）；无正式发布版本，
+    /// 搬移后旧条件永假，幂等。
+    fn migrate_legacy_db_path(&self) {
+        let Some(new_parent) = self.db_path.parent() else { return };
+        let Some(app_data) = new_parent.parent() else { return };
+        let legacy = app_data.join("sync").join("sync.db");
+        if !legacy.exists() || self.db_path.exists() {
+            return;
+        }
+        if let Err(e) = std::fs::create_dir_all(new_parent) {
+            tracing::warn!(error = %e, "db 目录创建失败，sync.db 归位跳过");
+            return;
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let src = PathBuf::from(format!("{}{}", legacy.display(), suffix));
+            if !src.exists() {
+                continue;
+            }
+            let dst = PathBuf::from(format!("{}{}", self.db_path.display(), suffix));
+            if let Err(e) = std::fs::rename(&src, &dst) {
+                tracing::warn!(error = %e, "sync.db 归位搬移失败");
+                return;
+            }
+        }
+        // 旧目录此时应已为空；非空（历史杂项）则保留不误删
+        let _ = std::fs::remove_dir(app_data.join("sync"));
+        tracing::info!("sync.db 已从 {}/sync 归位到 db/（D-12）", app_data.display());
     }
 
     /// 配对设备列表（SYNC 面板）
@@ -351,6 +386,7 @@ impl Module for SyncModule {
         let identity = DeviceIdentity::load_or_create(&ctx.app_data_dir.join("kvm"), crypto)
             .map_err(|e| ModuleError::Init(e.to_string()))?;
         *self.identity.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(identity));
+        self.migrate_legacy_db_path();
         let log = OpLog::open(&self.db_path).map_err(|e| ModuleError::Init(e.to_string()))?;
         *self.log.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(Arc::new(log));
         *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
@@ -429,5 +465,58 @@ impl Module for SyncModule {
             1 => ModuleState::Stopped,
             _ => ModuleState::Running,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_appdata(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nf_syncmod_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// D-12 归位断言：sync.db 父目录必须是 db/（防止后续新增模块重犯）
+    #[test]
+    fn db_path_is_under_db_dir() {
+        let dir = temp_appdata("d12path");
+        let m = SyncModule::new(&dir);
+        let parent = m.db_path().parent().unwrap();
+        assert!(parent.ends_with("db"), "sync.db 应位于 {{appData}}/db/ 下，实际 {parent:?}");
+        assert_eq!(m.db_path().file_name().unwrap(), "sync.db");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-12 一次性搬移：旧 sync/sync.db（含 WAL 伴生）→ db/sync.db；幂等；不覆盖已有新库
+    #[test]
+    fn legacy_db_moved_once_and_idempotent() {
+        let dir = temp_appdata("d12move");
+        let legacy_dir = dir.join("sync");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("sync.db"), b"legacy-bytes").unwrap();
+        std::fs::write(legacy_dir.join("sync.db-wal"), b"wal-bytes").unwrap();
+
+        let m = SyncModule::new(&dir);
+        m.migrate_legacy_db_path();
+        assert_eq!(std::fs::read(m.db_path()).unwrap(), b"legacy-bytes");
+        assert_eq!(std::fs::read(dir.join("db").join("sync.db-wal")).unwrap(), b"wal-bytes");
+        assert!(!legacy_dir.exists(), "搬移后旧空目录应被移除");
+
+        // 幂等：再跑一次不动内容
+        m.migrate_legacy_db_path();
+        assert_eq!(std::fs::read(m.db_path()).unwrap(), b"legacy-bytes");
+
+        // 新路径已存在库时绝不被旧文件覆盖
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("sync.db"), b"stale-legacy").unwrap();
+        m.migrate_legacy_db_path();
+        assert_eq!(
+            std::fs::read(m.db_path()).unwrap(),
+            b"legacy-bytes",
+            "已有 db/sync.db 不应被旧路径文件覆盖"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

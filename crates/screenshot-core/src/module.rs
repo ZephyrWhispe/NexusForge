@@ -583,16 +583,4 @@ impl ScreenshotModule {
     pub fn history_store(&self) -> Option<Arc<ShotStore>> {
         self.store.read().ok().and_then(|g| g.clone())
     }
-
-    /// 文本写入剪贴板（OCR 结果"复制全部"等；写系统剪贴板，
-    /// 剪贴板模块将其作为正常捕获入库）
-    pub fn copy_text(&self, content: &host_core::ports::ClipContent) -> Result<(), AppError> {
-        let clipboard = self
-            .clipboard
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "ClipboardPort 未就绪"))?;
-        clipboard.write(content)
-    }
 }

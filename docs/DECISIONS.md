@@ -19,9 +19,9 @@
 | D-07 | 截图捕获 v1 以 GDI/PrintWindow 为主路径 | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-08 | 录屏（P7）移出 v1，列入 v1.1 | 改规范 | P1 | 3 | 已裁决（文档生效） |
 | D-09 | OCR v1 单引擎 + 保留引擎抽象扩展点 | 改规范 + 补骨架 | P1 | 2/3 | 待实施 |
-| D-10 | OCR「复制全部」走剪贴板回写窗口 | 补实现 | P1 | 1 | 待实施 |
+| D-10 | OCR「复制全部」走剪贴板回写窗口 | 补实现 | P1 | 1 | 已完成 |
 | D-11 | 编辑器 PDF 保持纯 Rust（lopdf） | 改规范 | P2 | — | 已裁决（文档生效） |
-| D-12 | 同步库归位 `db/sync.db` | 补实现 | P1 | 1 | 待实施 |
+| D-12 | 同步库归位 `db/sync.db` | 补实现 | P1 | 1 | 已完成 |
 | D-13 | WinOps v1 交付范围收敛为 5 命令 | 改规范 | P2 | 3 | 已裁决（文档生效） |
 | D-14 | 引入 Zustand 三 store，替换轮询与静态状态 | 补实现 | P1 | 1 | 待实施 |
 | D-15 | 锁策略统一（parking_lot + 回调无锁快照） | 补实现 | P0 | 2 | 待实施 |
@@ -32,7 +32,7 @@
 | D-20 | ConPTY 诊断探针与验收门禁治理 | 治理 | P0 | 0 | 已完成 |
 | D-21 | 仓库治理与开源合规补齐 | 治理 | P0 | 0 | 已完成 |
 | D-22 | 批次划分、执行顺序与质量门槛 | 流程 | P0 | — | 已裁决（文档生效） |
-| D-23 | 多显示器 / 混合 DPI 策略 | 补实现 | P1 | 1 | 待实施 |
+| D-23 | 多显示器 / 混合 DPI 策略 | 补实现 | P1 | 1 | 已完成 |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -132,12 +132,14 @@
 - **背景（实测）**：`ocr_copy_text` 经 `ScreenshotModule::copy_text` 直写系统剪贴板（`crates/screenshot-core/src/module.rs:586-596`），未置回写窗口 → 必然新增一条剪贴板记录，与 impl/04 验收"复制全部不触发剪贴板重复记录"冲突（impl/03 又写"OCR 结果发回 clipboard.captured"，两份文档自相矛盾）。
 - **决策**：以 **impl/04 的验收为准**：OCR 结果写入剪贴板时置入既有 500ms 回写窗口（`crates/clipboard-core/src/pipeline.rs:24` 的 `WRITE_BACK_WINDOW`），**不产生新历史条目**；同时把 impl/03 的矛盾表述修正为"OCR 结果写入剪贴板，不回灌历史"。
 - **理由**：OCR 文本是用户显式"复制"动作，回灌会让历史被 OCR 噪声污染；回写窗口机制已存在且被 `clipboard_paste` 正常使用，复用即可。
+- **完成证据（2026-09-18）**：`ocr_copy_text` 改走 `ClipboardModule::write_back()`（置窗口后写端口），`ScreenshotModule::copy_text` 随唯一调用者删除；impl/03 矛盾表述改为"发 ocr.completed；复制全部经回写窗口、不回灌历史"；回归测试 `write_back_window_suppresses_self_capture` 断言窗口内事件不入库、窗口外恰入 1 条（`cargo test -p clipboard-core` 18/18）。
 
 ### D-12 同步库归位 `db/sync.db`
 
 - **决策**：`crates/sync-core/src/module.rs:227` 的 `{appData}/sync/sync.db` 改为 `{appData}/db/sync.db`，与 O3 的"每模块独立库统一在 `db/` 下"一致；启动时若发现旧路径文件则搬移（当前无正式发布版本，兼容逻辑仅需一次）。
 - **附加**：新增断言测试 `db_path.parent().ends_with("db")`，防止后续新增模块重犯。
 - **理由**：`db/` 目录是备份/迁移/卸载残留清理的枚举入口，散落外部会导致漏备份与卸载残留。
+- **完成证据（2026-09-18）**：`SyncModule::new` 的 `db_path` 改为 `{appData}/db/sync.db`；init 前 `migrate_legacy_db_path()` 一次性搬移旧文件（含 -wal/-shm 伴生，新库存在则绝不覆盖，旧空目录移除、非空保留）；测试 `db_path_is_under_db_dir`（父目录 ends_with("db") 断言）+ `legacy_db_moved_once_and_idempotent`（搬移/幂等/不覆盖三断言），`cargo test -p sync-core` 全绿。
 
 ### D-23 多显示器 / 混合 DPI 策略
 
@@ -146,6 +148,7 @@
   1. **批次 1（低成本必做）**：贴图/覆盖层定位改用 `currentMonitor()`（含 `position` 与 `scaleFactor`）取代 `screen.width`；移除硬编码偏移。
   2. **v1.1**：按 `availableMonitors()` 为每块屏创建独立覆盖窗口，各自使用本屏 `scaleFactor` 换算 —— 这需要重做覆盖层生命周期，与批次 1/2 无关，单独立项。
 - **理由**：定位错屏是"明显错误"，成本极低必须先修；每屏多窗口是架构级改动，不应阻塞安全红线批次。
+- **完成证据（2026-09-18，批次 1 范围）**：贴图居中改用 `currentMonitor()`（截图覆盖层所在显示器的物理矩形，position + size 直算），移除 `screen.width × dpr` 主屏基准换算与硬编码；crop 物理宽高原样使用不再乘 dpr；`npx tsc --noEmit` 零错误。第 2 条（每屏独立覆盖窗口）按裁决留在 v1.1。
 
 ---
 

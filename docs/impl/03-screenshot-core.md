@@ -105,7 +105,8 @@ pub trait PostAction: Send + Sync {
 pub struct ShotOutput { pub frame: Frame, pub file: Option<PathBuf>, pub task_id: String }
 // Pipeline: 顺序执行用户配置的 action 列表；任一失败：记录并继续（SaveTo 失败除外→整体报错）
 // Upload 为插件点（阶段四接入）；Ocr 动作转发给 ocr-core（经事件总线 screenshot.ocr_requested，
-// 由 ocr-core 订阅处理并把结果发回 clipboard.captured —— 跨模块只走事件，DESIGN O1）
+// 由 ocr-core 订阅处理并发 ocr.completed 供截图 UI 显示；OCR 结果的"复制全部"经剪贴板
+// 回写窗口写入系统剪贴板、不回灌历史条目 —— 跨模块只走事件，DESIGN O1）
 ```
 
 ### 潜在问题

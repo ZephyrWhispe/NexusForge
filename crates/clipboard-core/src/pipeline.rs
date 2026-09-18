@@ -417,4 +417,46 @@ mod tests {
         let total: usize = handles.iter().map(|h| h.live_workers()).sum();
         assert_eq!(total, 0, "5 轮启停后存活 worker 总数应为 0，实际 {total}");
     }
+
+    #[test]
+    fn write_back_window_suppresses_self_capture() {
+        // 回归 D-10：回写窗口（500ms）内的写入（OCR"复制全部"、历史粘贴）不得
+        // 生成新历史条目；窗口过期后的正常捕获不受影响。
+        let store = temp_store("wb");
+        let bus = Arc::new(EventBus::new());
+        let port = Arc::new(FakeClipboard { cb: Arc::new(Mutex::new(None)) });
+        let crypto = Arc::new(FakeCrypto);
+        let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
+        let write_back = Arc::new(Mutex::new(None));
+        let handle = CapturePipeline::start(
+            port.clone(),
+            store.clone(),
+            bus,
+            crypto,
+            config,
+            write_back.clone(),
+        )
+        .unwrap();
+
+        *write_back.lock().unwrap() = Some(Instant::now());
+        fire(&port, "in-window-must-be-dropped");
+        std::thread::sleep(WRITE_BACK_WINDOW + Duration::from_millis(150));
+        fire(&port, "out-of-window-captured");
+
+        assert!(
+            wait_until(
+                || store.search(&crate::types::SearchQuery::default()).unwrap().items.len() == 1,
+                Duration::from_secs(2)
+            ),
+            "窗口外事件应恰生成 1 条记录"
+        );
+        std::thread::sleep(WRITE_BACK_WINDOW + Duration::from_millis(300));
+        assert_eq!(
+            store.search(&crate::types::SearchQuery::default()).unwrap().items.len(),
+            1,
+            "窗口内事件不得入库（OCR 复制全部产生重复记录的根因）"
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
 }
