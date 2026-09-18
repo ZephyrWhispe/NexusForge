@@ -1,6 +1,6 @@
 //! C4 敏感数据保护（docs/impl/02 C4）
 //!
-//! 规则链按序短路命中；命中内容经 CryptoPort(DPAPI) 加密后入库，
+//! 规则链按序短路命中；命中内容经 CryptoPort(AES-256-GCM 信封，D-04) 加密后入库，
 //! preview 永远为遮蔽文案，**禁止**明文进日志（tracing 事件同理）。
 
 use std::sync::OnceLock;

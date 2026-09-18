@@ -17,6 +17,7 @@ pub mod clipboard;
 pub mod conpty;
 pub mod docker;
 pub mod dpapi;
+pub mod envelope;
 pub mod helper;
 pub mod hotkey;
 pub mod input;

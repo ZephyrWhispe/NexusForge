@@ -103,7 +103,7 @@ impl Module for ClipboardModule {
         let crypto = ctx
             .ports
             .get::<dyn CryptoPort>()
-            .ok_or_else(|| err("CLIPBOARD_INIT_002", "CryptoPort 未注册（DPAPI 缺失）"))?;
+            .ok_or_else(|| err("CLIPBOARD_INIT_002", "CryptoPort 未注册（信封加密缺失）"))?;
 
         // 捕获管线启动（worker 常驻；panic 由注册表隔离层捕获）
         CapturePipeline::start(
@@ -317,7 +317,7 @@ impl ClipboardModule {
             .pop_stack()
     }
 
-    /// 解密读取（clipboard_get；DPAPI 经 CryptoPort）
+    /// 解密读取（clipboard_get；信封解密经 CryptoPort）
     pub fn get_content(&self, id: &str) -> Result<Option<String>, AppError> {
         let store = self
             .store()

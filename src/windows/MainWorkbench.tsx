@@ -195,7 +195,7 @@ export default function MainWorkbench() {
                   <Badge appearance="outline">{current?.phase ?? "P0"}</Badge>
                   <span className={styles.meta}>
                     {isClipboard
-                      ? "历史 · 保留 30 天 · 敏感数据已加密（DPAPI）"
+                      ? "历史 · 保留 30 天 · 敏感数据已加密（AES-256-GCM 信封）"
                       : isKvm
                         ? "发现 · 配对 · 会话 · 边缘切换（TCP+UDP+X25519）"
                         : isVault

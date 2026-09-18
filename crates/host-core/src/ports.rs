@@ -401,7 +401,7 @@ pub trait HotkeyWinPort: Port {
     fn set_dispatcher(&self, dispatcher: Arc<dyn Fn(i32) + Send + Sync>);
 }
 
-/// 本机数据加密（DPAPI 封装，剪贴板敏感条目存储用，docs/impl/02 C4）
+/// 本机数据加密（剪贴板敏感条目：AES-256-GCM 信封 + DPAPI 包裹 DEK，D-04；docs/impl/02 C4）
 pub trait CryptoPort: Port {
     fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError>;
     fn unprotect(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError>;

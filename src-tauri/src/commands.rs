@@ -80,7 +80,7 @@ pub async fn clipboard_search(
         .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
 }
 
-/// 解密读取条目内容（secret 条目经 DPAPI 还原）
+/// 解密读取条目内容（secret 条目经信封解密还原，D-04）
 #[tauri::command]
 pub async fn clipboard_get(id: String, state: State<'_, HostState>) -> Result<String, AppError> {
     let clipboard = state.clipboard.clone();

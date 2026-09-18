@@ -124,7 +124,7 @@ impl ClipStore {
         Ok(id)
     }
 
-    /// 写入加密后的密文（secret 条目专用；密文经 DPAPI，Base64 由调用方处理）
+    /// 写入加密后的密文（secret 条目专用；密文为信封格式（D-04），Base64 由调用方处理）
     pub fn insert_encrypted(&self, encrypted_b64: &str, group: Option<&'static str>, source_app: Option<&str>) -> Result<String, AppError> {
         let hash = content_hash(encrypted_b64);
         let id = uuid::Uuid::now_v7().to_string();
@@ -139,7 +139,7 @@ impl ClipStore {
         Ok(id)
     }
 
-    /// 解密读取（clipboard_get 专用；secret 条目需 DPAPI 还原）
+    /// 解密读取（clipboard_get 专用；secret 条目需信封解密还原）
     pub fn get_content(&self, id: &str, unprotect: impl Fn(&[u8]) -> Result<Vec<u8>, AppError>) -> Result<Option<String>, AppError> {
         let conn = self.conn.lock().expect("clipboard db 锁");
         let row: Option<(String, Option<String>, i64)> = conn

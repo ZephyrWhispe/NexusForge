@@ -12,6 +12,10 @@ tracing.workspace = true
 image.workspace = true
 # ConPTY worker（docs/impl/06 T1）：PtyHandle 为 tokio mpsc 契约 + 写/resize 串行 worker
 tokio.workspace = true
+# 剪贴板信封加密（D-04）：DEK=AES-256-GCM 正文加密，DPAPI 仅包裹 DEK
+aes-gcm.workspace = true
+rand.workspace = true
+zeroize.workspace = true
 
 [dependencies.windows]
 version = "0.58"

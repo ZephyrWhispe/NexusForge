@@ -7268,12 +7268,15 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 name = "win-integration"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "host-core",
  "image",
  "portable-pty",
+ "rand 0.8.8",
  "tokio",
  "tracing",
  "windows 0.58.0",
+ "zeroize",
 ]
 
 [[package]]

@@ -18,7 +18,7 @@ use host_core::registry::ModuleRegistry;
 use serde::Serialize;
 use win_integration::capture::GdiCapture;
 use win_integration::clipboard::WindowsClipboard;
-use win_integration::dpapi::Dpapi;
+use win_integration::envelope::EnvelopeCrypto;
 use win_integration::hotkey::HotkeyWin;
 use win_integration::input::{InputHookWin, InputInjectWin, ScreenInfoWin};
 use win_integration::ocr::WinOcr;
@@ -106,7 +106,7 @@ impl HostState {
         let ports = Arc::new(Ports::new());
         // 真实 Windows 能力注册（win-integration）
         ports.register::<dyn ClipboardPort>(Arc::new(WindowsClipboard::new()));
-        ports.register::<dyn CryptoPort>(Arc::new(Dpapi));
+        ports.register::<dyn CryptoPort>(Arc::new(EnvelopeCrypto::with_dpapi()));
         // 屏幕捕获：GDI BitBlt（docs/impl/03 P2，v1 主路径）
         ports.register::<dyn CapturePort>(Arc::new(GdiCapture::new()));
         // 系统 OCR：Windows.Media.Ocr（docs/impl/04 O2）
