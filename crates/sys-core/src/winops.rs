@@ -1,4 +1,4 @@
-//! WinOps Tweak 引擎（docs/impl/08 W0–W3）：catalog 数据驱动 + BAVR 执行语义。
+//! WinOps Tweak 引擎（docs/impl/08 W0–W4）：catalog 数据驱动 + BAVR 执行语义。
 //!
 //! - BAVR：Backup（先落库原值）→ Apply → Verify；verify 失败即补偿回滚（apply 内闭环）
 //!   ——verify 之后的"回归重扫提示"是另一独立动作，不自动回滚（文档定稿）
@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use host_core::ports::{RegValue, RegistryOps, ServiceCtlPort, StartType, TaskTogglePort};
+use host_core::ports::{AppxPort, MaintenancePort, RegValue, RegistryOps, ServiceCtlPort, StartType, TaskTogglePort};
 
 use crate::error::{Result as SysResult, SysError};
 
@@ -33,7 +33,18 @@ pub struct Tweak {
     /// 含需管理员动作（Service / 系统计划任务）——非提权进程扫描标 needs_admin、apply 拒绝
     #[serde(default)]
     pub requires_admin: bool,
+    /// 维护型 tweak（clear_cache 等）：无"已应用"状态（scan 恒 NotApplied、verify 不做状态回读）
+    #[serde(default)]
+    pub maintenance: bool,
     pub actions: Vec<TweakAction>,
+}
+
+/// 服务启停动作（与 start_type 互斥使用；stop/start 为瞬态操作）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SvcAction {
+    Stop,
+    Start,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,18 +57,66 @@ pub enum TweakAction {
         value_type: String,
         data: RegValue,
     },
-    /// 服务启动类型（需管理员；sc.exe 封装）
+    /// 服务控制（需管理员；sc.exe 封装）——start_type 持久配置 / action 瞬态启停
     Service {
         name: String,
-        start_type: StartType,
+        #[serde(default)]
+        start_type: Option<StartType>,
+        #[serde(default)]
+        action: Option<SvcAction>,
     },
     /// 计划任务启停（系统内置任务需管理员；schtasks /Change 封装）
     Task {
         path: String,
         enabled: bool,
     },
-    /// 预留：Appx/FileClean/Exec 等 W3+ 动作类型（catalog 出现即报"需更高版本"）
+    /// 文件清理（维护型；SoftwareDistribution\Download 等需提权——helper 路径白名单硬限制）
+    FileClean {
+        path: String,
+        #[serde(default = "default_recursive")]
+        recursive: bool,
+        #[serde(default = "default_skip_hours")]
+        skip_recent_hours: u32,
+    },
+    /// Appx 包移除（all_users=false 当前用户本地移除；true provisioned 移除需管理员——helper）
+    AppxRemove {
+        name: String,
+        #[serde(default)]
+        all_users: bool,
+    },
+    /// 白名单程序执行（powercfg|dism|sfc|netsh|onedrive_uninstall——win-integration 层精确匹配）
+    Exec {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default = "default_exec_timeout")]
+        timeout_ms: u32,
+    },
+    /// 创建系统还原点（W6 维护；系统还原未开启如实报错）
+    RestorePoint {
+        #[serde(default)]
+        description: String,
+    },
+    /// 清理各进程工作集（内存整理）
+    EmptyWorkingSet {},
+    /// Defender 实时保护开关（高风险——篡改保护拦截时如实报错）
+    DefenderRealtime {
+        disable: bool,
+    },
+    /// 预留：HostsPatch 等 W7+ 动作类型（catalog 出现即报"需更高版本"）
     Unsupported { kind: String },
+}
+
+fn default_recursive() -> bool {
+    true
+}
+
+fn default_skip_hours() -> u32 {
+    24
+}
+
+fn default_exec_timeout() -> u32 {
+    30_000
 }
 
 /// 扫描三态（needs_admin 优先于状态判定：无权限时状态无意义）
@@ -75,10 +134,18 @@ pub enum ScanState {
 pub enum BackupItem {
     /// 注册表值（existed=false → 恢复为"不存在"）
     Registry(RegistryBackup),
-    /// 服务启动类型（恢复 = 写回原 start_type）
-    Service { name: String, start_type: StartType },
+    /// 服务状态（恢复 = 写回原 start_type + 原运行中则拉起；was_running 默认兼容 v2 旧记录）
+    Service { name: String, start_type: StartType, #[serde(default)] was_running: bool },
     /// 计划任务（existed=false → 无法恢复，跳过）
     Task { path: String, existed: bool, enabled: bool },
+    /// 文件清理（无需备份——恢复为空操作，维护型不可逆）
+    FileClean,
+    /// Appx 包（恢复为空操作——卸载后可从 Store 重装；was_installed 供回归检测）
+    Appx { name: String, all_users: bool, was_installed: bool },
+    /// Exec 执行（无原状备份——powercfg 等不可逆；占位条目）
+    Exec,
+    /// Defender 开关（无原状备份——恢复由对称 catalog 条目承担；占位条目）
+    DefenderRealtime,
 }
 
 /// 单注册表值备份（existed 区分"原不存在"与"原为空"）
@@ -91,11 +158,13 @@ pub struct RegistryBackup {
     pub old_value: Option<RegValue>,
 }
 
-/// Port 聚合（registry 必备；tasks/services 随动作类型可选）
+/// Port 聚合（registry 必备；tasks/services/maintenance/appx 随动作类型可选）
 pub struct SysPorts<'a> {
     pub registry: &'a dyn RegistryOps,
     pub tasks: Option<&'a dyn TaskTogglePort>,
     pub services: Option<&'a dyn ServiceCtlPort>,
+    pub maintenance: Option<&'a dyn MaintenancePort>,
+    pub appx: Option<&'a dyn AppxPort>,
 }
 
 /// 应用报告
@@ -174,9 +243,9 @@ fn action_applied(ports: &SysPorts, action: &TweakAction) -> SysResult<bool> {
             Ok((v, existed)) => Ok(existed && v == *data),
             Err(e) => Err(SysError::Registry(e.to_string())),
         },
-        TweakAction::Service { name, start_type } => match ports.services {
+        TweakAction::Service { name, start_type, .. } => match ports.services {
             Some(svc) => match svc.query(name) {
-                Ok(info) => Ok(info.start_type == *start_type),
+                Ok(info) => Ok(start_type.is_some_and(|st| info.start_type == st)),
                 Err(_) => Ok(false),
             },
             None => Ok(false), // 端口未注册（旧集成）——按未应用
@@ -189,17 +258,32 @@ fn action_applied(ports: &SysPorts, action: &TweakAction) -> SysResult<bool> {
             },
             None => Ok(false),
         },
+        // 瞬态/清理/无原状动作无持久目标状态（verify 走 maintenance 短路；防御性返回 true）
+        TweakAction::FileClean { .. } => Ok(true),
+        TweakAction::Exec { .. } | TweakAction::RestorePoint { .. } | TweakAction::EmptyWorkingSet {} | TweakAction::DefenderRealtime { .. } => Ok(true),
+        // 当前用户移除：包不在 = 已应用；provisioned 移除无法廉价验证 → 防御性 true
+        TweakAction::AppxRemove { name, all_users: false } => match ports.appx {
+            Some(a) => match a.list(name) {
+                Ok(pkgs) => Ok(pkgs.is_empty()),
+                Err(_) => Ok(false),
+            },
+            None => Ok(false),
+        },
+        TweakAction::AppxRemove { all_users: true, .. } => Ok(true),
         TweakAction::Unsupported { kind } => Err(SysError::Catalog(format!("动作类型 {kind} 需更高版本支持"))),
     }
 }
 
-/// 扫描状态（三态：requires_admin 且非管理员 → needs_admin，不做状态查询）
+/// 扫描状态（三态：requires_admin 且非管理员 → needs_admin，不做状态查询；
+/// 维护型 tweak 无"已应用"概念 → 恒 NotApplied，可重复执行）
 pub fn scan(ports: &SysPorts, tweaks: &[Tweak], is_admin: bool) -> Vec<(Tweak, ScanState)> {
     tweaks
         .iter()
         .map(|t| {
             let state = if t.requires_admin && !is_admin {
                 ScanState::NeedsAdmin
+            } else if t.maintenance {
+                ScanState::NotApplied
             } else {
                 let applied = t.actions.iter().all(|a| action_applied(ports, a).unwrap_or(false));
                 if applied { ScanState::Applied } else { ScanState::NotApplied }
@@ -230,7 +314,7 @@ fn backup_action(ports: &SysPorts, tweak_id: &str, action: &TweakAction) -> SysR
             let info = svc
                 .query(name)
                 .map_err(|e| SysError::Apply(format!("服务 {name} 备份失败: {e}")))?;
-            Ok(BackupItem::Service { name: name.clone(), start_type: info.start_type })
+            Ok(BackupItem::Service { name: name.clone(), start_type: info.start_type, was_running: info.running })
         }
         TweakAction::Task { path, .. } => {
             let t = ports.tasks.ok_or_else(|| SysError::Apply("计划任务端口未注册（无法备份任务状态）".into()))?;
@@ -240,7 +324,19 @@ fn backup_action(ports: &SysPorts, tweak_id: &str, action: &TweakAction) -> SysR
                 .ok_or_else(|| SysError::Apply(format!("任务 {path} 不存在")))?;
             Ok(BackupItem::Task { path: path.clone(), existed: true, enabled })
         }
+        // 清理动作不可逆（reversible=false）——占位条目，恢复为空操作
+        TweakAction::FileClean { .. } => Ok(BackupItem::FileClean),
+        // Appx：记录"原已安装"（恢复 = Store 重装提示，不自动重装）
+        TweakAction::AppxRemove { name, all_users } => {
+            let was_installed = ports
+                .appx
+                .map(|a| a.list(name).map(|pkgs| !pkgs.is_empty()).unwrap_or(false))
+                .unwrap_or(false);
+            Ok(BackupItem::Appx { name: name.clone(), all_users: *all_users, was_installed })
+        }
         TweakAction::Unsupported { kind } => Err(SysError::Catalog(format!("动作类型 {kind} 需更高版本支持"))),
+        // Exec/还原点/内存清理/Defender：无原状可备份（不可逆）——占位条目
+        TweakAction::Exec { .. } | TweakAction::RestorePoint { .. } | TweakAction::EmptyWorkingSet {} | TweakAction::DefenderRealtime { .. } => Ok(BackupItem::Exec),
     }
 }
 
@@ -251,13 +347,67 @@ fn apply_action(ports: &SysPorts, action: &TweakAction) -> SysResult<()> {
             .registry
             .write_value(key, value_name, data)
             .map_err(|e| SysError::Registry(e.to_string())),
-        TweakAction::Service { name, start_type } => {
+        TweakAction::Service { name, start_type, action } => {
             let svc = ports.services.ok_or_else(|| SysError::Apply("服务端口未注册".into()))?;
-            svc.set_start_type(name, *start_type).map_err(|e| SysError::Apply(format!("服务 {name} 配置失败: {e}")))
+            if let Some(st) = start_type {
+                svc.set_start_type(name, *st).map_err(|e| SysError::Apply(format!("服务 {name} 配置失败: {e}")))?;
+            }
+            match action {
+                Some(SvcAction::Stop) => {
+                    svc.stop(name).map_err(|e| SysError::Apply(format!("服务 {name} 停止失败: {e}")))
+                }
+                Some(SvcAction::Start) => {
+                    svc.start(name).map_err(|e| SysError::Apply(format!("服务 {name} 启动失败: {e}")))
+                }
+                None => Ok(()),
+            }
         }
         TweakAction::Task { path, enabled } => {
             let t = ports.tasks.ok_or_else(|| SysError::Apply("计划任务端口未注册".into()))?;
             t.set_enabled(path, *enabled).map_err(|e| SysError::Apply(format!("任务 {path} 启停失败: {e}")))
+        }
+        TweakAction::FileClean { path, recursive, skip_recent_hours } => {
+            let m = ports.maintenance.ok_or_else(|| SysError::Apply("维护端口未注册（无法清理文件）".into()))?;
+            m.clean_dir(path, *recursive, *skip_recent_hours)
+                .map_err(|e| SysError::Apply(format!("清理 {path} 失败: {e}")))?;
+            Ok(())
+        }
+        TweakAction::AppxRemove { name, all_users } => {
+            let a = ports.appx.ok_or_else(|| SysError::Apply("Appx 端口未注册".into()))?;
+            let n = if *all_users {
+                a.remove_provisioned(name)
+                    .map_err(|e| SysError::Apply(format!("移除 provisioned 包 {name} 失败: {e}")))?
+            } else {
+                a.remove_current_user(name)
+                    .map_err(|e| SysError::Apply(format!("移除包 {name} 失败: {e}")))?
+            };
+            if n == 0 {
+                // 未匹配任何包：可能已卸载（幂等成功），也可能包名不存在——报告语义不变
+                tracing::warn!(name = %name, "Appx 移除未匹配到包（可能已卸载）");
+            }
+            Ok(())
+        }
+        TweakAction::Exec { program, args, timeout_ms } => {
+            let m = ports.maintenance.ok_or_else(|| SysError::Apply("维护端口未注册".into()))?;
+            m.exec(program, args, *timeout_ms)
+                .map_err(|e| SysError::Apply(format!("执行 {program} 失败: {e}")))?;
+            Ok(())
+        }
+        TweakAction::RestorePoint { description } => {
+            let m = ports.maintenance.ok_or_else(|| SysError::Apply("维护端口未注册".into()))?;
+            m.restore_point(description)
+                .map_err(|e| SysError::Apply(format!("创建还原点失败: {e}")))
+        }
+        TweakAction::EmptyWorkingSet {} => {
+            let m = ports.maintenance.ok_or_else(|| SysError::Apply("维护端口未注册".into()))?;
+            m.empty_working_set()
+                .map_err(|e| SysError::Apply(format!("内存清理失败: {e}")))?;
+            Ok(())
+        }
+        TweakAction::DefenderRealtime { disable } => {
+            let m = ports.maintenance.ok_or_else(|| SysError::Apply("维护端口未注册".into()))?;
+            m.defender_realtime(*disable)
+                .map_err(|e| SysError::Apply(format!("Defender 实时保护开关失败: {e}")))
         }
         TweakAction::Unsupported { kind } => Err(SysError::Catalog(format!("动作类型 {kind} 需更高版本支持"))),
     }
@@ -280,10 +430,14 @@ pub fn restore_backup(ports: &SysPorts, backup: &[BackupItem]) -> SysResult<()> 
                     let _ = ports.registry.delete_value(&rb.key, &rb.value_name);
                 }
             }
-            BackupItem::Service { name, start_type } => {
+            BackupItem::Service { name, start_type, was_running } => {
                 if let Some(svc) = ports.services {
                     svc.set_start_type(name, *start_type)
                         .map_err(|e| SysError::Apply(format!("服务 {name} 恢复失败: {e}")))?;
+                    // 原运行中 → 拉起（start 内部处理 Disabled 跳过，best-effort 不阻断后续恢复）
+                    if *was_running {
+                        let _ = svc.start(name);
+                    }
                 }
             }
             BackupItem::Task { path, existed, enabled } => {
@@ -293,6 +447,18 @@ pub fn restore_backup(ports: &SysPorts, backup: &[BackupItem]) -> SysResult<()> 
                         t.set_enabled(path, *enabled)
                             .map_err(|e| SysError::Apply(format!("任务 {path} 恢复失败: {e}")))?;
                     }
+                }
+            }
+            // 清理动作不可逆——恢复为空操作（回滚仅还原同 tweak 的服务/注册表条目）
+            BackupItem::FileClean => {}
+            // Exec 不可逆——恢复为空操作
+            BackupItem::Exec => {}
+            // Defender 开关——恢复由对称 catalog 条目承担
+            BackupItem::DefenderRealtime => {}
+            // Appx 卸载不可自动恢复——提示可从 Store 重装（v1 不自动下载安装）
+            BackupItem::Appx { name, was_installed, .. } => {
+                if *was_installed {
+                    tracing::info!(name = %name, "Appx 包已卸载；如需恢复可从 Microsoft Store 重装");
                 }
             }
         }
@@ -326,9 +492,9 @@ pub fn apply(ports: &SysPorts, tweak: &Tweak, is_admin: bool) -> SysResult<Apply
             applied_errors.push(e.to_string());
         }
     }
-    // 3. 校验
-    let verified = applied_errors.is_empty()
-        && tweak.actions.iter().all(|a| action_applied(ports, a).unwrap_or(false));
+    // 3. 校验（维护型不做状态回读——clear_cache 等无持久目标状态；动作失败已并入 errors）
+    let verified =
+        applied_errors.is_empty() && (tweak.maintenance || tweak.actions.iter().all(|a| action_applied(ports, a).unwrap_or(false)));
     if verified {
         return Ok(ApplyReport { tweak_id: tweak.id.clone(), backup, verified: true });
     }
@@ -340,6 +506,61 @@ pub fn apply(ports: &SysPorts, tweak: &Tweak, is_admin: bool) -> SysResult<Apply
         "应用未通过校验（已回滚）: {}",
         applied_errors.join("; ")
     )))
+}
+
+/// 回归检测（docs/impl/08 §3.3 WUB 式防自愈，v1 边界：不做守护任务，模块 start 时比对一次）：
+/// 备份里的"原值"即系统自愈后的样子——当前值回到原值 = 被系统/外部改回。
+/// 返回回归的 tweak_id 列表（查询失败/端口缺失不误报）。
+pub fn regression_check(ports: &SysPorts, store: &BackupStore, tweaks: &[Tweak]) -> Vec<String> {
+    let mut regressed: Vec<String> = Vec::new();
+    for set in store.load_all() {
+        // 目录中不存在或维护型（clear_cache 无回归概念）跳过
+        let Some(t) = tweaks.iter().find(|t| t.id == set.tweak_id) else { continue };
+        if t.maintenance || regressed.contains(&set.tweak_id) {
+            continue;
+        }
+        for b in &set.items {
+            let hit = match b {
+                BackupItem::Registry(rb) => match ports.registry.read_value(&rb.key, &rb.value_name) {
+                    Ok((cur, existed)) => {
+                        if rb.existed {
+                            // 当前值回到备份原值，或写入的目标值消失 → 均为回归
+                            (existed && Some(&cur) == rb.old_value.as_ref()) || !existed
+                        } else {
+                            // 我们创建的值被清掉 = 回归
+                            !existed
+                        }
+                    }
+                    Err(_) => false,
+                },
+                BackupItem::Service { name, start_type, .. } => match ports.services {
+                    Some(svc) => svc.query(name).map(|i| i.start_type == *start_type).unwrap_or(false),
+                    None => false,
+                },
+                BackupItem::Task { path, existed, enabled } => match ports.tasks {
+                    Some(t) => match t.query_enabled(path) {
+                        Ok(Some(cur)) => *existed && cur == *enabled,
+                        Ok(None) => *existed, // 任务被删 = 回归
+                        Err(_) => false,
+                    },
+                    None => false,
+                },
+                BackupItem::FileClean => false,
+                BackupItem::Exec => false,
+                BackupItem::DefenderRealtime => false,
+                // 原已安装的包又被系统/Store 装回 = 回归
+                BackupItem::Appx { name, was_installed, .. } => match ports.appx {
+                    Some(a) => *was_installed && a.list(name).map(|p| !p.is_empty()).unwrap_or(false),
+                    None => false,
+                },
+            };
+            if hit {
+                regressed.push(set.tweak_id.clone());
+                break;
+            }
+        }
+    }
+    regressed
 }
 
 /// 备份落库（{appData}/winops/backup.json：每 tweak 保留最近一次 apply 的原值快照）
@@ -395,6 +616,115 @@ impl BackupStore {
     pub fn has_backup(&self, tweak_id: &str) -> bool {
         self.load_all().iter().any(|s| s.tweak_id == tweak_id)
     }
+
+    /// 移除指定 tweak 的备份（回滚完成后调用——已还原的状态不再参与回归检测，
+    /// 否则"当前值 == 备份原值"会被误判为系统自愈）
+    pub fn remove(&self, tweak_id: &str) {
+        let all: Vec<BackupSet> = self.load_all().into_iter().filter(|s| s.tweak_id != tweak_id).collect();
+        if let Ok(data) = serde_json::to_vec_pretty(&all) {
+            let _ = std::fs::write(&self.path, data);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 审计（docs/impl/08 §2.4/§9 W7：JSONL 追加 + 导出；helper 不落盘，审计由主进程承担）
+// ---------------------------------------------------------------------------
+
+/// 单条审计记录（audit.jsonl 每行一个 JSON 对象；只追加不修改）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuditEntry {
+    /// 毫秒时间戳
+    pub ts_ms: i64,
+    /// 触发者（"ui" | "profile:xxx" | "plugin:xxx"）
+    pub actor: String,
+    pub tweak_id: String,
+    /// apply | rollback
+    pub action: String,
+    /// apply 时的 verify 结果（rollback 为 None）
+    #[serde(default)]
+    pub verified: Option<bool>,
+    /// 附加信息（错误摘要/备份条目数）
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// 审计存储（{appData}/winops/audit.jsonl 追加写；导出到 exports/ 子目录）
+pub struct AuditStore {
+    path: std::path::PathBuf,
+}
+
+impl AuditStore {
+    pub fn open(app_data_dir: &Path) -> Self {
+        Self { path: app_data_dir.join("winops").join("audit.jsonl") }
+    }
+
+    /// 追加一条审计（写失败仅告警不阻断主流程——审计不比系统修改更重要）
+    pub fn record(&self, actor: &str, tweak_id: &str, action: &str, verified: Option<bool>, detail: &str) {
+        let entry = AuditEntry {
+            ts_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            actor: actor.to_string(),
+            tweak_id: tweak_id.to_string(),
+            action: action.to_string(),
+            verified,
+            detail: detail.to_string(),
+        };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut line) = serde_json::to_string(&entry) {
+            line.push('\n');
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+                let _ = f.write_all(line.as_bytes());
+            } else {
+                tracing::warn!("审计写入失败（不阻断主流程）");
+            }
+        }
+    }
+
+    /// 全量审计条目（导出/展示用）
+    pub fn entries(&self) -> Vec<AuditEntry> {
+        std::fs::read_to_string(&self.path)
+            .map(|raw| {
+                raw.lines()
+                    .filter_map(|l| serde_json::from_str::<AuditEntry>(l).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 导出审计 + 当前备份清单到 {appData}/winops/exports/，返回导出文件路径
+    pub fn export(&self, app_data_dir: &Path) -> SysResult<std::path::PathBuf> {
+        #[derive(Serialize)]
+        struct ExportDoc {
+            exported_at_ms: i64,
+            audit: Vec<AuditEntry>,
+            backups: Vec<BackupSet>,
+        }
+        let backup_store = BackupStore::open(app_data_dir);
+        let doc = ExportDoc {
+            exported_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            audit: self.entries(),
+            backups: backup_store.load_all(),
+        };
+        let dir = app_data_dir.join("winops").join("exports");
+        std::fs::create_dir_all(&dir).map_err(SysError::Io)?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("winops-audit-{ts}.json"));
+        let data = serde_json::to_vec_pretty(&doc).map_err(|e| SysError::Catalog(format!("导出序列化失败: {e}")))?;
+        std::fs::write(&path, data).map_err(SysError::Io)?;
+        Ok(path)
+    }
 }
 
 #[cfg(test)]
@@ -441,20 +771,42 @@ mod tests {
         }
     }
 
-    /// 内存服务表（Service 动作测试）
+    /// 内存服务表（Service 动作测试：启动类型 + 运行态）
     #[derive(Default)]
     struct FakeServices {
-        services: Mutex<HashMap<String, StartType>>,
+        services: Mutex<HashMap<String, (StartType, bool)>>,
+    }
+    impl FakeServices {
+        fn set(&self, name: &str, st: StartType, running: bool) {
+            self.services.lock().unwrap().insert(name.to_string(), (st, running));
+        }
     }
     impl ServiceCtlPort for FakeServices {
         fn query(&self, name: &str) -> std::result::Result<ServiceInfo, host_core::error::AppError> {
             let m = self.services.lock().unwrap();
             m.get(name)
-                .map(|&st| ServiceInfo { name: name.into(), start_type: st, running: false })
+                .map(|&(st, running)| ServiceInfo { name: name.into(), start_type: st, running })
                 .ok_or_else(|| host_core::error::AppError::module("T", format!("服务 {name} 不存在"), None))
         }
         fn set_start_type(&self, name: &str, st: StartType) -> std::result::Result<(), host_core::error::AppError> {
-            self.services.lock().unwrap().insert(name.to_string(), st);
+            let mut m = self.services.lock().unwrap();
+            let e = m.get_mut(name).ok_or_else(|| host_core::error::AppError::module("T", format!("服务 {name} 不存在"), None))?;
+            e.0 = st;
+            Ok(())
+        }
+        fn stop(&self, name: &str) -> std::result::Result<(), host_core::error::AppError> {
+            let mut m = self.services.lock().unwrap();
+            let e = m.get_mut(name).ok_or_else(|| host_core::error::AppError::module("T", format!("服务 {name} 不存在"), None))?;
+            e.1 = false;
+            Ok(())
+        }
+        fn start(&self, name: &str) -> std::result::Result<(), host_core::error::AppError> {
+            let mut m = self.services.lock().unwrap();
+            let e = m.get_mut(name).ok_or_else(|| host_core::error::AppError::module("T", format!("服务 {name} 不存在"), None))?;
+            // Disabled 服务启动跳过（幂等语义）
+            if e.0 != StartType::Disabled {
+                e.1 = true;
+            }
             Ok(())
         }
     }
@@ -479,18 +831,101 @@ mod tests {
         }
     }
 
+    /// 内存维护表（FileClean/Exec/还原点/内存清理：记录调用参数）
+    #[derive(Default)]
+    struct FakeMaintenance {
+        calls: Mutex<Vec<(String, bool, u32)>>,
+        execs: Mutex<Vec<String>>,
+        restore_points: Mutex<Vec<String>>,
+        working_sets: Mutex<u32>,
+    }
+    impl MaintenancePort for FakeMaintenance {
+        fn clean_dir(&self, path: &str, recursive: bool, skip_recent_hours: u32) -> std::result::Result<u32, host_core::error::AppError> {
+            self.calls.lock().unwrap().push((path.to_string(), recursive, skip_recent_hours));
+            Ok(3)
+        }
+        fn exec(&self, program: &str, args: &[String], timeout_ms: u32) -> std::result::Result<String, host_core::error::AppError> {
+            self.execs.lock().unwrap().push(format!("{program} {args:?} {timeout_ms}"));
+            Ok("ok".into())
+        }
+        fn restore_point(&self, description: &str) -> std::result::Result<(), host_core::error::AppError> {
+            self.restore_points.lock().unwrap().push(description.to_string());
+            Ok(())
+        }
+        fn empty_working_set(&self) -> std::result::Result<u32, host_core::error::AppError> {
+            *self.working_sets.lock().unwrap() += 1;
+            Ok(5)
+        }
+        fn repair(&self, kind: host_core::ports::RepairKind) -> std::result::Result<String, host_core::error::AppError> {
+            self.execs.lock().unwrap().push(format!("repair:{kind:?}"));
+            Ok("ok".into())
+        }
+        fn defender_realtime(&self, disable: bool) -> std::result::Result<(), host_core::error::AppError> {
+            self.execs.lock().unwrap().push(format!("defender_realtime:{disable}"));
+            Ok(())
+        }
+    }
+
+    /// 内存 Appx 表（记录移除调用；installed = 当前"已安装"的包名集合）
+    #[derive(Default)]
+    struct FakeAppx {
+        installed: Mutex<Vec<String>>,
+        removed_current: Mutex<Vec<String>>,
+        removed_provisioned: Mutex<Vec<String>>,
+    }
+    impl FakeAppx {
+        fn install(&self, name: &str) {
+            self.installed.lock().unwrap().push(name.to_string());
+        }
+    }
+    impl AppxPort for FakeAppx {
+        fn list(&self, name_filter: &str) -> std::result::Result<Vec<host_core::ports::AppxPackage>, host_core::error::AppError> {
+            let m = self.installed.lock().unwrap();
+            Ok(m.iter()
+                .filter(|n| n.starts_with(name_filter))
+                .map(|n| host_core::ports::AppxPackage { name: n.clone(), full_name: format!("{n}.1.0.0_x64__zz") })
+                .collect())
+        }
+        fn remove_current_user(&self, name_filter: &str) -> std::result::Result<u32, host_core::error::AppError> {
+            let mut m = self.installed.lock().unwrap();
+            let before = m.len();
+            m.retain(|n| !n.starts_with(name_filter));
+            let n = (before - m.len()) as u32;
+            self.removed_current.lock().unwrap().push(name_filter.to_string());
+            Ok(n)
+        }
+        fn remove_provisioned(&self, name_filter: &str) -> std::result::Result<u32, host_core::error::AppError> {
+            self.removed_provisioned.lock().unwrap().push(name_filter.to_string());
+            Ok(1)
+        }
+    }
+
     /// 端口聚合构造（全部 mock）
     struct FakePorts {
         reg: FakeRegistry,
         svc: FakeServices,
         task: FakeTasks,
+        maint: FakeMaintenance,
+        appx: FakeAppx,
     }
     impl FakePorts {
         fn new() -> Self {
-            Self { reg: FakeRegistry::default(), svc: FakeServices::default(), task: FakeTasks::default() }
+            Self {
+                reg: FakeRegistry::default(),
+                svc: FakeServices::default(),
+                task: FakeTasks::default(),
+                maint: FakeMaintenance::default(),
+                appx: FakeAppx::default(),
+            }
         }
         fn ports(&self) -> SysPorts<'_> {
-            SysPorts { registry: &self.reg, tasks: Some(&self.task), services: Some(&self.svc) }
+            SysPorts {
+                registry: &self.reg,
+                tasks: Some(&self.task),
+                services: Some(&self.svc),
+                maintenance: Some(&self.maint),
+                appx: Some(&self.appx),
+            }
         }
     }
 
@@ -503,6 +938,7 @@ mod tests {
             category: "test".into(),
             description: String::new(),
             requires_admin: false,
+            maintenance: false,
             actions: vec![TweakAction::Registry {
                 key: K.into(),
                 value_name: format!("{id}_v"),
@@ -523,8 +959,17 @@ mod tests {
                 if key.starts_with("HKLM") { t.requires_admin } else { true }
             }
             TweakAction::Service { .. } | TweakAction::Task { .. } => t.requires_admin,
+            // 清理动作仅出现于维护型 tweak（requires_admin 由 helper 路径约束兜底）
+            TweakAction::FileClean { .. } => t.requires_admin && t.maintenance,
+            // Appx 移除：provisioned（all_users）需提权；当前用户移除不要求但 catalog 统一标注
+            TweakAction::AppxRemove { all_users, .. } => {
+                if *all_users { t.requires_admin } else { true }
+            }
+            // Exec/还原点/内存清理：系统级动作一律 requires_admin
+            TweakAction::Exec { .. } | TweakAction::RestorePoint { .. } | TweakAction::EmptyWorkingSet {} => t.requires_admin,
+            TweakAction::DefenderRealtime { .. } => t.requires_admin,
             TweakAction::Unsupported { .. } => false,
-        })), "HKLM registry 动作与 Service/Task 动作必须标 requires_admin");
+        })), "HKLM registry 动作与 Service/Task/FileClean 动作必须标 requires_admin");
     }
 
     #[test]
@@ -620,7 +1065,13 @@ mod tests {
         let fp = FakePorts::new();
         let mut flaky = Flaky { inner: FakeRegistry::default() };
         flaky.inner.set(K, "t1_v", RegValue::Dword(1));
-        let ports = SysPorts { registry: &flaky, tasks: Some(&fp.task), services: Some(&fp.svc) };
+        let ports = SysPorts {
+            registry: &flaky,
+            tasks: Some(&fp.task),
+            services: Some(&fp.svc),
+            maintenance: Some(&fp.maint),
+            appx: Some(&fp.appx),
+        };
         let t = tweak("t1", "测试", 7);
         let err = apply(&ports, &t, false).unwrap_err();
         assert!(err.to_string().contains("已回滚"));
@@ -649,7 +1100,7 @@ mod tests {
     #[test]
     fn service_action_bavr_roundtrip() {
         let fp = FakePorts::new();
-        fp.svc.services.lock().unwrap().insert("DiagTrack".into(), StartType::Auto);
+        fp.svc.set("DiagTrack", StartType::Auto, false);
         let ports = fp.ports();
         let t = Tweak {
             id: "svc_off".into(),
@@ -657,9 +1108,11 @@ mod tests {
             category: "test".into(),
             description: String::new(),
             requires_admin: true,
+            maintenance: false,
             actions: vec![TweakAction::Service {
                 name: "DiagTrack".into(),
-                start_type: StartType::Disabled,
+                start_type: Some(StartType::Disabled),
+                action: None,
             }],
         };
         // 引擎闸：非管理员 → 拒绝
@@ -668,9 +1121,10 @@ mod tests {
         let report = apply(&ports, &t, true).unwrap();
         assert!(report.verified);
         match &report.backup[0] {
-            BackupItem::Service { name, start_type } => {
+            BackupItem::Service { name, start_type, was_running } => {
                 assert_eq!(name, "DiagTrack");
                 assert_eq!(*start_type, StartType::Auto);
+                assert!(!was_running);
             }
             _ => panic!("应为 Service 备份"),
         }
@@ -692,6 +1146,7 @@ mod tests {
             category: "test".into(),
             description: String::new(),
             requires_admin: true,
+            maintenance: false,
             actions: vec![TweakAction::Task { path: path.into(), enabled: false }],
         };
         let report = apply(&ports, &t, true).unwrap();
@@ -705,6 +1160,7 @@ mod tests {
             category: "test".into(),
             description: String::new(),
             requires_admin: true,
+            maintenance: false,
             actions: vec![TweakAction::Task { path: r"\Nope\Nope".into(), enabled: false }],
         };
         assert!(apply(&ports, &t2, true).is_err());
@@ -752,8 +1208,237 @@ mod tests {
             }
         }
         let fp = FakePorts::new();
-        let ports = SysPorts { registry: &ReadOnly, tasks: Some(&fp.task), services: Some(&fp.svc) };
+        let ports = SysPorts {
+            registry: &ReadOnly,
+            tasks: Some(&fp.task),
+            services: Some(&fp.svc),
+            maintenance: Some(&fp.maint),
+            appx: Some(&fp.appx),
+        };
         let err = apply(&ports, &tweak("t3", "测试", 1), false).unwrap_err();
         assert!(err.to_string().contains("只读"));
+    }
+
+    // ---------------- W4：clear_cache / maintenance / 回归检测 ----------------
+
+    /// 维护型 tweak：scan 恒 NotApplied（不做状态查询）；clear_cache 端到端
+    #[test]
+    fn maintenance_scan_and_clear_cache_e2e() {
+        let fp = FakePorts::new();
+        fp.svc.set("wuauserv", StartType::Auto, true);
+        fp.svc.set("bits", StartType::Manual, true);
+        let ports = fp.ports();
+        let t = Tweak {
+            id: "update_clear_cache".into(),
+            name: "清理更新缓存".into(),
+            category: "update".into(),
+            description: String::new(),
+            requires_admin: true,
+            maintenance: true,
+            actions: vec![
+                TweakAction::Service { name: "wuauserv".into(), start_type: None, action: Some(SvcAction::Stop) },
+                TweakAction::Service { name: "bits".into(), start_type: None, action: Some(SvcAction::Stop) },
+                TweakAction::FileClean {
+                    path: r"C:\Windows\SoftwareDistribution\Download".into(),
+                    recursive: true,
+                    skip_recent_hours: 0,
+                },
+                TweakAction::Service { name: "wuauserv".into(), start_type: None, action: Some(SvcAction::Start) },
+                TweakAction::Service { name: "bits".into(), start_type: None, action: Some(SvcAction::Start) },
+            ],
+        };
+        // scan：恒 NotApplied（即便服务运行中）
+        let states = scan(&ports, &[t.clone()], true);
+        assert_eq!(states[0].1, ScanState::NotApplied);
+        // apply：停止 → 清理 → 拉起；verify 短路通过
+        let report = apply(&ports, &t, true).unwrap();
+        assert!(report.verified);
+        assert!(fp.svc.query("wuauserv").unwrap().running, "结束后服务应已拉起");
+        assert!(fp.svc.query("bits").unwrap().running);
+        assert_eq!(fp.maint.calls.lock().unwrap().len(), 1, "clean_dir 调用一次");
+        // 备份：Service 条目带 was_running + FileClean 占位
+        let svc_items = report.backup.iter().filter(|b| matches!(b, BackupItem::Service { .. })).count();
+        assert_eq!(svc_items, 4);
+        assert!(report.backup.iter().any(|b| matches!(b, BackupItem::FileClean)));
+        // 回滚：写回原 start_type + was_running 拉起（无崩溃即语义正确）
+        restore_backup(&ports, &report.backup).unwrap();
+    }
+
+    /// Disabled 服务 start 跳过（disable_auto 禁用 wuauserv 后 clear_cache 仍可执行）
+    #[test]
+    fn clear_cache_with_disabled_service() {
+        let fp = FakePorts::new();
+        fp.svc.set("wuauserv", StartType::Disabled, false);
+        fp.svc.set("bits", StartType::Manual, false);
+        let ports = fp.ports();
+        let t = Tweak {
+            id: "update_clear_cache".into(),
+            name: "清理更新缓存".into(),
+            category: "update".into(),
+            description: String::new(),
+            requires_admin: true,
+            maintenance: true,
+            actions: vec![
+                TweakAction::Service { name: "wuauserv".into(), start_type: None, action: Some(SvcAction::Stop) },
+                TweakAction::FileClean { path: "X".into(), recursive: true, skip_recent_hours: 0 },
+                TweakAction::Service { name: "wuauserv".into(), start_type: None, action: Some(SvcAction::Start) },
+            ],
+        };
+        assert!(apply(&ports, &t, true).is_ok(), "Disabled 服务 start 应跳过而非报错");
+        assert!(!fp.svc.query("wuauserv").unwrap().running, "Disabled 服务不应被拉起");
+    }
+
+    /// 回归检测：注册表值被改回原值 → 检出；仍为目标值 → 不报
+    #[test]
+    fn regression_check_detects_self_heal() {
+        let fp = FakePorts::new();
+        let dir = std::env::temp_dir().join(format!("nf_winops_reg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = BackupStore::open(&dir);
+        // 原值 0 预先存在 → apply 备份 {existed:true, old:0} 并写入目标 1
+        fp.reg.set(K, "taskbar_x_v", RegValue::Dword(0));
+        let ports = fp.ports();
+        let t = tweak("taskbar_x", "测试", 1);
+        let report = apply(&ports, &t, false).unwrap();
+        store.save(&report).unwrap();
+        // 当前 = 目标值(1) → 无回归
+        assert!(regression_check(&ports, &store, &[t.clone()]).is_empty());
+        // 系统自愈：改回原值(0) → 检出
+        fp.reg.set(K, "taskbar_x_v", RegValue::Dword(0));
+        assert_eq!(regression_check(&ports, &store, &[t.clone()]), vec!["taskbar_x".to_string()]);
+        // 回滚后 remove 备份 → 不再误报
+        store.remove("taskbar_x");
+        assert!(regression_check(&ports, &store, &[t]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归检测：我们创建的值（原不存在）被删 → 检出
+    #[test]
+    fn regression_check_detects_deleted_value() {
+        let fp = FakePorts::new();
+        let dir = std::env::temp_dir().join(format!("nf_winops_reg2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = BackupStore::open(&dir);
+        let ports = fp.ports();
+        let t = tweak("created_val", "测试", 1);
+        let report = apply(&ports, &t, false).unwrap();
+        store.save(&report).unwrap();
+        // 外部删除 → 回归
+        fp.reg.delete_value(K, "created_val_v").unwrap();
+        assert_eq!(regression_check(&ports, &store, &[t]), vec!["created_val".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- W5：AppxRemove ----------------
+
+    /// Appx 移除端到端：当前用户 + provisioned 双动作；备份记录 was_installed
+    #[test]
+    fn appx_remove_e2e() {
+        let fp = FakePorts::new();
+        fp.appx.install("Microsoft.BingWeather");
+        let ports = fp.ports();
+        let t = Tweak {
+            id: "apps_remove_weather".into(),
+            name: "移除天气".into(),
+            category: "apps".into(),
+            description: String::new(),
+            requires_admin: true,
+            maintenance: false,
+            actions: vec![
+                TweakAction::AppxRemove { name: "Microsoft.BingWeather".into(), all_users: false },
+                TweakAction::AppxRemove { name: "Microsoft.BingWeather".into(), all_users: true },
+            ],
+        };
+        // scan：当前用户已装 → 未应用；管理员视角可判定
+        let states = scan(&ports, &[t.clone()], true);
+        assert_eq!(states[0].1, ScanState::NotApplied);
+        let report = apply(&ports, &t, true).unwrap();
+        assert!(report.verified, "移除后包不在 → action_applied=true");
+        assert_eq!(fp.appx.removed_current.lock().unwrap().len(), 1);
+        assert_eq!(fp.appx.removed_provisioned.lock().unwrap().len(), 1);
+        // 备份：两条 Appx 条目 was_installed=true；restore 不报错（Store 重装提示）
+        assert!(report.backup.iter().all(|b| matches!(b, BackupItem::Appx { was_installed: true, .. })));
+        restore_backup(&ports, &report.backup).unwrap();
+        // scan：包已不在 → 已应用
+        let states = scan(&ports, &[t], true);
+        assert_eq!(states[0].1, ScanState::Applied);
+    }
+
+    /// Appx 回归检测：被 Store/系统装回 → 检出
+    #[test]
+    fn regression_check_appx_reinstall() {
+        let fp = FakePorts::new();
+        let dir = std::env::temp_dir().join(format!("nf_winops_appx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = BackupStore::open(&dir);
+        fp.appx.install("Microsoft.Tips");
+        let ports = fp.ports();
+        let t = Tweak {
+            id: "apps_remove_tips".into(),
+            name: "移除提示".into(),
+            category: "apps".into(),
+            description: String::new(),
+            requires_admin: true,
+            maintenance: false,
+            actions: vec![TweakAction::AppxRemove { name: "Microsoft.Tips".into(), all_users: false }],
+        };
+        let report = apply(&ports, &t, true).unwrap();
+        store.save(&report).unwrap();
+        // 包已卸载 → 无回归
+        assert!(regression_check(&ports, &store, &[t.clone()]).is_empty());
+        // 系统装回 → 回归
+        fp.appx.install("Microsoft.Tips");
+        assert_eq!(regression_check(&ports, &store, &[t]), vec!["apps_remove_tips".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- W6：Exec / 还原点 / 内存清理 ----------------
+
+    /// Exec/RestorePoint/EmptyWorkingSet 动作端到端：维护型 + 不可逆备份占位
+    #[test]
+    fn exec_and_maintenance_actions_e2e() {
+        let fp = FakePorts::new();
+        let ports = fp.ports();
+        let t = Tweak {
+            id: "maint_ops".into(),
+            name: "维护操作".into(),
+            category: "maintenance".into(),
+            description: String::new(),
+            requires_admin: true,
+            maintenance: true,
+            actions: vec![
+                TweakAction::Exec {
+                    program: "powercfg".into(),
+                    args: vec!["-duplicatescheme".into(), "e9a42b02-d546-448a-9c71-0b2ca57cbcb7".into()],
+                    timeout_ms: 60_000,
+                },
+                TweakAction::RestorePoint { description: "NexusForge 应用前".into() },
+                TweakAction::EmptyWorkingSet {},
+            ],
+        };
+        let report = apply(&ports, &t, true).unwrap();
+        assert!(report.verified);
+        assert_eq!(fp.maint.execs.lock().unwrap().len(), 1, "Exec 调用一次");
+        assert_eq!(fp.maint.restore_points.lock().unwrap().len(), 1);
+        assert_eq!(*fp.maint.working_sets.lock().unwrap(), 1);
+        // 备份：3 条 Exec 占位；restore 空操作不报错
+        assert_eq!(report.backup.iter().filter(|b| matches!(b, BackupItem::Exec)).count(), 3);
+        restore_backup(&ports, &report.backup).unwrap();
+    }
+
+    /// Exec 白名单参数经 catalog 序列化回读（serde default timeout）
+    #[test]
+    fn exec_action_serde_roundtrip() {
+        let raw = r#"[{"id":"x","name":"x","category":"maintenance","requires_admin":true,"maintenance":true,
+            "actions":[{"type":"exec","program":"dism","args":["/Online","/ScanHealth"]}]}]"#;
+        let tweaks: Vec<Tweak> = serde_json::from_str(raw).unwrap();
+        match &tweaks[0].actions[0] {
+            TweakAction::Exec { program, args, timeout_ms } => {
+                assert_eq!(program, "dism");
+                assert_eq!(args, &vec!["/Online".to_string(), "/ScanHealth".to_string()]);
+                assert_eq!(*timeout_ms, 30_000, "默认超时 30s");
+            }
+            other => panic!("应为 Exec 动作: {other:?}"),
+        }
     }
 }

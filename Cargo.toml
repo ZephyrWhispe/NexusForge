@@ -52,6 +52,8 @@ wasmtime = { version = "29", default-features = false, features = ["cranelift", 
 # 发布配置（docs/impl/07 PERF2，阶段四启用前先保持默认可调试）
 [profile.dev]
 opt-level = 0
+# 只保留回溯行号表（全量调试信息曾把 target\debug\deps 推到 44GB，C 盘吃紧）
+debug = "line-tables-only"
 
 [profile.release]
 lto = "fat"

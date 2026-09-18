@@ -247,13 +247,91 @@ impl ServiceCtlPort for HelperServices {
         helper_call("service.set_start", json!({ "name": name, "start_type": st }))?;
         Ok(())
     }
+    fn stop(&self, name: &str) -> Result<(), AppError> {
+        helper_call("service.stop", json!({ "name": name }))?;
+        Ok(())
+    }
+    fn start(&self, name: &str) -> Result<(), AppError> {
+        helper_call("service.start", json!({ "name": name }))?;
+        Ok(())
+    }
 }
 
-/// 备份条目是否需要提权数据面（HKLM 注册表 / 服务 / 计划任务）
+/// 系统维护（经 helper；file.clean_dir 路径白名单 / exec 程序白名单在 helper 端硬限制）
+pub struct HelperMaintenance;
+
+impl host_core::ports::MaintenancePort for HelperMaintenance {
+    fn clean_dir(&self, path: &str, recursive: bool, skip_recent_hours: u32) -> Result<u32, AppError> {
+        let v = helper_call(
+            "file.clean_dir",
+            json!({ "path": path, "recursive": recursive, "skip_recent_hours": skip_recent_hours }),
+        )?;
+        Ok(v["removed"].as_u64().unwrap_or(0) as u32)
+    }
+    fn exec(&self, program: &str, args: &[String], timeout_ms: u32) -> Result<String, AppError> {
+        let v = helper_call("exec", json!({ "program": program, "args": args, "timeout_ms": timeout_ms }))?;
+        Ok(v["output"].as_str().unwrap_or_default().to_string())
+    }
+    fn restore_point(&self, description: &str) -> Result<(), AppError> {
+        helper_call("maintenance.restore_point", json!({ "description": description }))?;
+        Ok(())
+    }
+    fn empty_working_set(&self) -> Result<u32, AppError> {
+        let v = helper_call("maintenance.empty_working_set", json!({}))?;
+        Ok(v["processed"].as_u64().unwrap_or(0) as u32)
+    }
+    fn repair(&self, kind: host_core::ports::RepairKind) -> Result<String, AppError> {
+        use host_core::ports::RepairKind;
+        // RepairKind → 白名单固定参数模板（与 win-integration run_repair 一致）；长超时 30min
+        let (program, args): (&str, Vec<String>) = match kind {
+            RepairKind::DismScanHealth => ("dism", vec!["/Online".into(), "/Cleanup-Image".into(), "/ScanHealth".into()]),
+            RepairKind::DismRestoreHealth => {
+                ("dism", vec!["/Online".into(), "/Cleanup-Image".into(), "/RestoreHealth".into()])
+            }
+            RepairKind::DismComponentCleanup => {
+                ("dism", vec!["/Online".into(), "/Cleanup-Image".into(), "/StartComponentCleanup".into()])
+            }
+            RepairKind::SfcScanNow => ("sfc", vec!["/scannow".into()]),
+        };
+        let v = helper_call("exec", json!({ "program": program, "args": args, "timeout_ms": 30 * 60 * 1000 }))?;
+        Ok(v["output"].as_str().unwrap_or_default().to_string())
+    }
+    fn defender_realtime(&self, disable: bool) -> Result<(), AppError> {
+        helper_call("defender.set_realtime", json!({ "disable": disable }))?;
+        Ok(())
+    }
+}
+
+/// Appx 包管理（经 helper；名称注入校验在 helper 数据面）
+pub struct HelperAppx;
+
+impl host_core::ports::AppxPort for HelperAppx {
+    fn list(&self, name_filter: &str) -> Result<Vec<host_core::ports::AppxPackage>, AppError> {
+        // helper 无 list 方法——当前用户枚举走本地（同用户上下文，等价）
+        local_appx().list(name_filter)
+    }
+    fn remove_current_user(&self, name_filter: &str) -> Result<u32, AppError> {
+        let v = helper_call("appx.remove_current_user", json!({ "name": name_filter }))?;
+        Ok(v["removed"].as_u64().unwrap_or(0) as u32)
+    }
+    fn remove_provisioned(&self, name_filter: &str) -> Result<u32, AppError> {
+        let v = helper_call("appx.remove_provisioned", json!({ "name": name_filter }))?;
+        Ok(v["removed"].as_u64().unwrap_or(0) as u32)
+    }
+}
+
+/// 本地 Appx 数据面（list 始终可用；非提权分支也用它）
+pub fn local_appx() -> win_integration::appx::AppxOps {
+    win_integration::appx::AppxOps
+}
+
+/// 备份条目是否需要提权数据面（HKLM 注册表 / 服务 / 计划任务 / provisioned Appx）
 pub fn backup_needs_elevation(items: &[sys_core::winops::BackupItem]) -> bool {
     use sys_core::winops::BackupItem;
     items.iter().any(|b| match b {
         BackupItem::Registry(rb) => rb.key.starts_with("HKLM"),
-        BackupItem::Service { .. } | BackupItem::Task { .. } => true,
+        BackupItem::Service { .. } | BackupItem::Task { .. } | BackupItem::Exec | BackupItem::DefenderRealtime => true,
+        BackupItem::Appx { all_users: true, .. } => true,
+        BackupItem::FileClean | BackupItem::Appx { all_users: false, .. } => false,
     })
 }

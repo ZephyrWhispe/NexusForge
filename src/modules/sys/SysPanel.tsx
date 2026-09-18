@@ -21,6 +21,7 @@ import {
   winopsApply,
   winopsRollback,
   winopsScan,
+  winopsAuditExport,
   type CleanScanItemDto,
   type MetricsPointDto,
   type PkgEntryDto,
@@ -163,6 +164,8 @@ export default function SysPanel() {
   const [tweaks, setTweaks] = useState<WinopsScanItemDto[]>([]);
   const [tweaksLoading, setTweaksLoading] = useState(false);
   const [busyTweak, setBusyTweak] = useState<string | null>(null);
+  // W4 回归检测（WUB 式防自愈）：模块 start 时后端比对，回归项在此黄条提示
+  const [regressed, setRegressed] = useState<string[]>([]);
 
   // 事件驱动：sys.metrics 1s 推送
   useEffect(() => {
@@ -187,6 +190,9 @@ export default function SysPanel() {
           } else if (e.payload?.topic === "sys.pkg_line") {
             const pl = e.payload.payload as unknown as { line: string };
             if (pl?.line) setOutput((prev) => [...prev.slice(-200), pl.line]);
+          } else if (e.payload?.topic === "sys.verify_result") {
+            const vr = e.payload.payload as unknown as { regressed?: string[] };
+            if (Array.isArray(vr?.regressed)) setRegressed(vr.regressed);
           }
         }),
       )
@@ -271,6 +277,7 @@ export default function SysPanel() {
     setErr(null);
     try {
       setTweaks(await winopsScan());
+      setRegressed([]); // 手动重扫后黄条消除
     } catch (e) {
       fail(e);
     } finally {
@@ -311,6 +318,17 @@ export default function SysPanel() {
     },
     [doTweakScan, fail],
   );
+
+  // W7 审计导出：审计记录 + 备份清单 → {appData}/winops/exports/
+  const doAuditExport = useCallback(async () => {
+    setErr(null);
+    try {
+      const path = await winopsAuditExport();
+      setMsg(`审计已导出：${path}`);
+    } catch (e) {
+      fail(e);
+    }
+  }, [fail]);
 
   const cpuSeries = history.map((p) => p.cpu);
   const memSeries = history.map((p) => (p.mem_total ? (p.mem_used / p.mem_total) * 100 : 0));
@@ -519,11 +537,34 @@ export default function SysPanel() {
 
       {tab === "tweaks" && (
         <div className={styles.section}>
+          {regressed.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "6px 10px",
+                marginBottom: 8,
+                borderRadius: 4,
+                background: "var(--colorPaletteYellowBackground2, #fff4ce)",
+              }}
+            >
+              <Text size={200}>
+                系统已将 {regressed.length} 项设置恢复为默认（自愈），可重新应用。
+              </Text>
+              <Button size="small" appearance="subtle" onClick={() => void doTweakScan()}>
+                重新扫描
+              </Button>
+            </div>
+          )}
           <div className={styles.row}>
             <Button appearance="primary" size="small" onClick={() => void doTweakScan()}>
               {tweaksLoading ? "扫描中…" : "扫描"}
             </Button>
             {tweaksLoading && <Spinner size="tiny" />}
+            <Button size="small" appearance="subtle" onClick={() => void doAuditExport()}>
+              导出审计
+            </Button>
             <Text className={styles.muted}>
               BAVR 语义：应用前自动备份原值 · 校验失败自动回滚 · 回滚恢复最近一次应用前的状态
             </Text>

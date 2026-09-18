@@ -44,12 +44,16 @@ fn run() -> Result<(), String> {
     }
     // 单实例互斥：同名管道已存在 → 创建失败 → 退出
     let server = h::pipe_server_create(&h::pipe_name_for(parent_pid)).map_err(|e| e.to_string())?;
-    // 看门狗：last_activity 超 idle_secs → 自退（同步 ConnectNamedPipe 阻塞等待中亦计空闲）
+    // 看门狗：last_activity 超 idle_secs → 自退（同步 ConnectNamedPipe 阻塞等待中亦计空闲；
+    // BUSY 置位期间不自退——DISM/SFC 长任务可达 30 分钟）
     let last_activity = Arc::new(AtomicU64::new(now_ms()));
     {
         let last = last_activity.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(5));
+            if dispatch::BUSY.load(Ordering::Relaxed) {
+                continue;
+            }
             let idle = now_ms().saturating_sub(last.load(Ordering::Relaxed));
             if idle > idle_secs as u64 * 1000 {
                 std::process::exit(0);
@@ -185,12 +189,18 @@ mod tests {
         let v: Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(v["result"]["existed"], true);
         assert_eq!(v["result"]["value"]["dword"], 42);
-        // 白名单外 → error
+        // 白名单外 → error（exec.dism 已收录 W6；用 exec 未收录程序名 + 完全未知方法）
         wh::write_frame(
             hnd,
-            json!({"jsonrpc":"2.0","id":3,"method":"exec.dism","params":{}}).to_string().as_bytes(),
+            json!({"jsonrpc":"2.0","id":3,"method":"exec","params":{"program":"notepad","args":[]}})
+                .to_string()
+                .as_bytes(),
         )
         .unwrap();
+        let resp = wh::read_frame(hnd).unwrap();
+        let v: Value = serde_json::from_slice(&resp).unwrap();
+        assert!(v.get("error").is_some(), "白名单外程序必须拒绝: {v}");
+        wh::write_frame(hnd, json!({"jsonrpc":"2.0","id":5,"method":"dns.set","params":{}}).to_string().as_bytes()).unwrap();
         let resp = wh::read_frame(hnd).unwrap();
         let v: Value = serde_json::from_slice(&resp).unwrap();
         assert!(v.get("error").is_some(), "白名单外方法必须拒绝");

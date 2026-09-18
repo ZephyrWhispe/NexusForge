@@ -143,6 +143,12 @@ impl HostState {
         ports.register::<dyn ServiceCtlPort>(Arc::new(win_integration::service::ServiceOps::new()));
         // WinOps W3 提权 Helper 拉起（docs/impl/08 §4）：ShellExecuteExW runas → UAC
         ports.register::<dyn HelperSpawnPort>(Arc::new(win_integration::helper::HelperSpawnWin::new()));
+        // WinOps W4 系统维护（docs/impl/08）：clean_dir 本地实现（提权场景走 HelperMaintenance）
+        ports.register::<dyn host_core::ports::MaintenancePort>(Arc::new(
+            win_integration::maintenance::MaintenanceWin::new(),
+        ));
+        // WinOps W5 Appx 包管理（docs/impl/08）：WinRT 当前用户 + PS provisioned（提权走 HelperAppx）
+        ports.register::<dyn host_core::ports::AppxPort>(Arc::new(win_integration::appx::AppxOps::new()));
         // PR4 系统代理（proxy-core，docs/impl/05 PR）：注册表 + WinINET 广播
         let sys_proxy: Arc<dyn SysProxyPort> = Arc::new(WindowsSysProxy);
         ports.register::<dyn SysProxyPort>(sys_proxy.clone());

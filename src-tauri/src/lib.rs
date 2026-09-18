@@ -284,6 +284,7 @@ pub fn run() {
             commands::winops_scan,
             commands::winops_apply,
             commands::winops_rollback,
+            commands::winops_audit_export,
         ])
         .setup(move |app| {
             // PERF1（docs/impl/07）：启动路径计时（目标 < 1.5s；setup 完成即窗口可见）

@@ -95,6 +95,29 @@ impl ServiceCtlPort for ServiceOps {
         };
         Self::run(&["config", name, &format!("start= {v}")]).map(|_| ())
     }
+
+    fn stop(&self, name: &str) -> Result<(), AppError> {
+        // 幂等：已停止（sc stop 对 stopped 服务返回 1062）→ 视为成功
+        match Self::run(&["stop", name]) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("1062") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn start(&self, name: &str) -> Result<(), AppError> {
+        // Disabled 服务启动必失败（1058）——clear_cache 幂等语义：跳过而非报错
+        let info = self.query(name)?;
+        if info.start_type == StartType::Disabled {
+            return Ok(());
+        }
+        // 已运行（sc start 对 running 服务返回 1056）→ 视为成功
+        match Self::run(&["start", name]) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("1056") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

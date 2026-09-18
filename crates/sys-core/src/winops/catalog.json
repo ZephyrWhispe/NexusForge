@@ -227,6 +227,410 @@
           "enabled": false
         }
       ]
+    },
+    {
+      "id": "update_disable_auto",
+      "name": "关闭 Windows 自动更新",
+      "category": "update",
+      "description": "通过组策略键禁止自动下载/安装更新（WUB 式；安全更新也一并暂停，请自行承担风险）。同时禁用 Windows Update 服务。需管理员权限；系统更新周期可能将此设置改回（回归时会在启动检测中提示）",
+      "requires_admin": true,
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
+          "value_name": "NoAutoUpdate",
+          "value_type": "dword",
+          "data": { "dword": 1 }
+        },
+        {
+          "type": "registry",
+          "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
+          "value_name": "AUOptions",
+          "value_type": "dword",
+          "data": { "dword": 2 }
+        },
+        {
+          "type": "service",
+          "name": "wuauserv",
+          "start_type": "disabled"
+        }
+      ]
+    },
+    {
+      "id": "update_exclude_driver",
+      "name": "更新排除驱动程序",
+      "category": "update",
+      "description": "阻止 Windows Update 通过质量更新推送驱动程序（设备驱动改由厂商/设备管理器管理）。需管理员权限",
+      "requires_admin": true,
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate",
+          "value_name": "ExcludeWUDriversInQualityUpdate",
+          "value_type": "dword",
+          "data": { "dword": 1 }
+        }
+      ]
+    },
+    {
+      "id": "update_clear_cache",
+      "name": "清理 Windows 更新缓存",
+      "category": "update",
+      "description": "停止 Windows Update 服务后清空更新下载缓存（SoftwareDistribution\\Download），用于修复更新卡死/失败。属维护操作，可重复执行；完成后服务恢复运行",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        {
+          "type": "service",
+          "name": "wuauserv",
+          "action": "stop"
+        },
+        {
+          "type": "service",
+          "name": "bits",
+          "action": "stop"
+        },
+        {
+          "type": "file_clean",
+          "path": "C:\\Windows\\SoftwareDistribution\\Download",
+          "recursive": true,
+          "skip_recent_hours": 0
+        },
+        {
+          "type": "service",
+          "name": "wuauserv",
+          "action": "start"
+        },
+        {
+          "type": "service",
+          "name": "bits",
+          "action": "start"
+        }
+      ]
+    },
+    {
+      "id": "apps_remove_copilot",
+      "name": "卸载 Microsoft Copilot",
+      "category": "apps",
+      "description": "移除 Copilot 应用（当前用户 + 阻止新用户自动预装）。可随时从 Microsoft Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.Copilot", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.Copilot", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_bing_weather",
+      "name": "卸载 MSN 天气",
+      "category": "apps",
+      "description": "移除 Bing/MSN 天气应用（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.BingWeather", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.BingWeather", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_bing_news",
+      "name": "卸载 MSN 资讯",
+      "category": "apps",
+      "description": "移除 Bing/MSN 资讯应用（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.BingNews", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.BingNews", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_get_help",
+      "name": "卸载 获取帮助",
+      "category": "apps",
+      "description": "移除系统「获取帮助」应用（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.GetHelp", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.GetHelp", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_get_started",
+      "name": "卸载 使用技巧/欢迎体验",
+      "category": "apps",
+      "description": "移除系统「使用技巧（Get Started）」应用（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.Getstarted", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.Getstarted", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_tips",
+      "name": "卸载 提示",
+      "category": "apps",
+      "description": "移除系统「提示（Tips）」应用（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.Tips", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.Tips", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_solitaire",
+      "name": "卸载 Microsoft 纸牌合集",
+      "category": "apps",
+      "description": "移除纸牌合集（含广告推送；当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.MicrosoftSolitaireCollection", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.MicrosoftSolitaireCollection", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_3d_viewer",
+      "name": "卸载 3D 查看器",
+      "category": "apps",
+      "description": "移除 3D 查看器（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.Microsoft3DViewer", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.Microsoft3DViewer", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_print_3d",
+      "name": "卸载 Print 3D",
+      "category": "apps",
+      "description": "移除 Print 3D（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.Print3D", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.Print3D", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_mixed_reality",
+      "name": "卸载 混合现实门户",
+      "category": "apps",
+      "description": "移除混合现实门户（无 VR 设备时无用；当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.MixedReality.Portal", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.MixedReality.Portal", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_onenote",
+      "name": "卸载 OneNote for Windows 10",
+      "category": "apps",
+      "description": "移除 UWP 版 OneNote（不影响 Office 桌面版；当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.Office.OneNote", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.Office.OneNote", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_skype",
+      "name": "卸载 Skype（UWP）",
+      "category": "apps",
+      "description": "移除 UWP 版 Skype（Skype 已停止服务；当前用户 + 阻止新用户自动预装）",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.SkypeApp", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.SkypeApp", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_office_hub",
+      "name": "卸载 Microsoft 365 推广入口",
+      "category": "apps",
+      "description": "移除 Office Hub（Microsoft 365 广告入口，不影响已装 Office；当前用户 + 阻止新用户自动预装）",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.MicrosoftOfficeHub", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.MicrosoftOfficeHub", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_feedback_hub",
+      "name": "卸载 反馈中心",
+      "category": "apps",
+      "description": "移除反馈中心（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.WindowsFeedbackHub", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.WindowsFeedbackHub", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_maps",
+      "name": "卸载 Windows 地图",
+      "category": "apps",
+      "description": "移除 Windows 地图（当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "Microsoft.WindowsMaps", "all_users": false },
+        { "type": "appx_remove", "name": "Microsoft.WindowsMaps", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_teams_personal",
+      "name": "卸载 Teams 个人版",
+      "category": "apps",
+      "description": "移除 Teams 个人版（Microsoft Teams；不影响企业版 Teams；当前用户 + 阻止新用户自动预装）",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "MicrosoftTeams", "all_users": false },
+        { "type": "appx_remove", "name": "MicrosoftTeams", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_remove_quick_assist",
+      "name": "卸载 快速助手",
+      "category": "apps",
+      "description": "移除快速助手（远程协助工具；当前用户 + 阻止新用户自动预装）。可从 Store 重装",
+      "requires_admin": true,
+      "actions": [
+        { "type": "appx_remove", "name": "MicrosoftCorporationII.QuickAssist", "all_users": false },
+        { "type": "appx_remove", "name": "MicrosoftCorporationII.QuickAssist", "all_users": true }
+      ]
+    },
+    {
+      "id": "apps_block_edge_reinstall",
+      "name": "阻止 Edge 自动重装/更新（高风险）",
+      "category": "apps",
+      "description": "高风险：通过 EdgeUpdate 策略阻止 Edge Chromium 自动安装与更新。可能影响 Edge 安全补丁，除非明确需要否则不建议启用",
+      "requires_admin": true,
+      "actions": [
+        {
+          "type": "registry",
+          "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\EdgeUpdate",
+          "value_name": "DoNotUpdateToEdgeWithChromium",
+          "value_type": "dword",
+          "data": { "dword": 1 }
+        }
+      ]
+    },
+    {
+      "id": "maintenance_restore_point",
+      "name": "创建系统还原点",
+      "category": "maintenance",
+      "description": "在应用批量调整前手动创建系统还原点（MODIFY_SETTINGS 类型）。需管理员权限；系统还原未开启时会如实报错（控制面板 → 恢复 → 配置系统还原）",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "restore_point", "description": "NexusForge 系统调整前" }
+      ]
+    },
+    {
+      "id": "maintenance_free_memory",
+      "name": "整理内存（清理工作集）",
+      "category": "maintenance",
+      "description": "对所有可访问进程执行 EmptyWorkingSet，把物理内存页换出到待命列表（效果等同于 RAM 清理工具）。需管理员权限；部分受保护进程会被跳过",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "empty_working_set" }
+      ]
+    },
+    {
+      "id": "maintenance_dism_scanhealth",
+      "name": "DISM 组件存储健康检查",
+      "category": "maintenance",
+      "description": "DISM /ScanHealth：扫描组件存储损坏（只查不改，约 5–15 分钟）。需管理员权限；执行期间应用将等待完成",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "exec", "program": "dism", "args": ["/Online", "/Cleanup-Image", "/ScanHealth"], "timeout_ms": 1800000 }
+      ]
+    },
+    {
+      "id": "maintenance_dism_restorehealth",
+      "name": "DISM 组件存储修复",
+      "category": "maintenance",
+      "description": "DISM /RestoreHealth：修复组件存储损坏（需要联网下载完好组件，约 10–30 分钟）。需管理员权限",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "exec", "program": "dism", "args": ["/Online", "/Cleanup-Image", "/RestoreHealth"], "timeout_ms": 1800000 }
+      ]
+    },
+    {
+      "id": "maintenance_dism_component_cleanup",
+      "name": "DISM 组件存储清理",
+      "category": "maintenance",
+      "description": "DISM /StartComponentCleanup：清理 WinSxS 旧版本组件（释放磁盘空间；清理后已装更新无法单独卸载）。需管理员权限",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "exec", "program": "dism", "args": ["/Online", "/Cleanup-Image", "/StartComponentCleanup"], "timeout_ms": 1800000 }
+      ]
+    },
+    {
+      "id": "maintenance_sfc_scannow",
+      "name": "系统文件检查器（SFC）",
+      "category": "maintenance",
+      "description": "sfc /scannow：扫描并修复受保护的系统文件（约 10–20 分钟，结果输出到 CBS.log）。需管理员权限",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "exec", "program": "sfc", "args": ["/scannow"], "timeout_ms": 1800000 }
+      ]
+    },
+    {
+      "id": "ui_power_ultimate",
+      "name": "解锁超级性能电源方案",
+      "category": "ui",
+      "description": "powercfg -duplicatescheme 解锁 Windows 内置的「超级性能」电源方案（工作站版特性，家庭版可能不可见）；解锁后在控制面板电源选项中手动选用。属维护操作可重复执行（重复解锁会产生重复方案）",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "exec", "program": "powercfg", "args": ["-duplicatescheme", "e9a42b02-d546-448a-9c71-0b2ca57cbcb7"], "timeout_ms": 60000 }
+      ]
+    },
+    {
+      "id": "apps_remove_onedrive",
+      "name": "卸载 OneDrive",
+      "category": "apps",
+      "description": "运行 OneDriveSetup.exe /uninstall 卸载 OneDrive（自动选择 System32/SysWOW64 版本）。属维护操作；如需恢复可从 Microsoft 官网重装",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "exec", "program": "onedrive_uninstall", "args": [], "timeout_ms": 300000 }
+      ]
+    },
+    {
+      "id": "network_teredo_off",
+      "name": "关闭 Teredo 隧道",
+      "category": "network",
+      "description": "netsh 禁用 Teredo IPv6 过渡隧道（减少不必要的对外连接，谨慎级）。属维护操作；恢复用 netsh interface teredo set state default",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "exec", "program": "netsh", "args": ["interface", "teredo", "set", "state", "disabled"], "timeout_ms": 60000 }
+      ]
+    },
+    {
+      "id": "defender_realtime_off",
+      "name": "关闭 Defender 实时保护（高风险）",
+      "category": "defender",
+      "description": "高风险：关闭 Microsoft Defender 实时保护（Set-MpPreference 固定模板）。系统安全防线将失效，强烈不建议日常关闭；若被篡改保护拦截请在 Windows 安全中心关闭篡改保护后重试",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "defender_realtime", "disable": true }
+      ]
+    },
+    {
+      "id": "defender_realtime_on",
+      "name": "开启 Defender 实时保护",
+      "category": "defender",
+      "description": "恢复 Microsoft Defender 实时保护（与上一条对称的恢复入口）。需管理员权限",
+      "requires_admin": true,
+      "maintenance": true,
+      "actions": [
+        { "type": "defender_realtime", "disable": false }
+      ]
     }
   ]
 }

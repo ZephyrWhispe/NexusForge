@@ -276,10 +276,62 @@ pub struct ServiceInfo {
     pub running: bool,
 }
 
-/// 服务控制（sc.exe 封装；v1 仅 start_type 三态，stop/start 延后）
+/// 服务控制（sc.exe 封装；启动类型三态 + 启停，修改需管理员）
 pub trait ServiceCtlPort: Port {
+    /// 查询服务快照（启动类型 + 运行状态）
     fn query(&self, name: &str) -> Result<ServiceInfo, AppError>;
-    fn set_start_type(&self, name: &str, st: StartType) -> Result<(), AppError>;
+    /// 设置启动类型
+    fn set_start_type(&self, name: &str, start_type: StartType) -> Result<(), AppError>;
+    /// 停止服务（已停止 → 幂等成功）
+    fn stop(&self, name: &str) -> Result<(), AppError>;
+    /// 启动服务（Disabled 服务 → 跳过返回 Ok——clear_cache 幂等语义）
+    fn start(&self, name: &str) -> Result<(), AppError>;
+}
+
+/// 系统维护动作（docs/impl/08 W6；还原点/DISM/SFC 的安全等级归 MaintenancePort）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairKind {
+    DismScanHealth,
+    DismRestoreHealth,
+    DismComponentCleanup,
+    SfcScanNow,
+}
+
+/// 系统维护（docs/impl/08 W4–W6：clean_dir/Exec 白名单/还原点/内存清理/DISM-SFC）
+pub trait MaintenancePort: Port {
+    /// 清空目录内容（保留目录本身）；skip_recent_hours 内的新文件跳过；返回删除条目数
+    fn clean_dir(&self, path: &str, recursive: bool, skip_recent_hours: u32) -> Result<u32, AppError>;
+    /// 执行白名单程序（powercfg|dism|sfc|netsh|onedrive_uninstall；args 参数模板拼接，
+    /// 禁止透传任意字符串）；返回合并输出（截断到 256KB）；超时强杀
+    fn exec(&self, program: &str, args: &[String], timeout_ms: u32) -> Result<String, AppError>;
+    /// 创建系统还原点（需系统还原已开启 + 管理员；MODIFY_SETTINGS 类型）
+    fn restore_point(&self, description: &str) -> Result<(), AppError>;
+    /// 清理各进程工作集（EmptyWorkingSet；跳过自身/系统进程；返回成功处理数）
+    fn empty_working_set(&self) -> Result<u32, AppError>;
+    /// 系统修复（DISM/SFC；同步捕获输出，长超时）
+    fn repair(&self, kind: RepairKind) -> Result<String, AppError>;
+    /// Defender 实时保护开关（高风险；固定 PowerShell 模板——篡改保护拦截时如实报错）
+    fn defender_realtime(&self, disable: bool) -> Result<(), AppError>;
+}
+
+/// Appx 包快照（docs/impl/08 W5）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppxPackage {
+    /// 包名（Id.Name，不含版本/arch，如 "Microsoft.BingWeather"）
+    pub name: String,
+    /// 全名（含版本/arch/publisher hash，移除时使用）
+    pub full_name: String,
+}
+
+/// Appx 包管理（docs/impl/08 W5；WinRT PackageManager + provisioned 走 DISM/PowerShell）
+pub trait AppxPort: Port {
+    /// 列出当前用户已安装且包名前缀匹配的包（name_filter 空 = 全部）
+    fn list(&self, name_filter: &str) -> Result<Vec<AppxPackage>, AppError>;
+    /// 移除当前用户的匹配包（不需管理员；全部匹配项逐一移除，返回移除数）
+    fn remove_current_user(&self, name_filter: &str) -> Result<u32, AppError>;
+    /// 移除 provisioned 包（防新建用户/系统重置后再装；需管理员；PowerShell 模板）
+    fn remove_provisioned(&self, name_filter: &str) -> Result<u32, AppError>;
 }
 
 // ---------------------------------------------------------------------------

@@ -60,6 +60,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str)] = &[
     ("term.exit", "终端会话结束。payload: {session_id, code?}"),
     ("sys.metrics", "系统资源采样（1s 节流）。payload: {ts_ms, cpu, mem_used, mem_total, net_bps, disks}"),
     ("sys.pkg_line", "包管理器命令输出行。payload: {source, action, line}"),
+    ("sys.verify_result", "WinOps 回归检测（WUB 式防自愈，模块 start 时比对备份原值）。payload: {regressed: [tweak_id]}"),
     ("automation.notify", "自动化规则前端通知。payload: {rule_id, title, body}"),
     ("automation.rule_fired", "规则已触发。payload: {rule_id, rule_name}"),
     ("sync.state_changed", "跨设备同步状态。payload: {pushed, pulled_applied, pulled_lost, conflicts}"),

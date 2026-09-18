@@ -11,6 +11,7 @@
 
 pub mod accent;
 pub mod admin;
+pub mod appx;
 pub mod capture;
 pub mod clipboard;
 pub mod conpty;
@@ -19,6 +20,7 @@ pub mod dpapi;
 pub mod helper;
 pub mod hotkey;
 pub mod input;
+pub mod maintenance;
 pub mod ocr;
 pub mod perf;
 pub mod registry;

@@ -64,6 +64,12 @@ features = [
     "Storage_Streams",
     # AvailableRecognizerLanguages 返回 IVectorView<Language>
     "Foundation_Collections",
+    # Appx 包管理（docs/impl/08 W5）：PackageManager/Package（WinRT）
+    "Management_Deployment",
+    # Package/PackageId 类型（Appx 枚举返回元素）
+    "ApplicationModel",
+    # 内存清理 EmptyWorkingSet/EnumProcesses（docs/impl/08 W6）
+    "Win32_System_ProcessStatus",
     # PrintWindow 被 Windows 元数据归入 Storage.Xps（windows 0.58 已知归置）
     "Win32_Storage_Xps",
 ]

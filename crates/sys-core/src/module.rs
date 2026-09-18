@@ -1,8 +1,8 @@
 //! SysModule 模块壳（docs/impl/06 SY）：Module trait 实现。
 //!
-//! - init：注入 PerfPort / RecycleBinPort；构建包管理器集合与清理清单
-//! - start：启动 1s 采样线程 → sys.metrics 事件（节流 1s）
-//! - 无全局快捷键 ability；WinOps Tweak 引擎（docs/impl/08）为后续深化里程碑
+//! - init：注入 PerfPort / RecycleBinPort + WinOps 数据面快照；构建包管理器集合与清理清单
+//! - start：启动 1s 采样线程（sys.metrics）+ WinOps 回归检测（WUB 式防自愈，sys.verify_result）
+//! - 无全局快捷键 ability；WinOps Tweak 引擎（docs/impl/08）数据面经 Port 注入
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus};
 use host_core::module::{Module, ModuleContext, ModuleInfo, ModuleState};
-use host_core::ports::{PerfPort, RecycleBinPort};
+use host_core::ports::{AppxPort, MaintenancePort, PerfPort, RecycleBinPort, RegistryOps, ServiceCtlPort, TaskTogglePort};
 
 use crate::clean;
 use crate::metrics::{MetricsBuffer, MetricsPoint};
@@ -19,6 +19,16 @@ use crate::pkg::PkgManager;
 
 /// 采样间隔
 const SAMPLE_INTERVAL_MS: u64 = 1000;
+
+/// WinOps 回归检测数据面快照（init 时从 Ports 取，start 后台线程用）
+#[derive(Clone)]
+struct WinopsFace {
+    registry: Arc<dyn RegistryOps>,
+    tasks: Option<Arc<dyn TaskTogglePort>>,
+    services: Option<Arc<dyn ServiceCtlPort>>,
+    maintenance: Option<Arc<dyn MaintenancePort>>,
+    appx: Option<Arc<dyn AppxPort>>,
+}
 
 pub struct SysModule {
     state: AtomicU8,
@@ -30,8 +40,9 @@ pub struct SysModule {
     targets: Vec<clean::CleanTarget>,
     sample_cancel: Arc<std::sync::atomic::AtomicBool>,
     sample_thread: RwLock<Option<std::thread::JoinHandle<()>>>,
-    /// appData 根（预留）
-    #[allow(dead_code)]
+    /// WinOps 数据面（init 注入；start 时回归检测用）
+    winops: RwLock<Option<WinopsFace>>,
+    /// appData 根（回归检测定位 backup.json 与外置目录）
     app_data_dir: PathBuf,
 }
 
@@ -47,6 +58,7 @@ impl SysModule {
             targets: clean::builtin_targets(),
             sample_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sample_thread: RwLock::new(None),
+            winops: RwLock::new(None),
             app_data_dir: app_data_dir.to_path_buf(),
         }
     }
@@ -120,6 +132,46 @@ impl SysModule {
     unsafe fn leak_self(s: &Self) -> &'static Self {
         &*(s as *const Self)
     }
+
+    /// WinOps 回归检测（docs/impl/08 §3.3 W4：WUB 式防自愈，v1 不做守护任务）。
+    /// start 后台执行一次：备份原值 vs 当前值比对，回归 → sys.verify_result 事件（UI 黄条）。
+    fn start_regression_check(&self) {
+        let face = match self.winops.read().ok().and_then(|g| g.clone()) {
+            Some(f) => f,
+            None => return,
+        };
+        let Some(bus) = self.bus.read().ok().and_then(|g| g.clone()) else {
+            return;
+        };
+        let dir = self.app_data_dir.clone();
+        std::thread::Builder::new()
+            .name("nf-sys-regression".into())
+            .spawn(move || {
+                let external = dir.join("winops").join("catalog");
+                let Ok(tweaks) = crate::winops::load_catalog(Some(&external)) else {
+                    return;
+                };
+                let ports = crate::winops::SysPorts {
+                    registry: face.registry.as_ref(),
+                    tasks: face.tasks.as_deref(),
+                    services: face.services.as_deref(),
+                    maintenance: face.maintenance.as_deref(),
+                    appx: face.appx.as_deref(),
+                };
+                let store = crate::winops::BackupStore::open(&dir);
+                let regressed = crate::winops::regression_check(&ports, &store, &tweaks);
+                if !regressed.is_empty() {
+                    tracing::warn!(count = regressed.len(), "WinOps 回归检测发现被系统改回的设置");
+                    bus.publish(Event::new(
+                        "sys.verify_result",
+                        "sys",
+                        serde_json::json!({ "regressed": regressed }),
+                    ))
+                    .ok();
+                }
+            })
+            .ok();
+    }
 }
 
 impl Module for SysModule {
@@ -141,12 +193,24 @@ impl Module for SysModule {
         *self.perf.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(perf);
         *self.recycle.write().map_err(|_| ModuleError::Init("锁污染".into()))? = ctx.ports.get::<dyn RecycleBinPort>();
         *self.bus.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(ctx.event_bus.clone());
+        // WinOps 数据面快照（注册缺失容忍——回归检测按 None 跳过对应比对）
+        *self.winops.write().map_err(|_| ModuleError::Init("锁污染".into()))? = Some(WinopsFace {
+            registry: ctx
+                .ports
+                .get::<dyn RegistryOps>()
+                .ok_or_else(|| ModuleError::Init("RegistryOps 未注册".into()))?,
+            tasks: ctx.ports.get::<dyn TaskTogglePort>(),
+            services: ctx.ports.get::<dyn ServiceCtlPort>(),
+            maintenance: ctx.ports.get::<dyn MaintenancePort>(),
+            appx: ctx.ports.get::<dyn AppxPort>(),
+        });
         self.state.store(1, Ordering::SeqCst);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
         self.start_sampler();
+        self.start_regression_check();
         self.state.store(2, Ordering::SeqCst);
         Ok(())
     }

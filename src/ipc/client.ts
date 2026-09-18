@@ -1249,6 +1249,11 @@ export function winopsRollback(id: string): Promise<void> {
   return invoke("winops_rollback", { id });
 }
 
+/** 导出 WinOps 审计（审计记录 + 备份清单），返回导出文件路径（W7） */
+export function winopsAuditExport(): Promise<string> {
+  return invoke("winops_audit_export");
+}
+
 // ======================== 自动化与拓展（M14 A1–A3，docs/impl/07） ========================
 
 // Trigger/Expr/Action 与 Rust serde 内部 tag 序列化一一对应
