@@ -70,7 +70,6 @@ const useStyles = makeStyles({
   },
   code: {
     fontSize: tokens.fontSizeBase600,
-    fontSpacing: "4px",
     letterSpacing: "6px",
     fontWeight: tokens.fontWeightSemibold,
     color: tokens.colorBrandForeground1,

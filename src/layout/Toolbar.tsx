@@ -48,15 +48,18 @@ const useStyles = makeStyles({
 interface Props {
   search: string;
   onSearchChange: (v: string) => void;
+  onQuickPanel: () => void;
+  onLauncher: () => void;
+  onScreenshot: () => void;
 }
 
-export default function Toolbar({ search, onSearchChange }: Props) {
+export default function Toolbar({ search, onSearchChange, onQuickPanel, onLauncher, onScreenshot }: Props) {
   const styles = useStyles();
   return (
     <div className={styles.root}>
-      <button className={styles.btn}>◧ 剪切板快速面板 <span className={styles.kbd}>Ctrl+Shift+V</span></button>
-      <button className={styles.btn}>⌘ 启动器 <span className={styles.kbd}>Alt+Space</span></button>
-      <button className={styles.btn}>✂ 截图 <span className={styles.kbd}>Ctrl+Shift+S</span></button>
+      <button className={styles.btn} onClick={onQuickPanel}>◧ 剪切板快速面板 <span className={styles.kbd}>Ctrl+Shift+V</span></button>
+      <button className={styles.btn} onClick={onLauncher}>⌘ 启动器 <span className={styles.kbd}>Alt+Space</span></button>
+      <button className={styles.btn} onClick={onScreenshot}>✂ 截图 <span className={styles.kbd}>Ctrl+Shift+S</span></button>
       <div className={styles.spacer} />
       <Input
         className={styles.search}

@@ -546,7 +546,7 @@ export default function SysPanel() {
                 padding: "6px 10px",
                 marginBottom: 8,
                 borderRadius: 4,
-                background: "var(--colorPaletteYellowBackground2, #fff4ce)",
+                background: tokens.colorPaletteYellowBackground1,
               }}
             >
               <Text size={200}>

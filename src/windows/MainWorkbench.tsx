@@ -166,7 +166,13 @@ export default function MainWorkbench() {
     <div className={styles.app}>
       <MicaBackdrop />
       <TitleBar />
-      <Toolbar search={search} onSearchChange={setSearch} />
+      <Toolbar
+        search={search}
+        onSearchChange={setSearch}
+        onQuickPanel={() => void toggleQuickPanel()}
+        onLauncher={() => void toggleLauncher()}
+        onScreenshot={() => void import("./overlayController").then((m) => m.startOverlay("shot"))}
+      />
 
       <div className={styles.main}>
         <ModuleNav active={active} onChange={setActive} />

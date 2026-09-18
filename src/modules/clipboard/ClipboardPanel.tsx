@@ -177,7 +177,8 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
     };
   }, [load, refreshCounts]);
 
-  // U3-1 虚拟列表（固定行高 64px）
+  // U3-1 虚拟列表：64px 仅作初估，实际行高由 measureElement 动态测量
+  //（图片行含 52px 缩略图 + 上下 padding ≈75px，固定行高会重叠）
   const virtualizer = useVirtualizer({
     count: entries.length,
     getScrollElement: () => listRef.current,
@@ -220,6 +221,8 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
               return (
                 <div
                   key={e.id}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
                   className={styles.entry}
                   style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
                   onClick={() => doPaste(e)}

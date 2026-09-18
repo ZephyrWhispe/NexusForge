@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { FluentProvider } from "@fluentui/react-components";
+import "./styles/global.css";
 import App from "./App";
 import { buildThemeSet } from "./theme/theme";
 import { hostSystemAccent } from "./ipc/client";
