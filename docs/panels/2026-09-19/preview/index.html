@@ -160,18 +160,47 @@ body{font-family:var(--font);background:#E8E8E8;color:var(--txt-primary);font-si
 .tabbar{height:36px;display:flex;align-items:flex-end;gap:var(--sp-1);padding:0 var(--sp-4);border-bottom:1px solid var(--stroke)}
 .tab{height:30px;padding:0 var(--sp-3);font-size:13px;display:flex;align-items:center;border-radius:4px 4px 0 0;color:var(--txt-secondary)}
 .tab.on{background:var(--bg-card);border:1px solid var(--stroke);border-bottom-color:var(--bg-card);font-weight:600;color:var(--txt-primary)}
+/* ============ 四审新增：00§10 缩放演示（容器查询，按窗口可用宽判档） ============ */
+.window{container-type:inline-size}
+.hamb{display:none;width:32px;height:32px;border:1px solid transparent;background:transparent;border-radius:4px;align-items:center;justify-content:center;font-size:15px;color:var(--txt-secondary)}
+@container (max-width:1007px){
+  .subnav{width:48px;min-width:48px}
+  .subnav .modname,.subnav .grp,.subnav .cnt,.subnav .lbl{display:none}
+  .subnav .item{justify-content:center;padding:0}
+}
+@container (max-width:640px){
+  .subnav{display:none}
+  .hamb{display:inline-flex}
+  .panel-header:not(:has(.hamb))::before{content:"☰";display:inline-flex;align-items:center;font-size:14px;color:var(--txt-secondary);margin-right:var(--sp-2)}
+  .toolbar .chip{display:none}
+  .detaildrawer{display:none}
+}
+/* 样张屏通用小组件 */
+.statcard{background:var(--bg-card);border:1px solid var(--stroke);border-radius:6px;padding:var(--sp-4);display:flex;flex-direction:column;gap:var(--sp-1)}
+.statcard .big{font-size:28px;line-height:36px;font-weight:600;font-variant-numeric:tabular-nums}
+.statcard .lb{font-size:12px;color:var(--txt-secondary)}
+.cardgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:var(--sp-3)}
+.flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.flow .fstep{border:1px solid var(--stroke-strong);border-radius:16px;padding:2px 10px;font-size:12px;background:var(--bg-card)}
+.flow .fstep.on{border-color:var(--accent);background:#E7F1FB;color:var(--accent)}
+.flow .fstep.off{opacity:.45;text-decoration:line-through}
+.flow .arrow{color:var(--txt-tertiary);font-size:12px}
+.blk{border:1px solid var(--stroke);border-left:3px solid var(--accent);border-radius:6px;background:var(--bg-card);padding:var(--sp-2) var(--sp-3);font-family:var(--font-mono);font-size:12px;display:flex;flex-direction:column;gap:4px}
+.blk .bh{display:flex;gap:var(--sp-2);align-items:center;font-family:var(--font);font-size:12px;color:var(--txt-secondary)}
+.thumb{width:44px;height:30px;border-radius:4px;background:#E3E7EC;border:1px solid var(--stroke);display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--txt-tertiary);flex:none}
+.code{font-family:var(--font-mono);font-size:12px}
+.listpad{padding:var(--sp-3) 0}
+/* S18 断点演示必须与浏览器视口宽无关：取消 max-width:100% 封顶，超宽时由本节自身横向滚动消化 */
+#s18{overflow-x:auto}
+#s18>.window{max-width:none}
 </style>
 </head>
 <body>
 
 <div class="reviewbar">
   <h1>NexusForge UI 样张 · 静态预览（审核用，非应用代码）</h1>
-  <a href="#s1">① 主工作台骨架·剪切板</a>
-  <a href="#s2">② 系统·软件与卸载</a>
-  <a href="#s3">③ 系统·更新管控(新功能面)</a>
-  <a href="#s4">④ 设置页规范样例</a>
-  <a href="#s5">⑤ 代理·节点与分流规则</a>
-  <a href="../00-ui-layout-spec.md">规范原文 00-spec</a>
+  <a href="#s1">①工作台骨架</a><a href="#s2">②软件卸载</a><a href="#s3">③更新管控</a><a href="#s4">④设置规范</a><a href="#s5">⑤代理节点/分流</a><a href="#s6">⑥密码库</a><a href="#s7">⑦文件网盘</a><a href="#s8">⑧桌面效率</a><a href="#s9">⑨键鼠共享</a><a href="#s10">⑩终端</a><a href="#s11">⑪截图贴图</a><a href="#s12">⑫OCR</a><a href="#s13">⑬文本PDF</a><a href="#s14">⑭笔记</a><a href="#s15">⑮自动化</a><a href="#s16">⑯同步</a><a href="#s17">⑰宿主设置中心</a><a href="#s18">⑱缩放演示</a>
+  <a href="../00-ui-layout-spec.md">规范 00-spec</a>
 </div>
 
 <!-- ======================= S1 主工作台骨架 ======================= -->
@@ -510,12 +539,510 @@ body{font-family:var(--font);background:#E8E8E8;color:var(--txt-primary);font-si
   </div>
 </section>
 
+<!-- ======================= S6 密码库 ======================= -->
+<section class="screen" id="s6">
+  <div class="caption">
+    <h2>⑥ 密码库 · 条目（03 §2/§7 + 四审 §8-①③：到期列走宿主时间调度、仿冒域名离线告警、掩码条目）</h2>
+    <ul><li>到期时间列=共性②"时间事件→通知深链"的列表侧呈现（深链回本行）；敏感行默认掩码（03§7）。</li>
+    <li>口令列恒"•••"+揭示钮；复制口令走屏蔽通道不入剪贴板历史（01§7.2-⑥ 互斥红线成对）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">密码库</div>
+        <div class="item"><span class="ic">◧</span><span class="lbl">概览</span></div>
+        <div class="item sel"><span class="ic">🗄</span><span class="lbl">条目</span><span class="cnt">214</span></div>
+        <div class="item"><span class="ic">🖳</span><span class="lbl">卡片/身份信息</span></div>
+        <div class="item"><span class="ic">▤</span><span class="lbl">审计历史</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header">
+          <h3>条目</h3><span class="ctx">已解锁 · 30 分钟后自动锁定</span>
+          <span class="ph-spacer"></span>
+          <button class="btn" title="Chrome/Edge 本地库一键导入（DPAPI，明文仅内存即用即零化）">⬓ 从浏览器导入…</button>
+          <button class="btn primary">＋ 新建条目</button>
+        </div>
+        <div class="toolbar">
+          <input class="input xl" placeholder="⌕ 搜索标题/用户名">
+          <span class="chip">分组：全部 ▾</span><span class="chip on">30 天内到期 <span class="x">✕</span></span>
+          <span class="tb-spacer"></span>
+          <button class="btn subtle">健康检查 · 弱口令 4</button>
+        </div>
+        <div class="listbody">
+          <div class="thead"><span class="grow">标题</span><span style="width:150px">用户名</span><span style="width:88px">强度</span><span class="date">到期</span><span style="width:60px"></span></div>
+          <div class="row"><div class="grow"><div class="t">公司 VPN（radius）</div><div class="sub">TLS 证书 2026-10-01 轮换 · 上次修改 8 个月前</div></div><span class="code">ops@corp</span><span><span class="badge err">弱</span></span><span class="date" style="color:var(--danger)">12 天</span><span class="rowact"><span class="iconbtn" title="复制口令（不入剪贴板历史）">⎘</span><span class="iconbtn" title="自动填充">⇥</span><span class="iconbtn" title="更多">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">云服务商控制台</div><div class="sub">TOTP 已启用 · 偏移已校准（03§5-4）</div></div><span class="code">admin@…</span><span><span class="badge ok">强</span></span><span class="date">—</span><span class="rowact"><span class="iconbtn">⎘</span><span class="iconbtn">⇥</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">某 SaaS 试用（Pro）</div><div class="sub">试用到期提醒已挂宿主调度 · 临期 3 天出托盘</div></div><span class="code">me@mail</span><span><span class="badge">中</span></span><span class="date" style="color:var(--warning-fg)">3 天</span><span class="rowact"><span class="iconbtn">⎘</span><span class="iconbtn">⇥</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">paypaI.com（注意大写 I）</div><div class="sub"><span style="color:var(--danger)">⚠ 仿冒告警：与库内 "paypal.com" 编辑距离 1 · 同形字模式</span> · 打开前需二次确认</div></div><span class="code">—</span><span><span class="badge err">可疑</span></span><span class="date">—</span><span class="rowact"><span class="iconbtn">⎘</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">路由器管理 · 口令 ••••••••••（点击揭示）</div><div class="sub">加密字段 · 揭示动作进审计历史</div></div><span class="code">admin</span><span><span class="badge ok">强</span></span><span class="date">—</span><span class="rowact"><span class="iconbtn" title="揭示">👁</span><span class="iconbtn">⋯</span></span></div>
+        </div>
+        <div class="footerbar"><span>4 / 共 214（筛选：30 天内到期）</span><span class="f-spacer"></span><span>库：个人 · 独立信封（多库切换 §8-⑤ 计划中）</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S7 文件·网盘 ======================= -->
+<section class="screen" id="s7">
+  <div class="caption">
+    <h2>⑦ 文件 · 远程（04 §2/§7 + 四审 §8-①③④⑤：content: 搜索、归档就地浏览、镜像 diff 干跑、校验和列）</h2>
+    <ul><li>右抽屉=共性③"干跑预览→清单确认→执行"首例：镜像同步先列差异清单，删除条目要求输入确认词。</li>
+    <li>选中文件即出 SHA-256 徽标（右键菜单同入口）；zip 行双击=就地进入归档浏览而非解压。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">文件</div>
+        <div class="item"><span class="ic">🖿</span><span class="lbl">本地</span></div>
+        <div class="item sel"><span class="ic">☁</span><span class="lbl">网盘 · 远程</span><span class="cnt">3</span></div>
+        <div class="item"><span class="ic">⇅</span><span class="lbl">传输队列</span><span class="cnt">2</span></div>
+        <div class="item"><span class="ic">🗑</span><span class="lbl">回收站</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>WebDAV · NAS/docs</h3><span class="ctx">会话已连接（B6 Transfer）· 本地对照：D:\Docs</span><span class="ph-spacer"></span><button class="btn">⚙ 目录 diff / 镜像…</button><button class="btn primary">＋ 上传</button></div>
+        <div class="toolbar">
+          <input class="input xl" placeholder="⌕ 搜索（支持 content:关键词 全文检索）">
+          <span class="chip on">content: 合同 <span class="x">✕</span></span><span class="chip">类型 ▾</span>
+          <span class="tb-spacer"></span>
+          <span class="badge warn">content: 未建索引 · 扫描模式（可停） </span>
+        </div>
+        <div class="detailwrap">
+          <div class="listbody" style="flex:1;min-width:0">
+            <div class="thead"><span style="width:16px"></span><span class="grow">名称</span><span style="width:88px;text-align:right">大小</span><span class="date">修改</span><span style="width:110px">校验和</span><span style="width:60px"></span></div>
+            <div class="row sel"><span class="cb on">✓</span><div class="grow"><div class="t">2026-采购合同-修订.docx</div><div class="sub">content 命中 ×3 · §4.2 付款条款…</div></div><span class="num" style="width:88px">412 KB</span><span class="date">09-12</span><span class="badge u">SHA256 3f9a…c2</span><span class="rowact"><span class="iconbtn" title="下载">⇩</span><span class="iconbtn" title="空格预览">▣</span><span class="iconbtn">⋯</span></span></div>
+            <div class="row"><span class="cb"></span><div class="grow"><div class="t">项目存档.zip <span class="badge">可就地浏览</span></div><div class="sub">双击进入归档 · 勾选拖出=选择性解压</div></div><span class="num" style="width:88px">84 MB</span><span class="date">08-30</span><span style="width:110px"><span class="note">—</span></span><span class="rowact"><span class="iconbtn">⇩</span><span class="iconbtn">⋯</span></span></div>
+            <div class="row"><span class="cb"></span><div class="grow"><div class="t">扫描件</div><div class="sub">目录 · 214 项</div></div><span class="num" style="width:88px">—</span><span class="date">09-01</span><span style="width:110px"><span class="note">—</span></span><span class="rowact"><span class="iconbtn">⋯</span></span></div>
+          </div>
+          <div class="detaildrawer">
+            <h5>镜像预览（干跑） · D:\Docs → NAS/docs</h5>
+            <div class="banner warn"><b>比对结果：</b>新增 3 · 覆盖 1 · <span style="color:var(--danger)">远端将删除 2</span>（清单已展开）</div>
+            <div class="dd-block"><b style="color:var(--txt-primary);font-size:12px">+ 将上传</b>notes\2026-09.md · assets\a.png · 合同final.docx</div>
+            <div class="dd-block"><b style="color:var(--txt-primary);font-size:12px">− 将删除（远端独有）</b>旧版合同.docx · tmp\cache.zip</div>
+            <div style="display:flex;align-items:center;gap:8px;font-size:12px">输入确认词 <b>镜像</b>：<input class="input" style="width:120px;height:28px" placeholder="镜像"></div>
+            <div class="dd-actions"><button class="btn danger" disabled title="输入确认词后可用">执行镜像</button><button class="btn primary" style="margin-left:0">只看清单导出</button></div>
+          </div>
+        </div>
+        <div class="footerbar"><span>凭据来自密码库引用（不落明文 · vault 永不入同步流红线不变）</span><span class="f-spacer"></span><span>已选 1 · 412 KB</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S8 桌面效率 ======================= -->
+<section class="screen" id="s8">
+  <div class="caption">
+    <h2>⑧ 桌面效率 · 启动器（05 §2/§7 + 四审 §8-①③④：拼音首字母、结果类型"窗口"、URL 强制 HTTPS）</h2>
+    <ul><li>打分链单源（共性①）：拼音缩写/别名/模糊同表竞争排序；窗口结果只读枚举不注入。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">桌面效率</div>
+        <div class="item"><span class="ic">◧</span><span class="lbl">概览</span></div>
+        <div class="item sel"><span class="ic">⌕</span><span class="lbl">启动器</span></div>
+        <div class="item"><span class="ic">▦</span><span class="lbl">桌面整理</span></div>
+        <div class="item"><span class="ic">☑</span><span class="lbl">待办</span><span class="cnt">6</span></div>
+        <div class="item"><span class="ic">✎</span><span class="lbl">便签 · 随记</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>启动器</h3><span class="ctx">热键 Alt+Space · 索引 8,412 项 · 重建</span><span class="ph-spacer"></span><button class="btn primary">打开启动器窗</button></div>
+        <div class="toolbar"><input class="input xl" value="dd"><span class="chip">匹配方式：拼音首字母</span><span class="tb-spacer"></span><span class="note">↑↓ 选择 · Enter 启动 · Ctrl+Enter 以管理员</span></div>
+        <div class="listbody">
+          <div class="thead"><span style="width:24px"></span><span class="grow">结果</span><span style="width:96px">类型</span><span style="width:150px">命中依据</span><span style="width:60px"></span></div>
+          <div class="row sel"><span class="c-ic">钉</span><div class="grow"><div class="t"><b>钉钉</b> · DingTalk.exe</div><div class="sub">C:\Program Files (x86)\DingDing</div></div><span class="badge u">应用</span><span class="code">拼音 dd（匹配度 98）</span><span class="rowact"><span class="iconbtn">⏎</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><span class="c-ic">▣</span><div class="grow"><div class="t">窗口：index.html — NexusForge UI 样张</div><div class="sub">切换/置顶该窗口（Window Hopper 式，只读枚举）</div></div><span class="badge">窗口</span><span class="code">标题含 "dd"→模糊 61</span><span class="rowact"><span class="iconbtn">⏎</span></span></div>
+          <div class="row"><span class="c-ic">↗</span><div class="grow"><div class="t">URL：https://dict.baidu.com/?q={q}</div><div class="sub">固定项 · 强制 HTTPS 已生效 · 新窗打开</div></div><span class="badge">URL</span><span class="code">别名 "ddic"</span><span class="rowact"><span class="iconbtn">⏎</span></span></div>
+          <div class="row"><span class="c-ic">ƒ</span><div class="grow"><div class="t">计算：3*88+12 → 276</div><div class="sub">内置算术（汇率分组挂 DeferredBadge v1.1）</div></div><span class="badge">计算</span><span class="code">纯求值</span><span class="rowact"><span class="iconbtn">⏎</span></span></div>
+        </div>
+        <div class="footerbar"><span>最近使用同步显示于启动器窗空查询态（同一数据源）</span><span class="f-spacer"></span><span>今天自动整理了 14 个文件 · 查看</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S9 键鼠共享 ======================= -->
+<section class="screen" id="s9">
+  <div class="caption">
+    <h2>⑨ 键鼠共享 · 概览（06 §2/§7 + 四审 §8：锁定到本机瞬时冻结、地址多候选、落点连续性/重复透传开关进设置）</h2>
+    <ul><li>锁定态是"大字卡+托盘+热键"三处可见（§8-⑥）；被控指示器默认开（§7.2-④ 安全透明性）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">键鼠共享</div>
+        <div class="item sel"><span class="ic">◧</span><span class="lbl">概览</span></div>
+        <div class="item"><span class="ic">▦</span><span class="lbl">设备 · 屏幕</span><span class="cnt">2</span></div>
+        <div class="item"><span class="ic">▤</span><span class="lbl">会话历史</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>概览</h3><span class="ctx">服务端 · :49800 · 配对 2 台 · TLS 指纹已互信</span><span class="ph-spacer"></span><button class="btn">⏸ 锁定到本机 <span class="kbd">Ctrl+Alt+L</span></button><button class="btn primary">▶ 开始共享</button></div>
+        <div class="stack"><div class="centercol" style="gap:16px">
+          <div class="cardgrid">
+            <div class="statcard"><span class="lb">本机 → 桌面 2（左缘）</span><span class="big">12<span style="font-size:12px"> ms</span></span><span class="note">落点连续：按相对位置进入 · 滚轮 ×1.0 · 按键重复 开</span></div>
+            <div class="statcard"><span class="lb">当前控制方</span><span class="big" style="font-size:20px;line-height:28px">本机（无远端接管）</span><span class="note">被控指示器：开（角标常显）</span></div>
+            <div class="statcard"><span class="lb">今日跨机流量</span><span class="big">3.1<span style="font-size:12px"> GB</span></span><span class="note">剪贴板同步 14 条（emoji 往返 ✓）· 文件推送 2</span></div>
+          </div>
+          <div class="card">
+            <div class="row"><span class="c-ic">🖥</span><div class="grow"><div class="t">台式机-astra <span class="badge ok">在线</span></div><div class="sub">192.168.1.23:49801 · 主机名优先解析（IP 回退链 2 级）· 建议地址已随网络更新</div></div><span class="badge">被控端</span><span class="rowact"><span class="iconbtn" title="诊断">🩺</span><span class="iconbtn">⋯</span></span></div>
+            <div class="row" style="border-bottom:none"><span class="c-ic">💻</span><div class="grow"><div class="t">笔记本-navel <span class="badge err">离线</span></div><div class="sub">上次会话 42 分钟 · 修饰键复位握手正常（无"卡 Ctrl"上报）</div></div><span class="badge">双控</span><span class="rowact"><span class="iconbtn">⋯</span></span></div>
+          </div>
+          <div class="banner state"><span class="dot g"></span><b>防火墙预检通过</b>：49800/49801 入站规则齐备（首次配对前置体检，§7.2-⑤）</div>
+        </div></div>
+        <div class="footerbar"><span>锁屏/总开关关闭后重复注入计数恒 0（§8-① 负例已入验收）</span><span class="f-spacer"></span><span>方案：家（边缘映射 左/右）</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S10 终端 ======================= -->
+<section class="screen" id="s10">
+  <div class="caption">
+    <h2>⑩ 终端运维 · 会话（08 §2/§7 + 四审 §8-①②：命令块 Blocks、输出触发器→term.output_matched 事件）</h2>
+    <ul><li>块头=时间戳+退出码徽标+块级复制；无 shell integration 时整屏复制降级（禁假就绪）。</li>
+    <li>触发器命中行红标并可一键"交给自动化"（13 消费事件，共性⑦首例示范）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">终端</div>
+        <div class="item sel"><span class="ic">▣</span><span class="lbl">会话</span><span class="cnt">3</span></div>
+        <div class="item"><span class="ic">✂</span><span class="lbl">片段 · 模板</span></div>
+        <div class="item"><span class="ic">◉</span><span class="lbl">录制回放</span></div>
+        <div class="item"><span class="ic">⇄</span><span class="lbl">SFTP · 转发</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>prod-web-02</h3><span class="ctx">root@10.0.4.12 · keepalive 30s · 隧道×2 恢复中（自动重连已触发 1 次）</span><span class="ph-spacer"></span><button class="btn">⧉ 复制当前会话</button><button class="btn primary">＋ 新会话</button></div>
+        <div class="toolbar"><div class="tabbar" style="border:none;padding:0;height:40px;align-items:center"><span class="tab on">prod-web-02</span><span class="tab">db-01</span><span class="tab">bastion +2</span><span class="tab">＋</span></div><span class="tb-spacer"></span><input class="input m" placeholder="⌕ 块内搜索 / 跳上一块 ↑↓"></div>
+        <div class="listbody listpad" style="background:var(--bg-layer)">
+          <div class="blk"><div class="bh"><b style="color:var(--txt-primary)">systemctl status nginx</b><span class="badge ok">exit 0</span><span>21:47:03</span><span class="tb-spacer"></span><button class="btn subtle" style="height:24px">复制块</button></div><div>● nginx.service - active (running) since Fri 2026-09-19 06:12:44</div></div>
+          <div class="blk" style="border-left-color:var(--danger)"><div class="bh"><b style="color:var(--txt-primary)">dmesg -T | tail -3</b><span class="badge err">命中触发器：OOM</span><span>21:48:11</span><span class="tb-spacer"></span><button class="btn" style="height:24px">交给自动化 →</button></div><div>[Fri Sep 19 21:47:58 2026] Out of memory: Killed process 18422 (java) …</div><div class="note">触发器只提示不执行（§8-② 红线）；告警已进通知中心并深链本行</div></div>
+          <div class="blk"><div class="bh"><b style="color:var(--txt-primary)">df -h /data</b><span class="badge ok">exit 0</span><span>21:48:40</span><span class="tb-spacer"></span><button class="btn subtle" style="height:24px">复制块</button></div><div>/dev/sda1  916G  802G  67G  93% /data</div></div>
+        </div>
+        <div class="footerbar"><span>OSC 133 已协商（命令边界精确）· 录制打点：高风险确认 ×0</span><span class="f-spacer"></span><span>转发：-L 15432（冲突自检 ✓） -D 1080</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S11 截图与贴图 ======================= -->
+<section class="screen" id="s11">
+  <div class="caption">
+    <h2>⑪ 截图 · 历史与任务流（09 §2/§7 + 四审 §8-①②：重复上一次捕获、外发前元数据清洗、混合 DPI 逐屏覆盖层提示）</h2>
+    <ul><li>行内徽标说明清洗事实（去了哪几类字段），点开可回看原始元数据（清洗前留存 7 天）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">截图</div>
+        <div class="item"><span class="ic">◧</span><span class="lbl">概览 · 捕获</span></div>
+        <div class="item sel"><span class="ic">▤</span><span class="lbl">历史</span><span class="cnt">318</span></div>
+        <div class="item"><span class="ic">✦</span><span class="lbl">美化</span></div>
+        <div class="item"><span class="ic">⛓</span><span class="lbl">任务流</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>历史</h3><span class="ctx">占用 412 MB / 上限 1 GB · 立即清理</span><span class="ph-spacer"></span><button class="btn">⟲ 重复上一次捕获 <span class="kbd">Ctrl+Shift+3</span></button><button class="btn primary">✂ 新建捕获</button></div>
+        <div class="toolbar"><input class="input xl" placeholder="⌕ 按 OCR 文本搜历史（本地索引）"><span class="chip on">近 7 天 <span class="x">✕</span></span><span class="chip">含钉图</span><span class="tb-spacer"></span><button class="btn">对比所选（2）</button></div>
+        <div class="listbody">
+          <div class="thead"><span style="width:16px"></span><span style="width:44px"></span><span class="grow">条目</span><span style="width:130px">任务流</span><span class="date">时间</span><span style="width:60px"></span></div>
+          <div class="row"><span class="cb on">✓</span><span class="thumb">1080p</span><div class="grow"><div class="t">选区 2404×1391 · 含 12 行 OCR 文本</div><div class="sub">EXIF/GPS 已清除（3 字段）· 混合 DPI：屏2@150% 独立覆盖层</div></div><span class="flow"><span class="fstep on">钉图</span><span class="fstep on">OCR</span></span><span class="date">20:11</span><span class="rowact"><span class="iconbtn" title="重放任务链">⛓</span><span class="iconbtn">✎</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row sel"><span class="cb on">✓</span><span class="thumb">窗口</span><div class="grow"><div class="t">窗口捕获：Qoder Settings</div><div class="sub">含光标：否（默认）· 美化预设"圆角+渐变"已应用</div></div><span class="flow"><span class="fstep on">复制</span><span class="fstep off">上传(未配)</span></span><span class="date">19:40</span><span class="rowact"><span class="iconbtn">⛓</span><span class="iconbtn">✎</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><span class="cb"></span><span class="thumb">滚动</span><div class="grow"><div class="t">滚动截图 · 8 段拼接</div><div class="sub">拼接置信 96% · 第 5 段有重影（点击查看并手修接缝）</div></div><span class="flow"><span class="fstep on">保存</span><span class="fstep on">转 PDF…</span></span><span class="date">18:02</span><span class="rowact"><span class="iconbtn">⛓</span><span class="iconbtn">⋯</span></span></div>
+        </div>
+        <div class="footerbar"><span>贴图 3 张活跃 · 1 张穿透模式（角标常显）· 密码管理器窗口在不捕清单内</span><span class="f-spacer"></span><span>延迟截图 3/5/10s 在"新建捕获"菜单内</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S12 OCR ======================= -->
+<section class="screen" id="s12">
+  <div class="caption">
+    <h2>⑫ OCR · 批量（10 §2/§7 + 四审 §8-①③⑤：方向自动纠正、四类出口含"疑似敏感默认打码"、回环服务门禁行）</h2>
+    <ul><li>引擎状态条来自 ocr_engine_status（Tesseract 已探测/Rapid 缺语言包→修复深链，失败话术表 §7.2-④）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">OCR</div>
+        <div class="item"><span class="ic">◧</span><span class="lbl">识别</span></div>
+        <div class="item sel"><span class="ic">▤</span><span class="lbl">批量任务</span><span class="cnt">21</span></div>
+        <div class="item"><span class="ic">⚙□</span><span class="lbl">引擎 · 语言</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>批量任务 · 扫描件9月</h3><span class="ctx">21/24 完成 · 合并导出 txt/md · 整档转笔记</span><span class="ph-spacer"></span><button class="btn">＋ 拖入图片/PDF拆页</button><button class="btn primary">开始识别</button></div>
+        <div class="toolbar"><span class="chip on">引擎：按语言择优 ▾</span><span class="chip">排版合并：段落</span><span class="chip">忽略区域模板：财务表头（比例存）</span><span class="tb-spacer"></span><button class="btn">可搜索 PDF…（与文本工具共用）</button></div>
+        <div class="listbody">
+          <div class="thead"><span style="width:44px"></span><span class="grow">文件</span><span style="width:120px">出口分类</span><span style="width:100px">置信</span><span class="date">耗时</span><span style="width:60px"></span></div>
+          <div class="row"><span class="thumb">IMG</span><div class="grow"><div class="t">scan-014.jpg</div><div class="sub">方向自动纠正：旋转 90° 后置信 0.94→0.98（取优采用）</div></div><span class="badge u">含表格</span><span class="num" style="width:100px">0.98</span><span class="date">1.2s</span><span class="rowact"><span class="iconbtn">▣</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><span class="thumb">IMG</span><div class="grow"><div class="t">scan-015.jpg</div><div class="sub">检出疑似卡号 ×2 → 已默认打码，未写入导出缓冲（§8-⑤ 红线）</div></div><span class="badge err">疑似敏感</span><span class="num" style="width:100px">0.91</span><span class="date">1.4s</span><span class="rowact"><span class="iconbtn" title="人工复核">👁</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row" style="opacity:.75"><span class="thumb">IMG</span><div class="grow"><div class="t">scan-016.jpg</div><div class="sub">无文本 · 已按空结果归档（不算失败）</div></div><span class="badge">无文本</span><span class="num" style="width:100px">—</span><span class="date">0.3s</span><span class="rowact"><span class="iconbtn">⋯</span></span></div>
+        </div>
+        <div class="footerbar"><span>本地识别服务（HTTP 回环）：关 · 开启须接受"仅 127.0.0.1 · 无凭据 · 请求图不入历史"条款（§10-共性⑤）</span><span class="f-spacer"></span><span>翻译槽：未接服务（D-08 维持，Provider 留位）</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S13 文本与PDF ======================= -->
+<section class="screen" id="s13">
+  <div class="caption">
+    <h2>⑬ 文本 · PDF 工具箱（11 §2/§7 + 四审 §8-①②③：多工具流水线、元数据清洗确认、PDF→Markdown 落笔记）</h2>
+    <ul><li>流水线卡=共性③同族：步骤链失败不级联，中间产物目录可见可清；一切输出默认另存。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">文本工具</div>
+        <div class="item"><span class="ic">▤</span><span class="lbl">编辑器</span></div>
+        <div class="item sel"><span class="ic">⚒</span><span class="lbl">PDF 工具箱</span></div>
+        <div class="item"><span class="ic">◷</span><span class="lbl">本地历史</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>PDF 工具箱</h3><span class="ctx">入队 3 文件 · 全部默认另存输出（永不原地覆盖 §5-⑤）</span><span class="ph-spacer"></span><button class="btn">＋ 添加文件</button><button class="btn primary">运行流水线</button></div>
+        <div class="stack"><div class="centercol" style="gap:16px">
+          <div class="sec"><h4>流水线（3 步 · 步骤失败不级联）</h4>
+            <div class="card" style="padding:12px 16px"><div class="flow"><span class="fstep on">拆页 1–12</span><span class="arrow">→</span><span class="fstep on">元数据清洗（去 作者/日期/GPS）</span><span class="arrow">→</span><span class="fstep on">导出 Markdown → 笔记/assets</span><span class="arrow">·</span><span class="note">中间产物：AppData\Pipeline\run-27（可清）</span></div></div>
+          </div>
+          <div class="sec"><h4>隐私清洗预览（不可逆动作先看清）</h4>
+            <div class="card">
+              <div class="settingrow"><div class="sl"><div class="t">invoice-9.pdf</div><div class="d">将移除：Author=张三 · CreationDate · GPS(EXIF 透传) · Producer；保留：页面文本/书签</div></div><div class="ctl"><button class="btn">查看完整元数据</button></div></div>
+              <div class="settingrow" style="border-bottom:none"><div class="sl"><div class="t">合同扫描.pdf（可搜索化）</div><div class="d">OCR 文字层写入（10-② 共用管线件）· 34 页 · 预计 26s</div></div><div class="ctl"><span class="badge">待运行</span></div></div>
+            </div>
+          </div>
+          <div class="note">大文本侧：<span class="code">big.log · 128 MB</span> 以流式只读打开（行号跳转 ✓ · Footer 灰角标"只读：>50MB 降级"），编辑态需另存分片。</div>
+        </div></div>
+        <div class="footerbar"><span>编码/EOL 真实切换（保存转码）· 会话持久化恢复标签 · 拆分页数区间输入已替换硬编码 _pages</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S14 笔记 ======================= -->
+<section class="screen" id="s14">
+  <div class="caption">
+    <h2>⑭ 笔记 · 列表与任务聚合（12 §2/§7 + 四审 §8-①②④：内嵌引用、跨库任务单源、Ctrl+P 模糊跳转共用打分层）</h2>
+    <ul><li>右抽屉=内嵌引用渲染预览（递归深度≤3 防环）；"全部任务"视图与桌面待办同一数据源（禁两套待办）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">笔记</div>
+        <div class="item"><span class="ic">◧</span><span class="lbl">今日 · 每日</span></div>
+        <div class="item sel"><span class="ic">▤</span><span class="lbl">全部笔记</span><span class="cnt">842</span></div>
+        <div class="item"><span class="ic">☑</span><span class="lbl">任务聚合</span><span class="cnt">17</span></div>
+        <div class="item"><span class="ic">◍</span><span class="lbl">图谱 · 画布</span></div>
+        <div class="item"><span class="ic">▦</span><span class="lbl">属性视图</span><span class="note">（计划中）</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>全部笔记</h3><span class="ctx">库：个人（多库切换：先锁再切 §8-⑥）· 索引 842/842</span><span class="ph-spacer"></span><button class="btn">⌘P 快速跳转 <span class="kbd">Ctrl+P</span></button><button class="btn primary">＋ 新建</button></div>
+        <div class="toolbar"><input class="input xl" placeholder="⌕ 搜标题与正文（notes_search 后端通路）"><span class="chip on">#工作 <span class="x">✕</span></span><span class="chip">有附件</span><span class="tb-spacer"></span><button class="btn subtle">标签治理（重命名/合并）</button></div>
+        <div class="detailwrap">
+          <div class="listbody" style="flex:1;min-width:0">
+            <div class="thead"><span class="grow">标题</span><span style="width:150px">标签</span><span class="num" style="width:56px">出链</span><span class="date">更新</span><span style="width:60px"></span></div>
+            <div class="row sel"><div class="grow"><div class="t">Q4 发布清单</div><div class="sub">- [ ] 打包验收（到期 09-25）· - [x] 文档冻结 · 勾选回写原位</div></div><span><span class="badge u">#工作</span> <span class="badge">#发布</span></span><span class="num" style="width:56px">12</span><span class="date">今天 20:31</span><span class="rowact"><span class="iconbtn">☆</span><span class="iconbtn">⋯</span></span></div>
+            <div class="row"><div class="grow"><div class="t">会议纪要 · 与后端对齐</div><div class="sub">内嵌引用：![[接口约定#分页参数]] 就地渲染 ✓（深度 2/3）</div></div><span><span class="badge">#工作</span></span><span class="num" style="width:56px">4</span><span class="date">昨天</span><span class="rowact"><span class="iconbtn">⋯</span></span></div>
+            <div class="row"><div class="grow"><div class="t">白板照片复习卡 ×3</div><div class="sub">来自截图历史一键转卡（12§7.3-③）· ==高亮== 已启用（导出仍纯文本）</div></div><span><span class="badge">#学习</span></span><span class="num" style="width:56px">0</span><span class="date">09-17</span><span class="rowact"><span class="iconbtn">⋯</span></span></div>
+          </div>
+          <div class="detaildrawer">
+            <h5>Q4 发布清单 · 预览</h5>
+            <div class="dd-block"><b style="color:var(--txt-primary);font-size:12px">frontmatter</b><span class="code">owner: 我<br>due: 2026-09-25<br>tags: [工作, 发布]</span></div>
+            <div class="dd-block"><b style="color:var(--txt-primary);font-size:12px">引用本节的笔记（3）</b>发布流程 · 会议纪要-0912 · 今日</div>
+            <div class="dd-block"><b style="color:var(--txt-primary);font-size:12px">属性视图（Bases §8-⑤ 计划中）</b>同一数据 → 表格/看板多视图 · 视图定义存库内（DeferredBadge）</div>
+            <div class="dd-actions"><button class="btn danger">删除</button><span class="hr-v"></span><button class="btn primary">打开编辑（Monaco）</button></div>
+          </div>
+        </div>
+        <div class="footerbar"><span>重命名传播：将更新 3 处引用（执行前清单确认 §7.2-⑤）</span><span class="f-spacer"></span><span>搜索走后端 · 附件孤立扫描在设置页</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S15 自动化 ======================= -->
+<section class="screen" id="s15">
+  <div class="caption">
+    <h2>⑮ 自动化 · 规则与执行（13 §2/§7 + 四审 §8-①③④⑥⑦：版本历史、失败路由、标签、实时执行视图、下次运行日历）</h2>
+    <ul><li>多动作数组编辑器（then[1..] 不再静默裁切——B7 数据完整性第一优先）；规则行=启用 Switch（单点暂停）而全局暂停是引擎红横幅（§7.2-④ 双层语义）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">自动化</div>
+        <div class="item"><span class="ic">◧</span><span class="lbl">概览</span></div>
+        <div class="item sel"><span class="ic">≡</span><span class="lbl">规则</span><span class="cnt">28</span></div>
+        <div class="item"><span class="ic">▤</span><span class="lbl">执行历史</span></div>
+        <div class="item"><span class="ic">☠</span><span class="lbl">死信</span><span class="cnt">2</span></div>
+        <div class="item"><span class="ic">📅</span><span class="lbl">下次运行</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>规则</h3><span class="ctx">引擎运行中 · 触发 41 次/今日 · 失败 2（已路由）</span><span class="ph-spacer"></span><button class="btn">⚡ 全部试运行</button><button class="btn primary">＋ 新建规则</button></div>
+        <div class="toolbar"><input class="input xl" placeholder="⌕ 搜索规则"><span class="chip">标签：运维 ▾</span><span class="chip">仅启用</span><span class="tb-spacer"></span><button class="btn">导入（冲突三选+权限 diff）</button></div>
+        <div class="listbody">
+          <div class="thead"><span style="width:36px"></span><span class="grow">规则（当 → 则）</span><span style="width:120px">标签</span><span class="date">下次运行</span><span style="width:88px">版本</span><span style="width:60px"></span></div>
+          <div class="row"><span class="sw"></span><div class="grow"><div class="t">OOM 告警 → 通知 + 记笔记 + 截图现场 <span class="badge u">3 动作</span></div><div class="sub">触发源：term.output_matched（事件目录 §8-② 消费面）· 上次命中 21:48</div></div><span><span class="badge">运维</span></span><span class="date">事件型</span><span class="rowact"><span class="iconbtn" title="版本历史 · 一键回滚">◷</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><span class="sw off"></span><div class="grow"><div class="t">每日 21:00 磁盘水位检查</div><div class="sub">错过补偿：下次启动时补跑（不承诺唤醒 §7.2-①）· 禁用步骤 ×1（清理脚本待更新）</div></div><span><span class="badge">运维</span></span><span class="date">明天 21:00</span><span class="rowact"><span class="iconbtn">◷</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row" style="background:#FFFBF0"><span class="sw"></span><div class="grow"><div class="t">失败专收：一切规则错误 → 托盘告警 <span class="badge warn">失败路由</span></div><div class="sub">本规则自身失败即停（防风暴 §8-③ 负例）</div></div><span><span class="badge">全局</span></span><span class="date">事件型</span><span class="rowact"><span class="iconbtn">◷</span><span class="iconbtn">⋯</span></span></div>
+        </div>
+        <div style="border-top:1px solid var(--stroke)">
+          <div class="panel-header" style="height:40px"><h4 style="font-size:14px;font-weight:600;margin-left:4px">实时执行 · OOM 告警（只读视图）</h4><span class="ph-spacer"></span><span class="note">禁从此处改参数 · dry-run 在编辑器内</span></div>
+          <div style="padding:0 16px 12px;display:flex;flex-direction:column;gap:6px">
+            <div class="blk" style="border-left-color:var(--success)"><div class="bh"><span class="dot g"></span><b style="color:var(--txt-primary)">1. 条件成立（内存 &lt; 5%）</b><span>✓ 12ms</span></div></div>
+            <div class="blk" style="border-left-color:var(--warning-fg)"><div class="bh"><span class="dot y"></span><b style="color:var(--txt-primary)">2. 发通知（运行中…）</b><span>4ms</span></div></div>
+            <div class="blk"><div class="bh"><span class="dot n"></span><b style="color:var(--txt-secondary)">3. 记入笔记 · 4. 截图现场</b><span>排队</span></div></div>
+          </div>
+        </div>
+        <div class="footerbar"><span>快照仅本机 appData · 不入同步（§8-① 红线）· 子规则/sticky 注释见设计稿</span><span class="f-spacer"></span><span>死信 2 · 批量重放/清空</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S16 同步 ======================= -->
+<section class="screen" id="s16">
+  <div class="caption">
+    <h2>⑯ 同步 · 设备（14 §2/§7 + B5 + 四审 §8-①②③：per-peer 游标透出、条件自动暂停、漂移自检一键重推）</h2>
+    <ul><li>概览四卡=B5①"后端缺可查询状态"补齐后的形态；冲突行保留"保留两者→fork"入口（LWW 仍默认）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">同步</div>
+        <div class="item"><span class="ic">◧</span><span class="lbl">概览</span></div>
+        <div class="item sel"><span class="ic">▦</span><span class="lbl">设备</span><span class="cnt">2</span></div>
+        <div class="item"><span class="ic">▤</span><span class="lbl">活动流水</span></div>
+        <div class="item"><span class="ic">⚔</span><span class="lbl">冲突历史</span><span class="cnt">1</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>设备</h3><span class="ctx">发现 :49820 自检 ✓ · 笔记本-astra 由 KVM 配对合成（免手填地址）</span><span class="ph-spacer"></span><button class="btn">⇢ NAS/WebDAV 第三端点 <span class="badge">计划中 B6</span></button><button class="btn primary">全部同步</button></div>
+        <div class="stack"><div class="centercol" style="gap:16px">
+          <div class="banner warn"><span class="dot y"></span><b>自动同步已条件暂停：</b>当前网络按流量计费（Syncthing 式条件：计量/省电/SSID 白名单，§8-②）——手动"立即同步"仍可用。</div>
+          <div class="card">
+            <div class="expander" style="margin:0;border:none;border-radius:0;border-bottom:1px solid var(--stroke)">
+              <div class="exp-head" style="padding-left:0"><span class="dot g"></span><div class="sl"><div class="t">笔记本-astra（192.168.1.41 · 主机名优先）</div><div class="d">last_sync 4 分钟前 · 游标 本地#1204 / 对端#1204 · pending 0 · 数据集：笔记 ✓ 剪贴板（二期）· vault 永不入流</div></div><div class="ctl"><span class="badge ok">同步完成</span><button class="btn">立即同步</button><span class="iconbtn">⋯</span></div></div>
+            </div>
+            <div class="expander" style="margin:0;border:none;border-radius:0">
+              <div class="exp-head" style="padding-left:0"><span class="dot r"></span><div class="sl"><div class="t">台式机-astra</div><div class="d">漂移自检（§8-③）：对账发现缺 2 条 op · 摘要哈希不符 · 上次错误：连接被重置</div></div><div class="ctl"><span class="badge err">漂移</span><button class="btn primary">重推缺失</button><span class="iconbtn">⋯</span></div></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="row"><span class="ic">⚔</span><div class="grow"><div class="t">冲突 · 笔记「Q4 发布清单」</div><div class="sub">LWW 已采纳本机版本 · 败方快照可查（只读历史）——或"保留两者"落为 fork 记录再手合（§8-①）</div></div><span class="hr-v"></span><button class="btn">查看两版</button><button class="btn">保留两者…</button></div>
+          </div>
+        </div></div>
+        <div class="footerbar"><span>本机未出账变更：0 条 · 首包体量预估在"全部同步"前弹出（§7.2-②）</span><span class="f-spacer"></span><span>传输日志 · 暂停/恢复在概览</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S17 宿主设置中心 ======================= -->
+<section class="screen" id="s17">
+  <div class="caption">
+    <h2>⑰ 宿主壳 · 快捷键子面板（15 §2/§7 + 四审 §8-②：DND 时段与安全告警豁免负例、系统级占用探测、深链路由）</h2>
+    <ul><li>冲突行红标且<b>无法保存</b>（负例）；系统占用探测失败→"未探测"灰标≠崩溃（降级路径 §6 验收）。</li>
+    <li>页顶搜索框=设置内搜索（Ctrl+F，§9-5：&gt;5 结果翻页+面包屑）。</li></ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">设置中心</div>
+        <div class="item"><span class="ic">◐</span><span class="lbl">外观</span></div>
+        <div class="item"><span class="ic">▦</span><span class="lbl">导航 · 模块</span></div>
+        <div class="item sel"><span class="ic">⌨</span><span class="lbl">快捷键</span><span class="cnt">31</span></div>
+        <div class="item"><span class="ic">🔔</span><span class="lbl">通知中心</span></div>
+        <div class="item"><span class="ic">▤</span><span class="lbl">启动与托盘</span></div>
+        <div class="item"><span class="ic">⧉</span><span class="lbl">缩放与字体</span></div>
+        <div class="foot"><div class="item"><span class="ic">ⓘ</span><span class="lbl">关于与更新</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>快捷键</h3><span class="ctx">注册表实数 31 = 页面行数 31（漂移即红 §6）</span><span class="ph-spacer"></span><input class="input m" placeholder="⌕ 搜设置字段（Ctrl+F）"><button class="btn">全部恢复默认</button></div>
+        <div class="stack"><div class="centercol" style="gap:16px">
+          <div class="card">
+            <div class="thead"><span style="width:130px">动作</span><span style="width:120px">模块</span><span style="width:150px">当前绑定</span><span class="grow">占用检测</span><span style="width:96px"></span></div>
+            <div class="row"><div class="grow" style="flex:none;width:130px">QuickPanel</div><span class="badge">剪切板</span><span class="kbd">Ctrl+Alt+V</span><span class="note">✓ 可注册（试探回滚通过）</span><span class="rowact"><button class="btn" style="height:28px">改绑</button></span></div>
+            <div class="row" style="background:#FDF3F2"><div class="grow" style="flex:none;width:130px">截图 · 区域</div><span class="badge">截图</span><span class="kbd" style="border-color:var(--danger);color:var(--danger)">Ctrl+Alt+A</span><span style="color:var(--danger);font-size:12px">✕ 与模块内 "OCR 取词" 冲突——不可保存，请先解绑其一</span><span></span></div>
+            <div class="row"><div class="grow" style="flex:none;width:130px">锁定到本机</div><span class="badge">键鼠</span><span class="kbd">Ctrl+Alt+L</span><span class="note" title="RegisterHotKey 试探失败（外部程序占用），本应用运行不受影响但建议改绑">◌ 系统级疑似被外部占用（PowerToys 类工具）</span><span class="rowact"><button class="btn" style="height:28px">改绑</button></span></div>
+            <div class="row" style="border-bottom:none"><div class="grow" style="flex:none;width:130px">快速终端</div><span class="badge">终端</span><span class="note">未绑定</span><span class="note">探测降级：本条未做系统级探测（探测失败≠崩溃）</span><span class="rowact"><button class="btn" style="height:28px">录制…</button></span></div>
+          </div>
+          <div class="sec"><h4>通知 · 免打扰（§8-②）</h4>
+            <div class="card">
+              <div class="settingrow"><div class="sl"><div class="t">免打扰时段</div><div class="d">22:30–07:30 toast 静默入通知中心；<b>安全类告警恒穿透</b>（指纹变更/内核崩溃/磁盘将满——负例已列验收）</div></div><div class="ctl"><span class="sw"></span></div></div>
+              <div class="settingrow" style="border-bottom:none"><div class="sl"><div class="t">整体缩放 / 仅放大字体（00§10-10）</div><div class="d">两开关互不覆盖：缩放=webview zoom（参与布局重算，按窗持久化）；字体=字号令牌阶梯上移</div></div><div class="ctl"><button class="btn" style="width:160px;justify-content:space-between">125% ▾</button><button class="btn" style="width:160px;justify-content:space-between">字体 100% ▾</button><button class="btn subtle">重置</button></div></div>
+            </div>
+          </div>
+        </div></div>
+        <div class="footerbar"><span>导航子面板：模块排序/显隐=host_config 投影（MODULES 恒唯一真相源）· 场景模式（一键工作台）挂 B8 提案</span><span class="f-spacer"></span><span>关于：v0.1.0 · 诊断快照（脱敏）</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S18 缩放演示 ======================= -->
+<section class="screen" id="s18">
+  <div class="caption">
+    <h2>⑱ 缩放演示（00§10-③④⑮ 断点纪律：同一骨架在 1280 / 960 / 620 三档窗口宽下的确定形态）</h2>
+    <ul><li>≥1008 全栏 190；641–1007 图标窄栏 48（tooltip 载名）；≤640 SubNav 收进汉堡 + 工具条 chip 隐藏 + 详情抽屉隐藏（master-detail 二选一 §9-8）。</li>
+    <li>全程：数字列 tabular 定宽不抖、搜索框 XL→M 自适应、主按钮永不折叠、行高恒 48 不变——缩小只是"藏次要"，不是"挤所有"。</li>
+    <li>静态演示用 CSS 容器查询（按 .window 宽判档，等价于应用按窗口可用宽判档）；把浏览器窗拉窄，上方 ①–⑰ 所有屏同步实时重排可自查。</li></ul>
+  </div>
+  <div class="window" style="width:1280px">
+    <div class="titlebar"><span class="appname">宽 1280 · Large（≥1008）</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell" style="height:200px">
+      <div class="subnav"><div class="modname">剪切板</div><div class="item"><span class="ic">◧</span><span class="lbl">概览</span></div><div class="item sel"><span class="ic">≣</span><span class="lbl">历史记录</span><span class="cnt">1,204</span></div><div class="item"><span class="ic">⇅</span><span class="lbl">粘贴堆栈</span></div><div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">设置</span></div></div></div>
+      <div class="content"><div class="panel-header"><button class="hamb">☰</button><h3>历史记录</h3><span class="ctx">190px 全栏 · 工具条完整</span><span class="ph-spacer"></span><button class="btn primary">＋ 手动录入</button></div>
+        <div class="toolbar"><input class="input xl" placeholder="⌕ 搜索"><span class="chip">类型</span><span class="chip">近 7 天</span><span class="tb-spacer"></span><button class="btn">已选 2 · 收藏</button></div>
+        <div class="listbody"><div class="row"><div class="grow"><div class="t">行高恒 48 · 数字列 tabular 72 定宽</div></div><span class="num">1,842</span><span class="date">今天 21:47</span></div></div>
+      </div></div>
+  </div>
+  <div class="window" style="width:960px">
+    <div class="titlebar"><span class="appname">宽 960 · Medium（641–1007，含现 minWidth 940）</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell" style="height:200px">
+      <div class="subnav"><div class="modname">剪切板</div><div class="item" title="概览"><span class="ic">◧</span><span class="lbl">概览</span></div><div class="item sel" title="历史记录"><span class="ic">≣</span><span class="lbl">历史记录</span><span class="cnt">1,204</span></div><div class="item" title="粘贴堆栈"><span class="ic">⇅</span><span class="lbl">粘贴堆栈</span></div><div class="foot"><div class="item" title="设置"><span class="ic">⚙</span><span class="lbl">设置</span></div></div></div>
+      <div class="content"><div class="panel-header"><button class="hamb">☰</button><h3>历史记录</h3><span class="ph-spacer"></span><button class="btn primary">＋</button></div>
+        <div class="toolbar"><input class="input" style="width:240px" placeholder="⌕ 搜索（XL→M）"><span class="chip">类型</span><span class="tb-spacer"></span><button class="btn">已选 2</button></div>
+        <div class="listbody"><div class="row"><div class="grow"><div class="t">图标窄栏 48px · 次级按钮进 …（此处示意隐藏）· 主按钮恒在</div></div><span class="num">1,842</span><span class="date">今天 21:47</span></div></div>
+      </div></div>
+  </div>
+  <div class="window" style="width:620px">
+    <div class="titlebar"><span class="appname">宽 620 · Small（≤640）</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell" style="height:200px">
+      <div class="subnav"><div class="modname">剪切板</div><div class="item sel"><span class="ic">≣</span><span class="lbl">历史记录</span></div></div>
+      <div class="content"><div class="panel-header"><button class="hamb">☰</button><h3>历史记录</h3><span class="ph-spacer"></span><button class="btn primary">＋</button></div>
+        <div class="toolbar"><input class="input" style="flex:1;min-width:0" placeholder="⌕ 搜索（chip 全隐藏，进抽屉）"><span class="chip">类型</span><span class="tb-spacer"></span></div>
+        <div class="listbody"><div class="row"><div class="grow"><div class="t">SubNav 收汉堡 · 详情抽屉二选一（返回式）· 行结构不变</div></div><span class="num">1,842</span></div></div>
+      </div></div>
+  </div>
+</section>
+
 <div class="screen" style="padding-bottom:48px">
   <div class="caption">
     <h2>审核指引（对照检查，审毕反馈即可进实现）</h2>
     <ul>
       <li>每条样张标题注明其演示的规范条款；发现问题请指"屏号 + 元素"（例：③-危险区-确认词输入框应该先于开关渲染？）。</li>
-      <li>本轮新增设计（更新管控/卸载工作台/工具箱）功能依据与红线在 <a href="../07-sys.md">07-sys.md §8</a>，调研证据在 <a href="../90-research-system-ui.md">90-research-system-ui.md</a>；UI 新条款在 <a href="../00-ui-layout-spec.md">00-spec §9</a>。</li>
+      <li>三审新增（②③更新管控/卸载工作台/工具箱）：功能依据与红线在 <a href="../07-sys.md">07-sys.md §8</a>，调研证据在 <a href="../90-research-system-ui.md">90-research-system-ui.md</a>，UI 新条款在 <a href="../00-ui-layout-spec.md">00-spec §9</a>。</li>
+      <li>四审新增（⑥~⑰各面板功能增量、⑱缩放重排演示）：功能依据在各面板文档的"四审功能增补"§8 表（01~06、08~15 各档，见 <a href="../README.md">目录</a>），缩放/自适应 16 条纪律在 <a href="../00-ui-layout-spec.md">00-spec §10</a>，调研证据在 <a href="../91-research-panels-scaling.md">91-research-panels-scaling.md</a>。</li>
+      <li>S18 的断点态由 CSS container query 驱动：每个窗口按自身宽度独立演示 Large（1280）/ Medium 图标窄栏（960）/ Small 汉堡（620），与浏览器窗口宽度无关；旧屏 S1~S5 的 SubNav 标签未包 .lbl 容器，窄栏下为部分收拢示意，新屏 S6~S18 为完整收拢（未放真实汉堡钮的屏在 ≤640 由 CSS ::before 直接现写一个 ☰ 示意，应用中应为真实按钮）。</li>
       <li>样张为纯静态 HTML（无脚本、无网络请求），可直接浏览器打开；与 src/ 应用代码零耦合。</li>
     </ul>
   </div>

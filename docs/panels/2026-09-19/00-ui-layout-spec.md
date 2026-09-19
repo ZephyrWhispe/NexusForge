@@ -93,3 +93,24 @@
 10. **About 区制式**：宿主"关于与更新"置底一行（图标+名称+版本），展开含诊断快照/依赖/法律链接（§7-⑤ 同位置合并）。
 11. **二值控件选型备注**：维持 Switch（Fluent 官方立场）；Windows Terminal 新版改 CheckBox 一事记为**已评估不采纳**（防后续贡献者再度翻烙饼）。
 12. **accent 用度**：强调色只标"当前选中/可交互/状态高亮"三类，正文对比 ≥4.5:1（WCAG/Fluent a11y）；浅深主题均用 Fluent 自动生成的对比版本，禁手调色值入 token。
+
+## 10. 四审增补：缩放与自适应重排纪律（2026-09-19，用户点名"UI 在缩放前后位置变动问题"；证据与来源见 91-research-panels-scaling.md §4）
+
+> 现状锚点：主窗 `1280×800 / minWidth 940 / minHeight 600`（src-tauri/tauri.conf.json:17-20）；Fluent v9 令牌为 px 制；Tauri v2 已提供 `scaleFactor()/Webview.setZoom()/onScaleChanged`；覆盖层已做 `CSS px × dpr` 换算（src/windows/OverlayShot.tsx）。三条最可能漂移根因（须实测确认）：①覆盖层 CSS px 与物理 px 混用且 scale-changed 后未重算；②minWidth 940 落在 WinUI Medium 断点内却无该档确定形态；③列表/设置页未预留 scrollbar gutter，条目增减整页左右漂移。
+
+1. **单位单一真相**：UI 侧一律 CSS 逻辑 px；跨窗口/屏幕/注入 API 必经 `scaleFactor` 显式换算，变量名带 `logical/physical` 后缀，布局代码禁出现裸物理值。
+2. **"4 的倍数"从间距扩到尺寸与偏移**：宽/高/行高/边距/锚点偏移恒为 4 的倍数（Windows 缩放平台 100–400% 中 4 是唯一全乘得整的基元），文本字号豁免（走 §9-1 阶梯）。
+3. **断点恒按窗口可用宽度判**（非物理屏宽）：Small <640 / Medium 641–1007 / Large ≥1008（WinUI 官方三档）；本仓一切"双栏降级/侧栏折叠/工具条折叠"阈值只用这三个数。
+4. **侧栏三态**：≥1008 全栏 190px；641–1007 图标窄栏 48px（tooltip 承载名称，等价 NavigationView Compact）；≤640 收进汉堡抽屉。禁 CSS 硬压出第四种形态。
+5. **minWidth 与断点自洽**：940 落在 Medium 档，须为 940–1007 定义确定形态（窄栏 SubNav + 折叠工具条 + 双栏二选一）；"把主窗 minWidth 抬到 1008"作为 B0 备选一并提交裁决，二选一后写进 tauri.conf 与本文一致。
+6. **DPI/尺寸变更后派生值全部作废**：`onScaleChanged`/`onResized` 到达即重算——虚拟列表测量、canvas/缩略图/标注层/图谱位图、覆盖层坐标映射、贴图物理位置；禁在模块初始化期缓存 scaleFactor 派生数据（位图必须重栅格化而非拉伸）。
+7. **DPI 变化时窗口几何采用系统建议矩形**：禁"读 outerSize 再回写"的自校正实现（官方明示会造成鼠标相对位置漂移与递归 DPI 变更循环）。
+8. **分数缩放下 1px 线不承载层级**：分隔/边框厚度须可被 scaleFactor 整除（125%/150% 下 1px 重采样成灰带/半线）；主视觉层级改背景色带或 2px。
+9. **应用内缩放用 webview zoom，禁全局 `transform: scale()`**：`setZoom`（WebView2 ZoomFactor）参与布局重算、文字边框同尺度；transform 不改盒→溢出裁切，只允许用于局部动效。
+10. **缩放二态且不互覆**：设置中心提供"整体缩放（zoom，档位 100/110/125/150/175/200% 对齐 Windows 平台，按窗持久化+重置 100%）"与"仅放大字体（字号令牌，§9-1 阶梯整体上移）"两个独立开关（VS Code zoomLevel/fontSize 二分心智）；`webview:allow-set-webview-zoom`  capability 显式登记 + security_config 兜底负例（辅助窗不得持有）。
+11. **OS scale 与 app zoom 是两条独立乘数**：任何按物理像素工作的功能（截图选区、贴图位置、KVM edge_map、DPI 检测、覆盖层居中）代码与注释必须声明所用维度，最终视觉倍率=两者乘积；`CSS×dpr` 换算须考虑 zoom 生效后的 innerWidth 变化。
+12. **滚动条槽恒预留**：主体唯一滚动区、表头、详情抽屉、1040px 居中设置页一律 `scrollbar-gutter: stable`（居中页配 `both-edges`）——杜绝"筛选后条目变少→滚动条消失→整页右移"。
+13. **滚动锚定显式化**：虚拟列表恢复按"锚点行 index + 行内 offset"而非 scrollTop；实时流（终端输出/事件检查器/共享历史）显式 `overflow-anchor: none`，长文/历史保留 auto；resize/zoom 后按锚点行重设偏移，**滚动位置在缩放前后不得跳**。
+14. **虚拟列表行高以逻辑 px 下发不乘 dpr**（§9-3 三档），测量结果不回写常量；zoom 变更后同步 overscan（≥3 行），行高常量单一来源纪律延伸自剪切板 U4 教训。
+15. **防抖宽与折叠次序**：数字/时间/计数/延迟列恒 `font-variant-numeric: tabular-nums` + 右对齐定宽（`--` 占位既有纪律不变）；宽度不足时折叠次序恒为"搜索框 XL→M → 次级按钮进 `…` → 主按钮永不折叠 → 标题 ellipsis"，**禁工具条换行**（换行=行高变化=整页重排）；940/1008/1400 三档 vitest 快照回归。
+16. **命中区与对比度不随密度缩水**：紧凑态（图标窄栏/行高 44）交互目标仍 ≥40×40 逻辑 px（不足者透明 padding 扩 hitbox，不缩视觉尺寸）；`forced-colors: active` 下禁以 1px 边框表达层级，`prefers-contrast: more` 分隔线升 2px；preview 样张加"三档宽度 × 高对比"缩放自检对拍。
