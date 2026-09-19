@@ -222,6 +222,12 @@ export interface PinDataDto extends PinDto {
   png_b64: string;
 }
 
+/** 单条历史截图的 PNG 字节（D-29 B0-2 主面板缩略图） */
+export interface ShotDataDto {
+  id: string;
+  png_b64: string;
+}
+
 /** 启动截图（抓全屏帧，返回覆盖层定位） */
 export function screenshotStart(mode: "shot" | "ocr"): Promise<TaskStartDto> {
   return invoke("screenshot_start", { mode });
@@ -245,6 +251,14 @@ export function screenshotFinish(taskId: string, request: FinishRequestDto): Pro
 /** 截图历史分页 */
 export function screenshotHistoryList(page: number, size: number): Promise<ShotPageDto> {
   return invoke("screenshot_history_list", { query: { page, size } });
+}
+/** 历史截图字节（真缩略图，D-29 B0-2） */
+export function screenshotHistoryGet(id: string): Promise<ShotDataDto> {
+  return invoke("screenshot_history_get", { id });
+}
+/** 历史截图再复制进系统剪贴板 */
+export function screenshotHistoryCopy(id: string): Promise<void> {
+  return invoke("screenshot_history_copy", { id });
 }
 /** 全部贴图（启动恢复） */
 export function screenshotPins(): Promise<PinDto[]> {

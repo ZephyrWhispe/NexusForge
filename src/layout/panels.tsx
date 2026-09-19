@@ -57,6 +57,7 @@ function placeholderFor(moduleId: ModuleId, planDoc: string): PanelDef["panel"] 
   };
 }
 
+const ScreenshotPanel = lazy(() => import("../modules/screenshot/ScreenshotPanel"));
 const KvmPanel = lazy(() => import("../modules/kvm/KvmPanel"));
 const VaultPanel = lazy(() => import("../modules/vault/VaultPanel"));
 const FilePanel = lazy(() => import("../modules/file/FilePanel"));
@@ -75,8 +76,8 @@ export const PANELS: Record<ModuleId, PanelDef> = {
     subtitle: "历史 · 保留 30 天 · 敏感数据已加密（AES-256-GCM 信封）",
   },
   screenshot: {
-    panel: placeholderFor("screenshot", "09-screenshot"),
-    subtitle: "框选 · 美化 · 贴图 · 历史",
+    panel: ScreenshotPanel,
+    subtitle: "框选截取 · 贴图 · 历史（真缩略图 · 一键再复制）",
   },
   ocr: { panel: placeholderFor("ocr", "10-ocr"), subtitle: "识别 · 清洗 · 回写" },
   proxy: {

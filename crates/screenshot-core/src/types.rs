@@ -122,6 +122,13 @@ pub struct FinishDto {
     pub pin_id: Option<String>,
 }
 
+/// 单条截图历史的 PNG 字节出口（D-29 B0-2：主面板缩略图/再复制；历史表只存路径）
+#[derive(Debug, Clone, Serialize)]
+pub struct ShotDataDto {
+    pub id: String,
+    pub png_b64: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PinDto {
     pub id: String,

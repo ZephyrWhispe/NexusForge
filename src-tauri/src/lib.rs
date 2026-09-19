@@ -148,6 +148,8 @@ pub fn run() {
             commands::screenshot_discard,
             commands::screenshot_finish,
             commands::screenshot_history_list,
+            commands::screenshot_history_get,
+            commands::screenshot_history_copy,
             commands::screenshot_pins,
             commands::screenshot_pin_get,
             commands::screenshot_pin_update,

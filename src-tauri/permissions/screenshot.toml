@@ -49,3 +49,13 @@ commands.allow = ["screenshot_pin_update"]
 identifier = "allow-screenshot-pin-close"
 description = "允许前端调用 screenshot_pin_close 命令（D-28 按窗最小授权）"
 commands.allow = ["screenshot_pin_close"]
+
+[[permission]]
+identifier = "allow-screenshot-history-get"
+description = "允许前端调用 screenshot_history_get 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_history_get"]
+
+[[permission]]
+identifier = "allow-screenshot-history-copy"
+description = "允许前端调用 screenshot_history_copy 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_history_copy"]

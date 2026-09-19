@@ -29,7 +29,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::store::ShotStore;
 use crate::types::{
     ConfirmRect, CropDto, FinishDto, FinishRequest, PinDataDto, PinDto, ScreenshotConfig,
-    TaskInfoDto, TaskStartDto,
+    ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
 };
 use crate::util;
 
@@ -747,6 +747,50 @@ impl ScreenshotModule {
     pub fn history_store(&self) -> Option<Arc<ShotStore>> {
         self.store.read().clone()
     }
+
+    // ---------------- 历史字节出口（D-29 B0-2：面板缩略图 / 再复制）----------------
+
+    fn history_png(&self, id: &str) -> Result<(ShotItem, Vec<u8>), AppError> {
+        let store = self
+            .store
+            .read()
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "模块未就绪"))?;
+        let item = store
+            .get(id)?
+            .ok_or_else(|| mod_err("SCREENSHOT_HISTORY_404", "历史记录不存在"))?;
+        let file = item
+            .file
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_HISTORY_404", "该记录未保存文件"))?;
+        let bytes = std::fs::read(&file)
+            .map_err(|e| mod_err("SCREENSHOT_HISTORY_410", format!("文件已丢失或不可读: {e}")))?;
+        Ok((item, bytes))
+    }
+
+    pub fn history_get(&self, id: &str) -> Result<ShotDataDto, AppError> {
+        let (item, bytes) = self.history_png(id)?;
+        Ok(ShotDataDto {
+            id: item.id,
+            png_b64: host_core::util::b64_encode(&bytes),
+        })
+    }
+
+    /// 再复制：png 原字节交 ClipboardPort，CF_DIB 转换由 win-integration 负责（module.rs action_copy 同通道）
+    pub fn history_copy(&self, id: &str) -> Result<(), AppError> {
+        let (item, bytes) = self.history_png(id)?;
+        let clipboard = self
+            .clipboard
+            .read()
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "ClipboardPort 未就绪"))?;
+        clipboard.write(&host_core::ports::ClipContent::Image {
+            format: "png".into(),
+            width: item.width,
+            height: item.height,
+            bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
+        })
+    }
 }
 
 impl TrayProvider for ScreenshotModule {
@@ -808,6 +852,46 @@ mod tests {
         assert_eq!(parse_ocr_backfill(&foreign), None);
         let no_text = ocr_event("ocr", json!({ "source_task_id": "t1" }));
         assert_eq!(parse_ocr_backfill(&no_text), None);
+    }
+
+    /// D-29 B0-2：历史字节出口错误路径三类可分辨（未就绪 / 记录不存在 / 文件丢失）
+    #[test]
+    fn history_export_error_paths_are_distinguishable() {
+        let m = ScreenshotModule::new();
+        assert_eq!(
+            m.history_get("x").unwrap_err().code(),
+            "SCREENSHOT_STATE_001"
+        );
+        assert_eq!(
+            m.history_copy("x").unwrap_err().code(),
+            "SCREENSHOT_STATE_001"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(ShotStore::open(&dir.path().join("h.db")).unwrap());
+        *m.store.write() = Some(store.clone());
+        assert_eq!(
+            m.history_get("nope").unwrap_err().code(),
+            "SCREENSHOT_HISTORY_404"
+        );
+        store
+            .insert(&ShotItem {
+                id: "s1".into(),
+                created_ms: 1,
+                width: 2,
+                height: 2,
+                file: Some(
+                    dir.path()
+                        .join("missing.png")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ocr_text: None,
+            })
+            .unwrap();
+        assert_eq!(
+            m.history_get("s1").unwrap_err().code(),
+            "SCREENSHOT_HISTORY_410"
+        );
     }
 
     /// D-09 验收：ocr 动作写联动帧文件并发布只含路径引用的 ocr_requested 事件

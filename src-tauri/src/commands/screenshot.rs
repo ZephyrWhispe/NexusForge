@@ -85,6 +85,30 @@ pub fn screenshot_pins(state: State<'_, HostState>) -> Vec<screenshot_core::type
     state.screenshot.pins()
 }
 
+/// 单条历史截图的 PNG 字节（D-29 B0-2 主面板真缩略图；历史表只存路径）
+#[tauri::command]
+pub async fn screenshot_history_get(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<screenshot_core::types::ShotDataDto, AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.history_get(&id))
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
+/// 历史截图再复制进系统剪贴板（png→CF_DIB 由 win-integration 转换）
+#[tauri::command]
+pub async fn screenshot_history_copy(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.history_copy(&id))
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
 /// 单个贴图数据（Pin 窗口加载用）
 #[tauri::command]
 pub async fn screenshot_pin_get(

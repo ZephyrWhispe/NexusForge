@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use std::path::Path;
 
 use host_core::error::AppError;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::types::{HistoryQuery, Page, ShotItem};
 
@@ -70,6 +70,27 @@ impl ShotStore {
         )
         .map_err(|e| err("SCREENSHOT_STORE_003", e.to_string()))?;
         Ok(())
+    }
+
+    /// 按 id 取单条历史（D-29 B0-2：面板取字节/再复制的前置查询；无则 None）
+    pub fn get(&self, id: &str) -> Result<Option<ShotItem>, AppError> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT id, created_ms, width, height, file, ocr_text FROM shots WHERE id = ?1",
+            rusqlite::params![id],
+            |r| {
+                Ok(ShotItem {
+                    id: r.get(0)?,
+                    created_ms: r.get(1)?,
+                    width: r.get::<_, i64>(2)? as u32,
+                    height: r.get::<_, i64>(3)? as u32,
+                    file: r.get(4)?,
+                    ocr_text: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| err("SCREENSHOT_STORE_004", e.to_string()))
     }
 
     pub fn list(&self, q: &HistoryQuery) -> Result<Page<ShotItem>, AppError> {
@@ -156,6 +177,19 @@ mod tests {
         s.set_ocr_text("a", "识别文本").unwrap();
         let page = s.list(&HistoryQuery { page: 1, size: 10 }).unwrap();
         assert_eq!(page.items[0].ocr_text.as_deref(), Some("识别文本"));
+    }
+
+    #[test]
+    fn shot_store_get_roundtrip_and_missing() {
+        // D-29 B0-2 回归：按 id 存取一致；缺失 id 返回 None 而非 Err（面板据此显示"记录不存在"）
+        let (_d, s) = tmp_store("shot_get");
+        s.insert(&item("g1", 10)).unwrap();
+        s.set_ocr_text("g1", "取回文本").unwrap();
+        let got = s.get("g1").unwrap().expect("g1 应存在");
+        assert_eq!(got.id, "g1");
+        assert_eq!(got.file.as_deref(), Some("/x/g1.png"));
+        assert_eq!(got.ocr_text.as_deref(), Some("取回文本"));
+        assert!(s.get("nope").unwrap().is_none());
     }
 
     #[test]

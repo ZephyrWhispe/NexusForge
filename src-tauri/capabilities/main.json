@@ -122,6 +122,8 @@
     "allow-screenshot-confirm",
     "allow-screenshot-discard",
     "allow-screenshot-finish",
+    "allow-screenshot-history-copy",
+    "allow-screenshot-history-get",
     "allow-screenshot-history-list",
     "allow-screenshot-pin-close",
     "allow-screenshot-pin-get",
