@@ -24,11 +24,15 @@ import {
   fileOpCancel,
   fileOpPause,
   fileOpResume,
+  filePreview,
+  fileSearch,
   parseAppError,
   type ConflictItemDto,
   type ConflictPolicyDto,
   type FileEntryDto,
   type OpProgressDto,
+  type PreviewDto,
+  type SearchResultDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
@@ -39,7 +43,8 @@ import DeferredBadge from "../../components/DeferredBadge";
 /**
  * 文件与存储面板（docs/impl/05 F，M6 v1）：
  * ① 盘符/面包屑/目录列表导航 ② 选中复制/移动/删除入队（Ask 冲突预扫描）
- * ③ operation.progress 事件驱动的操作队列 ④ 新建目录。
+ * ③ operation.progress 事件驱动的操作队列 ④ 新建目录
+ * ⑤ 全局搜索（F5：USN 优先，降级遍历必须显式标注）⑥ 右侧预览分栏（F4 四形态）。
  * 删除与「全部覆盖」属破坏性操作，一律经 confirmAction 二次确认（审查 D-18）。
  */
 const useStyles = makeStyles({
@@ -53,6 +58,37 @@ const useStyles = makeStyles({
     gap: "12px",
   },
   toolbar: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
+  // T-B1-4 分栏：左列（导航/列表/队列）与右预览栏各自持有 overflow，互不挤压
+  split: { flex: 1, minHeight: 0, minWidth: 0, display: "flex", gap: "12px" },
+  leftCol: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "12px" },
+  previewPane: {
+    width: "380px",
+    flexShrink: 0,
+    minHeight: 0,
+    overflowY: "auto",
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground1,
+    padding: "10px 12px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+  },
+  previewImg: { maxWidth: "100%", borderRadius: tokens.borderRadiusMedium },
+  pre: {
+    margin: 0,
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-all",
+    fontSize: tokens.fontSizeBase200,
+    fontFamily: "Consolas, Menlo, monospace",
+  },
+  hitRow: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 },
+  pathLine: {
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    wordBreak: "break-all",
+  },
+  warn: { color: tokens.colorPaletteDarkOrangeForeground1, fontSize: tokens.fontSizeBase200 },
   crumbs: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" },
   crumbBtn: { padding: "2px 6px", minWidth: 0 },
   sep: { color: tokens.colorNeutralForeground3 },
@@ -140,6 +176,16 @@ export default function FilePanel() {
   const [dstInput, setDstInput] = useState("");
   const [drives, setDrives] = useState<[string, string][]>([]);
   const opsRef = useRef<Map<string, OpProgressDto>>(new Map());
+  // ---- T-B1-4 搜索 + 预览 ----
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchRes, setSearchRes] = useState<SearchResultDto | null>(null);
+  const searchSeq = useRef(0);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [preview, setPreview] = useState<PreviewDto | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const previewSeq = useRef(0);
 
   const applyError = useCallback((e: unknown, fallback: string) => {
     const err = parseAppError(e);
@@ -226,8 +272,60 @@ export default function FilePanel() {
     });
   };
 
+  const openPreview = async (path: string) => {
+    const seq = ++previewSeq.current;
+    // 切换目标即清空旧内容：加载期间预览栏不得残留上一文件的形态（防说谎分栏）
+    setPreviewPath(path);
+    setPreview(null);
+    setPreviewErr(null);
+    setPreviewLoading(true);
+    try {
+      const dto = await filePreview(path);
+      if (seq !== previewSeq.current) return;
+      setPreview(dto);
+    } catch (e) {
+      if (seq !== previewSeq.current) return;
+      const err = parseAppError(e);
+      setPreviewErr(err ? `${err.data.code}: ${err.data.message}` : "预览失败");
+    } finally {
+      if (seq === previewSeq.current) setPreviewLoading(false);
+    }
+  };
+
   const openEntry = (e: FileEntryDto) => {
     if (e.is_dir) void loadDir(e.path);
+    else void openPreview(e.path);
+  };
+
+  // 全局搜索（F5）：limit 取默认档位 50；root 传 null → 降级遍历走后端默认用户主目录，
+  // 不随当前 cwd（否则站在 C:\ 会把降级遍历扩成整盘扫描）。
+  const runSearch = async () => {
+    const q = query.trim();
+    if (!q) {
+      setSearchRes(null);
+      return;
+    }
+    const seq = ++searchSeq.current;
+    setSearching(true);
+    setSearchRes(null);
+    try {
+      const res = await fileSearch(q, 50, null);
+      if (seq === searchSeq.current) setSearchRes(res);
+    } catch (e) {
+      if (seq === searchSeq.current) applyError(e, "搜索失败");
+    } finally {
+      if (seq === searchSeq.current) setSearching(false);
+    }
+  };
+
+  const onQueryChange = (v: string) => {
+    setQuery(v);
+    if (!v.trim()) {
+      // 清空即作废在途请求并撤下结果区（负例判据：空查询不残留旧命中）
+      searchSeq.current += 1;
+      setSearching(false);
+      setSearchRes(null);
+    }
   };
 
   const enqueue = async (
@@ -342,6 +440,8 @@ export default function FilePanel() {
 
   return (
     <div className={styles.root}>
+      <div className={styles.split}>
+        <div className={styles.leftCol}>
       {/* 导航栏 */}
       <div className={styles.toolbar}>
         <div className={styles.crumbs}>
@@ -377,6 +477,18 @@ export default function FilePanel() {
         <DeferredBadge label="网盘" decisionRef="B6" />
         <Input
           size="small"
+          placeholder="搜索文件名（全局）"
+          value={query}
+          onChange={(_, d) => onQueryChange(d.value)}
+          onKeyDown={(ev) => ev.key === "Enter" && void runSearch()}
+          aria-label="全局搜索关键词"
+          style={{ maxWidth: "180px" }}
+        />
+        <Button size="small" onClick={() => void runSearch()}>
+          搜索
+        </Button>
+        <Input
+          size="small"
           placeholder="新建目录名"
           value={mkdirName}
           onChange={(_, d) => setMkdirName(d.value)}
@@ -393,6 +505,43 @@ export default function FilePanel() {
           新建
         </Button>
       </div>
+
+      {/* 搜索结果条（F5）：加载/空查询不残留旧命中；降级必须显式标注 */}
+      {searching && (
+        <div className={styles.queue} role="status">
+          <Text className={styles.muted}>正在全局搜索…</Text>
+        </div>
+      )}
+      {searchRes && !searching && (
+        <div className={styles.queue}>
+          {searchRes.degraded && (
+            <Text className={styles.warn}>索引降级：本次为目录遍历（深度≤6）</Text>
+          )}
+          {searchRes.hits.length === 0 && (
+            <Text className={styles.muted}>
+              没有名称匹配「{query.trim()}」的命中
+              {searchRes.degraded ? "（降级遍历仅覆盖用户主目录）" : ""}
+            </Text>
+          )}
+          {searchRes.hits.slice(0, 12).map((h) => (
+            <div key={h.path} className={styles.hitRow}>
+              <Button
+                appearance="subtle"
+                size="small"
+                className={styles.crumbBtn}
+                title={h.path}
+                onClick={() => void openPreview(h.path)}
+              >
+                {h.path}
+              </Button>
+              <Badge appearance="outline">{h.score}</Badge>
+            </div>
+          ))}
+          {searchRes.hits.length > 12 && (
+            <Text className={styles.muted}>共 {searchRes.hits.length} 条，仅显示前 12 条</Text>
+          )}
+        </div>
+      )}
 
       {/* 操作栏 */}
       <div className={styles.toolbar}>
@@ -542,6 +691,49 @@ export default function FilePanel() {
             )}
           </TableBody>
         </Table>
+      </div>
+        </div>
+
+        {/* 预览分栏（F4：文本/图片/系统缩略图/不支持 四形态；限额服务端固定，UI 不承诺可调） */}
+        <aside className={styles.previewPane} aria-label="文件预览">
+          {!previewPath && (
+            <EmptyState text="双击列表中的文件即可在此预览（搜索命中点击同效）" />
+          )}
+          {previewPath && (
+            <>
+              <Text className={styles.pathLine}>{previewPath}</Text>
+              {previewLoading && <EmptyState text="预览加载中…" loading />}
+              {!previewLoading && previewErr && <InlineError text={previewErr} />}
+              {!previewLoading && preview?.kind === "text" && (
+                <>
+                  {preview.truncated && (
+                    <Text className={styles.warn}>
+                      内容较大：仅显示开头部分（截断限额由服务端固定）
+                    </Text>
+                  )}
+                  <pre className={styles.pre}>{preview.content || "（文件内容为空）"}</pre>
+                </>
+              )}
+              {!previewLoading && (preview?.kind === "image" || preview?.kind === "shell") && (
+                <>
+                  <img
+                    src={preview.data_url}
+                    alt={`${previewPath} 预览`}
+                    className={styles.previewImg}
+                  />
+                  <Text className={styles.muted}>
+                    {preview.kind === "image"
+                      ? `原图 ${preview.width}×${preview.height}（超阈值时缩略显示）`
+                      : `系统缩略图 ${preview.width}×${preview.height}`}
+                  </Text>
+                </>
+              )}
+              {!previewLoading && preview?.kind === "unsupported" && (
+                <Text>无法预览：{preview.reason}</Text>
+              )}
+            </>
+          )}
+        </aside>
       </div>
 
       {/* 近期完成（终态摘要） */}
