@@ -1,0 +1,65 @@
+# 02 代理与 VPN 面板详细设计（B2）
+
+> 总纲：docs/impl/09 §5；对标：v2rayN/IRBox/FlowZ（蓝本 §3.2）+ Clash Verge Rev/NekoBox/Hiddify；状态：未开工。
+
+## 1. 现状问题
+
+- 后端：单内核锁死三点（`service.rs:463` 硬编码 SingBoxDriver、`config.rs` sing-box 方言无 IR、`sub.rs` 协议枚举仅 ss/vmess/trojan/vless）；`delay_test` 是 TCP RTT 伪测速（service.rs:515）；路由仅 ip_is_private+后缀直连（config.rs:61）；无节点选定命令（面板节点表只读）；无内核重启命令。
+- UI（478 行一屏竖排到底——"一锅炖"最重灾区）：残留提示条/模式/内核/订阅/节点/直连规则/日志 7 块全部纵向堆叠；节点无分组无选择操作；订阅无流量/到期信息位；无统计图表；日志无级别过滤与清空。
+
+## 2. 子面板信息架构
+
+| 子面板 | 类型 | 内容 |
+|--------|------|------|
+| 总览 | 概览 | 大开关（系统代理/TUN 互斥）、当前内核+节点、上下行速率 sparkline、代理连通自检灯、残留恢复提示 |
+| 节点 | 清单 | 按订阅分组 Tab + 全部/收藏视图；列：名称/协议/组/延迟(历史浮窗)/掉落率；行操作：选定/测速/收藏/编辑（单选覆写）；顶栏：手动选定↔自动优选切换、排序（延迟/名称/协议） |
+| 订阅 | 清单 | 订阅卡列表：名称/URL（脱敏）/节点数/**流量剩余与到期日**（sub 响应头解析）/更新策略（手动/间隔/启动时）/按钮：更新、复制、删除；"从剪贴板导入链接" |
+| 分流 | 编辑 | 模式（全局/规则/直连）+ 规则表（type: domain/suffix/keyword/cidr/geosite/geoip/process + 目标: 代理/直连/拒绝/指定节点组）+ 内置预设（大陆常用/仅绕过国内/GFW 清单只读预览）+ 导入 Clash 规则片段 |
+| 内核 | 概览+设置 | 内核选择卡（sing-box/xray/mihomo：版本、安装状态、切换按钮、换核影响提示）；TUN 设置（栈 system/gvisor/mixed、strict route、MTU）；DNS 设置（远端/本地 DNS、嗅探开关）；mixed 端口、日志级别 |
+| 日志 | 历史 | 内核日志流（级别过滤、搜索、暂停滚动、清空、导出）+ 连接日志（若内核 API 可得：目的域名/字节数/所选节点——mihomo/sing-box API 勘查项） |
+
+## 3. 对标功能矩阵
+
+| # | 功能 | 来源 | 现状 | 实施 |
+|---|------|------|------|------|
+| 1 | 内核抽象 CoreProvider | 蓝本 | trait 在但单实现 | B2-1 配置 IR 先行（golden 等价）；trait 升格 config_render/supported_protocols |
+| 2 | xray/mihomo 第二三内核 | v2rayN/FlowZ | ❌ | XrayDriver+MihomoDriver（sidecar 参数化下载、SHA256 记录复用 sing-box 模式） |
+| 3 | 换核生命周期（停旧→重生成→起新→重挂系统代理/TUN） | v2rayN | ❌ | service 状态机；负例：换核中途失败回滚旧核 |
+| 4 | 订阅 URI 全家桶 ss/vmess/trojan/vless | 蓝本 | ✅ | — |
+| 5 | hysteria2/tuic5/wireguard/ssr | v2rayN/NekoBox | ❌ | sub.rs 扩展，每种协议畸形负例 |
+| 6 | Clash YAML 订阅/配置导入 | Clash Verge | ❌ | 白名单子集解析（proxies/proxy-groups/rules），拒任意扩展字段（防投毒红线） |
+| 7 | 订阅流量/到期头解析 | v2rayN | ❌ | `proxy_sub_update` 返回值扩 `TrafficInfo{upload,download,left,expire}` |
+| 8 | 节点分组/收藏/排序/搜索 | v2rayN | ❌ | 本地覆写表（node_overrides：favorite/sort 字段）+ UI |
+| 9 | 手动选节点 / urltest 自动优选 | 全体 | ❌ | 新命令 `proxy_node_select`/`proxy_node_auto`；IR Selector/Urltest 组真实化 |
+| 10 | HTTP 204 真实测速 + 历史 | Clash Verge | TCP RTT 伪 | delay_test 改造 + 每节点延迟环形缓冲（总览/节点浮窗用） |
+| 11 | geoip/geosite 分流 | 全体 | ❌ | geodata 下载（sidecar 通道）+ 三内核各自规则方言渲染 |
+| 12 | 进程规则分流（按程序名走代理） | sing-box/xray process_name | ❌ | IR Rule 加 process；UI 分流页"应用"类型行 |
+| 13 | TUN 模式 | ✅ | 在 | 补栈选择/MTU/strict route 设置位 |
+| 14 | Pre-Socks 双核协作 | v2rayN | ❌ | 总纲明示二期（B8 子方案） |
+| 15 | 系统代理兜底恢复 | FlowZ | ✅ D-06 | — |
+| 16 | 内核启停/重启按钮 | 全体 | ❌ | `proxy_kernel_restart`（新命令+权限 ACL 同步） |
+| 17 | 带宽/流量统计 | Clash Verge/AureStream | ❌ | API 轮询（mihomo /traffic ws、sing-box experimental API；勘查后定，缺则降级"仅连接自检"并如实挂 DeferredBadge） |
+| 18 | 多用户配置方案(profile 切换) | v2rayN profiles | ❌ | 拓展项 §5-③ 承接 |
+
+## 4. 其他软件借鉴（蓝本外）
+
+- **Clash Verge Rev**：侧栏延迟迷你图、"代理模式"三圆点常驻托盘、TUN 栈设置分组样式；
+- **Hiddify**：一键"导入并应用"剪贴板链接的引导浮层（新手路径）；
+- **NekoBox**：节点"仅绕过大陆"等模式快捷组——落分流预设；
+- **v2rayN Wiki（UI 说明页）**：节点右键菜单全集（测试全部、复制服务器信息）——落节点行菜单。
+
+## 5. 拓展设计（常人未思）
+
+1. **代理体检页**（总览"自检"展开）：DNS 泄漏测试（查询返回 IP 对比出口 IP）、WebRTC 泄漏提示、时区/UA 一致性、直连国内站点连通性——每一项一个 pass/fail 灯，红项给修复按钮（自动改设置）。安全心智的制高点，市面客户端几乎无集成。
+2. **故障现场保全**：内核异常退出时自动打包（最后 200 行日志+配置脱敏版+系统代理态+内核版本）落 crash 目录，面板挂"上次异常退出·查看现场"。脱敏红线：节点密码/uuid 必须遮蔽（负例测试）。
+3. **配置方案 Profile**：多套"订阅+分流+内核+TUN"组合一键切换（公司/家用/实验）——复用 host_config 存储。
+4. **规则命中追踪**：开启后连接日志显示"命中规则 #n（来源）"，分流页规则行显示今日命中计数——把"为什么这个站没走代理"变成可查问题。
+5. **订阅变更 diff**：更新订阅时列出"新增/移除/延迟劣化"节点摘要，防止节点被静默替换（安全向）。
+
+## 6. 验收点
+
+- 三内核 golden-file（IR→各方言快照）+ IR 非法组合拒；重构前后 sing-box 输出一字不差；
+- 换核 e2e（测试双驱动）：中途失败回滚断言；系统代理/TUN 态不破；
+- 订阅解析新增 4 协议 + Clash YAML：每族畸形/投毒负例；
+- 子面板化后主区任一层滚动深度 ≤2；日志过滤/清空/导出可用；
+- 新命令（node_select/node_auto/kernel_restart/traffic）全部同步 permissions+main capability。

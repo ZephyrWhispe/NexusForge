@@ -4,6 +4,7 @@
 > 总纲目标（用户原话口径）："全部功能面板根据功能做最深度的设置，尽可能实现参考软件的全部功能，而不是主要功能。"
 > 蓝本来源：《集合软件开源蓝本》（DeepSeek 导出 2026-09-14）§3.1–§3.12；参考软件按节标注。
 > 状态标注：`未开工 → 进行中 → 已完成(+commit)`，与 §12 跟踪表同步。
+> **逐面板细案（2026-09-19 增）**：每个功能面板的问题清单（file:line）、子面板信息架构、对标全功能矩阵、其他软件借鉴与拓展设计，见 [`docs/panels/2026-09-19/`](../panels/2026-09-19/README.md)（README 含信息架构总则与五类子面板规范；15 份分档与本文件批次号互相引用，细案先于代码）。
 
 ## 1. 差距总览与三分法
 
@@ -28,7 +29,7 @@
 | 终端 | §3.11 | NyaTerm | ConPTY/WSL/SSH/SFTP/Docker 在；known_hosts 管理无 UI、端口转发/ProxyJump 缺（§5 推翻提前）| B7 |
 | 系统监控 | §3.12 | NeoHtop | 采样环+3 曲线在；无进程 top-N/结束进程、托盘负载；winops 目录浏览无 UI [孤儿] | B7 |
 | sync | §五(整合) | Syncthing 理念 | **后端缺可查询接口**（per-peer 游标/冲突历史/自动同步/entity 白名单写死 "note" `module.rs:39`）——非纯 UI 问题 | B5 |
-| editor/notes/desktop/automation | — | — | 各有孤儿命令与半截功能，见 §4/§7 | B1+B7 |
+| editor/notes/desktop/automation | — | — | 各有半截功能（细案复核：notes 18 命令**零孤儿**、其薄在 textarea 编辑形态与信息架构；editor 孤儿=editor_save_as+草稿箱只写不看；automation UI 单动作表单会裁切多动作规则、IpcCommand/and-or-not 无入口——见 panels/11/12/13）| B1+B7 |
 
 ## 2. 批次划分与依赖
 

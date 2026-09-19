@@ -1,0 +1,65 @@
+# 09 截图与贴图面板详细设计（B0 补壳 + B4 深化）
+
+> 总纲：docs/impl/09 §9；对标：蓝本 §3.9（OpenSnap+ShareX）+ Snipaste/PixPin/Flameshot/Ksnip；状态：未开工。**本模块是用户报告"显示模块待构建"的直接对象**：后端 10 命令齐备（lib.rs:145-154），`src/modules/` 下**没有 screenshot 目录**，MainWorkbench 落入"模块界面待实现"兜底三元尾（MainWorkbench.tsx:266）。
+
+## 1. 现状问题
+
+- **[壳缺]** 面板从未建：10 命令中 `screenshot_history_list` 是全孤儿（client 包装 :246 无人调用），pins/pin_get/pin_update 仅被贴图窗与 overlayController 消费（PinWindow.tsx:134/147、overlayController.ts:172）——贴图缩放/透明度在贴图窗内已可调（0.2–5x / 0.2–1.0），但**主窗无任何管理面**（列不出、找不回、关不完活跃贴图）。
+- **贴图位置恒报废**：OverlayShot 提交 `pin_x: null, pin_y: null`（OverlayShot.tsx:827-828），后端 `unwrap_or(100)`（module.rs:459）——所有贴图永远弹在 (100,100)，Snipaste 式"原地钉图"体验缺失（数据通道存在，前端没填）。
+- **历史整库无人看**：`ShotStore` 持久历史含 `ocr_text` 回填（store.rs:65、module.rs:740）——**全应用无任何历史视图**可查，识别过的文字随检索需求沉没。
+- **标注器局限**：固定 5 色（OverlayShot.tsx:176）、3 线宽（:177）、文本用 `window.prompt`（:695，无字号/字体/换行）；无直线/高亮笔/高斯模糊（马赛克只有像素格一种隐私形态）；undo/redo 全量重放无操作栈上限说明；**无图层概念**（蓝本明列"图层系统+撤销/重做栈"）。
+- **捕获模式单一**：`start_capture(mode)` 只有全屏帧+选区一条路（TaskInfoDto.mode 仅 shot|ocr，types.rs:79）；蓝本 §3.9 承诺的窗口捕获/滚动长截图/全屏直无。
+- **配置 schema 无 UI**：ScreenshotConfig（save_dir/filename_template `{ts}`/auto_copy/auto_save/auto_pin，types.rs:7-23）设计注释就写"设置中心 schema 渲染"，但设置中心硬编码 `moduleId="clipboard"`（MainWorkbench.tsx:201）——配置永远默认值。
+
+## 2. 子面板信息架构
+
+| 子面板 | 类型 | 内容 |
+|--------|------|------|
+| 捕获 | 概览 | 模式卡片网格：区域（=现覆盖层）/全屏/当前窗口/滚动长截图（新）/剪贴板图片转贴图（Snipaste F3 式）；每卡显示将触发的动作链摘要（auto_copy/save/pin 开关状态镜像）|
+| 贴图 | 清单 | 活跃贴图表（id/尺寸/zoom/opacity/位置，`screenshot_pins` 消费）→ 聚焦（打开对应贴图窗）/关闭/全部关闭/重开丢失的贴图（pin_get 直读 appData 持久 png）；调节本身留在贴图窗（已有滚轮缩放/透明度），面板管"找回来"而非重复造调节旋钮 |
+| 历史 | 清单 | ShotStore 分页缩略流（`screenshot_history_list` 接线）：日期分组、含 OCR 文本关键字过滤（后端加 q 参数）、行内动作=重新打开标注/复制/钉图/定位文件/查看识别文本 |
+| 任务流 | 编辑 | ShareX 式 after-capture 链编辑器：`捕获→标注→[OCR]→[上传]→[复制链接]→[保存]→[复制]→[钉图]` 步骤开关+排序；上传目标（UploadProvider）子表：HTTP(S) 图床/自定义命令，凭证引用 vault 条目（红线：导出与日志永不带明文凭证）|
+| 覆盖层标注器 | 编辑 | 仍在覆盖层窗内完成（不迁进面板），但补：自定义取色器+recent 色板、直线/高亮笔/高斯模糊、文本改内联小编辑器弃 prompt、pin_x/pin_y 回填选区原点、序号标签样式、导出格式下拉（PNG/JPEG/WebP；SVG 登记待评估——前端 canvas 合成路线改矢量输出是架构级）|
+| 设置 | 设置 | ScreenshotConfig schema 全量渲染（含文件名模板预览）+ 历史保留策略（条数/天数/存储上限）|
+
+## 3. 对标功能矩阵
+
+| # | 功能 | 来源 | 现状 | 实施 |
+|---|------|------|------|------|
+| 1 | 区域截图+覆盖层 | 蓝本 | ✅ | — |
+| 2 | 全屏/窗口截图 | 蓝本 §3.9 | ❌ | 全屏=选区退化；窗口捕获用枚举窗+hover 高亮（win 已有列举）|
+| 3 | 滚动截图 | 蓝本 + PixPin | ❌ | 滚动 stitch：抓 N 帧重叠区匹配拼接；失败降级=逐帧存图引导手动拼 |
+| 4 | 标注矢量/栅格工具 | 蓝本 | 7 工具 | 补直线/高亮/高斯模糊；文本内联编辑 |
+| 5 | 图层+撤销栈 | 蓝本 | 全量重放 | 操作栈化（现结构天然近栈，成本中）；真图层登记为偏离→蓝本"图层系统"以标注 z-order 满足 |
+| 6 | 导出 PNG/JPEG/WebP/SVG | 蓝本 | 仅 PNG | 编码参数入 finish；SVG 挂 DeferredBadge（前端合成路线冲突）|
+| 7 | 任务流水线 | 蓝本/ShareX | 半（三 auto 开关）| 任务流子面板，开关 schema 化存 host_config |
+| 8 | UploadProvider 插件化 | 蓝本/ShareX `IUploaderProvider` | ❌ | trait+注册表，HTTP(S) provider 先行；S3/FTP/WebDAV 复用 B6 TransferProtocol 抽象 |
+| 9 | 贴图置顶 | 蓝本/Ksnip | ✅ 壳+调节 | 补位置回填/面板级枚举找回/会话恢复（zoom/opacity 调节已在贴图窗）|
+| 10 | 多显示器+高 DPI | 蓝本 | 虚拟桌面整帧 | 逐屏帧拆分（TaskStartDto 扩 monitors[]）|
+| 11 | 全局快捷键 | 蓝本 §4.4 | ✅ 热键通路 | 面板设置页可见可改（复用宿主 HotkeyProvider 表）|
+| 12 | 历史+OCR 回填 | ShareX 历史观 | 后端✅孤儿 | 历史子面板接线即得 |
+
+## 4. 其他软件借鉴
+
+- **Snipaste**：F3 把剪贴板图像变贴图（本档"剪贴板图片转贴图"卡）；贴图滚轮缩放、S 循环透明度、双击进标注器再编辑（pin_get 已备）；贴图分组（登记 v1.1，需贴图组持久化模型）；
+- **PixPin**：滚动长截图 + 贴图钉 GIF/文字/文件（GIF 需帧解码，登记 v1.1；"钉任意文件=在桌面挂文件卡片"作拓展②）；
+- **ShareX**：任务流水线与 after-capture 编辑器是本档任务流子面板原型；历史窗口的"重新执行任务链"按钮；
+- **Flameshot**：标注工具就近悬浮于选区边缘（现工具条固定顶部——改跟随选区）；打印直出；
+- **PowerToys Screen Ruler/ColorPicker**：覆盖层内临时取色条（见拓展①）。
+
+## 5. 拓展设计（常人未思）
+
+1. **取色即历史**：覆盖层 P 键取色 → 颜色入 recent 色板且可一键"设为系统主题 accent"（宿主已有 `host_system_accent` 命令，孤儿变联动）；取色格式循环 HEX/RGB/HSL 复制。
+2. **钉文件/钉网址**：贴图对象不止像素——钉 PDF 首页、钉文件夹（点击=打开资源管理器）、钉 URL 卡片；复用 pin 窗体壳，元数据入 ShotStore 旁表。
+3. **截图→自动化事件源**：`screenshot.completed{mode,size,actions}` 发布上总线，规则模块可写"区域截图后自动 OCR+命名归档"——截图成为自动化生态传感器。
+4. **隐私模糊分级**：高斯模糊与马赛克并列，且提供"正则预扫"（选中区域文本若已被 OCR 判为邮箱/IP/密钥形态则自动建议模糊框——复用 ocr-core，防"打了码又泄漏"）。
+5. **贴图防呆**：贴图窗进入全屏演示模式（PPT 放映）时自动半透明化+禁置顶抢焦点，退出恢复——Snipaste 用户痛点（贴图挡住放映）。
+6. **历史秒传桥**：历史行右键"作为文件发送给 KVM 对端/加入 sync 资产"——贴图→跨设备通路（红线：敏感目录截图需手动确认）。
+
+## 6. 验收点
+
+- B0 壳红线：MODULES 注册表 vitest 断言 screenshot 有面板组件且非 fallback；设置中心按 moduleId 渲染 ScreenshotConfig（模板预览含 `{ts}` 替换示例）；
+- `pin_x/pin_y` 回填回归（钉图位置=选区原点断言）；贴图管理面端到端（面板枚举→聚焦/全部关闭后 pins() 为空；贴图窗既有 zoom/opacity 持久化 PinWindow.tsx:134/147 作为基线不得回归）；
+- 滚动截图拼接失败负例（重叠区无匹配→降级路径，不产生损坏长图）；
+- 上传 provider：http 明文 + 用户凭证 URL 的 SSRF/泄漏负例（默认拒 http、日志脱敏）；历史 q 过滤含 OCR 文本命中正例；
+- 快捷键/托盘/热键三通路触发同一 start_capture（复用 D-26 事件走查法）。
