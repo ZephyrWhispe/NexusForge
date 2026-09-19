@@ -1,12 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { makeStyles, tokens, Tooltip } from "@fluentui/react-components";
+import {
+  Button,
+  Checkbox,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
+  makeStyles,
+  Text,
+  tokens,
+  Tooltip,
+} from "@fluentui/react-components";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   clipboardSearch,
   clipboardPaste,
   clipboardPin,
   clipboardDelete,
+  clipboardClear,
+  clipboardGet,
   clipboardGroupCounts,
+  parseAppError,
   type ClipEntry,
   type ClipSearchQuery,
 } from "../../ipc/client";
@@ -22,6 +38,47 @@ import { keyActivate } from "../../a11y";
  * 数据：clipboard_search FTS/分页；实时：nf:event clipboard.captured → 刷新。
  */
 const useStyles = makeStyles({
+  root: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 },
+  toolbar: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    height: "40px",
+    padding: "0 20px",
+    flexShrink: 0,
+  },
+  // 破坏性主按钮 = 红色（与 ConfirmDialog 同基准，当前 Fluent 版本无 overflow appearance）
+  danger: {
+    backgroundColor: tokens.colorPaletteRedBackground1,
+    color: tokens.colorPaletteRedForeground1,
+  },
+  impact: {
+    display: "block",
+    fontSize: tokens.fontSizeBase300,
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorNeutralForeground1,
+  },
+  detailHint: {
+    display: "block",
+    marginTop: "6px",
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
+  },
+  fullText: {
+    display: "block",
+    maxHeight: "46vh",
+    overflowY: "auto",
+    margin: "4px 0 0",
+    padding: "8px 12px",
+    borderRadius: tokens.borderRadiusMedium,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    backgroundColor: tokens.colorNeutralBackground2,
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeBase200,
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-all",
+  },
+  meta: { display: "block", marginBottom: "6px", fontSize: tokens.fontSizeBase200, color: tokens.colorNeutralForeground2 },
   list: { flex: 1, overflowY: "auto", padding: "4px 20px 20px" },
   entry: {
     display: "flex",
@@ -116,6 +173,14 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
   const [page, setPage] = useState(0);
   // 首轮查询是否已落定（成功或失败）：未落定前不渲染引导文案（D-18 假空态修正）
   const [loaded, setLoaded] = useState(false);
+  // T-B1-1 清空：面板局部 Dialog 携带「保留置顶」选项（全局 confirmAction 只回布尔、无选项通道）
+  const [clearOpen, setClearOpen] = useState(false);
+  const [keepPinned, setKeepPinned] = useState(true);
+  const [clearing, setClearing] = useState(false);
+  // T-B1-2 详情：text/files 走 clipboard_get 全文；image 走大图 DibThumb（字节不做 lossy 展示）
+  const [detail, setDetail] = useState<{ entry: ClipEntry; text: string | null; failed: string | null } | null>(
+    null,
+  );
   const listRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(
@@ -216,8 +281,48 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
     }
   };
 
+  // T-B1-1：实删条数以 clipboard_clear 返回值如实回报；列表重载由本处理器自调
+  //（clipboard.cleared 订阅只做分组计数刷新，不动它）
+  const doClear = async () => {
+    setClearing(true);
+    try {
+      const removed = await clipboardClear(keepPinned);
+      notify(
+        "success",
+        "已清空剪切板历史",
+        `删除 ${removed} 条记录${keepPinned ? "，置顶条目已保留" : ""}`,
+      );
+      setClearOpen(false);
+      await load(0, false);
+    } catch (e) {
+      notify("error", "清空失败", parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const openDetail = (e: ClipEntry) => {
+    setDetail({ entry: e, text: null, failed: null });
+    if (e.content_type === "image") return;
+    clipboardGet(e.id)
+      .then((t) => setDetail((d) => (d && d.entry.id === e.id ? { ...d, text: t } : d)))
+      .catch((err) =>
+        setDetail((d) =>
+          d && d.entry.id === e.id
+            ? { ...d, failed: parseAppError(err)?.data.message ?? String(err) }
+            : d,
+        ),
+      );
+  };
+
   return (
-    <div className={styles.list} ref={listRef}>
+    <div className={styles.root}>
+      <div className={styles.toolbar}>
+        <Button size="small" onClick={() => setClearOpen(true)}>
+          清空
+        </Button>
+      </div>
+      <div className={styles.list} ref={listRef}>
       {entries.length === 0 ? (
         <EmptyState
           text="没有匹配的记录：复制任意内容后这里会显示历史（文本实时捕获）。"
@@ -260,6 +365,18 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
                   <div className={`${styles.preview} ${isCode ? styles.mono : ""}`}>{e.preview}</div>
                 </div>
                 <div className={styles.ops}>
+                  <Tooltip content="详情" relationship="label">
+                    <button
+                      className={styles.opBtn}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        openDetail(e);
+                      }}
+                      aria-label="详情"
+                    >
+                      ⓘ
+                    </button>
+                  </Tooltip>
                   <Tooltip content="粘贴" relationship="label">
                     <button
                       className={styles.opBtn}
@@ -315,6 +432,85 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
           </button>
         </div>
       )}
+      </div>
+
+      {/* T-B1-1 清空二次确认（D-18 基线形态；Checkbox 走局部 Dialog 承载，见 09 §4.2 行内更正） */}
+      <Dialog open={clearOpen} onOpenChange={(_, d) => !d.open && setClearOpen(false)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>清空剪切板历史</DialogTitle>
+            <DialogContent>
+              <span className={styles.impact}>
+                {keepPinned ? "将删除当前库中全部未置顶记录" : "将删除当前库中全部记录（含置顶）"}
+              </span>
+              <span className={styles.detailHint}>
+                删除后不可恢复；图片条目的 blob 与敏感条目的密文一并清理。实际删除条数以执行结果提示为准。
+              </span>
+              <Checkbox
+                checked={keepPinned}
+                onChange={(_, d) => setKeepPinned(d.checked === true)}
+                label="保留置顶条目"
+                style={{ marginTop: "10px" }}
+              />
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setClearOpen(false)} disabled={clearing}>
+                取消
+              </Button>
+              <Button
+                appearance="primary"
+                className={styles.danger}
+                disabled={clearing}
+                onClick={() => void doClear()}
+              >
+                {clearing ? "清空中…" : "确认清空"}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      {/* T-B1-2 行详情：全文经 clipboard_get；空串=不存在/空内容合一，如实并陈 */}
+      <Dialog open={detail !== null} onOpenChange={() => setDetail(null)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>记录详情</DialogTitle>
+            <DialogContent>
+              {detail && (
+                <>
+                  <Text className={styles.meta}>
+                    {[
+                      detail.entry.source_app || "未知来源",
+                      fmtTime(detail.entry.created_at),
+                      detail.entry.pinned ? "置顶" : "",
+                      detail.entry.secret ? "已加密" : "",
+                      detail.entry.origin === "remote" ? "远端" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </Text>
+                  {detail.entry.content_type === "image" ? (
+                    <DibThumb id={detail.entry.id} width={420} height={280} />
+                  ) : detail.failed ? (
+                    <span className={styles.detailHint}>读取失败：{detail.failed}</span>
+                  ) : detail.text === null ? (
+                    <span className={styles.detailHint}>加载中…</span>
+                  ) : detail.text === "" ? (
+                    <span className={styles.detailHint}>内容已空或记录已删</span>
+                  ) : (
+                    <pre className={styles.fullText}>{detail.text}</pre>
+                  )}
+                </>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setDetail(null)}>
+                关闭
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }
