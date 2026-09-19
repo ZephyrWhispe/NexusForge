@@ -410,19 +410,22 @@ export function kvmReleaseControl(): Promise<void> {
 
 // ---------------- 密码库 IPC（docs/impl/05 V7 DTO 对齐）----------------
 
+/** 保险库头部（vault-core crypto.rs VaultHeader；明文可存盘，机密全在 wrapped_dek） */
+export interface VaultHeaderDto {
+  version: number;
+  vault_id: string;
+  kdf: { algo: string; m_cost_kib: number; t_cost: number; p_cost: number; salt_b64: string };
+  wrapped_dek: { nonce_b64: string; ct_b64: string };
+  /** V4 Hello 免密信封（D-24；未启用 = null） */
+  hello?: { wrapped_dek_b64: string; verifier: { nonce_b64: string; ct_b64: string } } | null;
+}
+
 /** 密码库状态（三态：uninitialized / locked / unlocked） */
 export interface VaultStatusDto {
   state: "uninitialized" | "locked" | "unlocked";
   lockout_remaining_secs: number;
   /** 头部快照（KDF 参数 / vault_id，无机密） */
-  kdf: {
-    version: number;
-    vault_id: string;
-    kdf: { algo: string; m_cost_kib: number; t_cost: number; p_cost: number; salt_b64: string };
-    wrapped_dek: { nonce_b64: string; ct_b64: string };
-    /** V4 Hello 免密信封（D-24；未启用 = null） */
-    hello?: { wrapped_dek_b64: string; verifier: { nonce_b64: string; ct_b64: string } } | null;
-  } | null;
+  kdf: VaultHeaderDto | null;
   /** V4：免密路径已启用 */
   hello_enabled: boolean;
   /** V4：连续校验失败熔断（本进程仅允许主密码解锁） */
@@ -477,7 +480,7 @@ export function vaultUnlock(masterPassword: string): Promise<void> {
 export function vaultLock(): Promise<void> {
   return invoke("vault_lock");
 }
-export function vaultChangeMasterPassword(oldPassword: string, newPassword: string): Promise<unknown> {
+export function vaultChangeMasterPassword(oldPassword: string, newPassword: string): Promise<VaultHeaderDto> {
   return invoke("vault_change_master_password", { oldPassword, newPassword });
 }
 export function vaultFolders(): Promise<VaultFolderDto[]> {

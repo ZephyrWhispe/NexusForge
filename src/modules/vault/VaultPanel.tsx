@@ -24,11 +24,14 @@ import {
   DeleteRegular,
   CopyRegular,
   DismissRegular,
+  EditRegular,
   EyeRegular,
   EyeOffRegular,
+  CheckmarkRegular,
 } from "@fluentui/react-icons";
 import {
   parseAppError,
+  vaultChangeMasterPassword,
   vaultCopyPassword,
   vaultCreate,
   vaultEntries,
@@ -37,6 +40,7 @@ import {
   vaultEntryUpdate,
   vaultFolderCreate,
   vaultFolderDelete,
+  vaultFolderRename,
   vaultFolders,
   vaultGeneratePassword,
   vaultHelloDisable,
@@ -53,6 +57,7 @@ import {
   type VaultFolderDto,
   type VaultStatusDto,
 } from "../../ipc/client";
+import type { PanelProps } from "../../layout/panels";
 import { IN_TAURI } from "../../ipc/env";
 import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
@@ -313,7 +318,7 @@ function editorFromEntry(entry: VaultEntryDto): EditorState {
   return { ...base, initial: serializeEditorForm(base) };
 }
 
-export default function VaultPanel() {
+export default function VaultPanel({ search }: PanelProps) {
   const styles = useStyles();
   const [status, setStatus] = useState<VaultStatusDto | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -325,12 +330,24 @@ export default function VaultPanel() {
   const [pwConfirm, setPwConfirm] = useState("");
   const [lockoutLeft, setLockoutLeft] = useState(0);
 
+  // 改主密码对话框（T-B1-3；红线：change_master_password 不经 unlock()，
+  // 错旧密不递增尝试计数——文案不得宣称锁定保护，错误原样内联展示）
+  const [mpOpen, setMpOpen] = useState(false);
+  const [mpOld, setMpOld] = useState("");
+  const [mpNew, setMpNew] = useState("");
+  const [mpConfirm, setMpConfirm] = useState("");
+  const [mpErr, setMpErr] = useState<string | null>(null);
+
   // 解锁态数据
   const [folders, setFolders] = useState<VaultFolderDto[]>([]);
   const [activeFolder, setActiveFolder] = useState<string | "all">("all");
   const [entries, setEntries] = useState<VaultEntryDto[]>([]);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
+  // 文件夹行内改名（T-B1-3）：null = 无进行中；否则 {文件夹 id, 草稿名}
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  // callback ref：进入改名态挂载即聚焦（jsx-a11y 禁 autoFocus，attach 时序等价）
+  const focusRename = useCallback((el: HTMLInputElement | null) => el?.focus(), []);
   const [loaded, setLoaded] = useState(false);
   const reloadRef = useRef<() => void>(() => undefined);
 
@@ -342,7 +359,9 @@ export default function VaultPanel() {
       if (s.state === "unlocked") {
         const [f, e] = await Promise.all([
           vaultFolders(),
-          vaultEntries(activeFolder === "all" ? null : activeFolder, null),
+          // 搜索走后端（vault_entries search 参数，仅匹配标题 model.rs LIKE）；
+          // 空白查询传 null = 不参与过滤
+          vaultEntries(activeFolder === "all" ? null : activeFolder, search.trim() || null),
         ]);
         setFolders(f);
         setEntries(e);
@@ -352,12 +371,12 @@ export default function VaultPanel() {
     } finally {
       setLoaded(true);
     }
-  }, [activeFolder]);
+  }, [activeFolder, search]);
   reloadRef.current = () => void refresh();
 
   useEffect(() => {
     reloadRef.current();
-  }, [activeFolder]);
+  }, [activeFolder, search]);
 
   // 冷却倒计时（锁定态每秒递减）
   useEffect(() => {
@@ -581,6 +600,47 @@ export default function VaultPanel() {
     await refresh();
   };
 
+  // T-B1-3 行内改名：vault_folder_rename 对不存在的 id 返回 false（非报错），如实区分
+  const doRenameFolder = async (f: VaultFolderDto) => {
+    if (!renaming) return;
+    const name = renaming.name.trim();
+    if (!name || name === f.name) {
+      setRenaming(null);
+      return;
+    }
+    try {
+      const ok = await vaultFolderRename(f.id, name);
+      if (!ok) notify("warn", "未找到该文件夹", "可能被其他窗口删除，已刷新列表");
+      await refresh();
+    } catch (e) {
+      reportError(e, { context: "重命名文件夹失败" });
+    } finally {
+      setRenaming(null);
+    }
+  };
+
+  // T-B1-3 改主密码（红线）：错误经 InlineError 原样内联（VAULT_UNLOCK_001 = 旧密错误），
+  // 不宣称尝试计数/冷却保护（该命令不经 unlock()，无锁定副作用）
+  const doChangePassword = async () => {
+    setMpErr(null);
+    if (mpNew.length < 8) return setMpErr("新主密码至少 8 个字符");
+    if (mpNew !== mpConfirm) return setMpErr("两次输入的新密码不一致");
+    if (!mpOld) return setMpErr("请输入当前主密码");
+    setBusy(true);
+    try {
+      await vaultChangeMasterPassword(mpOld, mpNew);
+      setMpOld("");
+      setMpNew("");
+      setMpConfirm("");
+      setMpOpen(false);
+      notify("success", "主密码已修改", "DEK 已用新密码重包裹，条目数据未改动。");
+    } catch (e) {
+      setMpErr(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const doGen = async () => {
     if (!editor) return;
     setFormErr(null);
@@ -706,6 +766,9 @@ export default function VaultPanel() {
         <Button icon={<LockClosedRegular />} onClick={() => void doLock()}>
           立即锁定
         </Button>
+        <Button icon={<PasswordRegular />} onClick={() => { setMpErr(null); setMpOpen(true); }}>
+          修改主密码
+        </Button>
         {status.hello_available && (
           <Button
             icon={<PasswordRegular />}
@@ -743,17 +806,57 @@ export default function VaultPanel() {
               tabIndex={0}
               onKeyDown={keyActivate(() => setActiveFolder(f.id))}
             >
-              <Text truncate>{f.name}</Text>
-              <Button
-                appearance="subtle"
-                size="small"
-                icon={<DeleteRegular />}
-                title="删除文件夹"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void doDeleteFolder(f);
-                }}
-              />
+              {renaming?.id === f.id ? (
+                // 行内改名（沿用新文件夹行的 Input+按钮形态，00-spec 控件档内）
+                <>
+                  <Input
+                    ref={focusRename}
+                    size="small"
+                    value={renaming.name}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(_, d) => setRenaming({ id: f.id, name: d.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void doRenameFolder(f);
+                      if (e.key === "Escape") setRenaming(null);
+                    }}
+                    style={{ minWidth: 0, flex: 1 }}
+                  />
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    icon={<CheckmarkRegular />}
+                    title="确认重命名"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void doRenameFolder(f);
+                    }}
+                  />
+                </>
+              ) : (
+                <>
+                  <Text truncate>{f.name}</Text>
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    icon={<EditRegular />}
+                    title="重命名文件夹"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRenaming({ id: f.id, name: f.name });
+                    }}
+                  />
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    icon={<DeleteRegular />}
+                    title="删除文件夹"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void doDeleteFolder(f);
+                    }}
+                  />
+                </>
+              )}
             </div>
           ))}
           <Divider />
@@ -770,8 +873,13 @@ export default function VaultPanel() {
         </div>
 
         <div className={styles.entryList}>
-          {(loaded && entries.length === 0) && (
-            <EmptyState text="暂无条目，点击「新建条目」添加。" />
+          {loaded && entries.length === 0 && (
+            // D-18/00§4-4：后端已过滤，搜索无果 ≠ 空库两态如实分开
+            search.trim() ? (
+              <EmptyState text={`没有标题匹配「${search.trim()}」的条目（搜索仅按标题，由后端执行）。`} />
+            ) : (
+              <EmptyState text="暂无条目，点击「新建条目」添加。" />
+            )
           )}
           {entries.map((entry) => (
             <div key={entry.id} className={styles.entry}>
@@ -958,6 +1066,52 @@ export default function VaultPanel() {
           </DialogSurface>
         </Dialog>
       )}
+
+      {/* T-B1-3 改主密码：三字段皆 password（永不回显），错误内联不蒸发 */}
+      <Dialog open={mpOpen} onOpenChange={(_, d) => !d.open && !busy && setMpOpen(false)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>修改主密码</DialogTitle>
+            <DialogContent>
+              <Text className={styles.muted}>
+                旧密码验证后用新密码重新包裹数据密钥（DEK），条目密文不搬运。
+              </Text>
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "8px" }}>
+                <Input
+                  type="password"
+                  aria-label="当前主密码"
+                  placeholder="当前主密码"
+                  value={mpOld}
+                  onChange={(_, d) => setMpOld(d.value)}
+                />
+                <Input
+                  type="password"
+                  aria-label="新主密码"
+                  placeholder="新主密码（≥8 位）"
+                  value={mpNew}
+                  onChange={(_, d) => setMpNew(d.value)}
+                />
+                <Input
+                  type="password"
+                  aria-label="确认新主密码"
+                  placeholder="确认新主密码"
+                  value={mpConfirm}
+                  onChange={(_, d) => setMpConfirm(d.value)}
+                />
+              </div>
+              <InlineError text={mpErr} />
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" disabled={busy} onClick={() => setMpOpen(false)}>
+                取消
+              </Button>
+              <Button appearance="primary" disabled={busy} onClick={() => void doChangePassword()}>
+                {busy ? "修改中…" : "确认修改"}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }
