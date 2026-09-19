@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use std::sync::Arc;
 
-use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
+use host_core::capability::{
+    HotkeyAction, HotkeyBinding, HotkeyProvider, TrayAction, TrayMenuItem, TrayProvider,
+};
 use host_core::error::{AppError, ModuleError};
 use host_core::events::{Event, EventBus};
 use host_core::module::{
@@ -747,6 +749,35 @@ impl ScreenshotModule {
     }
 }
 
+impl TrayProvider for ScreenshotModule {
+    /// D-26：托盘段「截图与贴图」——与全局热键同一事件通路（overlay_requested）
+    fn tray_menu_items(&self) -> Vec<TrayMenuItem> {
+        vec![TrayMenuItem {
+            id: "region".into(),
+            label: "截图选区".into(),
+            enabled: true,
+        }]
+    }
+
+    fn tray_actions(&self) -> Vec<TrayAction> {
+        let bus = self.bus.read().clone();
+        let Some(bus) = bus else {
+            return vec![];
+        };
+        vec![TrayAction {
+            item_id: "region".into(),
+            action: Arc::new(move || {
+                bus.publish(Event::new(
+                    "screenshot.overlay_requested",
+                    "screenshot",
+                    serde_json::json!({ "mode": "shot" }),
+                ))
+                .ok();
+            }),
+        }]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,5 +843,26 @@ mod tests {
         let m = ScreenshotModule::new();
         let e = m.dispatch_ocr_request("t", 1, 1, &[0; 4]).unwrap_err();
         assert_eq!(e.code(), "SCREENSHOT_STATE_001");
+    }
+
+    /// D-26 验收⑤：托盘 region 动作经 bus 发布与热键同通路事件（mode=shot）；init 前为空
+    #[tokio::test]
+    async fn tray_action_publishes_overlay_request_observable_on_bus() {
+        let m = ScreenshotModule::new();
+        assert!(m.tray_actions().is_empty(), "init 前不得提供动作");
+
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus
+            .subscribe("screenshot.overlay_requested")
+            .expect("订阅 tray 事件");
+        *m.bus.write() = Some(bus);
+        let actions = m.tray_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].item_id, "region");
+        (actions[0].action)();
+        let ev = rx.recv().await.expect("动作闭包应发布事件");
+        assert_eq!(ev.source, "screenshot");
+        assert_eq!(ev.payload["mode"], "shot");
+        assert_eq!(m.tray_menu_items()[0].label, "截图选区");
     }
 }

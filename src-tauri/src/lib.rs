@@ -3,6 +3,7 @@
 // 集成测试（S6 IPC 契约回归）需可见命令面与宿主状态型：升格 pub
 pub mod commands;
 pub mod state;
+mod tray;
 mod winops_helper;
 
 use automation_core::engine::ActionHandler;
@@ -335,6 +336,11 @@ pub fn run() {
 
             app.manage(host.clone());
             state::forward_events(app.handle().clone(), host.bus.clone());
+
+            // D-26：原生托盘（聚合 + 重建 + 预警气泡在 tray.rs；构建失败仅降级不阻断启动）
+            if let Err(e) = tray::build(app.handle(), &host) {
+                tracing::warn!(error = %e, "原生托盘构建失败，托盘功能本次启动不可用");
+            }
 
             // 模块引导放后台任务，不阻塞窗口显示（M1 验收：启动 < 1.5s）
             let host_for_boot = host.clone();

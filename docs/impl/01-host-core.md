@@ -296,6 +296,8 @@ impl HotkeyManager {
 ### S6.3 TrayManager
 聚合所有 `TrayProvider` 的菜单项，按模块 priority 排序 + 分隔线分组；模块 `Error` 状态时其菜单项置灰。用 `tray-icon` crate（Tauri 官方）。
 
+> v1 交付口径（D-26）：原生托盘已落 `src-tauri/src/tray.rs`（setup 构建 + `host.module_state` 事件驱动整建重建 + `{module}:{item_id}` 动作查表；`aggregate_tray` 的 Error 置灰即本节规范句）。vault 自动锁定预警经 `set_title` 标题通道呈现——本栈（tauri 2.11.5 / tray-icon 0.24.2）未暴露 Windows balloon API，前端 Toast 为主告警面，见 DECISIONS D-26 决策④。
+
 ### S6.4 日志
 `tracing_subscriber`：`EnvFilter`（RUST_LOG 可覆盖）+ 每日滚动文件（`tracing-appender`，保留 7 天）+ 隐私过滤器 layer（对含 `password/token/secret` 字段的 JSON 自动脱敏）。
 

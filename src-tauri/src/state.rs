@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use host_core::capability::HotkeyProvider;
+use host_core::capability::{HotkeyProvider, TrayProvider};
 use host_core::config::ConfigStore;
 use host_core::crash;
 use host_core::events::EventBus;
@@ -197,11 +197,13 @@ impl HostState {
         config.register_schema("clipboard", clipboard.config_schema());
         registry.register(clipboard.clone())?;
         registry.register_ability::<dyn HotkeyProvider>(clipboard.clone());
+        registry.register_ability::<dyn TrayProvider>(clipboard.clone());
 
         let screenshot = Arc::new(ScreenshotModule::new());
         config.register_schema("screenshot", screenshot.config_schema());
         registry.register(screenshot.clone())?;
         registry.register_ability::<dyn HotkeyProvider>(screenshot.clone());
+        registry.register_ability::<dyn TrayProvider>(screenshot.clone());
 
         let ocr = Arc::new(OcrModule::new());
         registry.register(ocr.clone())?;
@@ -217,6 +219,7 @@ impl HostState {
         let vault = Arc::new(VaultModule::new_with_config(config.clone()));
         config.register_schema("vault", vault.config_schema());
         registry.register(vault.clone())?;
+        registry.register_ability::<dyn TrayProvider>(vault.clone());
 
         // ---- P1 文件与存储（M6，docs/impl/05 F1–F7）----
         let file = Arc::new(FileModule::new());
@@ -339,7 +342,8 @@ impl HostState {
             }
         }
         tracing::info!(count = registered, "全局快捷键注册完成");
-        // 托盘聚合（原生 tray-icon 接入在 C1 里程碑；此处验证数据链路）
+        // D-26：托盘菜单聚合的原生消费端在 tray.rs（host.module_state 事件驱动重建）；
+        // 此处日志保留作引导期观测点
         let sections = host_core::capability::aggregate_tray(self.registry.abilities());
         tracing::info!(sections = ?sections, "托盘菜单聚合完成");
     }

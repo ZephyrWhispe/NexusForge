@@ -4,7 +4,9 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
-use host_core::capability::{HotkeyAction, HotkeyBinding, HotkeyProvider};
+use host_core::capability::{
+    HotkeyAction, HotkeyBinding, HotkeyProvider, TrayAction, TrayMenuItem, TrayProvider,
+};
 use host_core::error::{AppError, ModuleError};
 use host_core::events::{Event, EventBus};
 use host_core::module::{
@@ -482,6 +484,35 @@ impl ClipboardModule {
     }
 }
 
+impl TrayProvider for ClipboardModule {
+    /// D-26：托盘段「剪切板中枢」——与全局热键同一事件通路（quick_panel_toggled）
+    fn tray_menu_items(&self) -> Vec<TrayMenuItem> {
+        vec![TrayMenuItem {
+            id: "quick_panel".into(),
+            label: "打开剪切板面板".into(),
+            enabled: true,
+        }]
+    }
+
+    fn tray_actions(&self) -> Vec<TrayAction> {
+        let bus = self.bus.read().clone();
+        let Some(bus) = bus else {
+            return vec![]; // init 前不提供动作
+        };
+        vec![TrayAction {
+            item_id: "quick_panel".into(),
+            action: Arc::new(move || {
+                bus.publish(Event::new(
+                    "clipboard.quick_panel_toggled",
+                    "clipboard",
+                    serde_json::json!({}),
+                ))
+                .ok();
+            }),
+        }]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +618,25 @@ mod tests {
         );
         assert_eq!(fake.writes.lock().len(), 1, "stop 后不得再写系统剪贴板");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-26 验收⑤：托盘 quick_panel 动作经 bus 发布与热键同通路事件；init 前动作表为空
+    #[tokio::test]
+    async fn tray_action_publishes_quick_panel_toggle_observable_on_bus() {
+        let m = ClipboardModule::new();
+        assert!(m.tray_actions().is_empty(), "init 前不得提供动作");
+
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus
+            .subscribe("clipboard.quick_panel_toggled")
+            .expect("订阅 tray 事件");
+        *m.bus.write() = Some(bus);
+        let actions = m.tray_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].item_id, "quick_panel");
+        (actions[0].action)();
+        let ev = rx.recv().await.expect("动作闭包应发布事件");
+        assert_eq!(ev.source, "clipboard");
+        assert_eq!(m.tray_menu_items()[0].label, "打开剪切板面板");
     }
 }

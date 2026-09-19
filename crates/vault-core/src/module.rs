@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use host_core::capability::{TrayAction, TrayMenuItem, TrayProvider};
 use host_core::config::ConfigStore;
 use host_core::error::ModuleError;
 use host_core::events::Event;
@@ -251,5 +252,51 @@ impl Module for VaultModule {
 
     fn set_status(&self, state: ModuleState) {
         self.state.set(state);
+    }
+}
+
+impl TrayProvider for VaultModule {
+    /// D-26：托盘段「密码库」——立即锁定（与 vault_lock 命令同语义：lock + state_changed 事件）
+    fn tray_menu_items(&self) -> Vec<TrayMenuItem> {
+        vec![TrayMenuItem {
+            id: "lock_now".into(),
+            label: "立即锁定密码库".into(),
+            enabled: true,
+        }]
+    }
+
+    fn tray_actions(&self) -> Vec<TrayAction> {
+        // 未 init（无服务）时不提供动作：点击项查不到闭包 → 宿主静默忽略（D-26 验收②）
+        let (Some(svc), Some(ctx)) = (self.service(), self.ctx.read().clone()) else {
+            return vec![];
+        };
+        vec![TrayAction {
+            item_id: "lock_now".into(),
+            action: Arc::new(move || {
+                if svc.lock().is_ok() {
+                    let _ = ctx.event_bus.publish(Event::new(
+                        "vault.state_changed",
+                        "vault",
+                        serde_json::json!({ "state": "locked", "reason": "tray" }),
+                    ));
+                }
+            }),
+        }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D-26 验收②负例：未 init（无服务/无 ctx）时不提供动作，但菜单形状恒定
+    #[test]
+    fn tray_actions_empty_before_init() {
+        let m = VaultModule::new();
+        assert!(m.tray_actions().is_empty(), "init 前不得提供动作");
+        let items = m.tray_menu_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "lock_now");
+        assert_eq!(items[0].label, "立即锁定密码库");
     }
 }
