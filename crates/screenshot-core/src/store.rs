@@ -157,4 +157,22 @@ mod tests {
         let page = s.list(&HistoryQuery { page: 1, size: 10 }).unwrap();
         assert_eq!(page.items[0].ocr_text.as_deref(), Some("识别文本"));
     }
+
+    #[test]
+    fn reopen_preserves_history_and_ocr_backfill() {
+        // M7：旧库 → 重开（CREATE IF NOT EXISTS 幂等迁移）→ 数据保留
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reopen.db");
+        {
+            let s = ShotStore::open(&path).unwrap();
+            s.insert(&item("keep", 7)).unwrap();
+            s.set_ocr_text("keep", "重开保留文本").unwrap();
+        }
+        let s = ShotStore::open(&path).unwrap();
+        let page = s.list(&HistoryQuery { page: 1, size: 10 }).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, "keep");
+        assert_eq!(page.items[0].file.as_deref(), Some("/x/keep.png"));
+        assert_eq!(page.items[0].ocr_text.as_deref(), Some("重开保留文本"));
+    }
 }

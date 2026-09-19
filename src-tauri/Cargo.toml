@@ -39,3 +39,7 @@ sync-core = { path = "../crates/sync-core" }
 base64.workspace = true
 # winops_helper token 熵源（docs/impl/08 §4.1 64 hex）
 rand.workspace = true
+
+[dev-dependencies]
+# S6/M7 集成测试的 app_data_dir 沙箱
+tempfile = "3"

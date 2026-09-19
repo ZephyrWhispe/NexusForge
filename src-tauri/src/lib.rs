@@ -1,7 +1,8 @@
 //! NexusForge Tauri 壳（docs/impl/01 S7）
 
-mod commands;
-mod state;
+// 集成测试（S6 IPC 契约回归）需可见命令面与宿主状态型：升格 pub
+pub mod commands;
+pub mod state;
 mod winops_helper;
 
 use automation_core::engine::ActionHandler;

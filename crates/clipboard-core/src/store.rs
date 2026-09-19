@@ -943,4 +943,52 @@ mod tests {
         );
         assert_eq!(s.group_counts().unwrap()["all"].as_i64(), Some(2));
     }
+
+    #[test]
+    fn reopen_migrates_old_db_and_preserves_rows_blob_fts() {
+        // M7：旧库 → 重开（rusqlite-migration to_latest 幂等）→ 行/blob/FTS 全部保留
+        let dir = std::env::temp_dir().join(format!("nf_clip_reopen_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("clipboard.db");
+        let blobs = dir.join("blobs");
+        let payload = big("重开载荷");
+        let (text_id, blob_id) = {
+            let s = ClipStore::open(&db, blobs.clone()).unwrap();
+            let t = s.insert("重开验证文本", None, false, None).unwrap();
+            let b = s.insert(&payload, None, false, None).unwrap();
+            (t, b)
+        };
+        let s = ClipStore::open(&db, blobs.clone()).unwrap();
+        assert_eq!(
+            s.search(&SearchQuery::default()).unwrap().items.len(),
+            2,
+            "重开后历史必须保留"
+        );
+        assert_eq!(
+            s.get_content(&text_id, |c| Ok(c.to_vec())).unwrap(),
+            Some("重开验证文本".into())
+        );
+        assert_eq!(
+            s.get_content(&blob_id, |c| Ok(c.to_vec())).unwrap(),
+            Some(payload),
+            "blob 引用重开后可原样读回"
+        );
+        assert_eq!(blob_files(&blobs).len(), 1);
+        assert_eq!(
+            s.gc_orphan_blobs().unwrap(),
+            0,
+            "负例：重开后 GC 不得误删被引用 blob"
+        );
+        // FTS5 外部内容表索引跨重开可用
+        assert_eq!(
+            s.search(&SearchQuery {
+                text: Some("重开验证".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .len(),
+            1
+        );
+    }
 }
