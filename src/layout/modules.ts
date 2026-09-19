@@ -1,10 +1,28 @@
 /** 模块交付阶段（决定导航分组与状态展示） */
 export type ModulePhase = "P0" | "P1" | "P2";
 
-/** 13 模块清单（与 docs/DESIGN.md §3 一致，图标映射见 ModuleNav）。
+/** 14 模块路由 id（D-29 B0/T-B0-1：联合类型是 PANELS/SUBNAV 穷尽性的编译期判据——
+ * 新增模块 id 而注册表缺键时 tsc 直接报错，兜底三元无处藏身） */
+export type ModuleId =
+  | "clipboard"
+  | "screenshot"
+  | "ocr"
+  | "proxy"
+  | "vault"
+  | "file"
+  | "desktop"
+  | "kvm"
+  | "editor"
+  | "notes"
+  | "term"
+  | "sys"
+  | "automation"
+  | "sync";
+
+/** 模块清单（与 docs/DESIGN.md §3 一致，图标映射见 ModuleNav）。
  * 运行态不在此处（D-14）：真实状态唯一事实源是 stores/modules.ts 的事件流。 */
 export interface ModuleDef {
-  id: string;
+  id: ModuleId;
   name: string;
   phase: ModulePhase;
 }
@@ -33,12 +51,53 @@ export const MODULE_GROUPS: { label: string; phase: ModulePhase }[] = [
   { label: "扩展", phase: "P2" },
 ];
 
-/** 剪切板二级导航分组（docs/impl/02 C8；计数为 U3-3 接线前的占位） */
-export const CLIP_GROUPS: { id: string; name: string; count: number }[] = [
-  { id: "all", name: "全部", count: 0 },
-  { id: "text", name: "文本", count: 0 },
-  { id: "code", name: "代码", count: 0 },
-  { id: "url", name: "链接", count: 0 },
-  { id: "secret", name: "敏感", count: 0 },
-  { id: "files", name: "文件", count: 0 },
-];
+/** session/URL 里的模块 id 是字符串，进注册表查键前必须先收窄（穷尽性判据） */
+export function isModuleId(id: string): id is ModuleId {
+  return MODULES.some((m) => m.id === id);
+}
+
+/** 二级导航条目（panels/README 总则字面签名）：badgeKey 挂实时计数，缺省不显示数字 */
+export interface SubNavItem {
+  id: string;
+  label: string;
+  icon?: string;
+  badgeKey?: string;
+}
+
+export interface SubNavSection {
+  group: string;
+  items: SubNavItem[];
+}
+
+/**
+ * 全模块二级导航注册表（D-29 B0/T-B0-6，原 SubNav.tsx 里的 CLIP_GROUPS 硬编码迁址于此）。
+ * 空数组 = 该模块暂无分组栏；面板档 §2 子面板 IA 落地时逐模块填充。
+ */
+export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
+  clipboard: [
+    {
+      group: "剪切板",
+      items: [
+        { id: "all", label: "全部", badgeKey: "all" },
+        { id: "text", label: "文本", badgeKey: "text" },
+        { id: "code", label: "代码", badgeKey: "code" },
+        { id: "url", label: "链接", badgeKey: "url" },
+        { id: "secret", label: "敏感", badgeKey: "secret" },
+        { id: "files", label: "文件", badgeKey: "files" },
+      ],
+    },
+  ],
+  screenshot: [],
+  ocr: [],
+  proxy: [],
+  vault: [],
+  file: [],
+  desktop: [],
+  kvm: [],
+  editor: [],
+  notes: [],
+  term: [],
+  sys: [],
+  automation: [],
+  sync: [],
+};
