@@ -537,7 +537,8 @@ impl Module for KvmModule {
                         ));
                     }
                     SessionEvent::Frame { device_id, frame } => match frame.msg_type {
-                        // K6 剪贴板：直接上抛事件（写回系统剪贴板由剪贴板模块经事件订阅，K8 接线）
+                        // K6 剪贴板：直接上抛事件（写回系统剪贴板由剪贴板模块订阅
+                        // kvm.clip_received 完成，D-25 已接线：回写 + origin=remote 入库）
                         crate::session::MsgType::ClipData => {
                             match serde_json::from_slice::<ClipContent>(&frame.payload) {
                                 Ok(content) => {

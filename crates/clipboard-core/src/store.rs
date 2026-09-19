@@ -84,13 +84,16 @@ impl ClipStore {
         })
     }
 
-    /// 去重插入（docs/impl/02 C2 算法）；命中 hash → 置顶并返回既有 id
+    /// 去重插入（docs/impl/02 C2 算法）；命中 hash → 置顶并返回既有 id。
+    /// origin：local|remote（D-25）；dedup 命中且新事件为 local → 晋升 'local'，
+    /// remote 事件不得改写既有归属（只收紧不放松）。
     pub fn insert(
         &self,
         text: &str,
         group: Option<&'static str>,
         secret: bool,
         source_app: Option<&str>,
+        origin: &str,
     ) -> Result<String, AppError> {
         let hash = content_hash(text);
         let now = now_ms();
@@ -106,8 +109,9 @@ impl ClipStore {
 
         if let Some(id) = existing {
             conn.execute(
-                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1, pinned = 0 WHERE id = ?1",
-                params![id, now],
+                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1, pinned = 0,
+                 origin = CASE WHEN ?3 = 'local' THEN 'local' ELSE origin END WHERE id = ?1",
+                params![id, now, origin],
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             return Ok(id);
@@ -127,8 +131,8 @@ impl ClipStore {
         conn.execute(
             r#"INSERT INTO clip_entries
                (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at)
-               VALUES (?1, 'text', ?2, ?3, ?4, 'local', ?5, 0, ?6, ?7, ?8)"#,
-            params![id, content_col, hash, blob_path, source_app, group, secret as i64, now],
+               VALUES (?1, 'text', ?2, ?3, ?4, ?9, ?5, 0, ?6, ?7, ?8)"#,
+            params![id, content_col, hash, blob_path, source_app, group, secret as i64, now, origin],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(id)
@@ -140,6 +144,7 @@ impl ClipStore {
         encrypted_b64: &str,
         group: Option<&'static str>,
         source_app: Option<&str>,
+        origin: &str,
     ) -> Result<String, AppError> {
         let hash = content_hash(encrypted_b64);
         let id = uuid::Uuid::now_v7().to_string();
@@ -147,8 +152,8 @@ impl ClipStore {
         conn.execute(
             r#"INSERT INTO clip_entries
                (id, content_type, content, content_hash, origin, source_app, pinned, group_name, secret, created_at)
-               VALUES (?1, 'text', ?2, ?3, 'local', ?4, 0, ?5, 1, ?6)"#,
-            params![id, encrypted_b64, hash, source_app, group, now_ms()],
+               VALUES (?1, 'text', ?2, ?3, ?7, ?4, 0, ?5, 1, ?6)"#,
+            params![id, encrypted_b64, hash, source_app, group, now_ms(), origin],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(id)
@@ -257,7 +262,12 @@ impl ClipStore {
                 content_type: content_type.leak() as &'static str,
                 preview,
                 blob_path,
-                origin: "local",
+                // D-25：真读 origin 列；'remote' 之外一律兜底 local（兼容旧库/脏值）
+                origin: if r.get::<_, String>(4)? == "remote" {
+                    "remote"
+                } else {
+                    "local"
+                },
                 source_app: r.get(5)?,
                 pinned: r.get::<_, i64>(6)? != 0,
                 group: group.map(|g| leak_group(&g)),
@@ -409,6 +419,7 @@ impl ClipStore {
         height: u32,
         bytes: &[u8],
         source_app: Option<&str>,
+        origin: &str,
     ) -> Result<String, AppError> {
         let hash = content_hash_bytes(bytes);
         let conn = self.conn.lock();
@@ -422,8 +433,9 @@ impl ClipStore {
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         if let Some(id) = existing {
             conn.execute(
-                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1 WHERE id = ?1",
-                params![id, now_ms()],
+                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1,
+                 origin = CASE WHEN ?3 = 'local' THEN 'local' ELSE origin END WHERE id = ?1",
+                params![id, now_ms(), origin],
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             return Ok(id);
@@ -435,8 +447,8 @@ impl ClipStore {
         conn.execute(
             r#"INSERT INTO clip_entries
                (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at)
-               VALUES (?1, 'image', ?2, ?3, ?4, 'local', ?5, 0, NULL, 0, ?6)"#,
-            params![id, format!("{width}x{height}"), hash, blob, source_app, now_ms()],
+               VALUES (?1, 'image', ?2, ?3, ?4, ?7, ?5, 0, NULL, 0, ?6)"#,
+            params![id, format!("{width}x{height}"), hash, blob, source_app, now_ms(), origin],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(id)
@@ -447,13 +459,14 @@ impl ClipStore {
         &self,
         paths: &[std::path::PathBuf],
         source_app: Option<&str>,
+        origin: &str,
     ) -> Result<String, AppError> {
         let content = paths
             .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        self.insert_typed(&content, "files", source_app)
+        self.insert_typed(&content, "files", source_app, origin)
     }
 
     fn insert_typed(
@@ -461,6 +474,7 @@ impl ClipStore {
         content: &str,
         content_type: &'static str,
         source_app: Option<&str>,
+        origin: &str,
     ) -> Result<String, AppError> {
         let hash = content_hash(content);
         let now = now_ms();
@@ -475,8 +489,9 @@ impl ClipStore {
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         if let Some(id) = existing {
             conn.execute(
-                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1 WHERE id = ?1",
-                params![id, now],
+                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1,
+                 origin = CASE WHEN ?3 = 'local' THEN 'local' ELSE origin END WHERE id = ?1",
+                params![id, now, origin],
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             return Ok(id);
@@ -485,8 +500,8 @@ impl ClipStore {
         conn.execute(
             r#"INSERT INTO clip_entries
                (id, content_type, content, content_hash, origin, source_app, pinned, group_name, secret, created_at)
-               VALUES (?1, ?2, ?3, ?4, 'local', ?5, 0, NULL, 0, ?6)"#,
-            params![id, content_type, content, hash, source_app, now],
+               VALUES (?1, ?2, ?3, ?4, ?7, ?5, 0, NULL, 0, ?6)"#,
+            params![id, content_type, content, hash, source_app, now, origin],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(id)
@@ -799,8 +814,8 @@ mod tests {
     #[test]
     fn insert_dedup_pins_and_bumps_usage() {
         let s = open_temp("dedup");
-        let id1 = s.insert("第一条内容", None, false, None).unwrap();
-        let id2 = s.insert("第一条内容", None, false, None).unwrap();
+        let id1 = s.insert("第一条内容", None, false, None, "local").unwrap();
+        let id2 = s.insert("第一条内容", None, false, None, "local").unwrap();
         assert_eq!(id1, id2, "相同内容应去重返回同一 id");
         let page = s.search(&SearchQuery::default()).unwrap();
         assert_eq!(page.items.len(), 1);
@@ -810,9 +825,9 @@ mod tests {
     #[test]
     fn fts_search_finds_text() {
         let s = open_temp("fts");
-        s.insert("设计原则：Windows 原生优先", None, false, None)
+        s.insert("设计原则：Windows 原生优先", None, false, None, "local")
             .unwrap();
-        s.insert("cargo build --release", Some("code"), false, None)
+        s.insert("cargo build --release", Some("code"), false, None, "local")
             .unwrap();
         let q = SearchQuery {
             text: Some("原生".into()),
@@ -832,8 +847,8 @@ mod tests {
     #[test]
     fn pin_clear_and_delete() {
         let s = open_temp("ops");
-        let a = s.insert("A", None, false, None).unwrap();
-        let _ = s.insert("B", None, false, None).unwrap();
+        let a = s.insert("A", None, false, None, "local").unwrap();
+        let _ = s.insert("B", None, false, None, "local").unwrap();
         s.pin(&a, true).unwrap();
         let removed = s.clear(true).unwrap();
         assert_eq!(removed, 1);
@@ -846,7 +861,7 @@ mod tests {
     fn big_content_goes_to_blob() {
         let s = open_temp("blob");
         let big = "x".repeat(BLOB_THRESHOLD + 10);
-        let id = s.insert(&big, None, false, None).unwrap();
+        let id = s.insert(&big, None, false, None, "local").unwrap();
         let entry = &s.search(&SearchQuery::default()).unwrap().items[0];
         assert!(entry.blob_path.is_some(), ">64KB 内容应转 blob");
         let back = s.get_content(&id, |c| Ok(c.to_vec())).unwrap().unwrap();
@@ -882,7 +897,9 @@ mod tests {
     #[test]
     fn delete_entry_removes_blob_file() {
         let (s, blobs) = open_temp_dir("d05_del");
-        let id = s.insert(&big("payload"), None, false, None).unwrap();
+        let id = s
+            .insert(&big("payload"), None, false, None, "local")
+            .unwrap();
         assert_eq!(blob_files(&blobs).len(), 1, "入库应写出 blob");
         s.delete(&id).unwrap();
         assert!(
@@ -894,8 +911,8 @@ mod tests {
     #[test]
     fn clear_removes_all_blobs_and_keeps_pinned_blob() {
         let (s, blobs) = open_temp_dir("d05_clear");
-        let a = s.insert(&big("a"), None, false, None).unwrap();
-        let _b = s.insert(&big("b"), None, false, None).unwrap();
+        let a = s.insert(&big("a"), None, false, None, "local").unwrap();
+        let _b = s.insert(&big("b"), None, false, None, "local").unwrap();
         s.pin(&a, true).unwrap();
         let removed = s.clear(true).unwrap();
         assert_eq!(removed, 1);
@@ -916,7 +933,7 @@ mod tests {
     #[test]
     fn startup_gc_removes_orphans_only() {
         let (s, blobs) = open_temp_dir("d05_gc");
-        let _live = s.insert(&big("live"), None, false, None).unwrap();
+        let _live = s.insert(&big("live"), None, false, None, "local").unwrap();
         let live_file = blob_files(&blobs)[0].clone();
         std::fs::write(blobs.join("orphan-deadbeef.txt"), b"residual plaintext").unwrap();
         std::fs::write(blobs.join("orphan-image.dib"), b"residual image").unwrap();
@@ -931,7 +948,8 @@ mod tests {
     fn purge_max_entries_removes_blobs() {
         let (s, blobs) = open_temp_dir("d05_purge");
         for i in 0..5 {
-            s.insert(&big(&format!("e{i}")), None, false, None).unwrap();
+            s.insert(&big(&format!("e{i}")), None, false, None, "local")
+                .unwrap();
         }
         assert_eq!(blob_files(&blobs).len(), 5);
         let n = s.purge(0, 2).unwrap();
@@ -954,8 +972,10 @@ mod tests {
         let payload = big("重开载荷");
         let (text_id, blob_id) = {
             let s = ClipStore::open(&db, blobs.clone()).unwrap();
-            let t = s.insert("重开验证文本", None, false, None).unwrap();
-            let b = s.insert(&payload, None, false, None).unwrap();
+            let t = s
+                .insert("重开验证文本", None, false, None, "local")
+                .unwrap();
+            let b = s.insert(&payload, None, false, None, "local").unwrap();
             (t, b)
         };
         let s = ClipStore::open(&db, blobs.clone()).unwrap();
@@ -989,6 +1009,84 @@ mod tests {
             .items
             .len(),
             1
+        );
+    }
+
+    // ---- D-25 origin 归属（含旧库/脏值兼容） ----
+
+    fn open_temp_with_db(tag: &str) -> (ClipStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nf_clip_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("clipboard.db");
+        (ClipStore::open(&db, dir.join("blobs")).unwrap(), db)
+    }
+
+    #[test]
+    fn origin_roundtrip_local_and_remote() {
+        let s = open_temp("origin_rt");
+        let rid = s
+            .insert("remote-row", None, false, Some("kvm:dev-x"), "remote")
+            .unwrap();
+        s.insert("local-row", None, false, None, "local").unwrap();
+        let page = s.search(&SearchQuery::default()).unwrap();
+        assert_eq!(page.items.len(), 2);
+        let remote = page.items.iter().find(|e| e.id == rid).unwrap();
+        assert_eq!(remote.origin, "remote");
+        assert_eq!(remote.source_app.as_deref(), Some("kvm:dev-x"));
+        assert_eq!(
+            page.items.iter().find(|e| e.id != rid).unwrap().origin,
+            "local"
+        );
+    }
+
+    #[test]
+    fn dedup_promotes_local_only_never_remote_overwrite() {
+        let s = open_temp("origin_promote");
+        // 远端先入：origin=remote；本地重拷同内容 → 晋升 local
+        s.insert("dup-text", None, false, None, "remote").unwrap();
+        s.insert("dup-text", None, false, None, "local").unwrap();
+        assert_eq!(
+            s.search(&SearchQuery::default()).unwrap().items[0].origin,
+            "local"
+        );
+        // 反向：本地先入，远端后到不得覆写
+        let s2dir =
+            std::env::temp_dir().join(format!("nf_clip_origin_demix_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&s2dir);
+        let s2 = ClipStore::open(&s2dir.join("clipboard.db"), s2dir.join("blobs")).unwrap();
+        let lid = s2.insert("keep-local", None, false, None, "local").unwrap();
+        s2.insert("keep-local", None, false, None, "remote")
+            .unwrap();
+        let row = s2
+            .search(&SearchQuery::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|e| e.id == lid)
+            .unwrap();
+        assert_eq!(row.origin, "local", "远端事件不得放松既有归属");
+        assert_eq!(row.usage_count, 1, "去重命中仍累加 usage");
+    }
+
+    #[test]
+    fn dirty_or_legacy_origin_value_reads_as_local() {
+        // 验收⑤：旧库无值/脏值一律兜底为合法枚举 'local'（前端 DTO 只有 local|remote）
+        let (s, db) = open_temp_with_db("origin_dirty");
+        let id = s
+            .insert("dirty-origin", None, false, None, "remote")
+            .unwrap();
+        {
+            let raw = Connection::open(&db).unwrap();
+            raw.execute(
+                "UPDATE clip_entries SET origin = 'weird-legacy' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        }
+        let row = &s.search(&SearchQuery::default()).unwrap().items[0];
+        assert_eq!(
+            row.origin, "local",
+            "非法 origin 值必须兜底 local 而非 panic"
         );
     }
 }

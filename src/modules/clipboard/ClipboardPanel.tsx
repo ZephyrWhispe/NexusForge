@@ -249,7 +249,12 @@ export default function ClipboardPanel({ search, group, onCounts }: Props) {
                     ) : (
                       e.group && <span className={styles.chip}>{GROUP_LABEL[e.group] ?? e.group}</span>
                     )}
-                    {e.source_app && <span className={styles.src}>{e.source_app}</span>}
+                    {e.origin === "remote" && (
+                      <span className={styles.chip}>远端</span>
+                    )}
+                    {e.source_app && (
+                      <span className={styles.src}>{e.source_app}</span>
+                    )}
                     <span className={styles.time}>{fmtTime(e.created_at)}</span>
                   </div>
                   <div className={`${styles.preview} ${isCode ? styles.mono : ""}`}>{e.preview}</div>

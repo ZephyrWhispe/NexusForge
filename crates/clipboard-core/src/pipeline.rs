@@ -30,11 +30,22 @@ const WORKER_TICK: Duration = Duration::from_millis(100);
 /// 与事件背压无关（事件合并统一走 EventBus::publish_merged，D-03）
 const DB_BATCH_WINDOW: Duration = Duration::from_millis(50);
 
+pub struct CapturePipeline {
+    port: Arc<dyn ClipboardPort>,
+    store: Arc<ClipStore>,
+    bus: Arc<EventBus>,
+    crypto: Arc<dyn CryptoPort>,
+    config: Arc<AsyncMutex<ClipboardConfig>>,
+    write_back_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+    insert_counter: std::sync::atomic::AtomicU32,
+}
+
 /// 管线运行句柄（S3）：`shutdown` 置取消位使 worker 线程退出并释放 store，
 /// `live_workers` 供停机/重启回归测试观测存活 worker 数不随重启累积。
 pub struct PipelineHandle {
     cancel: Arc<AtomicBool>,
     live_workers: Arc<AtomicUsize>,
+    pipeline: Arc<CapturePipeline>,
 }
 
 impl PipelineHandle {
@@ -59,15 +70,11 @@ impl PipelineHandle {
         }
         true
     }
-}
 
-pub struct CapturePipeline {
-    store: Arc<ClipStore>,
-    bus: Arc<EventBus>,
-    crypto: Arc<dyn CryptoPort>,
-    config: Arc<AsyncMutex<ClipboardConfig>>,
-    write_back_at: Arc<parking_lot::Mutex<Option<Instant>>>,
-    insert_counter: std::sync::atomic::AtomicU32,
+    /// 管线共享句柄（D-25：kvm.clip_received 消费协程经此调 ingest_remote）
+    pub fn pipeline(&self) -> Arc<CapturePipeline> {
+        self.pipeline.clone()
+    }
 }
 
 impl CapturePipeline {
@@ -85,6 +92,7 @@ impl CapturePipeline {
     ) -> Result<PipelineHandle, AppError> {
         let (tx, rx) = mpsc::channel::<(host_core::ports::ClipContent, Option<String>)>();
         let pipeline = Arc::new(Self {
+            port: port.clone(),
             store,
             bus,
             crypto,
@@ -129,11 +137,10 @@ impl CapturePipeline {
                 }
             })
             .map_err(|e| AppError::module("CLIPBOARD_PIPELINE_001", e.to_string(), None))?;
-        // 启动期临时引用就地释放；worker 那份随线程结束 drop → store 连接随之回收
-        drop(pipeline);
         Ok(PipelineHandle {
             cancel,
             live_workers: live,
+            pipeline,
         })
     }
 
@@ -181,24 +188,50 @@ impl CapturePipeline {
     }
 
     fn process(&self, content: host_core::ports::ClipContent, source_app: Option<String>) {
+        self.ingest(content, source_app, "local", true);
+    }
+
+    /// D-25：远端剪贴板入库（kvm.clip_received 消费协程调用）。
+    /// 先标记回写窗口（自触发 WM_CLIPBOARDUPDATE 被回调丢弃，防双写），
+    /// 再写系统剪贴板（失败仅 warn 不阻断入历史），最后走与本地捕获同一
+    /// 分类/加密/门控路径显式入库，origin=remote、source_app=kvm:<device_id>。
+    /// 黑名单（本机应用隐私语义）不适用于已配对加密会话。
+    pub fn ingest_remote(&self, content: host_core::ports::ClipContent, device_id: &str) {
+        self.mark_write_back();
+        if let Err(e) = self.port.write(&content) {
+            tracing::warn!(error = %e, "远端剪贴板写系统剪贴板失败（历史入库继续）");
+        }
+        let source = format!("kvm:{device_id}");
+        self.ingest(content, Some(source), "remote", false);
+    }
+
+    fn ingest(
+        &self,
+        content: host_core::ports::ClipContent,
+        source_app: Option<String>,
+        origin: &'static str,
+        apply_blacklist: bool,
+    ) {
         let config = futures_now(&self.config);
 
         // ① 黑名单过滤（excluded_apps：进程名小写比对）
-        if let Some(app) = &source_app {
-            if config
-                .excluded_apps
-                .iter()
-                .any(|x| x.eq_ignore_ascii_case(app))
-            {
-                tracing::debug!(app = %app, "来源应用在永不记录黑名单，丢弃");
-                return;
+        if apply_blacklist {
+            if let Some(app) = &source_app {
+                if config
+                    .excluded_apps
+                    .iter()
+                    .any(|x| x.eq_ignore_ascii_case(app))
+                {
+                    tracing::debug!(app = %app, "来源应用在永不记录黑名单，丢弃");
+                    return;
+                }
             }
         }
 
         // ② 按类型分流（图片/文件受开关控制）
         match content {
             host_core::ports::ClipContent::Text { text, .. } => {
-                self.process_text(text, source_app, &config)
+                self.process_text(text, source_app, origin, &config)
             }
             host_core::ports::ClipContent::Image {
                 format,
@@ -209,18 +242,24 @@ impl CapturePipeline {
                 if !config.capture_images {
                     return;
                 }
-                self.process_image(&format, width, height, &bytes, source_app);
+                self.process_image(&format, width, height, &bytes, source_app, origin);
             }
             host_core::ports::ClipContent::Files { paths } => {
                 if !config.capture_files {
                     return;
                 }
-                self.process_files(&paths, source_app);
+                self.process_files(&paths, source_app, origin);
             }
         }
     }
 
-    fn process_text(&self, text: String, source_app: Option<String>, config: &ClipboardConfig) {
+    fn process_text(
+        &self,
+        text: String,
+        source_app: Option<String>,
+        origin: &'static str,
+        config: &ClipboardConfig,
+    ) {
         if text.trim().is_empty() {
             return;
         }
@@ -249,11 +288,11 @@ impl CapturePipeline {
                 };
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&cipher);
                 self.store
-                    .insert_encrypted(&b64, group, source_app.as_deref())
+                    .insert_encrypted(&b64, group, source_app.as_deref(), origin)
             }
             None => self
                 .store
-                .insert(&text, group, false, source_app.as_deref()),
+                .insert(&text, group, false, source_app.as_deref(), origin),
         };
         let Ok(id) = result else {
             return;
@@ -290,10 +329,11 @@ impl CapturePipeline {
         height: u32,
         bytes: &[u8],
         source_app: Option<String>,
+        origin: &'static str,
     ) {
-        let Ok(id) = self
-            .store
-            .insert_image(format, width, height, bytes, source_app.as_deref())
+        let Ok(id) =
+            self.store
+                .insert_image(format, width, height, bytes, source_app.as_deref(), origin)
         else {
             return;
         };
@@ -310,11 +350,19 @@ impl CapturePipeline {
             .ok();
     }
 
-    fn process_files(&self, paths: &[std::path::PathBuf], source_app: Option<String>) {
+    fn process_files(
+        &self,
+        paths: &[std::path::PathBuf],
+        source_app: Option<String>,
+        origin: &'static str,
+    ) {
         if paths.is_empty() {
             return;
         }
-        let Ok(id) = self.store.insert_files(paths, source_app.as_deref()) else {
+        let Ok(id) = self
+            .store
+            .insert_files(paths, source_app.as_deref(), origin)
+        else {
             return;
         };
         self.bus
@@ -339,42 +387,62 @@ fn futures_now(cfg: &AsyncMutex<ClipboardConfig>) -> ClipboardConfig {
         .unwrap_or_else(|_| ClipboardConfig::default())
 }
 
+// ---- 测试替身（crate 内共享：pipeline 单测与 module 消费协程测试都用）----
+
+#[cfg(test)]
+use host_core::ports::ClipContent;
+
+#[cfg(test)]
+pub(crate) type FakeCb =
+    Arc<parking_lot::Mutex<Option<Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>>>>;
+
+/// 替身端口：start_listener 仅捕获回调（stop_listener 沿用默认 no-op，
+/// 因此回调及其持有的 Sender 全程存活——正是旧实现 worker 永不退出的根因场景）；
+/// write 记录文本载荷，fail_write = true 时一律返回 Err（D-25 写失败负例）。
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct FakeClipboard {
+    pub(crate) cb: FakeCb,
+    pub(crate) writes: Arc<parking_lot::Mutex<Vec<String>>>,
+    pub(crate) fail_write: bool,
+}
+
+#[cfg(test)]
+impl ClipboardPort for FakeClipboard {
+    fn start_listener(
+        &self,
+        cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>,
+    ) -> Result<(), AppError> {
+        *self.cb.lock() = Some(cb);
+        Ok(())
+    }
+    fn write(&self, content: &ClipContent) -> Result<(), AppError> {
+        if self.fail_write {
+            return Err(AppError::module("FAKE_CLIP_001", "write disabled", None));
+        }
+        if let ClipContent::Text { text, .. } = content {
+            self.writes.lock().push(text.clone());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct FakeCrypto;
+#[cfg(test)]
+impl CryptoPort for FakeCrypto {
+    fn protect(&self, p: &[u8]) -> Result<Vec<u8>, AppError> {
+        Ok(p.to_vec())
+    }
+    fn unprotect(&self, c: &[u8]) -> Result<Vec<u8>, AppError> {
+        Ok(c.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use parking_lot::Mutex;
-
-    use host_core::ports::ClipContent;
-
-    type FakeCb = Arc<Mutex<Option<Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>>>>;
-
-    /// 替身端口：start_listener 仅捕获回调（stop_listener 沿用默认 no-op，
-    /// 因此回调及其持有的 Sender 全程存活——正是旧实现 worker 永不退出的根因场景）
-    struct FakeClipboard {
-        cb: FakeCb,
-    }
-    impl ClipboardPort for FakeClipboard {
-        fn start_listener(
-            &self,
-            cb: Box<dyn Fn(ClipContent, Option<String>) + Send + Sync>,
-        ) -> Result<(), AppError> {
-            *self.cb.lock() = Some(cb);
-            Ok(())
-        }
-        fn write(&self, _content: &ClipContent) -> Result<(), AppError> {
-            Ok(())
-        }
-    }
-
-    struct FakeCrypto;
-    impl CryptoPort for FakeCrypto {
-        fn protect(&self, p: &[u8]) -> Result<Vec<u8>, AppError> {
-            Ok(p.to_vec())
-        }
-        fn unprotect(&self, c: &[u8]) -> Result<Vec<u8>, AppError> {
-            Ok(c.to_vec())
-        }
-    }
 
     fn temp_store(tag: &str) -> Arc<ClipStore> {
         let dir = std::env::temp_dir().join(format!("nf_clip_pipe_{tag}_{}", std::process::id()));
@@ -405,6 +473,8 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let port = Arc::new(FakeClipboard {
             cb: Arc::new(Mutex::new(None)),
+            writes: Arc::new(Mutex::new(Vec::new())),
+            fail_write: false,
         });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
@@ -491,6 +561,8 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let port = Arc::new(FakeClipboard {
             cb: Arc::new(Mutex::new(None)),
+            writes: Arc::new(Mutex::new(Vec::new())),
+            fail_write: false,
         });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
@@ -571,6 +643,154 @@ mod tests {
             !events.is_empty() && events.len() <= 2,
             "300ms 合并窗口内 8 条捕获应至多 2 条通知，实际 {}",
             events.len()
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    // ---- D-25 远端入库（kvm.clip_received 落地路径，含负例） ----
+
+    fn first_row(store: &Arc<ClipStore>) -> Option<crate::types::ClipEntry> {
+        store
+            .search(&crate::types::SearchQuery::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .next()
+    }
+
+    fn remote_text(text: &str) -> ClipContent {
+        ClipContent::Text {
+            text: text.into(),
+            html: None,
+        }
+    }
+
+    #[test]
+    fn remote_ingest_writes_clipboard_records_remote_row_and_suppresses_recapture() {
+        // 验收①：远端内容 → 写系统剪贴板一次 + 恰 1 条 origin=remote 历史；
+        // 回写窗口内的自捕获回调被丢弃（若被处理，去重晋升会立刻翻成 local）；
+        // 验收④：窗口过期后本地重拷同内容 → 去重晋升 origin=local，仍 1 条。
+        let (handle, store, port, _bus) = start_with_fake("remote1");
+        handle
+            .pipeline()
+            .ingest_remote(remote_text("kvm-payload-1"), "dev-a");
+        assert_eq!(
+            *port.writes.lock(),
+            vec!["kvm-payload-1".to_string()],
+            "远端内容应写系统剪贴板一次"
+        );
+        assert!(
+            wait_until(
+                || store
+                    .search(&crate::types::SearchQuery::default())
+                    .unwrap()
+                    .items
+                    .len()
+                    == 1,
+                Duration::from_secs(2)
+            ),
+            "远端入库应恰生成 1 条历史"
+        );
+        let row = first_row(&store).unwrap();
+        assert_eq!(row.origin, "remote");
+        assert_eq!(row.source_app.as_deref(), Some("kvm:dev-a"));
+
+        // 窗口内自回调：必须被丢弃（origin 不得翻回 local）
+        fire(&port, "kvm-payload-1");
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(first_row(&store).unwrap().origin, "remote");
+
+        // 窗口过期后本地重拷：去重晋升为 local，仍恰 1 条
+        std::thread::sleep(WRITE_BACK_WINDOW);
+        fire(&port, "kvm-payload-1");
+        assert!(
+            wait_until(
+                || first_row(&store)
+                    .map(|r| r.origin == "local")
+                    .unwrap_or(false),
+                Duration::from_secs(2)
+            ),
+            "本地重拷应将 origin 晋升为 local"
+        );
+        assert_eq!(
+            store
+                .search(&crate::types::SearchQuery::default())
+                .unwrap()
+                .items
+                .len(),
+            1,
+            "晋升只更新既有行，不新增条目"
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn remote_second_arrival_does_not_overwrite_local_origin() {
+        // 验收④负例半边：本地先入库，远端后到同一内容只走去重累加，origin 保持 local
+        let (handle, store, port, _bus) = start_with_fake("remote2");
+        fire(&port, "shared-text");
+        assert!(
+            wait_until(
+                || first_row(&store)
+                    .map(|r| r.origin == "local")
+                    .unwrap_or(false),
+                Duration::from_secs(2)
+            ),
+            "本地捕获应先入库 origin=local"
+        );
+        handle
+            .pipeline()
+            .ingest_remote(remote_text("shared-text"), "dev-b");
+        let row = first_row(&store).unwrap();
+        assert_eq!(row.origin, "local", "远端后到不得覆写既有 local 来源");
+        assert_eq!(row.usage_count, 1, "去重命中应累加 usage");
+        assert_eq!(
+            store
+                .search(&crate::types::SearchQuery::default())
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn remote_history_survives_clipboard_write_failure() {
+        // 验收③：port.write 失败仅 warn，历史入库继续（origin=remote）
+        let store = temp_store("remote3");
+        let bus = Arc::new(EventBus::new());
+        let port = Arc::new(FakeClipboard {
+            cb: Arc::new(Mutex::new(None)),
+            writes: Arc::new(Mutex::new(Vec::new())),
+            fail_write: true,
+        });
+        let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
+        let write_back = Arc::new(Mutex::new(None));
+        let handle = CapturePipeline::start(
+            port.clone(),
+            store.clone(),
+            bus,
+            Arc::new(FakeCrypto),
+            config,
+            write_back,
+        )
+        .unwrap();
+        handle
+            .pipeline()
+            .ingest_remote(remote_text("write-must-fail"), "dev-c");
+        assert!(port.writes.lock().is_empty(), "fail_write 不应记录成功写入");
+        assert!(
+            wait_until(
+                || first_row(&store)
+                    .map(|r| r.origin == "remote" && r.source_app.as_deref() == Some("kvm:dev-c"))
+                    .unwrap_or(false),
+                Duration::from_secs(2)
+            ),
+            "写剪贴板失败不得阻断远端历史入库"
         );
         handle.shutdown();
         assert!(handle.wait_idle(Duration::from_secs(3)));

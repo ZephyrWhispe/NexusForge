@@ -34,6 +34,7 @@
 | D-22 | 批次划分、执行顺序与质量门槛 | 流程 | P0 | — | 已裁决（文档生效） |
 | D-23 | 多显示器 / 混合 DPI 策略 | 补实现 | P1 | 1 | 已完成 |
 | D-24 | vault V4/V5 安全补齐实施路线（Hello 免密 / 自动锁定 / VirtualLock / 剪贴板限时清除） | 补实现 | P1 | 3 | 已完成 |
+| D-25 | KVM 剪贴板回写与 origin 防循环实施路线（kvm.clip_received 订阅方 / local·remote 入库标记 / 去重晋升） | 补实现 | P1 | 3 | 已完成 |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -252,6 +253,21 @@
 - **代价**：Hello 免密强度弱于理想中的"Hello 派生密钥"（DPAPI blob 在同用户进程可解，安全边界 = verify 门禁 + 同机同账户）；watchdog 线程 + 前端 blur 信号引入一处前端→后端单向依赖（正常，经 IPC）；navigator.clipboard 改后端写剪贴板丢失无焦点粘贴便利性。
 - **验收**：负例必含——①hello 失败 ≥5 后 `vault_hello_unlock` 被拒且正确密码解锁可复位；②meta 的 hello.wrapped 被篡改/异库拷贝 → verifier 失败保持 Locked；③冷却（Cooling）中 hello_unlock 被拒；④自动锁策略纯函数：idle 越界 → Lock、warn 窗口 → Warn、0 → 永不锁、blur 独立计时；⑤剪贴板清除：内容仍是密文 → 清；已被用户替换 → 不动；secs=0 → 不调度；⑥MemLockPort 未注册/失败 → 解锁路径不受影响。
 - **实施记录与完成证据（2026-09-19）**：①②③⑥ 由 `crates/vault-core/tests/hello_vault.rs` 6 个集成测试覆盖（FakeHello/FakeCrypto/FakeMemLock 经 Ports 注册表注入；熔断后密码解锁复位、逐字节翻转 wrapped_dek 密文 → VAULT_UNLOCK_001 保持 Locked、异库 envelope 拒绝、Cooling 中 VAULT_LOCKED_002 且 verify 未被触碰、set_mem_lock 全部失败仍正常解锁）；④ 由 `autolock.rs` 6 个单测覆盖（idle 越界 Lock、30s warn 窗口、0=永不锁、blur 独立、最早预警胜出+时钟回拨安全、`clipboard_clear_due` 负例：None/被替换 → false）；⑤ `vault_copy_password` 写前校验 read_text 恒等 + 600s 上限，secs=0 不调度（命令内 `if clear_secs > 0`）。密码变更保留 envelope（`change_password_preserves_hello_envelope`）、verifier 绑定 DEK↔vault_id（`hello_verifier_binds_dek_and_vault`）另见 crypto 单测。真机 Windows Hello 弹框与锁屏可用性（`WindowsHello::available`）需 PIN/生物特征已注册环境人工验证，代码路径与降级（未注册 → 按钮隐藏 + HELLO_STATE_00x）已由 `hello_available` 状态字段贯通。门禁：`cargo fmt --all --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` 全绿（含 vault-core 26 单测 + 6 集成）、tsc/eslint/vitest(32)/vite build 全绿、`tauri dev` 启动无 panic。
+
+---
+
+### D-25 KVM 剪贴板回写与 origin 防循环实施路线（补实现）
+
+- **背景**：REVIEW §4 判定 kvm ~70%：`kvm.clip_received` 事件（kvm-core/src/module.rs 收到 ClipData 帧后发布）**无任何订阅者**，远端剪贴板永不落本机 → "共享"实为单向；`origin` 防循环标记未实现（store.rs 四条 INSERT 全部硬编码 `'local'`，读取 mapper 甚至丢弃 SELECT 出的 origin 列）。DESIGN §4.1 规范："每条目带 `origin` 标记（local/remote），同步模块忽略远端回写条目"；§4.4 "剪贴板共享复用剪切板中枢的防循环标记"。
+- **决策**：
+  1. **订阅方落 clipboard-core**（事件唯一合法通道，DESIGN O1 禁模块直调；kvm 不持 ClipboardPort，写系统剪贴板本就是剪贴板中枢职责）。`ClipboardModule::start` 按 S4 watch 停机模式挂消费协程：订 `kvm.clip_received`，逐事件 `spawn_blocking` 调 `CapturePipeline::ingest_remote(content, device_id)` = 标记回写窗口（D-10 500ms，防自捕获重复入库）→ `ClipboardPort::write`（失败仅 warn，**不阻断入历史**）→ 走与本地捕获同一分类/敏感加密/门控路径显式入库，`origin='remote'`、`source_app='kvm:<device_id>'`。
+  2. **origin 是条目入库时刻的标记，不上协议线**：ClipContent 线格式不变（成对设备同 app 同批演进，但经 session 到达=定义上即 remote，无需逐帧携带）；值集维持 DESIGN 字面 `local|remote`（`ClipEntry.origin: &'static str` 与前端 DTO 联合类型不动）。win-integration 预留的自定义剪贴板格式（register_custom_format，零调用者）不启用——回写窗口已承担防循环，无需第二机制。
+  3. **读取侧修正**：mapper 真读 origin 列（`'remote'` 之外的一切值兜底 `'local'`，兼容旧库与脏值）；**去重晋升**：dedup 命中且新事件 origin=local → UPDATE 该行 origin='local'（本机再复制是更强的本地证据），remote 事件命中既有行 → 仅 bump 不改 origin（保守，远端不得改写本地归属）。
+  4. `excluded_apps` 黑名单只对本地 source_app 生效，remote 事件不受其影响（黑名单语义=本机应用隐私，不针对已显式配对加密的会话）。图片/文件条目沿用 `capture_images`/`capture_files` 门控。
+- **依据**：订阅方选择与事件唯一通道是架构红线（D-02 同型）；去重晋升与"write 失败仍入历史"取"数据可见性优先、归属只收紧不放松"的保守序，与 D-05 删除保守同谱系。
+- **代价**：remote 内容先经 `port.write` 再显式入库，绕过了"捕获→入库"单一路径（换来 origin 精确与窗口防重）；`ingest_remote` 与 `process` 共享分类逻辑但多一条入口（以 CapturePipeline 方法收敛，无复制粘贴）；kvm 端仍无本地→远端自动外发（维持手动 `kvm_send_clip`，规范未要求自动）。
+- **验收**：负例必含——①remote 事件入历史恰 1 条 `origin='remote'` 且回写窗口内自捕获回调不再追加（防双写）；②payload 缺 `device_id`/`content` 或 content 非法 JSON → 丢弃不 panic，协程存活；③port.write 失败（FakeClipboard 报错）→ 历史仍有该 remote 条目；④同内容本地再捕获 → 去重命中且 origin 晋升 'local'、仍 1 条；remote 二次到达不改写已有 local；⑤旧库（全 'local'）与脏 origin 值读出恒为合法枚举；⑥stop 后协程退出（watch 对称停机）。正例：ClipboardPanel 对 origin=remote 条目渲染"远端"徽标。
+- **实施记录与完成证据（2026-09-19）**：订阅协程落 `ClipboardModule::start`（`spawn_kvm_clip_consumer`，S4 watch 每次 start 重建信道；`Handle::try_current()` 失败仅 warn 跳过本次 start），逐事件 `spawn_blocking` 调 `CapturePipeline::ingest_remote`；origin 上写四条 INSERT 路径（insert/insert_encrypted/insert_image/insert_typed）与去重晋升 `CASE WHEN ?='local' THEN 'local' ELSE origin END`，mapper 真读 origin 列且非 'remote' 一律兜底 'local'；`parse_clip_event` 为纯函数回归入口。回归证据（8 新用例，clipboard-core lib 20→28 全绿）：①②③④⑥——pipeline 3 测（`remote_ingest_writes_clipboard_records_remote_row_and_suppresses_recapture`：恰 1 条 origin=remote + source_app=kvm:dev-a、窗口内回调被丢弃、窗口外本地重拷晋升 local 仍 1 条；`remote_second_arrival_does_not_overwrite_local_origin`；`remote_history_survives_clipboard_write_failure`：fail_write 端口写失败仍入库）；②⑥——module 2 测（`parse_clip_event_accepts_valid_and_drops_malformed` 5 种畸形载荷、`kvm_clip_consumer_end_to_end_with_symmetric_shutdown` #[tokio::test]：幽灵事件后协程存活并消费合法事件、stop 后再发事件零写入零入库）；⑤——store 3 测（origin 往返、去重晋升双方向、第二连接裸 UPDATE `origin='weird-legacy'` 读出兜底 'local' 不 panic）。FakeClipboard 升级为 crate 内共享替身（writes 记录器 + fail_write 位）。前端 `ClipboardPanel` 行内沿用既有 chip 样式渲染"远端"徽标（未引新组件）；kvm-core K6 注释同步为"D-25 已接线"。门禁：`cargo fmt --all --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` 全绿、tsc 0、eslint 0、vitest 32/32、`vite build` 0。
 
 ---
 

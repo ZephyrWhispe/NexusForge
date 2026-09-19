@@ -10,7 +10,8 @@ use host_core::events::{Event, EventBus};
 use host_core::module::{
     priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
 };
-use host_core::ports::{ClipboardPort, CryptoPort};
+use host_core::ports::{ClipContent, ClipboardPort, CryptoPort};
+use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::pipeline::{CapturePipeline, PipelineHandle};
@@ -30,6 +31,8 @@ pub struct ClipboardModule {
     cleanup_cancel: RwLock<Option<Arc<AtomicU8>>>,
     /// S3：捕获管线运行句柄（start 建立、stop 拆除；None 表示未运行）
     pipeline: RwLock<Option<PipelineHandle>>,
+    /// D-25：kvm.clip_received 消费协程停机信道（S4 watch，同 ocr-core 模式）
+    remote_shutdown: RwLock<Option<watch::Sender<bool>>>,
     state: ModuleStateCell,
 }
 
@@ -45,6 +48,7 @@ impl ClipboardModule {
             config: Arc::new(AsyncMutex::new(ClipboardConfig::default())),
             cleanup_cancel: RwLock::new(None),
             pipeline: RwLock::new(None),
+            remote_shutdown: RwLock::new(None),
             state: ModuleStateCell::new(),
         }
     }
@@ -84,6 +88,59 @@ impl Default for ClipboardModule {
 
 fn err(code: &str, m: impl Into<String>) -> ModuleError {
     ModuleError::Init(format!("[{code}] {}", m.into()))
+}
+
+/// 解析 kvm.clip_received 载荷（纯函数，回归入口）：
+/// {device_id, content} → (device_id, ClipContent)；任何缺字段/反序列化失败 → None
+pub(crate) fn parse_clip_event(ev: &Event) -> Option<(String, ClipContent)> {
+    let device_id = ev.payload.get("device_id")?.as_str()?.to_string();
+    let content = serde_json::from_value(ev.payload.get("content")?.clone()).ok()?;
+    Some((device_id, content))
+}
+
+/// D-25：kvm.clip_received 消费协程（S4 watch 协作停机，同 ocr-core 模式）。
+/// 逐事件 spawn_blocking 走 CapturePipeline::ingest_remote（回写窗口+写端口+入库）；
+/// 非法载荷逐条丢弃协程存活，Lagged 不假设重放。
+fn spawn_kvm_clip_consumer(
+    bus: Arc<EventBus>,
+    pipeline: Arc<CapturePipeline>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let mut rx = match bus.subscribe("kvm.clip_received") {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::warn!(error = %e, "kvm.clip_received 订阅失败，KVM 剪贴板回写不可用");
+            return tokio::spawn(async {});
+        }
+    };
+    tokio::spawn(async move {
+        loop {
+            let ev = tokio::select! {
+                biased;
+                ch = shutdown.changed() => {
+                    if ch.is_err() || *shutdown.borrow_and_update() { break; }
+                    continue;
+                }
+                received = rx.recv() => match received {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                },
+            };
+            let Some((device_id, content)) = parse_clip_event(&ev) else {
+                tracing::warn!("kvm.clip_received 载荷非法，丢弃该事件");
+                continue;
+            };
+            let pipe = pipeline.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                pipe.ingest_remote(content, &device_id);
+            })
+            .await
+            {
+                tracing::warn!(error = %e, "KVM 剪贴板回写任务 join 失败");
+            }
+        }
+    })
 }
 
 impl Module for ClipboardModule {
@@ -163,6 +220,21 @@ impl Module for ClipboardModule {
             .map_err(|e| ModuleError::Start(e.to_string()))?;
             *self.pipeline.write() = Some(handle);
         }
+        // D-25：kvm.clip_received 消费协程（事件唯一通道，O1；每次 start 重建停机信道，S4）
+        {
+            let (tx, rx) = watch::channel(false);
+            *self.remote_shutdown.write() = Some(tx);
+            let bus = self.bus.read().clone();
+            let pipeline = self.pipeline.read().as_ref().map(|h| h.pipeline());
+            if let (Some(bus), Some(pipeline)) = (bus, pipeline) {
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    drop(spawn_kvm_clip_consumer(bus, pipeline, rx));
+                } else {
+                    *self.remote_shutdown.write() = None;
+                    tracing::warn!("无 tokio 运行时，KVM 剪贴板回写协程未启动（本次 start 跳过）");
+                }
+            }
+        }
         // 启动 C9 清理线程
         self.start_cleanup();
         self.state.set(ModuleState::Running);
@@ -180,6 +252,10 @@ impl Module for ClipboardModule {
             if let Some(handle) = g.take() {
                 handle.shutdown();
             }
+        }
+        // D-25：先停消费协程（watch 协作退出，S4 对称停机）
+        if let Some(tx) = self.remote_shutdown.write().take() {
+            tx.send(true).ok();
         }
         // 停止清理线程（置取消标志；线程 sleep 期间会滞后响应，可接受）
         {
@@ -403,5 +479,113 @@ impl ClipboardModule {
             }
             other => Ok(other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::{FakeClipboard, FakeCrypto};
+    use host_core::ports::Ports;
+    use parking_lot::Mutex;
+    use std::time::Duration;
+
+    fn clip_event(device_id: &str, text: &str) -> Event {
+        let content = ClipContent::Text {
+            text: text.into(),
+            html: None,
+        };
+        Event::new(
+            "kvm.clip_received",
+            "kvm",
+            serde_json::json!({ "device_id": device_id, "content": content }),
+        )
+    }
+
+    fn find_row(store: &ClipStore, preview: &str) -> Option<crate::types::ClipEntry> {
+        store
+            .search(&crate::types::SearchQuery::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|e| e.preview == preview)
+    }
+
+    #[test]
+    fn parse_clip_event_accepts_valid_and_drops_malformed() {
+        // 验收②纯函数半边：缺字段 / 类型错 / content 非对象 → None，不 panic
+        let good = clip_event("dev-a", "payload-text");
+        let (id, content) = parse_clip_event(&good).unwrap();
+        assert_eq!(id, "dev-a");
+        assert!(matches!(content, ClipContent::Text { ref text, .. } if text == "payload-text"));
+        for bad in [
+            serde_json::json!({ "content": { "Text": { "text": "x" } } }),
+            serde_json::json!({ "device_id": "d" }),
+            serde_json::json!({ "device_id": "d", "content": "not-an-object" }),
+            serde_json::json!({ "device_id": 7, "content": {} }),
+            serde_json::json!(null),
+        ] {
+            let ev = Event::new("kvm.clip_received", "kvm", bad);
+            assert!(parse_clip_event(&ev).is_none(), "非法载荷必须解析为 None");
+        }
+    }
+
+    #[tokio::test]
+    async fn kvm_clip_consumer_end_to_end_with_symmetric_shutdown() {
+        // 验收①②⑥：start 挂协程 → 非法事件丢弃且协程存活 → 合法事件写系统剪贴板
+        // 并入库 origin=remote → stop 后信道关闭，再发事件不产生任何写入/入库
+        let dir = std::env::temp_dir().join(format!("nf_clip_mod_kvm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ports = Arc::new(Ports::new());
+        let fake = Arc::new(FakeClipboard {
+            cb: Arc::new(Mutex::new(None)),
+            writes: Arc::new(Mutex::new(Vec::new())),
+            fail_write: false,
+        });
+        ports.register::<dyn ClipboardPort>(fake.clone());
+        ports.register::<dyn CryptoPort>(Arc::new(FakeCrypto));
+        let bus = Arc::new(EventBus::new());
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: dir.clone(),
+            ports,
+            event_bus: bus.clone(),
+        });
+        let module = ClipboardModule::new();
+        module.init(ctx).unwrap();
+        module.start().unwrap();
+
+        bus.publish(Event::new(
+            "kvm.clip_received",
+            "kvm",
+            serde_json::json!({ "device_id": "ghost" }),
+        ))
+        .unwrap();
+        bus.publish(clip_event("dev-m", "kvm-mod-event")).unwrap();
+
+        let store = module.store().unwrap();
+        let row = {
+            let mut found = None;
+            for _ in 0..100 {
+                if let Some(r) = find_row(&store, "kvm-mod-event") {
+                    found = Some(r);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            found.expect("协程应消费事件并入库")
+        };
+        assert_eq!(row.origin, "remote");
+        assert_eq!(row.source_app.as_deref(), Some("kvm:dev-m"));
+        assert_eq!(*fake.writes.lock(), vec!["kvm-mod-event".to_string()]);
+
+        module.stop().unwrap();
+        bus.publish(clip_event("dev-m", "after-stop")).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            find_row(&store, "after-stop").is_none(),
+            "stop 后协程必须已退出（S4 对称停机）"
+        );
+        assert_eq!(fake.writes.lock().len(), 1, "stop 后不得再写系统剪贴板");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
