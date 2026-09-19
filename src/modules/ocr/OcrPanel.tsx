@@ -19,6 +19,7 @@ import {
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
 import EmptyState from "../../components/EmptyState";
+import DeferredBadge from "../../components/DeferredBadge";
 
 /**
  * OCR 识别主面板（D-29 B0/T-B0-3）：引擎状态卡 + 选图识别 + 分行结果 + 复制全部。
@@ -224,6 +225,7 @@ export default function OcrPanel() {
           ))}
         </Dropdown>
         <span className={styles.spacer} />
+        <DeferredBadge label="PaddleOCR 引擎" decisionRef="D-08" />
         <Badge appearance="outline">{engineBadge(status)}</Badge>
       </div>
       {err?.engineMissing && (

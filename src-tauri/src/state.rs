@@ -206,6 +206,7 @@ impl HostState {
         registry.register_ability::<dyn TrayProvider>(screenshot.clone());
 
         let ocr = Arc::new(OcrModule::new());
+        config.register_schema("ocr", ocr.config_schema());
         registry.register(ocr.clone())?;
         registry.register_ability::<dyn HotkeyProvider>(ocr.clone());
 

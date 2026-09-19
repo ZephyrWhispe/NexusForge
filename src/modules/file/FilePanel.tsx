@@ -34,6 +34,7 @@ import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import DeferredBadge from "../../components/DeferredBadge";
 
 /**
  * 文件与存储面板（docs/impl/05 F，M6 v1）：
@@ -373,6 +374,7 @@ export default function FilePanel() {
             </option>
           ))}
         </Select>
+        <DeferredBadge label="网盘" decisionRef="B6" />
         <Input
           size="small"
           placeholder="新建目录名"

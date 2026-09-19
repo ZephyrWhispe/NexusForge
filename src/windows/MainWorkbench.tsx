@@ -81,6 +81,8 @@ export default function MainWorkbench() {
   // D-14：会话态（活跃模块/分组/搜索）入 session store，跨窗口与重启间保持一致
   const active = useSession((s) => s.activeModule);
   const setActive = useSession((s) => s.setActiveModule);
+  // T-B0-4：设置中心跟随"最近激活的功能模块"（进设置不覆写该值）
+  const settingsModule = useSession((s) => s.lastModule);
   const group = useSession((s) => s.clipGroup);
   const setGroup = useSession((s) => s.setClipGroup);
   const search = useSession((s) => s.clipSearch);
@@ -172,11 +174,14 @@ export default function MainWorkbench() {
             {isSettings ? (
               <>
                 <div className={styles.head}>
-                  <span className={styles.headTitle}>设置中心</span>
+                  <span className={styles.headTitle}>
+                    设置中心 · {MODULES.find((m) => m.id === settingsModule)?.name ?? "NexusForge"}
+                  </span>
                   <Badge appearance="outline">schema 驱动</Badge>
                   <span className={styles.meta}>修改即校验即保存</span>
                 </div>
-                <SchemaForm moduleId="clipboard" />
+                {/* key=模块 id：切换跟随目标时整体重建，杜绝上一模块表单值闪现 */}
+                <SchemaForm key={settingsModule} moduleId={settingsModule} />
               </>
             ) : (
               <>

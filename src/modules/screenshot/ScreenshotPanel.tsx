@@ -18,6 +18,7 @@ import {
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
 import EmptyState from "../../components/EmptyState";
+import DeferredBadge from "../../components/DeferredBadge";
 
 /**
  * 截图与贴图主面板（D-29 B0/T-B0-2）：历史网格（真缩略图，screenshot_history_get 字节出口）
@@ -207,6 +208,8 @@ export default function ScreenshotPanel() {
           onChange={(_, d) => setFilter(d.value)}
         />
         <span className={styles.spacer} />
+        <DeferredBadge label="录屏" decisionRef="D-08" />
+        <DeferredBadge label="每显示器覆盖层" decisionRef="D-23" />
         <Badge appearance="outline">
           {total} 条历史
         </Badge>

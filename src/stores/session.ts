@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { isModuleId, type ModuleId } from "../layout/modules";
 
 /**
  * 会话 store（docs/DESIGN.md §7 Zustand 基线，审查 D-14）：
@@ -14,6 +15,8 @@ export type ThemeMode = "auto" | "light" | "dark";
 interface SessionState {
   themeMode: ThemeMode;
   activeModule: string;
+  /** 最近一次有效的功能模块 id（进设置中心时的跟随目标，__settings 不覆写它） */
+  lastModule: ModuleId;
   clipGroup: string;
   clipSearch: string;
   setThemeMode: (mode: ThemeMode) => void;
@@ -27,16 +30,23 @@ export const useSession = create<SessionState>()(
     (set) => ({
       themeMode: "auto",
       activeModule: "clipboard",
+      lastModule: "clipboard",
       clipGroup: "all",
       clipSearch: "",
       setThemeMode: (themeMode) => set({ themeMode }),
-      setActiveModule: (activeModule) => set({ activeModule }),
+      setActiveModule: (id) =>
+        set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
       setClipGroup: (clipGroup) => set({ clipGroup }),
       setClipSearch: (clipSearch) => set({ clipSearch }),
     }),
     {
       name: "nf-session",
-      partialize: (s) => ({ themeMode: s.themeMode, activeModule: s.activeModule, clipGroup: s.clipGroup }),
+      partialize: (s) => ({
+        themeMode: s.themeMode,
+        activeModule: s.activeModule,
+        lastModule: s.lastModule,
+        clipGroup: s.clipGroup,
+      }),
     },
   ),
 );
