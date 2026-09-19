@@ -49,8 +49,8 @@ S1 Workspace 骨架 ──► S2 错误体系 ──► S3 Module trait + Ports 
 | S6 | 配置中心/快捷键/托盘/日志/崩溃恢复 | S5 | config.rs 等 | 配置迁移单测 |
 | S7 | Tauri Plugin 集成 + IPC 注册宏 | S5,S6 | plugin.rs、ipc.rs | 前端可 invoke |
 | C1–C9 | 剪切板中枢全量 | S1–S7 | clipboard-core | 见 02 文档验收 |
-| P1–P8 | 截图录屏全量 | S1–S7 | screenshot-core | 见 03 文档验收 |
-| O1–O8 | OCR 翻译全量 | S1–S7 | ocr-core | 见 04 文档验收 |
+| P1–P8 | 截图全量（P7 录屏 = v1.1，D-08 移出 v1） | S1–S7 | screenshot-core | 见 03 文档验收（P7 不计入 v1 批次判定） |
+| O1–O8 | OCR 全量（O3 Paddle / O6 翻译 = v1.1，D-09 第 2 步） | S1–S7 | ocr-core | 见 04 文档验收 |
 
 **并行规则**：C/P/O 三条线互不依赖，可三人并行；每条线完成即合入主干，不得交叉修改 host-core（如需新增 Port，先在 host-core 提 PR）。
 

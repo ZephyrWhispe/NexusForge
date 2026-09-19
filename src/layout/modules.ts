@@ -9,10 +9,11 @@ export interface ModuleDef {
   phase: ModulePhase;
 }
 
+/** 名称即 v1 承诺口径（D-08/D-09）：导航与标题不得出现录屏、PaddleOCR、翻译等 v1.1 能力 */
 export const MODULES: ModuleDef[] = [
   { id: "clipboard", name: "剪切板中枢", phase: "P0" },
-  { id: "screenshot", name: "截图与录屏", phase: "P0" },
-  { id: "ocr", name: "OCR 与翻译", phase: "P0" },
+  { id: "screenshot", name: "截图与贴图", phase: "P0" },
+  { id: "ocr", name: "OCR 文字识别", phase: "P0" },
   { id: "proxy", name: "代理与 VPN", phase: "P1" },
   { id: "vault", name: "安全与凭据", phase: "P1" },
   { id: "file", name: "文件与存储", phase: "P1" },

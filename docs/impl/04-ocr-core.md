@@ -8,10 +8,10 @@
 |------|------|------|
 | O1 | 引擎抽象（OcrEngine trait + 注册表） | S3 |
 | O2 | Windows.Media.Ocr 引擎实现 | O1 |
-| O3 | PaddleOCR Sidecar 引擎实现 | O1 |
+| O3 | PaddleOCR Sidecar 引擎实现 **（v1.1，D-09 第 2 步：依赖 O5 sidecar 下载通道）** | O1 |
 | O4 | 识别管线（预处理→识别→后处理） | O1–O3 |
 | O5 | 触发集成（快捷键/截图联动/划词） | O4, S6 |
-| O6 | 翻译引擎抽象 | O4 |
+| O6 | 翻译引擎抽象 **（v1.1，D-09 第 2 步）** | O4 |
 | O7 | 结果覆盖层 + IPC | O4 |
 | O8 | 引擎可用性检测与降级 | O1–O3 |
 
@@ -52,7 +52,7 @@ impl EngineRegistry {
 3. 单次识别建议图像 ≤ 4096px，超限先缩放（P4 预处理）。
 4. 该引擎无 confidence 输出：统一填 1.0，置信度排序逻辑不依赖它。
 
-## O3 PaddleOCR Sidecar 实现
+## O3 PaddleOCR Sidecar 实现（v1.1，D-09 第 2 步；扩展点已由第 1 步的 `engine.rs` 注册表承接，新引擎=登记一项，不改核心）
 
 ```rust
 pub struct PaddleEngine { sidecar: SidecarManager }   // 复用 host 侧 sidecar 下载/校验/守护
@@ -97,7 +97,7 @@ impl OcrPipeline {
 
 **联动规约**：ocr-core 与 screenshot-core 之间只允许上述事件交互（DESIGN O1），禁止直接函数调用。
 
-## O6 翻译引擎
+## O6 翻译引擎（v1.1，D-09 第 2 步）
 
 ```rust
 #[async_trait]
@@ -129,5 +129,5 @@ pub trait TranslateEngine: Send + Sync {
 - [ ] 快捷键截屏 → 结果覆盖层 P95 < 1.5s（win-ocr 引擎，1080p 区域）
 - [ ] 中文/英文混排行序正确（多列布局按段聚类）
 - [ ] 未安装语言包 → 明确报错并可一键跳转系统语言设置
-- [ ] Paddle 引擎崩溃 → 自动重启 ≤ 3 次，超出后 UI 呈现可操作错误
+- [ ] Paddle 引擎崩溃 → 自动重启 ≤ 3 次，超出后 UI 呈现可操作错误（v1.1 验收，不计入 v1 批次判定，D-09）
 - [ ] 识别结果"复制全部"不触发剪贴板重复记录（回写窗口生效）

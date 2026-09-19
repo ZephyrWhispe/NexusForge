@@ -12,7 +12,7 @@
 | P4 | 标注状态机（工具/撤销栈/渲染） | P3 |
 | P5 | 任务流水线（后处理动作注册表） | P4 |
 | P6 | 贴图置顶窗口 | P4 |
-| P7 | 录屏（Graphics.Capture 视频流 + FFmpeg 编码） | P2 |
+| P7 | 录屏（Graphics.Capture 视频流 + FFmpeg 编码）**（v1.1，D-08：前置为 O5 sidecar 下载通道；v1 UI 不得暗示录屏可用）** | P2 |
 | P8 | IPC + 事件 + 前端组件 | P5 |
 
 ---
@@ -121,7 +121,7 @@ pub struct ShotOutput { pub frame: Frame, pub file: Option<PathBuf>, pub task_id
 // 布局持久化：{appData}/pins.json，重启恢复已存在 pin（文件丢失则丢弃该项）
 ```
 
-## P7 录屏
+## P7 录屏（v1.1，D-08 移出 v1）
 
 - 捕获：`GraphicsCaptureSession` 帧池 → 每帧转 BGRA 写入 spsc 环形缓冲（容量 90 帧）。
 - 编码：FFmpeg Sidecar 子进程（`-f rawvideo -pix_fmt bgra -s WxH -r 30 -i - -c:v libx264 -preset veryfast out.mp4`），stdin 管道喂帧。
@@ -149,4 +149,4 @@ screenshot_pin(output) / screenshot_history_list(page) -> Page<ShotItem>
 - [ ] 副屏（负坐标）截图选区正确
 - [ ] 标注 undo/redo 正确；导出 PNG 与预览一致
 - [ ] 贴图缩放/透明度/重启恢复可用
-- [ ] 录屏 1 分钟 mp4 可播放、停止后无僵尸 ffmpeg 进程
+- [ ] 录屏 1 分钟 mp4 可播放、停止后无僵尸 ffmpeg 进程（v1.1 验收，不计入 v1 批次判定，D-08）
