@@ -40,6 +40,8 @@
 - **HKCU 注册表、纯查询、内存清理（尽力而为）** → 主进程内 Port 直执行。
 - **HKLM/服务/计划任务/Appx 卸载/Hosts 写入/DNS 设置/DISM/SFC/还原点** → 一律 HelperClient。Helper 未运行 → 返回 `SYS_ELEVATION_001`（UI 提示"需要管理员授权"→ 触发 spawn → UAC 弹窗）。
 
+> **v1 落地现状（D-13）**：提权边界已按上述规则实装于 `src-tauri/src/winops_helper.rs` 的 `RoutingRegistry`（key 以 `HKLM` 开头 → helper 进程 registry.read/write/delete；其余 → 本地直写），非"未实现前全 HKCU"。嵌入式 catalog 43 条中 HKLM 条目即走此路由。
+
 ---
 
 ## 2. 实体模型与目录（代码级）
@@ -167,6 +169,7 @@ impl CatalogLoader {
 - `backup` 不写则自动从 `apply` 反推（registry/service op 均可反演）；显式 `revert` 数组仅用于备份无法覆盖的操作（如缓存清理类 FileClean）。
 - `verify` 是 BAVR 的 V，也是 scan 的状态来源（probe = 只跑 verify）。
 - 风险分级规则（合规红线）：`High` 包含一切禁用安全更新 / Defender / 安全中心 / 卸载系统组件的条目，默认不勾选 + 二次确认（§8）。
+- **id 合规强校验（D-13）**：`parse_catalog`（sys-core winops.rs）对每个条目断言 id 形如 `winops.{family}.{slug}`（前缀大小写敏感；至少两段；段内仅 `[a-z0-9_]`，非空）且同文件内无重复，违例返回 `SysError::Catalog`。外置目录含非法 id 的文件被整文件跳过（`load_catalog` warn，不阻断内置 43 条）；内置目录合规性由回归测试钉死。
 
 ### 2.3 原子操作（Op）与备份值
 
@@ -603,6 +606,8 @@ impl Module for SysModule {
 ```
 
 ### 7.2 IPC 命令（19 个，命名 `{module}_{action}`，阻塞调用一律 spawn_blocking，注意闭包 move 捕获需提前 clone —— 见 M6 教训 svc2/id2 模式）
+
+> **v1 交付口径（D-13）**：本表为最初设计稿。v1 实交付 5 命令（`src-tauri/src/commands/winops.rs`）：`winops_catalog` / `winops_scan` / `winops_apply` / `winops_audit_export` / `winops_rollback`，承载 §6 全部 43 条目录项的 scan→apply(BAVR)→rollback→审计导出闭环；其余（profiles、hosts、dns、services、tasks、restore_point、repair、clean_memory、helper_status、verify/backups 独立命令）记 **v1.1**。
 
 | 命令 | 签名要点 |
 |---|---|

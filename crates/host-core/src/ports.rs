@@ -247,7 +247,8 @@ pub trait TaskSchdPort: Port {
 }
 
 /// 注册表窄操作（docs/impl/08 WinOps W0：BAVR 引擎数据面）。
-/// 路由契约：HKCU 由本进程实现直写；HKLM 需提权 Helper（未实现前 catalog 全 HKCU）。
+/// 路由契约（D-13）：HKCU 由本进程直写；HKLM 一律经 winops_helper::RoutingRegistry
+/// 转发到提权 Helper 进程执行（HKLM→helper、其余→本地），详见 docs/impl/08 §5。
 pub trait RegistryOps: Port {
     /// 读值（existed=false 表示值不存在——备份语义区分"原值不存在"与"原值为空"）
     fn read_value(&self, key: &str, value_name: &str) -> Result<(RegValue, bool), AppError>;

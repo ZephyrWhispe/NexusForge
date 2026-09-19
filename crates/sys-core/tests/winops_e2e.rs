@@ -127,8 +127,8 @@ fn catalog_contains_defender_family() {
     let tweaks = load_catalog(None).unwrap();
     let off = tweaks
         .iter()
-        .find(|t| t.id == "defender_realtime_off")
-        .expect("defender_realtime_off 应在目录");
+        .find(|t| t.id == "winops.defender.realtime_off")
+        .expect("winops.defender.realtime_off 应在目录");
     assert!(off.requires_admin && off.maintenance);
     assert!(matches!(
         off.actions[0],
@@ -136,8 +136,8 @@ fn catalog_contains_defender_family() {
     ));
     let on = tweaks
         .iter()
-        .find(|t| t.id == "defender_realtime_on")
-        .expect("defender_realtime_on 应在目录");
+        .find(|t| t.id == "winops.defender.realtime_on")
+        .expect("winops.defender.realtime_on 应在目录");
     assert!(matches!(
         on.actions[0],
         TweakAction::DefenderRealtime { disable: false }

@@ -189,6 +189,23 @@ pub struct ApplyReport {
 // catalog 加载
 // ---------------------------------------------------------------------------
 
+/// Tweak id 规范（D-13，docs/impl/08 §5）：`winops.{family}.{slug}`，
+/// 段为小写 [a-z0-9_]，至少 family + slug 两段。
+fn valid_tweak_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("winops.") else {
+        return false;
+    };
+    let mut segs = rest.split('.');
+    if segs.next().is_none() || segs.next().is_none() {
+        return false; // 至少 family + slug 两段
+    }
+    rest.split('.').all(|s| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    })
+}
+
 /// 解析目录 JSON（单个文件；顶层数组或 {"tweaks": [...]} 两种形态）
 fn parse_catalog(raw: &str) -> SysResult<Vec<Tweak>> {
     let v: serde_json::Value =
@@ -202,8 +219,22 @@ fn parse_catalog(raw: &str) -> SysResult<Vec<Tweak>> {
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    serde_json::from_value(serde_json::Value::Array(arr))
-        .map_err(|e| SysError::Catalog(format!("目录解析失败: {e}")))
+    let tweaks: Vec<Tweak> = serde_json::from_value(serde_json::Value::Array(arr))
+        .map_err(|e| SysError::Catalog(format!("目录解析失败: {e}")))?;
+    let mut seen: Vec<&str> = Vec::with_capacity(tweaks.len());
+    for t in &tweaks {
+        if !valid_tweak_id(&t.id) {
+            return Err(SysError::Catalog(format!(
+                "非法 Tweak id: {}（须为 winops.{{family}}.{{slug}} 小写点分段）",
+                t.id
+            )));
+        }
+        if seen.contains(&t.id.as_str()) {
+            return Err(SysError::Catalog(format!("Tweak id 重复: {}", t.id)));
+        }
+        seen.push(&t.id);
+    }
+    Ok(tweaks)
 }
 
 /// 合并目录：外置同 id 覆盖内置，其余追加（顺序：内置在前）
@@ -1230,20 +1261,97 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("extra.json"),
-            r#"[{"id":"taskbar_hide_widgets","name":"覆盖版","category":"taskbar","actions":[]},
-                {"id":"brand_new","name":"新增","category":"x","actions":[]}]"#,
+            r#"[{"id":"winops.taskbar.hide_widgets","name":"覆盖版","category":"taskbar","actions":[]},
+                {"id":"winops.brand.new","name":"新增","category":"x","actions":[]}]"#,
         )
         .unwrap();
         let tweaks = load_catalog(Some(&dir)).unwrap();
         let w = tweaks
             .iter()
-            .find(|t| t.id == "taskbar_hide_widgets")
+            .find(|t| t.id == "winops.taskbar.hide_widgets")
             .unwrap();
         assert_eq!(w.name, "覆盖版");
-        assert!(tweaks.iter().any(|t| t.id == "brand_new"));
+        assert!(tweaks.iter().any(|t| t.id == "winops.brand.new"));
         // 损坏文件跳过不阻断
         std::fs::write(dir.join("bad.json"), "not json").unwrap();
         assert!(load_catalog(Some(&dir)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-13：内置目录 43 条全部符合 winops.{family}.{slug} 前缀规范且无重复
+    #[test]
+    fn builtin_catalog_ids_compliant_and_unique() {
+        let mut tweaks = load_catalog(None).unwrap();
+        assert_eq!(tweaks.len(), 43, "v1 承诺口径：43 条目录项");
+        for t in &tweaks {
+            assert!(valid_tweak_id(&t.id), "非法 id: {}", t.id);
+        }
+        let n = tweaks.len();
+        tweaks.dedup_by(|a, b| a.id == b.id);
+        assert_eq!(tweaks.len(), n, "内置目录 id 不得重复");
+    }
+
+    #[test]
+    fn valid_tweak_id_accepts_spec_shape_and_rejects_deviation() {
+        assert!(valid_tweak_id("winops.update.disable_auto"));
+        assert!(valid_tweak_id("winops.a1.b2"));
+        assert!(valid_tweak_id("winops.a.b.c"));
+        assert!(!valid_tweak_id("taskbar_hide_widgets")); // 无前缀（旧形态）
+        assert!(!valid_tweak_id("winops.taskbar")); // 缺 slug 段
+        assert!(!valid_tweak_id("winops."));
+        assert!(!valid_tweak_id("winops.Taskbar.x")); // 大写
+        assert!(!valid_tweak_id("winops.task-bar.x")); // 连字符
+        assert!(!valid_tweak_id("winops.taskbar..x")); // 空段
+        assert!(!valid_tweak_id("Winops.taskbar.x")); // 前缀大小写敏感
+    }
+
+    /// D-13：解析层拦截非规范 id 与重复 id（外置坏文件因此进入 load_catalog 的跳过路径）
+    #[test]
+    fn parse_catalog_rejects_bad_prefix_and_duplicates() {
+        let bad_prefix =
+            r#"[{"id":"taskbar_hide_widgets","name":"旧形态","category":"taskbar","actions":[]}]"#;
+        assert!(matches!(
+            parse_catalog(bad_prefix),
+            Err(SysError::Catalog(msg)) if msg.contains("taskbar_hide_widgets")
+        ));
+        let dup = r#"[{"id":"winops.x.y","name":"一","category":"c","actions":[]},
+                     {"id":"winops.x.y","name":"二","category":"c","actions":[]}]"#;
+        assert!(matches!(
+            parse_catalog(dup),
+            Err(SysError::Catalog(msg)) if msg.contains("重复")
+        ));
+        let good = r#"[{"id":"winops.x.y","name":"一","category":"c","actions":[]}]"#;
+        assert!(parse_catalog(good).is_ok());
+    }
+
+    /// D-13：外置文件含非法 id → 整文件跳过，内置目录与合法外置项不受影响
+    #[test]
+    fn external_bad_id_file_skipped_without_harming_builtin() {
+        let dir = std::env::temp_dir().join(format!("nf_winops_valid_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bad_id.json"),
+            r#"[{"id":"Not-Compliant","name":"坏","category":"x","actions":[]}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ok.json"),
+            r#"[{"id":"winops.taskbar.hide_widgets","name":"覆盖版","category":"taskbar","actions":[]}]"#,
+        )
+        .unwrap();
+        let tweaks = load_catalog(Some(&dir)).unwrap();
+        assert!(!tweaks.iter().any(|t| t.id == "Not-Compliant"));
+        assert_eq!(
+            tweaks
+                .iter()
+                .find(|t| t.id == "winops.taskbar.hide_widgets")
+                .unwrap()
+                .name,
+            "覆盖版"
+        );
+        // 内置 42 条 + 覆盖 1 条 = 总数不变
+        assert_eq!(tweaks.len(), 43);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1524,7 +1632,7 @@ mod tests {
         fp.svc.set("bits", StartType::Manual, true);
         let ports = fp.ports();
         let t = Tweak {
-            id: "update_clear_cache".into(),
+            id: "winops.update.clear_cache".into(),
             name: "清理更新缓存".into(),
             category: "update".into(),
             description: String::new(),
@@ -1593,7 +1701,7 @@ mod tests {
         fp.svc.set("bits", StartType::Manual, false);
         let ports = fp.ports();
         let t = Tweak {
-            id: "update_clear_cache".into(),
+            id: "winops.update.clear_cache".into(),
             name: "清理更新缓存".into(),
             category: "update".into(),
             description: String::new(),
@@ -1635,21 +1743,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let store = BackupStore::open(&dir);
         // 原值 0 预先存在 → apply 备份 {existed:true, old:0} 并写入目标 1
-        fp.reg.set(K, "taskbar_x_v", RegValue::Dword(0));
+        fp.reg.set(K, "winops.taskbar.x_v", RegValue::Dword(0));
         let ports = fp.ports();
-        let t = tweak("taskbar_x", "测试", 1);
+        let t = tweak("winops.taskbar.x", "测试", 1);
         let report = apply(&ports, &t, false).unwrap();
         store.save(&report).unwrap();
         // 当前 = 目标值(1) → 无回归
         assert!(regression_check(&ports, &store, std::slice::from_ref(&t)).is_empty());
         // 系统自愈：改回原值(0) → 检出
-        fp.reg.set(K, "taskbar_x_v", RegValue::Dword(0));
+        fp.reg.set(K, "winops.taskbar.x_v", RegValue::Dword(0));
         assert_eq!(
             regression_check(&ports, &store, std::slice::from_ref(&t)),
-            vec!["taskbar_x".to_string()]
+            vec!["winops.taskbar.x".to_string()]
         );
         // 回滚后 remove 备份 → 不再误报
-        store.remove("taskbar_x");
+        store.remove("winops.taskbar.x");
         assert!(regression_check(&ports, &store, &[t]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1683,7 +1791,7 @@ mod tests {
         fp.appx.install("Microsoft.BingWeather");
         let ports = fp.ports();
         let t = Tweak {
-            id: "apps_remove_weather".into(),
+            id: "winops.apps.remove_weather".into(),
             name: "移除天气".into(),
             category: "apps".into(),
             description: String::new(),
@@ -1731,7 +1839,7 @@ mod tests {
         fp.appx.install("Microsoft.Tips");
         let ports = fp.ports();
         let t = Tweak {
-            id: "apps_remove_tips".into(),
+            id: "winops.apps.remove_tips".into(),
             name: "移除提示".into(),
             category: "apps".into(),
             description: String::new(),
@@ -1750,7 +1858,7 @@ mod tests {
         fp.appx.install("Microsoft.Tips");
         assert_eq!(
             regression_check(&ports, &store, &[t]),
-            vec!["apps_remove_tips".to_string()]
+            vec!["winops.apps.remove_tips".to_string()]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

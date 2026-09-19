@@ -22,7 +22,7 @@
 | D-10 | OCR「复制全部」走剪贴板回写窗口 | 补实现 | P1 | 1 | 已完成 |
 | D-11 | 编辑器 PDF 保持纯 Rust（lopdf） | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-12 | 同步库归位 `db/sync.db` | 补实现 | P1 | 1 | 已完成 |
-| D-13 | WinOps v1 交付范围收敛为 5 命令 | 改规范 | P2 | 3 | 已裁决（文档生效） |
+| D-13 | WinOps v1 交付范围收敛为 5 命令 | 改规范 | P2 | 3 | 已完成（批次 3 落地） |
 | D-14 | 引入 Zustand 三 store，替换轮询与静态状态 | 补实现 | P1 | 1 | 已完成 |
 | D-15 | 锁策略统一（parking_lot + 回调无锁快照） | 补实现 | P0 | 2 | 已完成 |
 | D-16 | host-core 收敛公共工具与 ModuleStateCell | 补实现 | P1 | 2 | 已完成 |
@@ -107,6 +107,12 @@
 
 - **决策**：**修订 DESIGN §3 / impl/08 §7.2**：v1 交付已实现的 5 个 IPC 命令 + 43 条目录项；profiles / hosts / dns / restore_point / repair / helper_status 等其余命令列入 v1.1。
 - **附加要求**：目录 id 前缀按 impl/08 规范统一（现为 `privacy_ad_id_off` 形式），并在文档中明确 HKCU/HKLM 的提权边界（现注释自述"HKLM 需提权 Helper，未实现前 catalog 全 HKCU"）。
+
+- **实施记录（批次 3）**：
+  1. `catalog.json` 全部 43 条 id 重命名为 `winops.{family}.{slug}`（family = 原 category，slug = 原下划线后缀，如 `taskbar_hide_widgets` → `winops.taskbar.hide_widgets`）；`parse_catalog` 新增 `valid_tweak_id` 强校验（前缀大小写敏感、≥2 段、段内仅 `[a-z0-9_]` 非空）+ 同文件重复 id 拒绝，违例返回 `SysError::Catalog`；外置目录含非法 id 的文件经 `load_catalog` 的 warn 路径整文件跳过，内置目录不受影响。
+  2. HKCU/HKLM 提权边界文档化：`ports.rs` RegistryOps 的过期注释（"未实现前 catalog 全 HKCU"）改写为实际契约（HKCU 进程内直写；HKLM 一律经 `winops_helper::RoutingRegistry` 转发提权 Helper——该路由 read/write/delete 三方法均已实装，属注释陈旧而非功能缺失）；impl/08 §1 增"v1 落地现状"段、§2.2 要点增 id 合规强校验条目、§7.2 增 v1 交付口径段（5 命令 + 43 条闭环，其余记 v1.1）。
+  3. 测试内旧 id 字面量同步（winops.rs 单测、winops_e2e.rs defender 族断言）；`tweak()` 辅助函数的 value_name 由 id 派生，相关 `_v` 字面量随之更新。
+- **完成证据**：新增 4 条回归测试——`builtin_catalog_ids_compliant_and_unique`（43 条全合规且无重复，钉死 v1 口径数量）、`valid_tweak_id_accepts_spec_shape_and_rejects_deviation`（10 例正反：旧形态无前缀/缺 slug/大写/连字符/空段全拒）、`parse_catalog_rejects_bad_prefix_and_duplicates`（负例含错误消息断言）、`external_bad_id_file_skipped_without_harming_builtin`（外置坏 id 文件跳过、合法覆盖生效、总数仍 43）；`cargo test -p sys-core` 全绿（lib 23+10、e2e 2/2、recycle 3/3）。
 
 ### D-22 批次划分、执行顺序与质量门槛（流程）
 
