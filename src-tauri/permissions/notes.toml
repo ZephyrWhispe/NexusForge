@@ -1,0 +1,91 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-notes-list"
+description = "允许前端调用 notes_list 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_list"]
+
+[[permission]]
+identifier = "allow-notes-read"
+description = "允许前端调用 notes_read 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_read"]
+
+[[permission]]
+identifier = "allow-notes-create"
+description = "允许前端调用 notes_create 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_create"]
+
+[[permission]]
+identifier = "allow-notes-write"
+description = "允许前端调用 notes_write 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_write"]
+
+[[permission]]
+identifier = "allow-notes-delete"
+description = "允许前端调用 notes_delete 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_delete"]
+
+[[permission]]
+identifier = "allow-notes-rename"
+description = "允许前端调用 notes_rename 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_rename"]
+
+[[permission]]
+identifier = "allow-notes-links"
+description = "允许前端调用 notes_links 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_links"]
+
+[[permission]]
+identifier = "allow-notes-backlinks"
+description = "允许前端调用 notes_backlinks 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_backlinks"]
+
+[[permission]]
+identifier = "allow-notes-sync"
+description = "允许前端调用 notes_sync 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_sync"]
+
+[[permission]]
+identifier = "allow-notes-reindex"
+description = "允许前端调用 notes_reindex 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_reindex"]
+
+[[permission]]
+identifier = "allow-notes-cards"
+description = "允许前端调用 notes_cards 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_cards"]
+
+[[permission]]
+identifier = "allow-notes-card-create"
+description = "允许前端调用 notes_card_create 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_card_create"]
+
+[[permission]]
+identifier = "allow-notes-card-delete"
+description = "允许前端调用 notes_card_delete 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_card_delete"]
+
+[[permission]]
+identifier = "allow-notes-review-queue"
+description = "允许前端调用 notes_review_queue 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_review_queue"]
+
+[[permission]]
+identifier = "allow-notes-review-grade"
+description = "允许前端调用 notes_review_grade 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_review_grade"]
+
+[[permission]]
+identifier = "allow-notes-canvas-get"
+description = "允许前端调用 notes_canvas_get 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_canvas_get"]
+
+[[permission]]
+identifier = "allow-notes-canvas-save"
+description = "允许前端调用 notes_canvas_save 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_canvas_save"]
+
+[[permission]]
+identifier = "allow-notes-canvas-dirs"
+description = "允许前端调用 notes_canvas_dirs 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_canvas_dirs"]

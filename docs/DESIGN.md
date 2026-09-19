@@ -391,5 +391,6 @@ pub enum AppError {
 | §3 P2 文本与 PDF | qpdf/mutool sidecar | **纯 Rust（lopdf）** | D-11 |
 | §7 / §9.3 交付与 CI | CI + NSIS/MSI + 签名更新 | 口径不变，但明确**门禁先行**（批次 2 前置）；`LICENSE`/`THIRD_PARTY_LICENSES.md`/`README.md` 的缺失判定为未完成项 | D-01 / D-17 / D-21 |
 | §9.2 测试策略 | 各模块 mock ModuleContext 可独立单测 | 口径不变，补充强制要求：IPC 契约层、模块生命周期、DB/配置迁移须有回归测试 | D-22 |
+| §8 安全原则 4 | Tauri Capabilities 默认全拒，**按模块**显式授权 | "默认全拒"随 app ACL manifest 落地成为真实强制；但 SPA 单入口下 12 模块同栖 main 窗，capability 授权粒度实为**按窗**（6 文件），模块级运行时防护由宿主 ability/模块状态承担 | D-28 |
 
 > 本修订**不降低** O1–O8 的效力：审查发现 O1（模块间禁止直接调用）与 O8（总线背压）在实现中被违反，按"补实现"处理，标准不变。

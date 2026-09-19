@@ -43,3 +43,7 @@ rand.workspace = true
 [dev-dependencies]
 # S6/M7 集成测试的 app_data_dir 沙箱
 tempfile = "3"
+# D-28 security_config.rs：配置面判定需要独立链接的解析器
+toml.workspace = true
+serde_json.workspace = true
+base64.workspace = true

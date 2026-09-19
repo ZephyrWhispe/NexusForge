@@ -3377,6 +3377,7 @@ dependencies = [
  "tempfile",
  "term-core",
  "tokio",
+ "toml 0.8.2",
  "tracing",
  "vault-core",
  "win-integration",

@@ -1,0 +1,46 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-automation-rules-list"
+description = "允许前端调用 automation_rules_list 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_rules_list"]
+
+[[permission]]
+identifier = "allow-automation-save-rule"
+description = "允许前端调用 automation_save_rule 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_save_rule"]
+
+[[permission]]
+identifier = "allow-automation-delete-rule"
+description = "允许前端调用 automation_delete_rule 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_delete_rule"]
+
+[[permission]]
+identifier = "allow-automation-toggle-rule"
+description = "允许前端调用 automation_toggle_rule 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_toggle_rule"]
+
+[[permission]]
+identifier = "allow-automation-dead-letters"
+description = "允许前端调用 automation_dead_letters 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_dead_letters"]
+
+[[permission]]
+identifier = "allow-automation-replay"
+description = "允许前端调用 automation_replay 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_replay"]
+
+[[permission]]
+identifier = "allow-automation-plugins-list"
+description = "允许前端调用 automation_plugins_list 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_plugins_list"]
+
+[[permission]]
+identifier = "allow-automation-plugin-install"
+description = "允许前端调用 automation_plugin_install 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_plugin_install"]
+
+[[permission]]
+identifier = "allow-automation-plugin-remove"
+description = "允许前端调用 automation_plugin_remove 命令（D-28 按窗最小授权）"
+commands.allow = ["automation_plugin_remove"]

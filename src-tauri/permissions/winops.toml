@@ -1,0 +1,26 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-winops-catalog"
+description = "允许前端调用 winops_catalog 命令（D-28 按窗最小授权）"
+commands.allow = ["winops_catalog"]
+
+[[permission]]
+identifier = "allow-winops-scan"
+description = "允许前端调用 winops_scan 命令（D-28 按窗最小授权）"
+commands.allow = ["winops_scan"]
+
+[[permission]]
+identifier = "allow-winops-apply"
+description = "允许前端调用 winops_apply 命令（D-28 按窗最小授权）"
+commands.allow = ["winops_apply"]
+
+[[permission]]
+identifier = "allow-winops-rollback"
+description = "允许前端调用 winops_rollback 命令（D-28 按窗最小授权）"
+commands.allow = ["winops_rollback"]
+
+[[permission]]
+identifier = "allow-winops-audit-export"
+description = "允许前端调用 winops_audit_export 命令（D-28 按窗最小授权）"
+commands.allow = ["winops_audit_export"]

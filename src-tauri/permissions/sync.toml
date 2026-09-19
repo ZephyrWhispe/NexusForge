@@ -1,0 +1,16 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-sync-peers"
+description = "允许前端调用 sync_peers 命令（D-28 按窗最小授权）"
+commands.allow = ["sync_peers"]
+
+[[permission]]
+identifier = "allow-sync-status"
+description = "允许前端调用 sync_status 命令（D-28 按窗最小授权）"
+commands.allow = ["sync_status"]
+
+[[permission]]
+identifier = "allow-sync-now"
+description = "允许前端调用 sync_now 命令（D-28 按窗最小授权）"
+commands.allow = ["sync_now"]

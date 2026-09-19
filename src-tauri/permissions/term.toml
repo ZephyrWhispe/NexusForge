@@ -1,0 +1,86 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-term-spawn-local"
+description = "允许前端调用 term_spawn_local 命令（D-28 按窗最小授权）"
+commands.allow = ["term_spawn_local"]
+
+[[permission]]
+identifier = "allow-term-spawn-wsl"
+description = "允许前端调用 term_spawn_wsl 命令（D-28 按窗最小授权）"
+commands.allow = ["term_spawn_wsl"]
+
+[[permission]]
+identifier = "allow-term-wsl-list"
+description = "允许前端调用 term_wsl_list 命令（D-28 按窗最小授权）"
+commands.allow = ["term_wsl_list"]
+
+[[permission]]
+identifier = "allow-term-write"
+description = "允许前端调用 term_write 命令（D-28 按窗最小授权）"
+commands.allow = ["term_write"]
+
+[[permission]]
+identifier = "allow-term-resize"
+description = "允许前端调用 term_resize 命令（D-28 按窗最小授权）"
+commands.allow = ["term_resize"]
+
+[[permission]]
+identifier = "allow-term-ack"
+description = "允许前端调用 term_ack 命令（D-28 按窗最小授权）"
+commands.allow = ["term_ack"]
+
+[[permission]]
+identifier = "allow-term-kill"
+description = "允许前端调用 term_kill 命令（D-28 按窗最小授权）"
+commands.allow = ["term_kill"]
+
+[[permission]]
+identifier = "allow-term-sessions"
+description = "允许前端调用 term_sessions 命令（D-28 按窗最小授权）"
+commands.allow = ["term_sessions"]
+
+[[permission]]
+identifier = "allow-term-ssh-connect"
+description = "允许前端调用 term_ssh_connect 命令（D-28 按窗最小授权）"
+commands.allow = ["term_ssh_connect"]
+
+[[permission]]
+identifier = "allow-term-ssh-known-hosts"
+description = "允许前端调用 term_ssh_known_hosts 命令（D-28 按窗最小授权）"
+commands.allow = ["term_ssh_known_hosts"]
+
+[[permission]]
+identifier = "allow-term-ssh-forget-host"
+description = "允许前端调用 term_ssh_forget_host 命令（D-28 按窗最小授权）"
+commands.allow = ["term_ssh_forget_host"]
+
+[[permission]]
+identifier = "allow-term-sftp-list"
+description = "允许前端调用 term_sftp_list 命令（D-28 按窗最小授权）"
+commands.allow = ["term_sftp_list"]
+
+[[permission]]
+identifier = "allow-term-sftp-download"
+description = "允许前端调用 term_sftp_download 命令（D-28 按窗最小授权）"
+commands.allow = ["term_sftp_download"]
+
+[[permission]]
+identifier = "allow-term-sftp-upload"
+description = "允许前端调用 term_sftp_upload 命令（D-28 按窗最小授权）"
+commands.allow = ["term_sftp_upload"]
+
+[[permission]]
+identifier = "allow-term-docker-containers"
+description = "允许前端调用 term_docker_containers 命令（D-28 按窗最小授权）"
+commands.allow = ["term_docker_containers"]
+
+[[permission]]
+identifier = "allow-term-docker-lifecycle"
+description = "允许前端调用 term_docker_lifecycle 命令（D-28 按窗最小授权）"
+commands.allow = ["term_docker_lifecycle"]
+
+[[permission]]
+identifier = "allow-term-docker-logs"
+description = "允许前端调用 term_docker_logs 命令（D-28 按窗最小授权）"
+commands.allow = ["term_docker_logs"]

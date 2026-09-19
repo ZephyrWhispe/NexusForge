@@ -1,0 +1,61 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-desktop-launcher-search"
+description = "允许前端调用 desktop_launcher_search 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_launcher_search"]
+
+[[permission]]
+identifier = "allow-desktop-launcher-launch"
+description = "允许前端调用 desktop_launcher_launch 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_launcher_launch"]
+
+[[permission]]
+identifier = "allow-desktop-launcher-status"
+description = "允许前端调用 desktop_launcher_status 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_launcher_status"]
+
+[[permission]]
+identifier = "allow-desktop-tidy-plan"
+description = "允许前端调用 desktop_tidy_plan 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_tidy_plan"]
+
+[[permission]]
+identifier = "allow-desktop-tidy-apply"
+description = "允许前端调用 desktop_tidy_apply 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_tidy_apply"]
+
+[[permission]]
+identifier = "allow-desktop-tidy-restore"
+description = "允许前端调用 desktop_tidy_restore 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_tidy_restore"]
+
+[[permission]]
+identifier = "allow-desktop-tidy-status"
+description = "允许前端调用 desktop_tidy_status 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_tidy_status"]
+
+[[permission]]
+identifier = "allow-desktop-note-add"
+description = "允许前端调用 desktop_note_add 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_note_add"]
+
+[[permission]]
+identifier = "allow-desktop-note-list"
+description = "允许前端调用 desktop_note_list 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_note_list"]
+
+[[permission]]
+identifier = "allow-desktop-note-done"
+description = "允许前端调用 desktop_note_done 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_note_done"]
+
+[[permission]]
+identifier = "allow-desktop-note-remove"
+description = "允许前端调用 desktop_note_remove 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_note_remove"]
+
+[[permission]]
+identifier = "allow-desktop-notes-due"
+description = "允许前端调用 desktop_notes_due 命令（D-28 按窗最小授权）"
+commands.allow = ["desktop_notes_due"]

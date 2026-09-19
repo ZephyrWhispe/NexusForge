@@ -1,0 +1,36 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-host-system-accent"
+description = "允许前端调用 host_system_accent 命令（D-28 按窗最小授权）"
+commands.allow = ["host_system_accent"]
+
+[[permission]]
+identifier = "allow-host-log"
+description = "允许前端调用 host_log 命令（D-28 按窗最小授权）"
+commands.allow = ["host_log"]
+
+[[permission]]
+identifier = "allow-host-modules-status"
+description = "允许前端调用 host_modules_status 命令（D-28 按窗最小授权）"
+commands.allow = ["host_modules_status"]
+
+[[permission]]
+identifier = "allow-host-module-restart"
+description = "允许前端调用 host_module_restart 命令（D-28 按窗最小授权）"
+commands.allow = ["host_module_restart"]
+
+[[permission]]
+identifier = "allow-host-config-get"
+description = "允许前端调用 host_config_get 命令（D-28 按窗最小授权）"
+commands.allow = ["host_config_get"]
+
+[[permission]]
+identifier = "allow-host-config-set"
+description = "允许前端调用 host_config_set 命令（D-28 按窗最小授权）"
+commands.allow = ["host_config_set"]
+
+[[permission]]
+identifier = "allow-host-config-schema"
+description = "允许前端调用 host_config_schema 命令（D-28 按窗最小授权）"
+commands.allow = ["host_config_schema"]

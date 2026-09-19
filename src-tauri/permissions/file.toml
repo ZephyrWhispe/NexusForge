@@ -1,0 +1,86 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-file-drives"
+description = "允许前端调用 file_drives 命令（D-28 按窗最小授权）"
+commands.allow = ["file_drives"]
+
+[[permission]]
+identifier = "allow-file-list"
+description = "允许前端调用 file_list 命令（D-28 按窗最小授权）"
+commands.allow = ["file_list"]
+
+[[permission]]
+identifier = "allow-file-breadcrumbs"
+description = "允许前端调用 file_breadcrumbs 命令（D-28 按窗最小授权）"
+commands.allow = ["file_breadcrumbs"]
+
+[[permission]]
+identifier = "allow-file-mkdir"
+description = "允许前端调用 file_mkdir 命令（D-28 按窗最小授权）"
+commands.allow = ["file_mkdir"]
+
+[[permission]]
+identifier = "allow-file-rename-entry"
+description = "允许前端调用 file_rename_entry 命令（D-28 按窗最小授权）"
+commands.allow = ["file_rename_entry"]
+
+[[permission]]
+identifier = "allow-file-enqueue"
+description = "允许前端调用 file_enqueue 命令（D-28 按窗最小授权）"
+commands.allow = ["file_enqueue"]
+
+[[permission]]
+identifier = "allow-file-ops-active"
+description = "允许前端调用 file_ops_active 命令（D-28 按窗最小授权）"
+commands.allow = ["file_ops_active"]
+
+[[permission]]
+identifier = "allow-file-ops-pending"
+description = "允许前端调用 file_ops_pending 命令（D-28 按窗最小授权）"
+commands.allow = ["file_ops_pending"]
+
+[[permission]]
+identifier = "allow-file-op-pause"
+description = "允许前端调用 file_op_pause 命令（D-28 按窗最小授权）"
+commands.allow = ["file_op_pause"]
+
+[[permission]]
+identifier = "allow-file-op-resume"
+description = "允许前端调用 file_op_resume 命令（D-28 按窗最小授权）"
+commands.allow = ["file_op_resume"]
+
+[[permission]]
+identifier = "allow-file-op-cancel"
+description = "允许前端调用 file_op_cancel 命令（D-28 按窗最小授权）"
+commands.allow = ["file_op_cancel"]
+
+[[permission]]
+identifier = "allow-file-op-drop-pending"
+description = "允许前端调用 file_op_drop_pending 命令（D-28 按窗最小授权）"
+commands.allow = ["file_op_drop_pending"]
+
+[[permission]]
+identifier = "allow-file-preview"
+description = "允许前端调用 file_preview 命令（D-28 按窗最小授权）"
+commands.allow = ["file_preview"]
+
+[[permission]]
+identifier = "allow-file-search"
+description = "允许前端调用 file_search 命令（D-28 按窗最小授权）"
+commands.allow = ["file_search"]
+
+[[permission]]
+identifier = "allow-file-drivers"
+description = "允许前端调用 file_drivers 命令（D-28 按窗最小授权）"
+commands.allow = ["file_drivers"]
+
+[[permission]]
+identifier = "allow-file-rename-plan"
+description = "允许前端调用 file_rename_plan 命令（D-28 按窗最小授权）"
+commands.allow = ["file_rename_plan"]
+
+[[permission]]
+identifier = "allow-file-rename-apply"
+description = "允许前端调用 file_rename_apply 命令（D-28 按窗最小授权）"
+commands.allow = ["file_rename_apply"]

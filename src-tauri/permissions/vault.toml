@@ -1,0 +1,106 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-vault-status"
+description = "允许前端调用 vault_status 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_status"]
+
+[[permission]]
+identifier = "allow-vault-create"
+description = "允许前端调用 vault_create 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_create"]
+
+[[permission]]
+identifier = "allow-vault-unlock"
+description = "允许前端调用 vault_unlock 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_unlock"]
+
+[[permission]]
+identifier = "allow-vault-lock"
+description = "允许前端调用 vault_lock 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_lock"]
+
+[[permission]]
+identifier = "allow-vault-change-master-password"
+description = "允许前端调用 vault_change_master_password 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_change_master_password"]
+
+[[permission]]
+identifier = "allow-vault-folders"
+description = "允许前端调用 vault_folders 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_folders"]
+
+[[permission]]
+identifier = "allow-vault-folder-create"
+description = "允许前端调用 vault_folder_create 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_folder_create"]
+
+[[permission]]
+identifier = "allow-vault-folder-rename"
+description = "允许前端调用 vault_folder_rename 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_folder_rename"]
+
+[[permission]]
+identifier = "allow-vault-folder-delete"
+description = "允许前端调用 vault_folder_delete 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_folder_delete"]
+
+[[permission]]
+identifier = "allow-vault-entries"
+description = "允许前端调用 vault_entries 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_entries"]
+
+[[permission]]
+identifier = "allow-vault-entry-get"
+description = "允许前端调用 vault_entry_get 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_entry_get"]
+
+[[permission]]
+identifier = "allow-vault-entry-add"
+description = "允许前端调用 vault_entry_add 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_entry_add"]
+
+[[permission]]
+identifier = "allow-vault-entry-update"
+description = "允许前端调用 vault_entry_update 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_entry_update"]
+
+[[permission]]
+identifier = "allow-vault-entry-delete"
+description = "允许前端调用 vault_entry_delete 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_entry_delete"]
+
+[[permission]]
+identifier = "allow-vault-generate-password"
+description = "允许前端调用 vault_generate_password 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_generate_password"]
+
+[[permission]]
+identifier = "allow-vault-totp-now"
+description = "允许前端调用 vault_totp_now 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_totp_now"]
+
+[[permission]]
+identifier = "allow-vault-hello-enable"
+description = "允许前端调用 vault_hello_enable 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_hello_enable"]
+
+[[permission]]
+identifier = "allow-vault-hello-disable"
+description = "允许前端调用 vault_hello_disable 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_hello_disable"]
+
+[[permission]]
+identifier = "allow-vault-hello-unlock"
+description = "允许前端调用 vault_hello_unlock 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_hello_unlock"]
+
+[[permission]]
+identifier = "allow-vault-notify-blur"
+description = "允许前端调用 vault_notify_blur 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_notify_blur"]
+
+[[permission]]
+identifier = "allow-vault-copy-password"
+description = "允许前端调用 vault_copy_password 命令（D-28 按窗最小授权）"
+commands.allow = ["vault_copy_password"]

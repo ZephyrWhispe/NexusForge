@@ -1,0 +1,41 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-sys-pkg-sources"
+description = "允许前端调用 sys_pkg_sources 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_pkg_sources"]
+
+[[permission]]
+identifier = "allow-sys-pkg-list"
+description = "允许前端调用 sys_pkg_list 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_pkg_list"]
+
+[[permission]]
+identifier = "allow-sys-pkg-cmd-preview"
+description = "允许前端调用 sys_pkg_cmd_preview 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_pkg_cmd_preview"]
+
+[[permission]]
+identifier = "allow-sys-pkg-action"
+description = "允许前端调用 sys_pkg_action 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_pkg_action"]
+
+[[permission]]
+identifier = "allow-sys-clean-targets"
+description = "允许前端调用 sys_clean_targets 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_clean_targets"]
+
+[[permission]]
+identifier = "allow-sys-clean-scan"
+description = "允许前端调用 sys_clean_scan 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_clean_scan"]
+
+[[permission]]
+identifier = "allow-sys-clean-execute"
+description = "允许前端调用 sys_clean_execute 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_clean_execute"]
+
+[[permission]]
+identifier = "allow-sys-metrics-history"
+description = "允许前端调用 sys_metrics_history 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_metrics_history"]

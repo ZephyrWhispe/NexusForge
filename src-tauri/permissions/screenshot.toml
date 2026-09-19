@@ -1,0 +1,51 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-screenshot-start"
+description = "允许前端调用 screenshot_start 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_start"]
+
+[[permission]]
+identifier = "allow-screenshot-task"
+description = "允许前端调用 screenshot_task 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_task"]
+
+[[permission]]
+identifier = "allow-screenshot-confirm"
+description = "允许前端调用 screenshot_confirm 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_confirm"]
+
+[[permission]]
+identifier = "allow-screenshot-discard"
+description = "允许前端调用 screenshot_discard 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_discard"]
+
+[[permission]]
+identifier = "allow-screenshot-finish"
+description = "允许前端调用 screenshot_finish 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_finish"]
+
+[[permission]]
+identifier = "allow-screenshot-history-list"
+description = "允许前端调用 screenshot_history_list 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_history_list"]
+
+[[permission]]
+identifier = "allow-screenshot-pins"
+description = "允许前端调用 screenshot_pins 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_pins"]
+
+[[permission]]
+identifier = "allow-screenshot-pin-get"
+description = "允许前端调用 screenshot_pin_get 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_pin_get"]
+
+[[permission]]
+identifier = "allow-screenshot-pin-update"
+description = "允许前端调用 screenshot_pin_update 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_pin_update"]
+
+[[permission]]
+identifier = "allow-screenshot-pin-close"
+description = "允许前端调用 screenshot_pin_close 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_pin_close"]

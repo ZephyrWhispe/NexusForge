@@ -326,7 +326,7 @@ impl tauri::Plugin for NexusForgePlugin {
 **潜在问题**：
 - `tauri::State` 只能托管 `'static` 数据，registry/context 全部 `Arc` 化。
 - 事件转发到前端时统一格式 `{topic, source, payload, ts}`，前端 `ipc/` 层提供类型化 `onEvent<Topic>()`。
-- Tauri 2 capabilities：`capabilities/default.json` 只开放宿主级命令；模块命令在各自模块启用时动态追加权限集。
+- Tauri 2 capabilities（D-28 已落地）：`permissions/*.toml` 为 `generate_handler` 全部 177 个命令定义 `allow-*` 权限（app ACL manifest 一经存在即默认全拒），`capabilities/` 按窗标签拆 6 个文件（main/quickpanel/overlay/pin/launcher/notebar）各授最小权限集；新增 IPC 命令必须同步 permissions + 目标窗 capability，否则 `src-tauri/tests/security_config.rs` 完整性测试构建期拦截。原设想"模块启用时动态追加权限集"不成立——capability 是构建期产物；模块级运行时防护由宿主 ability/模块状态承担，按窗≠按模块为平台事实偏离（D-28 决策 3）。
 
 ## 验收（host-core 出口）
 

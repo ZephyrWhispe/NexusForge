@@ -56,6 +56,9 @@ wasmtime = { version = "29", default-features = false, features = ["cranelift", 
 # D-27：性能基准（DESIGN §9.1/§9.2 阈值断言与 criterion 基准矩阵）
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
+# D-28：security_config.rs 需要解析 permissions/*.toml
+toml = "0.8"
+
 # 发布配置（docs/impl/07 PERF2，阶段四启用前先保持默认可调试）
 [profile.dev]
 opt-level = 0

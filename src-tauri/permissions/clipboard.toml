@@ -1,0 +1,41 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-clipboard-search"
+description = "允许前端调用 clipboard_search 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_search"]
+
+[[permission]]
+identifier = "allow-clipboard-get"
+description = "允许前端调用 clipboard_get 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_get"]
+
+[[permission]]
+identifier = "allow-clipboard-get-image"
+description = "允许前端调用 clipboard_get_image 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_get_image"]
+
+[[permission]]
+identifier = "allow-clipboard-paste"
+description = "允许前端调用 clipboard_paste 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_paste"]
+
+[[permission]]
+identifier = "allow-clipboard-pin"
+description = "允许前端调用 clipboard_pin 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_pin"]
+
+[[permission]]
+identifier = "allow-clipboard-delete"
+description = "允许前端调用 clipboard_delete 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_delete"]
+
+[[permission]]
+identifier = "allow-clipboard-clear"
+description = "允许前端调用 clipboard_clear 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_clear"]
+
+[[permission]]
+identifier = "allow-clipboard-group-counts"
+description = "允许前端调用 clipboard_group_counts 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_group_counts"]

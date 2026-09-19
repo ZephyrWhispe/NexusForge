@@ -124,7 +124,7 @@ pub fn run() {
 
     tauri::Builder::default()
         // REL1（docs/impl/07）：自动更新插件（端点/公钥见 tauri.conf.json plugins.updater；
-        // 签名私钥仅存 CI Secret——REL3 接入后 latest.json 附签名，更新前双签名校验）
+        // D-28：minisign ed25519 密钥对本仓生成，私钥仓外口令保护，CI secret 必须与本公钥配对）
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::host_system_accent,

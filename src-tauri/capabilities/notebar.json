@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notebar",
+  "description": "速记条窗：仅速记写入 + 隐藏（D-28 最小授权）",
+  "windows": [
+    "notebar"
+  ],
+  "permissions": [
+    "allow-desktop-note-add",
+    "allow-host-log",
+    "allow-host-system-accent",
+    "core:default",
+    "core:window:allow-hide"
+  ]
+}

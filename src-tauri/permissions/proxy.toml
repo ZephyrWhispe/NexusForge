@@ -1,0 +1,66 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-proxy-status"
+description = "允许前端调用 proxy_status 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_status"]
+
+[[permission]]
+identifier = "allow-proxy-kernel-install"
+description = "允许前端调用 proxy_kernel_install 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_kernel_install"]
+
+[[permission]]
+identifier = "allow-proxy-wintun-install"
+description = "允许前端调用 proxy_wintun_install 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_wintun_install"]
+
+[[permission]]
+identifier = "allow-proxy-subs"
+description = "允许前端调用 proxy_subs 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_subs"]
+
+[[permission]]
+identifier = "allow-proxy-sub-add"
+description = "允许前端调用 proxy_sub_add 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_sub_add"]
+
+[[permission]]
+identifier = "allow-proxy-sub-remove"
+description = "允许前端调用 proxy_sub_remove 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_sub_remove"]
+
+[[permission]]
+identifier = "allow-proxy-sub-update"
+description = "允许前端调用 proxy_sub_update 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_sub_update"]
+
+[[permission]]
+identifier = "allow-proxy-nodes"
+description = "允许前端调用 proxy_nodes 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_nodes"]
+
+[[permission]]
+identifier = "allow-proxy-direct-rules"
+description = "允许前端调用 proxy_direct_rules 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_direct_rules"]
+
+[[permission]]
+identifier = "allow-proxy-set-direct-rules"
+description = "允许前端调用 proxy_set_direct_rules 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_set_direct_rules"]
+
+[[permission]]
+identifier = "allow-proxy-set-mode"
+description = "允许前端调用 proxy_set_mode 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_set_mode"]
+
+[[permission]]
+identifier = "allow-proxy-delay-test"
+description = "允许前端调用 proxy_delay_test 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_delay_test"]
+
+[[permission]]
+identifier = "allow-proxy-logs"
+description = "允许前端调用 proxy_logs 命令（D-28 按窗最小授权）"
+commands.allow = ["proxy_logs"]

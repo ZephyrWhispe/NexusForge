@@ -1,6 +1,10 @@
-# DESIGN §9.3 release.yml：tag 触发，NSIS 安装包 + GitHub Release。
-# 待办（不阻塞门禁先行）： updater 签名密钥（TAURI_SIGNING_PRIVATE_KEY secret，
-# 需恢复 createUpdaterArtifacts）与 SignPath/自签代码证书接入后在下方补 env。
+# DESIGN §9.3 release.yml：tag 触发，NSIS + MSI 双格式（D-28）+ 签名更新工件 + GitHub Release。
+# D-28：updater 签名走 tauri.conf.json 真实公钥（minisign ed25519，密钥对本仓生成）；
+# 必须配置仓库 secrets：TAURI_SIGNING_PRIVATE_KEY（私钥全文）与
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD（口令）——两者必须与 tauri.conf.json
+# plugins.updater.pubkey 配对，换密钥=换公钥+换 secret 一起动。
+# 缺 secret 时本工作流按签名失败终止——宁可红着，不出未签名的"可更新"工件。
+# 待办（不阻塞门禁先行）：SignPath/自签代码证书接入后在 windows 构建补 signtool 步骤。
 name: Release
 
 on:
@@ -23,11 +27,17 @@ jobs:
           cache: npm
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
-      # updater 私钥尚未配置：临时关闭 updater 产物，其余按 tauri.conf（NSIS currentUser）
-      - name: tauri build
-        run: npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: tauri build (NSIS + MSI + signed updater artifacts)
+        run: npm run tauri -- build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/bundle/**/*-setup.exe
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.sig
+            src-tauri/target/release/bundle/msi/*.sig
           generate_release_notes: true

@@ -1,0 +1,41 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-editor-open"
+description = "允许前端调用 editor_open 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_open"]
+
+[[permission]]
+identifier = "allow-editor-content"
+description = "允许前端调用 editor_content 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_content"]
+
+[[permission]]
+identifier = "allow-editor-update"
+description = "允许前端调用 editor_update 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_update"]
+
+[[permission]]
+identifier = "allow-editor-save"
+description = "允许前端调用 editor_save 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_save"]
+
+[[permission]]
+identifier = "allow-editor-save-as"
+description = "允许前端调用 editor_save_as 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_save_as"]
+
+[[permission]]
+identifier = "allow-editor-autosave"
+description = "允许前端调用 editor_autosave 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_autosave"]
+
+[[permission]]
+identifier = "allow-editor-close"
+description = "允许前端调用 editor_close 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_close"]
+
+[[permission]]
+identifier = "allow-editor-sessions"
+description = "允许前端调用 editor_sessions 命令（D-28 按窗最小授权）"
+commands.allow = ["editor_sessions"]

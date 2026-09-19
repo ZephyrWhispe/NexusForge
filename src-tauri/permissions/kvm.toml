@@ -1,0 +1,66 @@
+# D-28：app 命令 ACL（tauri 2 中应用自定义权限文件一经定义即进入全量 ACL 强制——默认全拒，capabilities 显式白名单）。
+
+[[permission]]
+identifier = "allow-kvm-issue-pair-code"
+description = "允许前端调用 kvm_issue_pair_code 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_issue_pair_code"]
+
+[[permission]]
+identifier = "allow-kvm-pair-with"
+description = "允许前端调用 kvm_pair_with 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_pair_with"]
+
+[[permission]]
+identifier = "allow-kvm-unpair"
+description = "允许前端调用 kvm_unpair 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_unpair"]
+
+[[permission]]
+identifier = "allow-kvm-paired-peers"
+description = "允许前端调用 kvm_paired_peers 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_paired_peers"]
+
+[[permission]]
+identifier = "allow-kvm-discovered-peers"
+description = "允许前端调用 kvm_discovered_peers 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_discovered_peers"]
+
+[[permission]]
+identifier = "allow-kvm-connect-to"
+description = "允许前端调用 kvm_connect_to 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_connect_to"]
+
+[[permission]]
+identifier = "allow-kvm-send-clip"
+description = "允许前端调用 kvm_send_clip 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_send_clip"]
+
+[[permission]]
+identifier = "allow-kvm-send-file"
+description = "允许前端调用 kvm_send_file 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_send_file"]
+
+[[permission]]
+identifier = "allow-kvm-session-list"
+description = "允许前端调用 kvm_session_list 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_session_list"]
+
+[[permission]]
+identifier = "allow-kvm-set-edge-map"
+description = "允许前端调用 kvm_set_edge_map 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_set_edge_map"]
+
+[[permission]]
+identifier = "allow-kvm-edge-map"
+description = "允许前端调用 kvm_edge_map 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_edge_map"]
+
+[[permission]]
+identifier = "allow-kvm-control-state"
+description = "允许前端调用 kvm_control_state 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_control_state"]
+
+[[permission]]
+identifier = "allow-kvm-release-control"
+description = "允许前端调用 kvm_release_control 命令（D-28 按窗最小授权）"
+commands.allow = ["kvm_release_control"]

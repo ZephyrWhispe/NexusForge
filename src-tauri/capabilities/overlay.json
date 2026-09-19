@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "截图覆盖层窗：仅截图任务生命周期与 OCR + 定位/显隐/建贴图窗（D-28 最小授权）",
+  "windows": [
+    "overlay",
+    "overlay-*"
+  ],
+  "permissions": [
+    "allow-host-log",
+    "allow-host-system-accent",
+    "allow-ocr-copy-text",
+    "allow-ocr-recognize",
+    "allow-screenshot-confirm",
+    "allow-screenshot-discard",
+    "allow-screenshot-finish",
+    "allow-screenshot-task",
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-current-monitor",
+    "core:window:allow-get-all-windows",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-show"
+  ]
+}

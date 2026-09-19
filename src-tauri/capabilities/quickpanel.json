@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "quickpanel",
+  "description": "剪切板快速面板窗：仅 clipboard 读/粘贴/图 + 自身隐藏（D-28 最小授权）",
+  "windows": [
+    "quickpanel"
+  ],
+  "permissions": [
+    "allow-clipboard-get-image",
+    "allow-clipboard-paste",
+    "allow-clipboard-search",
+    "allow-host-log",
+    "allow-host-system-accent",
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-start-dragging"
+  ]
+}
