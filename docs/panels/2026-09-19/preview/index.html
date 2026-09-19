@@ -199,7 +199,7 @@ body{font-family:var(--font);background:#E8E8E8;color:var(--txt-primary);font-si
 
 <div class="reviewbar">
   <h1>NexusForge UI 样张 · 静态预览（审核用，非应用代码）</h1>
-  <a href="#s1">①工作台骨架</a><a href="#s2">②软件卸载</a><a href="#s3">③更新管控</a><a href="#s4">④设置规范</a><a href="#s5">⑤代理节点/分流</a><a href="#s6">⑥密码库</a><a href="#s7">⑦文件网盘</a><a href="#s8">⑧桌面效率</a><a href="#s9">⑨键鼠共享</a><a href="#s10">⑩终端</a><a href="#s11">⑪截图贴图</a><a href="#s12">⑫OCR</a><a href="#s13">⑬文本PDF</a><a href="#s14">⑭笔记</a><a href="#s15">⑮自动化</a><a href="#s16">⑯同步</a><a href="#s17">⑰宿主设置中心</a><a href="#s18">⑱缩放演示</a>
+  <a href="#s1">①工作台骨架</a><a href="#s2">②软件卸载</a><a href="#s3">③更新管控</a><a href="#s4">④设置规范</a><a href="#s5">⑤代理节点/分流</a><a href="#s6">⑥密码库</a><a href="#s7">⑦文件网盘</a><a href="#s8">⑧桌面效率</a><a href="#s9">⑨键鼠共享</a><a href="#s10">⑩终端</a><a href="#s11">⑪截图贴图</a><a href="#s12">⑫OCR</a><a href="#s13">⑬文本PDF</a><a href="#s14">⑭笔记</a><a href="#s15">⑮自动化</a><a href="#s16">⑯同步</a><a href="#s17">⑰宿主设置中心</a><a href="#s18">⑱缩放演示</a><a href="#s19">⑲更新中心(B9)</a>
   <a href="../00-ui-layout-spec.md">规范 00-spec</a>
 </div>
 
@@ -1035,6 +1035,54 @@ body{font-family:var(--font);background:#E8E8E8;color:var(--txt-primary);font-si
   </div>
 </section>
 
+<!-- ======================= S19 宿主·更新中心（B9） ======================= -->
+<section class="screen" id="s19">
+  <div class="caption">
+    <h2>⑲ 宿主设置中心·更新中心子面板（B9 构件与分流规则自动更新的 UI 面，方案=docs/impl/10 §6）</h2>
+    <ul>
+      <li>列表型五类子面板骨架：工具条（检查全部/最近检查 ctx/过滤 chip）+ 唯一滚动主体 + Footer 活动计数（00§1）；每构件一行 48，版本对 tabular 右靠（00§2/§9-3）。</li>
+      <li>策略三态下拉（关/手动/自动）恒在行右；主按钮随状态变 [更新]→[待安装(warn)]→[重试(err)]；降级与清除 TOFU pin 是危险动作，进"…"溢出菜单不进行内（00§3）。</li>
+      <li>回滚无 .bak 时 disabled+tooltip 原因（00§4-2）；"镜像只搬字节不改信任锚"等纪律以说明文案进高级 expander（00§9-4 组≤5）。</li>
+      <li>订阅卡（代理模块内）联动示意置底：profile-update 跟随/关闭/每 N 天三选 + 偏离度门禁的 D-18 确认形态。</li>
+    </ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname"><span class="lbl">宿主</span></div>
+        <div class="grp">设置</div>
+        <div class="item"><span class="ic">⌘</span><span class="lbl">快捷键</span></div>
+        <div class="item sel"><span class="ic">⟳</span><span class="lbl">更新中心</span><span class="cnt">3</span></div>
+        <div class="item"><span class="ic">◍</span><span class="lbl">关于与诊断</span></div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span><span class="lbl">全部设置</span></div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header"><h3>更新中心</h3><span class="ctx">上次全量检查 今天 03:14 · 应用本体经独立通道更新（不在此列）</span><span class="ph-spacer"></span><button class="btn">最近活动</button><button class="btn primary">⟳ 检查全部</button></div>
+        <div class="toolbar">
+          <input class="input m" placeholder="⌕ 构件名称">
+          <span class="chip on">需更新 <span class="x">✕</span></span>
+          <span class="chip">策略：自动</span>
+          <span class="tb-spacer"></span>
+          <span class="note">构件通道与本体更新端点互不共享（台账 92-⑫）</span>
+        </div>
+        <div class="listbody">
+          <div class="thead"><span class="grow">构件</span><span style="width:150px">当前 → 最新</span><span style="width:96px">策略</span><span style="width:120px"></span></div>
+          <div class="row"><div class="grow"><div class="t">代理内核 sing-box</div><div class="sub">KernelBinary · 空闲窗口自动换装 · 官方 checksums.txt 校验</div></div><span class="num" style="width:150px">1.10.7 → <b>1.11.2</b></span><span style="width:96px"><span class="badge u">自动 ▾</span></span><span style="width:120px;display:flex;gap:4px;justify-content:flex-end"><button class="btn primary" style="height:28px">更新</button><span class="iconbtn" title="指定版本/手动下载">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">GeoIP 数据库（sing-geoip）</div><div class="sub">GeoData · 2026-09-12 版待安装（内核运行中，下个空闲窗口兑现）</div></div><span class="num" style="width:150px">0901 → <b>0912</b></span><span style="width:96px"><span class="badge u">自动 ▾</span></span><span style="width:120px;display:flex;gap:4px;justify-content:flex-end"><button class="btn" style="height:28px;background:#FFF4CE;border-color:#E6D9A8;color:#9D5D00" title="已下载并校验通过，等待空闲窗口">待安装</button><span class="iconbtn" title="立即安装将中断代理约 2 秒，点击确认">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">GeoSite 规则域名集（sing-geosite）</div><div class="sub">GeoData · 上次检查失败：api.github.com 403 → 已回落 atom，24h 内退避</div></div><span class="num" style="width:150px">0905 → <b>0912</b></span><span style="width:96px"><span class="badge u">自动 ▾</span></span><span style="width:120px;display:flex;gap:4px;justify-content:flex-end"><button class="btn" style="height:28px;border-color:#C42B1C;color:#C42B1C">重试</button><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">wintun.dll（TUN 运行时）</div><div class="sub">Runtime · 无官方校验文件 → TOFU pin 0x3fa9…；更新罕见，默认手动</div></div><span class="num" style="width:150px">0.14.1 <span class="note">= 最新</span></span><span style="width:96px"><span class="badge">手动 ▾</span></span><span style="width:120px;display:flex;gap:4px;justify-content:flex-end"><button class="btn" style="height:28px" disabled title="已是最新，无可用更新">更新</button><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t">订阅「机场A」自动刷新</div><div class="sub">订阅轨 · 跟随 profile-update: 72h · 下次 09-22 03:00 · 偏离≥50% 时转人工确认（宁旧勿毒）</div></div><span class="num" style="width:150px">64 节点</span><span style="width:96px"><span class="badge u">跟随 ▾</span></span><span style="width:120px;display:flex;gap:4px;justify-content:flex-end"><button class="btn" style="height:28px">现在刷新</button><span class="iconbtn">⋯</span></span></div>
+          <div class="expander" style="margin:12px 16px 16px">
+            <div class="exp-head"><span class="iconbtn">▸</span><div class="sl"><div class="t" style="font-size:14px;font-weight:600">高级</div><div class="d" style="font-size:12px;color:var(--txt-secondary)">下载镜像（只改下载来源，校验永远锚定官方）· 非计量网络门槛 · 更新通知</div></div></div>
+          </div>
+        </div>
+        <div class="footerbar"><span>5 构件 · 3 需处理</span><span class="f-spacer"></span><span>自动轨：日检 03:00±15min · 失败退避 2ⁿ→封顶 24h</span><span>回滚保留 N-1（.bak）</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <div class="screen" style="padding-bottom:48px">
   <div class="caption">
     <h2>审核指引（对照检查，审毕反馈即可进实现）</h2>
@@ -1043,6 +1091,7 @@ body{font-family:var(--font);background:#E8E8E8;color:var(--txt-primary);font-si
       <li>三审新增（②③更新管控/卸载工作台/工具箱）：功能依据与红线在 <a href="../07-sys.md">07-sys.md §8</a>，调研证据在 <a href="../90-research-system-ui.md">90-research-system-ui.md</a>，UI 新条款在 <a href="../00-ui-layout-spec.md">00-spec §9</a>。</li>
       <li>四审新增（⑥~⑰各面板功能增量、⑱缩放重排演示）：功能依据在各面板文档的"四审功能增补"§8 表（01~06、08~15 各档，见 <a href="../README.md">目录</a>），缩放/自适应 16 条纪律在 <a href="../00-ui-layout-spec.md">00-spec §10</a>，调研证据在 <a href="../91-research-panels-scaling.md">91-research-panels-scaling.md</a>。</li>
       <li>S18 的断点态由 CSS container query 驱动：每个窗口按自身宽度独立演示 Large（1280）/ Medium 图标窄栏（960）/ Small 汉堡（620），与浏览器窗口宽度无关；旧屏 S1~S5 的 SubNav 标签未包 .lbl 容器，窄栏下为部分收拢示意，新屏 S6~S18 为完整收拢（未放真实汉堡钮的屏在 ≤640 由 CSS ::before 直接现写一个 ☰ 示意，应用中应为真实按钮）。</li>
+      <li>五审新增（⑲宿主更新中心，B9）：码级任务书与验收在 <a href="../../impl/10-artifact-auto-update.md">docs/impl/10-artifact-auto-update.md</a>（内核/geo/订阅三构件、三态策略、空闲窗口、回滚、TOFU pin、镜像纪律），借鉴与注意事项台账在 <a href="../92-research-final-audit-updates.md">92-research-final-audit-updates.md</a>；面板挂点在 <a href="../02-proxy.md">02-proxy §9</a> 与 <a href="../15-host-shell.md">15-host-shell §9</a>。</li>
       <li>样张为纯静态 HTML（无脚本、无网络请求），可直接浏览器打开；与 src/ 应用代码零耦合。</li>
     </ul>
   </div>

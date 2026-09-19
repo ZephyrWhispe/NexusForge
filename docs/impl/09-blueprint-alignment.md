@@ -44,19 +44,46 @@
 | B6 | 文件/网盘多协议（§6） | B1 file 接线、D-28 分发通道 | XL | 未开工 |
 | B7 | 终端等七模块深化（§7） | B1 | XL（拆 7 子批） | 未开工 |
 | B8 | 办公助手立项、i18n 复审——**只出方案等裁决，不写代码**（§11） | — | 方案 | 未开工 |
+| B9 | 构件与分流规则自动更新治理（内核/geo/订阅双轨，三态策略+手动下载）——**码级任务书已独立成文：[10-artifact-auto-update.md](10-artifact-auto-update.md)**（D-32 预留） | B9a 无依赖；B9b（xray/mihomo/rule-set 收编）随 B2 | L | 未开工 |
 
-顺序理由：B0 消除"模块待实现"这类最刺眼观感；B1 以最小代价兑现最多"面板里详细内容"；重架构（B2/B6）不与壳层改动同批，避免回归面重叠。
+顺序理由：B0 消除"模块待实现"这类最刺眼观感；B1 以最小代价兑现最多"面板里详细内容"；重架构（B2/B6）不与壳层改动同批，避免回归面重叠；B9a 是纯增量框架（新 crate+新命令域），与 B0/B1 无文件交叠可并行排产，B9b 挂 B2 尾部。
+
+## 2.5 任务书粒度标准（五审裁定："文档内容要做到代码级"）
+
+每个实施批次开工前，其 09 小节（或独立方案文档，如 10）必须把每个任务写满六栏，缺一栏不算任务书：
+
+1. **目标锚点**：文件:行 或新建路径（不许"某组件"级泛指）；
+2. **接口形状**：Rust/TS 函数、类型、IPC command 的字面签名（实现可照抄级）；
+3. **数据变更**：migration/表/JSON 文件结构 + 旧数据兼容策略（serde default 等）；
+4. **门禁联动**：capability/permissions 文件、host schema 注册、安全负例测试名；
+5. **回归清单**：每任务至少一正一反，测试**字面名**写进文档（写不出名字=没设计过断言）；
+6. **完成判据**：机器可判定语句（测试绿/冒烟步骤+预期可观测值），拒绝"体验良好"式判据。
+
+现状核账：B9 已按本标准全文（10 文档 §3–§9 即样板）；B0 按本标准补齐见 §3 末六栏表；B1–B8 各批维持现状粒度（已有 文件:行+组件名+验收），**升级为六栏是该批首个代码提交前的先行动作**（与"方案先行"同轨，不额外造一轮文档运动）。调研/设计层文档（panels 细案、台账）不承担六栏义务，以本表链接为桥。
 
 ## 3. B0 宿主壳补齐
 
 1. **MainWorkbench 注册表化**：`lazy` 声明 / `isXxx` 布尔 / 副标题三元 / 渲染三元四处合并为 `PANELS: Record<ModuleId, { panel: LazyExoticComponent; subtitle: string }>`；MODULES 表新增 `panelKey` 或 id 直用。收益：新模块缺壳从"静默兜底"变"类型系统报错"。
 2. **ScreenshotPanel（新建 `src/modules/screenshot/ScreenshotPanel.tsx`）**：截图历史网格（`screenshot_history_list`，缩略图 + 时间 + OCR 文本预览 + 点击放大/再复制/再 OCR）；贴图管理卡（`screenshot_pins` 列表：聚焦/关闭/全部关闭）；发起截图按钮（复用 `overlayController.startOverlay("shot"|"ocr")`）；「计划中：录屏 v1.1（D-08）」占位 Badge。
-3. **OcrPanel（新建 `src/modules/ocr/OcrPanel.tsx`）**：引擎状态卡（`ocr_engine_status`：注册引擎/可用语言/当前选择）；发起"截图取字"；本地图片文件识别入口（读文件 → `ocr_recognize(image_b64)`，含语言下拉——兑现 B4 前的最小语言面）；结果文本区 + 复制（`ocr_copy_text` 回写窗口语义复用）。
+3. **OcrPanel（新建 `src/modules/ocr/OcrPanel.tsx`）**：引擎状态卡（`ocr_engine_status`：注册引擎/可用语言/当前选择）；发起"截图取字"；本地图片文件识别入口（读文件 → `ocr_recognize({ request: OcrRequest })`，含语言下拉——兑现 B4 前的最小语言面）；结果文本区 + 复制（`ocr_copy_text` 回写窗口语义复用）。
 4. **设置中心修复**：`MainWorkbench.tsx:201` 硬编码 `moduleId="clipboard"` → `moduleId={active}`，各模块 schema 键在 `host_config_schema` 已按模块存在（校验：给 screenshot/proxy 打开设置渲染出各自表单的正例测试）。
 5. **占位 Badge 机制（D-29 决策 4）**：新组件 `DeferredBadge({ label, decisionRef })`——outline Badge "计划中（v1.1）" + Tooltip 指向 DECISIONS 条目；首批挂点：录屏(D-08)、Paddle/翻译(D-08)、每显示器覆盖(D-23)、T4→已排期则不挂、网盘(B6 排期前)。
 6. **回归**：vitest 新断言——遍历 `MODULES` 每个 id 在 `PANELS` 注册表必有键（或显式 `placeholderOf`），负例：删一键即红；`inlineStyleCount` 同款纯函数风格 + MainWorkbench 无 "模块界面待实现" 字面量可达路径（注册表兜底分支删除）。
 
 验收：实启冒烟走查截图/OCR 面板实数据渲染、任一模块设置面板跟随、托盘触发 quickpanel/overlay 无回归；门禁全组。
+
+### 3.1 B0 六栏任务书（五审按 §2.5 标准补齐；上列 1–6 为设计叙述，本表为动工工单）
+
+| 任务 | 目标锚点 | 接口形状（字面） | 数据变更 | 门禁联动 | 回归（正反例字面名） | 完成判据 |
+|------|----------|------------------|----------|----------|----------------------|----------|
+| T-B0-1 注册表化 | `src/layout/MainWorkbench.tsx`（四处 lazy/isXxx/副标题/渲染三元 + :201） | `export const PANELS: Record<ModuleId, { panel: LazyExoticComponent<ComponentType>; subtitle: string }>` | 无 | 无新命令 | `panelsRegistry_coversEveryModuleId`（正：MODULES 每 id 有键或 placeholderOf）；`panelsRegistry_missingKey_selfCheckTurnsRed`（负：构造缺键表必红）；`mainWorkbench_noFallbackLiteral`（"模块界面待实现"字面量 src 内零命中） | tsc 报错即兜底消失（类型系统判据）+ vitest 三名绿 |
+| T-B0-2 ScreenshotPanel | 新建 `src/modules/screenshot/ScreenshotPanel.tsx` + PANELS 挂行 | `invoke<ScreenshotHistoryItem[]>('screenshot_history_list')`；`invoke('screenshot_pins')`；`overlayController.startOverlay(mode:'shot'|'ocr')`（既有签名复用） | 无（DTO 以后端 wire.rs 现形为准，前端 types 镜像） | 命令既有，无权限变更 | `screenshotPanel_rendersHistoryRows_fromMockedInvoke`（正）；`screenshotPanel_emptyVsNoResult_twoCopy`（负：空库与搜索无果文案不同，00§4-4） | 实启冒烟：历史网格出真缩略图+点击再复制；vitest 二名绿 |
+| T-B0-3 OcrPanel | 新建 `src/modules/ocr/OcrPanel.tsx` + PANELS 挂行 | `invoke<OcrStatusDto>('ocr_engine_status')`；`invoke('ocr_recognize', { request: OcrRequest })`（commands/ocr.rs:10 实签：request 对象非裸 b64，含 source_task_id 回填语义）；复制走 `ocr_copy_text(text)` | 无 | 同 | `ocrPanel_engineCard_fieldsFromStatus`（正）；`ocrPanel_recognizeError_showsWhyEmpty`（负：引擎缺失时 EmptyState 说明原因+首动作） | 冒烟：选图识别出文本可复制；vitest 二名绿 |
+| T-B0-4 设置中心跟随 | `MainWorkbench.tsx:201` | `moduleId={activeModuleId}`（prop 传递，非硬编码字面量） | 无 | 各模块 schema 已在 host `register_schema`（config.rs:111） | `settingsCenter_followsActiveModule_screenshotAndProxy`（正：两模块各渲出自身表单字段）；`settingsCenter_moduleIdProp_noClipboardLiteral`（负例式静态断言） | 冒烟：切模块开设置见不同表单 |
+| T-B0-5 DeferredBadge | 新建 `src/components/DeferredBadge.tsx` | `export function DeferredBadge(props: { label: string; decisionRef: string }): JSX.Element`（outline Badge+Tooltip 指 DECISIONS） | 无 | 无 | `deferredBadge_tooltipCarriesDecisionRef`（正）；`deferredBadge_neverRendersAsEnabledButton`（负：不得出现可点击主按钮形态） | 首批挂点（录屏 D-08/Paddle D-08/每显示器 D-23/网盘 B6）渲染可见 |
+| T-B0-6 SUBNAV 通用化 | `src/layout/SubNav.tsx`（CLIP_GROUPS 硬编码处） | `SUBNAV: Record<ModuleId, SubNavSection[]>`，`SubNavSection = { group: string; items: { id; label; icon; badgeKey? }[] }`（panels/README 总则字面） | 无 | 无 | `subnavRegistry_coversAllModules`（正）；`subnav_clipboardGroupsMigrated_countsPreserved`（回归：剪切板现有分组/计数一项不丢） | 剪切板行为与迁移前逐项一致（快照断言） |
+
+实施提交切法：T-B0-1+6 同提交（注册表原子面）、2/3 各一、4+5 可并；每提交门禁全组。
 
 ## 4. B1 孤儿命令接线全表（后端已有 → UI 补入口）
 
@@ -89,6 +116,7 @@
 7. **Pre-Socks 双核协作（蓝本 §3.2 TUN 段）**：**登记为二期**（mihomo/xray 齐后另立小节），避免 B2 膨胀为 XL×2；D-29 决策 2 已注明 B2 范围。
 8. UI：ProxyPanel 顶部「内核」选择卡（版本/安装/切换，复用 kernel_install 通路按 core 参数化）+ 分流规则页 + 节点操作列 + 日志级别过滤。
 9. 权限面：全部新命令同步 `permissions/` + main capability（D-28 机制自动兜底）。
+10. **与 B9 合流（五审新增，防遗忘钩子）**：xray/mihomo 内核二进制与其 geo/rule-set 资产上线即注册进 `artifact-core` 注册表（[10 文档](10-artifact-auto-update.md) §3 占位行），禁止另写内核特例更新器；mihomo 系优先接通**内核原生** `geo-auto-update/geo-update-interval` 与 rule-provider `interval`（IR 的 rule/geo 段带该字段，由内核自刷），应用轨只兜底非内核托管者（sing-box 的 geoip.db/geosite.db、内核二进制本身）。
 
 验收：三内核配置生成 golden-file；换核 e2e（测试双驱动断言生命周期）；订阅解析含 5 类畸形负例； Clash YAML 投毒负例（JS 字段拒）；系统代理崩溃恢复回归不破（D-06 语义）。
 
@@ -147,3 +175,4 @@
 | B2 | 未开工 | — |
 | B3–B7 | 未开工 | — |
 | B8 | 方案待裁决 | — |
+| B9 | 未开工（码级任务书已立于 [10-artifact-auto-update.md](10-artifact-auto-update.md)，D-32 待登记） | 五审台账 92 |

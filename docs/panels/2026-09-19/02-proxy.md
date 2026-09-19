@@ -99,3 +99,16 @@
 | 3 | Windows **服务模式**：内核随服务开机起、TUN 恢复免 UAC（现仅"开机自启"开关） | clash-nyanpasu 痛点 | 重 | 触 D-13 提权边界清单评审后定档（B2 尾或 B8 裁决），评审前挂 DeferredBadge |
 | 4 | 本地覆写脚本：用户本地 JS 调订阅生成配置 | Clash Verge Rev | 中 | **默认关、仅本地文件、执行前变更 diff 确认**（防投毒延伸至脚本通道） |
 | 5 | 分应用代理可视化向导：从运行窗口列表挑选进程→生成 process 规则 + 场景预设 | Netch（维护状态待复核） | 轻 | §3-12 process 规则已列，本条只补 UI 拾取器；B2 节点/规则清单内 |
+
+## 9. 五审增补：内核与分流规则自动更新（用户点名，方案与验收全文在 [docs/impl/10-artifact-auto-update.md](../../impl/10-artifact-auto-update.md)，批次 B9，D-32 预留）
+
+| # | 条目 | 一句话设计 | 落点 |
+|---|------|-----------|------|
+| 1 | **sing-box 内核自动更新**（"看重的核心"第一行） | 日检 release→官方 checksum 校验→staged 先跑 `sing-box version` 健康→空闲窗口停核原子换装→起核失败自动回滚 .bak；策略三态 关/手动/自动（默认自动） | 10§4.3/§4.4；概览内核卡状态点（10§6） |
+| 2 | **geoip.db / geosite.db 自动更新** | 独立构件行（sing-geoip/sing-geosite 仓 date 版本），装到 `{appData}/proxy/geo/`，B2 配置 IR 的 geo 字段引用该目录 | 10§3 表行 3 |
+| 3 | **分流规则自动更新=订阅轨** | 订阅拉取读 `profile-update` 响应头得 interval（无头=永不自动）；到期自动刷新→解析→**偏离度门禁**（节点数变化≥50% 或清空→转人工确认，宁旧勿毒）→应用+活动记录；订阅编辑弹窗加"自动刷新：跟随订阅头/关闭/每 N 天" | 10§4.4；sub.rs `SubscriptionMeta` |
+| 4 | **手动下载兜底**（用户"或者手动下载之类的"） | `artifact_install(id, version?, allow_downgrade?)`：任意历史版本手输安装；降级必须显式标志+D-18 输入构件名确认 | 10§5 表 |
+| 5 | wintun 运行时 | 默认手动（更新极罕见、无官方校验文件→TOFU pin） | 10§3 表行 2 |
+| 6 | **与 B2 合流** | xray/mihomo 内核与其 geo/rule-set 一律注册进 artifact-core，禁写内核特例更新器；mihomo 优先接内核原生 `geo-auto-update`/rule-provider `interval`，应用轨只兜底 | 09 §5 第 10 条 |
+
+验收随 10§9（A1–A10），红线负例（镜像投毒/zip-slip/自动降级/aux 窗调 install）同文 §7；本批纯增量，不动 B2 的 IR 与驱动接口。
