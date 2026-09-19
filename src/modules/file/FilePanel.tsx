@@ -5,6 +5,13 @@ import {
   Text,
   Badge,
   Button,
+  Checkbox,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Input,
   Select,
   Table,
@@ -21,20 +28,29 @@ import {
   fileEnqueue,
   fileMkdir,
   fileOpsActive,
+  fileOpsPending,
   fileOpCancel,
+  fileOpDropPending,
   fileOpPause,
   fileOpResume,
   filePreview,
+  fileRenameApply,
+  fileRenameEntry,
+  fileRenamePlan,
   fileSearch,
   parseAppError,
   type ConflictItemDto,
   type ConflictPolicyDto,
   type FileEntryDto,
+  type FileOpKind,
   type OpProgressDto,
+  type PendingOpDto,
   type PreviewDto,
+  type RenameCaseDto,
+  type RenamePlanDto,
   type SearchResultDto,
 } from "../../ipc/client";
-import { reportError } from "../../stores/notifications";
+import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
@@ -114,6 +130,15 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
   },
   opRow: { display: "flex", alignItems: "center", gap: "8px" },
+  rnField: { display: "flex", flexDirection: "column", gap: "2px" },
+  rnPlanRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    minWidth: 0,
+    fontSize: tokens.fontSizeBase200,
+  },
+  rnPath: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "180px" },
   bar: { flex: 1, minWidth: "120px" },
   conflictBox: {
     border: `1px solid ${tokens.colorPaletteYellowBorder1}`,
@@ -155,6 +180,41 @@ const OP_KIND_LABEL: Record<string, string> = {
   extract: "解压",
 };
 
+/**
+ * 冲突原因前端推导（T-B1-5）：后端 conflict 是单一布尔、两种成因不可分辨
+ * （rename.rs:141-149 目标已存在 || 计划内重复），故"表内重复"由计划内同名
+ * 目标计数（>1）判出，其余冲突如实标"目标已存在"。键=from 路径。
+ */
+export function renameConflictReasons(plans: RenamePlanDto[]): Map<string, string> {
+  const targetCount = new Map<string, number>();
+  for (const p of plans) {
+    if (p.from === p.to) continue;
+    const k = p.to.toLowerCase();
+    targetCount.set(k, (targetCount.get(k) ?? 0) + 1);
+  }
+  const out = new Map<string, string>();
+  for (const p of plans) {
+    if (!p.conflict) continue;
+    out.set(p.from, (targetCount.get(p.to.toLowerCase()) ?? 0) > 1 ? "表内重复" : "目标已存在");
+  }
+  return out;
+}
+
+/**
+ * zip 目标路径推导：目标输入留空 → 当前目录\<主名>.zip；以 \ 结尾或裸盘符
+ * 视作目录拼自动名；其余按完整 zip 文件路径原样使用（run_compress 的 dst 是
+ * zip 文件本体而非目录，ops.rs:916）。
+ */
+export function zipTarget(cwd: string, dstInput: string, stem: string): string {
+  const d = dstInput.trim();
+  const name = `${stem}.zip`;
+  const base = cwd.replace(/\\+$/, "");
+  if (!d) return `${base}\\${name}`;
+  if (/\\$/.test(d)) return `${d}${name}`;
+  if (/^[A-Za-z]:$/.test(d)) return `${d}\\${name}`;
+  return d;
+}
+
 export default function FilePanel() {
   const styles = useStyles();
   const [cwd, setCwd] = useState<string | null>(null);
@@ -167,7 +227,7 @@ export default function FilePanel() {
   const [conflicts, setConflicts] = useState<ConflictItemDto[] | null>(null);
   // 冲突挂起的操作：srcs 一并暂存，避免决议时读到已变动的当前选中集（确认框按此计数）
   const [pendingSpec, setPendingSpec] = useState<{
-    kind: "copy" | "move";
+    kind: FileOpKind;
     dst: string;
     srcs: string[];
   } | null>(null);
@@ -186,6 +246,18 @@ export default function FilePanel() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
   const previewSeq = useRef(0);
+  // ---- T-B1-5 等待队列 + 批量重命名 ----
+  const [pending, setPending] = useState<PendingOpDto[]>([]);
+  const [rnOpen, setRnOpen] = useState(false);
+  const [rnTemplate, setRnTemplate] = useState("{name}{ext}");
+  const [rnRegex, setRnRegex] = useState("");
+  const [rnReplacement, setRnReplacement] = useState("");
+  const [rnCase, setRnCase] = useState<RenameCaseDto>("none");
+  const [rnStart, setRnStart] = useState("1");
+  const [rnBusy, setRnBusy] = useState(false);
+  const [rnPlans, setRnPlans] = useState<RenamePlanDto[] | null>(null);
+  const [rnErr, setRnErr] = useState<string | null>(null);
+  const [rnChecked, setRnChecked] = useState<Set<string>>(new Set());
 
   const applyError = useCallback((e: unknown, fallback: string) => {
     const err = parseAppError(e);
@@ -231,6 +303,19 @@ export default function FilePanel() {
     }
   }, []);
 
+  // 等待中（崩溃恢复的 pending_ops 记录，F2/docs/impl-01 S6.5）
+  const loadPending = useCallback(async () => {
+    try {
+      setPending(await fileOpsPending());
+    } catch (e) {
+      reportError(e, { context: "等待队列刷新失败", dedupeKey: "file-ops-pending", toast: false });
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPending();
+  }, [loadPending]);
+
   // operation.progress 事件驱动刷新（节流由后端保证 200ms）
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -247,6 +332,10 @@ export default function FilePanel() {
           ) {
             void refreshOps();
           }
+          // pending 行只在完成/失败/取消时被后端消费，终态事件顺带刷新等待队列
+          if (topic === "operation.done" || topic === "operation.failed") {
+            void loadPending();
+          }
         }),
       )
       .then((u) => {
@@ -261,7 +350,7 @@ export default function FilePanel() {
       cancelled = true;
       unlisten?.();
     };
-  }, [refreshOps]);
+  }, [refreshOps, loadPending]);
 
   const toggleSelect = (path: string) => {
     setSelected((prev) => {
@@ -329,7 +418,7 @@ export default function FilePanel() {
   };
 
   const enqueue = async (
-    kind: "copy" | "move" | "delete",
+    kind: FileOpKind,
     dst = "",
     policy: ConflictPolicyDto = "ask",
   ) => {
@@ -357,7 +446,8 @@ export default function FilePanel() {
       )
         return;
     }
-    const target = kind === "delete" ? dst : dstInput.trim();
+    // copy/move 的目标即用户输入；delete/compress/extract 由调用方算好经 dst 传入
+    const target = kind === "copy" || kind === "move" ? dstInput.trim() : dst;
     try {
       const res = await fileEnqueue({
         kind,
@@ -368,7 +458,7 @@ export default function FilePanel() {
       });
       if (res.conflicts.length > 0 && res.op_id === null) {
         setConflicts(res.conflicts);
-        setPendingSpec({ kind: kind as "copy" | "move", dst: target, srcs });
+        setPendingSpec({ kind, dst: target, srcs });
         return;
       }
       setError(null);
@@ -430,6 +520,153 @@ export default function FilePanel() {
       applyError(e, "操作控制失败");
     }
   };
+
+  const dropPending = async (p: PendingOpDto) => {
+    try {
+      const gone = await fileOpDropPending(p.op_id);
+      if (gone) notify("success", "已丢弃等待记录", p.op_id);
+      else notify("warn", "该等待记录已不存在", "可能刚被启动崩溃恢复消费");
+      void loadPending();
+    } catch (e) {
+      applyError(e, "丢弃等待记录失败");
+    }
+  };
+
+  // ---- T-B1-5 压缩 / 解压 / 行内重命名 ----
+  const doCompress = async () => {
+    if (!cwd || selected.size === 0) return;
+    const srcs = [...selected];
+    const base = srcs[0].split(/[\\/]/).filter(Boolean).pop() ?? "archive";
+    const stem = srcs.length === 1 ? base.replace(/\.[^.]+$/, "") || "archive" : "打包";
+    const target = zipTarget(cwd, dstInput, stem);
+    // 压缩不参与冲突预扫描（service.rs:117 仅 Copy|Move），dst 已存在会被整体重写 → D-18 确认点名
+    if (
+      !(await confirmAction({
+        title: "压缩为 zip",
+        impact: [`目标文件：${target}`, `共 ${srcs.length} 个条目：${namePreview(srcs)}`],
+        detail:
+          "目标 zip 若已存在会被整体重写（覆盖内容不进回收站）。压缩/移动的重名冲突预扫描互不适用，入队前请自行核对目标路径。",
+        confirmLabel: "入队压缩",
+      }))
+    )
+      return;
+    void enqueue("compress", target);
+  };
+
+  const doExtract = async () => {
+    if (!cwd || selected.size !== 1) {
+      setError("解压需且仅需选中 1 个压缩包（后端只取所选首个源）");
+      return;
+    }
+    const zip = [...selected][0];
+    if (!/\.zip$/i.test(zip)) {
+      setError("解压目前仅支持 zip 格式");
+      return;
+    }
+    const dst = dstInput.trim() || cwd;
+    if (
+      !(await confirmAction({
+        title: "解压",
+        impact: [`压缩包：${zip}`, `目标目录：${dst}`],
+        detail:
+          "包内条目以压缩包名目录归组释放；目标已有同名文件时自动重命名保留两者（后端的解压安全默认，不覆盖既有文件）。",
+        confirmLabel: "入队解压",
+      }))
+    )
+      return;
+    void enqueue("extract", dst, "rename");
+  };
+
+  // 行内单项重命名：复用「目标目录」输入框——纯名称视为当前目录内改名，含 \ 或盘符开头按完整路径
+  const doRenameOne = async () => {
+    if (!cwd || selected.size !== 1) return;
+    const from = [...selected][0];
+    const v = dstInput.trim();
+    if (!v) {
+      setError("请在「目标目录」输入框填写新名称或完整路径");
+      return;
+    }
+    const to = /^[A-Za-z]:/.test(v) || v.includes("\\") ? v : `${cwd.replace(/\\+$/, "")}\\${v}`;
+    try {
+      await fileRenameEntry(from, to);
+      notify(
+        "success",
+        "已重命名",
+        `${from.split(/[\\/]/).pop()} → ${to.split(/[\\/]/).pop()}`,
+      );
+      void loadDir(cwd);
+    } catch (e) {
+      applyError(e, "重命名失败");
+    }
+  };
+
+  // ---- 批量重命名 Dialog（F7：预览→勾选→应用，冲突条目后端兜底跳过）----
+  const openRename = () => {
+    setRnPlans(null);
+    setRnErr(null);
+    setRnOpen(true);
+  };
+
+  const doRenamePlan = async () => {
+    if (!cwd) return;
+    // 只交文件主名：显式 names 不做目录过滤（rename.rs:78-86），目录必须由前端挡下
+    const names = entries.filter((e) => selected.has(e.path) && !e.is_dir).map((e) => e.name);
+    if (selected.size > 0 && names.length === 0) {
+      setRnErr("所选条目全是目录：仅文件参与批量重命名");
+      return;
+    }
+    const parsed = Number.parseInt(rnStart, 10);
+    setRnBusy(true);
+    setRnErr(null);
+    setRnPlans(null);
+    try {
+      const plans = await fileRenamePlan(cwd, names, {
+        template: rnTemplate,
+        regex: rnRegex.trim() ? rnRegex : null,
+        replacement: rnReplacement,
+        case: rnCase,
+        start: Number.isNaN(parsed) || parsed < 0 ? 1 : parsed,
+      });
+      setRnPlans(plans);
+      // 默认只勾非冲突、非 no-op 条目（服务端对冲突条目也会再次跳过，双保险）
+      setRnChecked(new Set(plans.filter((p) => !p.conflict && p.from !== p.to).map((p) => p.from)));
+    } catch (e) {
+      const err = parseAppError(e);
+      setRnErr(err ? `${err.data.code}: ${err.data.message}` : "生成重命名预览失败");
+    } finally {
+      setRnBusy(false);
+    }
+  };
+
+  const doRenameApply = async () => {
+    if (!cwd || !rnPlans) return;
+    const checked = rnPlans.filter((p) => rnChecked.has(p.from));
+    if (checked.length === 0) {
+      setRnErr("未勾选任何可执行条目");
+      return;
+    }
+    try {
+      const n = await fileRenameApply(checked);
+      notify("success", "批量重命名完成", `已重命名 ${n} 项；冲突与未勾选条目未执行。`);
+      setRnOpen(false);
+      setRnPlans(null);
+      void loadDir(cwd);
+    } catch (e) {
+      const err = parseAppError(e);
+      setRnErr(err ? `${err.data.code}: ${err.data.message}` : "应用重命名失败");
+    }
+  };
+
+  const toggleRn = (from: string) => {
+    setRnChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(from)) next.delete(from);
+      else next.add(from);
+      return next;
+    });
+  };
+
+  const rnReasons = rnPlans ? renameConflictReasons(rnPlans) : null;
 
   const activeOps = ops.filter((p) =>
     ["Queued", "Running", "Paused"].includes(p.state),
@@ -504,6 +741,9 @@ export default function FilePanel() {
         <Button size="small" onClick={() => void doMkdir()}>
           新建
         </Button>
+        <Button size="small" onClick={openRename}>
+          批量重命名
+        </Button>
       </div>
 
       {/* 搜索结果条（F5）：加载/空查询不残留旧命中；降级必须显式标注 */}
@@ -569,6 +809,30 @@ export default function FilePanel() {
           onClick={() => void enqueue("delete")}
         >
           删除
+        </Button>
+        <Button
+          size="small"
+          appearance="secondary"
+          disabled={selected.size !== 1}
+          onClick={() => void doRenameOne()}
+        >
+          重命名
+        </Button>
+        <Button
+          size="small"
+          appearance="secondary"
+          disabled={selected.size === 0}
+          onClick={() => void doCompress()}
+        >
+          压缩为 zip
+        </Button>
+        <Button
+          size="small"
+          appearance="secondary"
+          disabled={selected.size !== 1}
+          onClick={() => void doExtract()}
+        >
+          解压
         </Button>
         <span style={{ flex: 1 }} />
         <InlineError text={error} />
@@ -639,6 +903,32 @@ export default function FilePanel() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* 等待中（F2 崩溃恢复记录：pending_ops 表，可丢弃） */}
+      {pending.length > 0 && (
+        <div className={styles.queue}>
+          <Text weight="semibold" size={200}>
+            等待中（未完成操作的崩溃恢复记录）
+          </Text>
+          {pending.map((p) => (
+            <div key={p.op_id} className={styles.opRow}>
+              <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
+              <Text size={200} className={styles.muted}>
+                {p.srcs[0]?.split(/[\\/]/).pop() ?? "（无源）"}
+                {p.srcs.length > 1 ? ` 等 ${p.srcs.length} 项` : ""}
+                {` → ${p.dst} · 断点文件 ${p.file_index} · ${fmtTime(p.created_ms)}`}
+              </Text>
+              <span style={{ flex: 1 }} />
+              <Button size="small" onClick={() => void dropPending(p)}>
+                丢弃
+              </Button>
+            </div>
+          ))}
+          <Text size={200} className={styles.muted}>
+            应用重启时以上条目会被自动断点续传；「丢弃」仅删除恢复记录，不影响已落盘文件。
+          </Text>
         </div>
       )}
 
@@ -757,6 +1047,133 @@ export default function FilePanel() {
           </Button>
         </div>
       )}
+
+      {/* 批量重命名 Dialog（F7：规则表单 → 预览表 → 勾选应用；冲突原因前端推导） */}
+      <Dialog open={rnOpen} onOpenChange={(_, d) => !d.open && setRnOpen(false)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>批量重命名</DialogTitle>
+            <DialogContent>
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <Text size={200} className={styles.muted}>
+                  仅文件，目录不参与。
+                  {selected.size === 0
+                    ? "未选中文件：将对当前目录全部文件生成计划。"
+                    : `已选 ${entries.filter((e) => selected.has(e.path) && !e.is_dir).length} 个文件参与。`}
+                </Text>
+                <div className={styles.rnField}>
+                  <Text size={200} className={styles.muted}>
+                    模板（变量仅 {"{name}"} {"{ext}"} {"{n}"} {"{n:0N}"}，N≤10）
+                  </Text>
+                  <Input
+                    size="small"
+                    aria-label="重命名模板"
+                    value={rnTemplate}
+                    onChange={(_, d) => setRnTemplate(d.value)}
+                  />
+                </div>
+                <div className={styles.rnField}>
+                  <Text size={200} className={styles.muted}>
+                    正则（作用于主名，留空不处理）
+                  </Text>
+                  <Input
+                    size="small"
+                    aria-label="重命名正则"
+                    value={rnRegex}
+                    onChange={(_, d) => setRnRegex(d.value)}
+                  />
+                </div>
+                <div className={styles.rnField}>
+                  <Text size={200} className={styles.muted}>
+                    替换串（$1 组引用）
+                  </Text>
+                  <Input
+                    size="small"
+                    aria-label="重命名替换串"
+                    value={rnReplacement}
+                    onChange={(_, d) => setRnReplacement(d.value)}
+                  />
+                </div>
+                <div className={styles.rnField}>
+                  <Text size={200} className={styles.muted}>
+                    大小写
+                  </Text>
+                  <Select
+                    size="small"
+                    aria-label="大小写转换"
+                    value={rnCase}
+                    onChange={(_, d) => setRnCase((d.value || "none") as RenameCaseDto)}
+                  >
+                    <option value="none">不转换</option>
+                    <option value="lower">全部小写</option>
+                    <option value="upper">全部大写</option>
+                  </Select>
+                </div>
+                <div className={styles.rnField}>
+                  <Text size={200} className={styles.muted}>
+                    序号起始值
+                  </Text>
+                  <Input
+                    size="small"
+                    type="number"
+                    aria-label="序号起始值"
+                    value={rnStart}
+                    onChange={(_, d) => setRnStart(d.value)}
+                    style={{ maxWidth: "100px" }}
+                  />
+                </div>
+                {rnErr && <InlineError text={rnErr} />}
+                {rnBusy && (
+                  <Text size={200} role="status" className={styles.muted}>
+                    正在生成预览…
+                  </Text>
+                )}
+                {rnPlans &&
+                  rnPlans.map((p) => (
+                    <div key={p.from} className={styles.rnPlanRow}>
+                      <Checkbox
+                        checked={rnChecked.has(p.from)}
+                        onChange={() => toggleRn(p.from)}
+                        aria-label={`选择 ${p.from}`}
+                      />
+                      <span className={styles.rnPath} title={p.from}>
+                        {p.from.split(/[\\/]/).pop()}
+                      </span>
+                      <span>→</span>
+                      <span className={styles.rnPath} title={p.to}>
+                        {p.to.split(/[\\/]/).pop()}
+                      </span>
+                      {p.from === p.to && <Badge appearance="outline">不变</Badge>}
+                      {rnReasons?.get(p.from) && (
+                        <Badge appearance="tint" color="warning">
+                          {rnReasons.get(p.from)}
+                        </Badge>
+                      )}
+                    </div>
+                  ))}
+                {rnPlans && rnPlans.length === 0 && (
+                  <Text size={200} className={styles.muted}>
+                    计划为 0 条
+                  </Text>
+                )}
+              </div>
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => void doRenamePlan()}>生成预览</Button>
+              <Button
+                appearance="primary"
+                disabled={!rnPlans || rnBusy}
+                onClick={() => void doRenameApply()}
+              >
+                应用（勾选 {rnChecked.size} 项）
+              </Button>
+              <Button appearance="subtle" onClick={() => setRnOpen(false)}>
+                关闭
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }
