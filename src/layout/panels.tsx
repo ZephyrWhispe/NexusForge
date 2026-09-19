@@ -51,13 +51,15 @@ function ModulePlaceholder({ moduleId, planDoc }: { moduleId: ModuleId; planDoc:
   );
 }
 
-function placeholderFor(moduleId: ModuleId, planDoc: string): PanelDef["panel"] {
+/** 供未来新模块在面板落地前显式挂占位（穷尽性由 Record 保证，禁默认兜底） */
+export function placeholderFor(moduleId: ModuleId, planDoc: string): PanelDef["panel"] {
   return function Placeholder() {
     return <ModulePlaceholder moduleId={moduleId} planDoc={planDoc} />;
   };
 }
 
 const ScreenshotPanel = lazy(() => import("../modules/screenshot/ScreenshotPanel"));
+const OcrPanel = lazy(() => import("../modules/ocr/OcrPanel"));
 const KvmPanel = lazy(() => import("../modules/kvm/KvmPanel"));
 const VaultPanel = lazy(() => import("../modules/vault/VaultPanel"));
 const FilePanel = lazy(() => import("../modules/file/FilePanel"));
@@ -79,7 +81,7 @@ export const PANELS: Record<ModuleId, PanelDef> = {
     panel: ScreenshotPanel,
     subtitle: "框选截取 · 贴图 · 历史（真缩略图 · 一键再复制）",
   },
-  ocr: { panel: placeholderFor("ocr", "10-ocr"), subtitle: "识别 · 清洗 · 回写" },
+  ocr: { panel: OcrPanel, subtitle: "识别 · 引擎状态 · 分行结果 · 一键复制" },
   proxy: {
     panel: ProxyPanel,
     subtitle: "sing-box 内核 · 系统代理/TUN · 订阅解析 · 崩溃自动还原",
