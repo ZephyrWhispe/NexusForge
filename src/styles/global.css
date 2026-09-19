@@ -1,3 +1,13 @@
+/* U1-4：透明窗口需要页面基底透明（Mica 由系统合成）。
+   必须在链接 CSS 内而非 index.html 内联 <style>：打包时 Tauri 会给静态 <style> 注入
+   nonce,使 style-src 变成 `'unsafe-inline' 'nonce-…'`,而 CSP 规范下出现 nonce 即让
+   'unsafe-inline' 失效,从而拒掉 Fluent UI(griffel) 运行时注入的无 nonce 样式。 */
+html,
+body {
+  background: transparent;
+  margin: 0;
+}
+
 /* 全局可访问性基线（UI-DEMO 承诺项）：系统"减少动效"偏好下关闭动画与过渡 */
 @media (prefers-reduced-motion: reduce) {
   *,

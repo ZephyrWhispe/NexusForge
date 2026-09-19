@@ -377,6 +377,41 @@ fn aux_windows_never_reach_main_only_commands() {
     );
 }
 
+/// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
+fn transparent_base_ok(css: &str) -> bool {
+    let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(idx) = norm.find("html, body {") else {
+        return false;
+    };
+    let block = match norm[idx..].split_once('}') {
+        Some((b, _)) => b,
+        None => return false,
+    };
+    block.contains("background: transparent") && block.contains("margin: 0")
+}
+
+#[test]
+fn global_css_carries_transparent_window_base() {
+    // D-28 发布后修复：页面基底透明规则从 index.html 内联 <style> 迁到链接 CSS。
+    // 内联 <style> 会让打包期 Tauri 给 style-src 注入 nonce,进而使 'unsafe-inline' 失效、
+    // 拒掉 Fluent UI 运行时注入样式（安装包 UI 全乱）。规则本身必须仍随 global.css 送达。
+    assert!(
+        !transparent_base_ok("body { margin: 0; }"),
+        "判定函数必须可否例"
+    );
+    assert!(
+        !transparent_base_ok("html, body { color: red; }"),
+        "缺声明应判否"
+    );
+    assert!(transparent_base_ok(
+        "html, body {\n background: transparent;\n margin: 0;\n}"
+    ));
+    assert!(
+        transparent_base_ok(&read("../src/styles/global.css")),
+        "global.css 必须携带 html,body 基底透明规则（U1-4，勿改回 index.html 内联 <style>）"
+    );
+}
+
 #[test]
 fn dead_permission_surface_is_trimmed() {
     let caps = load_capabilities();
