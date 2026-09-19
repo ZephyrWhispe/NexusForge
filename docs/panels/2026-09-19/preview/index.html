@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NexusForge UI 样张 · 2026-09-19（审核用静态预览）</title>
+<style>
+/* ============ tokens：00-spec §2/§9 的字面翻译 ============ */
+:root{
+  --bg-window:#F3F3F3; --bg-layer:#FBFBFB; --bg-card:#FFFFFF; --bg-card-secondary:#F9F9F9;
+  --stroke:#E5E5E5; --stroke-strong:#DEDEDE;
+  --txt-primary:#1A1A1A; --txt-secondary:#616161; --txt-tertiary:#8A8A8A; --txt-on-accent:#FFFFFF;
+  --accent:#005FB8; --accent-hover:#1A75CC; --accent-pressed:#004A94;
+  --danger:#C42B1C; --warning-bg:#FFF4CE; --warning-stroke:#9D5D00;
+  --success:#0F7B0F; --warning-fg:#9D5D00;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-6:24px;
+  --row-h:48px; --row-h-compact:44px; --row-h-2line:64px;
+  --font:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --font-mono:"Cascadia Code","Consolas",monospace;
+}
+/* type ramp（00§9-1）：caption12/16 body14/20 bodyStrong subtitle20/28 title28/36 */
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:#E8E8E8;color:var(--txt-primary);font-size:14px;line-height:20px}
+.reviewbar{position:sticky;top:0;z-index:50;background:#202020;color:#fff;padding:var(--sp-3) var(--sp-6);display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.reviewbar h1{font-size:16px;font-weight:600;margin-right:var(--sp-4)}
+.reviewbar a{color:#9CC9F5;text-decoration:none;font-size:13px;padding:6px 12px;border:1px solid #444;border-radius:16px}
+.reviewbar a:hover{background:#333}
+.screen{max-width:1352px;margin:var(--sp-6) auto;padding:0 var(--sp-4)}
+.caption{background:#FFFBEA;border:1px solid #E6D9A8;border-radius:8px;padding:var(--sp-3) var(--sp-4);margin-bottom:var(--sp-3)}
+.caption h2{font-size:14px;font-weight:600;margin-bottom:var(--sp-1)}
+.caption ul{margin-left:18px;color:var(--txt-secondary);font-size:13px}
+.window{width:1280px;max-width:100%;background:var(--bg-window);border:1px solid #CFCFCF;border-radius:8px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.12);margin-bottom:var(--sp-6)}
+/* titlebar 40（宿主壳） */
+.titlebar{height:40px;display:flex;align-items:center;padding:0 var(--sp-4);gap:var(--sp-3);background:var(--bg-window)}
+.titlebar .appname{font-size:12px;color:var(--txt-secondary)}
+.titlebar .tb-spacer{flex:1}
+.titlebar .tb-btn{width:36px;height:28px;display:flex;align-items:center;justify-content:center;color:var(--txt-secondary);border-radius:4px;font-size:12px}
+.shell{display:flex;height:740px}
+/* SubNav 190 */
+.subnav{width:190px;min-width:190px;background:var(--bg-window);border-right:1px solid var(--stroke);padding:var(--sp-2) var(--sp-1);display:flex;flex-direction:column}
+.subnav .modname{font-size:13px;font-weight:600;padding:var(--sp-2) 12px;color:var(--txt-primary)}
+.subnav .grp{font-size:11px;color:var(--txt-tertiary);padding:var(--sp-2) 12px var(--sp-1)}
+.subnav .item{height:34px;display:flex;align-items:center;gap:var(--sp-2);padding:0 12px;border-radius:4px;color:var(--txt-primary);font-size:13px;cursor:default;position:relative}
+.subnav .item .ic{width:16px;text-align:center;color:var(--txt-secondary);font-size:13px}
+.subnav .item .cnt{margin-left:auto;font-size:11px;color:var(--txt-tertiary)}
+.subnav .item:hover{background:rgba(0,0,0,.04)}
+.subnav .item.sel{background:var(--bg-card);border:1px solid var(--stroke);font-weight:600}
+.subnav .item.sel::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:2px;background:var(--accent)}
+.subnav .foot{margin-top:auto}
+/* content column */
+.content{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg-layer)}
+.panel-header{height:48px;min-height:48px;display:flex;align-items:center;gap:var(--sp-3);padding:0 var(--sp-5,20px) 0 var(--sp-4);border-bottom:1px solid transparent}
+.panel-header h3{font-size:20px;line-height:28px;font-weight:600}
+.panel-header .ctx{font-size:12px;color:var(--txt-secondary)}
+.panel-header .ph-spacer{flex:1}
+/* buttons */
+.btn{height:32px;padding:0 var(--sp-3);border-radius:4px;border:1px solid var(--stroke-strong);background:var(--bg-card);color:var(--txt-primary);font-size:13px;font-family:var(--font);display:inline-flex;align-items:center;gap:6px}
+.btn:hover{background:var(--bg-card-secondary)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--txt-on-accent)}
+.btn.primary:hover{background:var(--accent-hover)}
+.btn.subtle{border-color:transparent;background:transparent}
+.btn.subtle:hover{background:rgba(0,0,0,.05)}
+.btn.danger{border-color:var(--danger);color:var(--danger);background:transparent}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+/* DataToolbar 40 */
+.toolbar{height:40px;min-height:40px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-4)}
+.input{height:32px;border:1px solid var(--stroke-strong);border-bottom-width:2px;border-bottom-color:#8A8A8A;border-radius:4px;background:var(--bg-card);padding:0 var(--sp-3);font-size:13px;font-family:var(--font);color:var(--txt-primary)}
+.input.xl{flex:1;min-width:0;max-width:420px}
+.input.s{width:120px}.input.m{width:240px}.input.l{width:360px}
+.chip{height:26px;padding:0 10px;border-radius:13px;border:1px solid var(--stroke-strong);background:var(--bg-card);font-size:12px;display:inline-flex;align-items:center;gap:6px;color:var(--txt-primary)}
+.chip.on{background:#E7F1FB;border-color:var(--accent);color:var(--accent)}
+.chip .x{color:var(--txt-tertiary)}
+.tb-spacer{flex:1}
+/* list table */
+.listbody{flex:1;overflow-y:auto;background:var(--bg-card);border-top:1px solid var(--stroke)}
+.thead{height:36px;display:flex;align-items:center;gap:var(--sp-3);padding:0 var(--sp-4);background:var(--bg-card-secondary);border-bottom:1px solid var(--stroke);font-size:12px;color:var(--txt-secondary)}
+.row{height:var(--row-h);display:flex;align-items:center;gap:var(--sp-3);padding:0 var(--sp-4);border-bottom:1px solid #F0F0F0;font-size:13px}
+.row:hover{background:#FAFAFA}
+.row.sel{background:#E7F1FB;outline:1px solid #BFDBF5}
+.row .c-ic{width:24px;height:24px;border-radius:4px;background:#EFF3F8;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--accent)}
+.row .grow{flex:1;min-width:0}
+.row .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .sub{font-size:11px;color:var(--txt-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.num{width:72px;text-align:right;font-variant-numeric:tabular-nums}
+.date{width:120px;text-align:right;color:var(--txt-secondary);font-variant-numeric:tabular-nums}
+.badge{height:20px;padding:0 8px;border-radius:4px;background:#EFEFEF;color:var(--txt-secondary);font-size:11px;display:inline-flex;align-items:center}
+.badge.u{background:#E7F1FB;color:var(--accent)}
+.badge.warn{background:var(--warning-bg);color:var(--warning-fg)}
+.badge.err{background:#FDF3F2;color:var(--danger)}
+.badge.ok{background:#E6F4E6;color:var(--success)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--success)}.dot.y{background:#9D5D00}.dot.r{background:var(--danger)}.dot.n{background:#BDBDBD}
+.rowact{display:flex;gap:var(--sp-1);opacity:0}
+.row:hover .rowact{opacity:1}
+.iconbtn{width:28px;height:28px;border-radius:4px;border:1px solid transparent;background:transparent;display:inline-flex;align-items:center;justify-content:center;font-size:14px;color:var(--txt-secondary)}
+.iconbtn:hover{background:rgba(0,0,0,.05)}
+/* footer 32 */
+.footerbar{height:32px;min-height:32px;display:flex;align-items:center;gap:var(--sp-3);padding:0 var(--sp-4);border-top:1px solid var(--stroke);font-size:12px;color:var(--txt-secondary);background:var(--bg-layer)}
+.footerbar .f-spacer{flex:1}
+/* selection action bar (replaces toolbar when rows selected) */
+.selbar{height:40px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-4);background:#E7F1FB;border-bottom:1px solid #BFDBF5;font-size:13px}
+/* checkbox */
+.cb{width:16px;height:16px;border-radius:3px;border:1px solid #6B6B6B;background:var(--bg-card);display:inline-flex;align-items:center;justify-content:center;font-size:11px;color:#fff}
+.cb.on{background:var(--accent);border-color:var(--accent)}
+/* switch */
+.sw{width:40px;height:20px;border-radius:10px;background:var(--accent);position:relative;display:inline-block;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:21px;width:14px;height:14px;border-radius:50%;background:#fff}
+.sw.off{background:transparent;border:1px solid #767676}
+.sw.off::after{top:2px;left:2px;width:14px;height:14px;background:#767676}
+/* cards & settings */
+.stack{flex:1;overflow-y:auto;padding:var(--sp-4) 0}
+.centercol{max-width:1040px;margin:0 auto;padding:0 20px;display:flex;flex-direction:column;gap:var(--sp-6)}
+.sec{display:flex;flex-direction:column;gap:var(--sp-2)}
+.sec h4{font-size:14px;font-weight:600;margin-top:var(--sp-2)}
+.sec .desc{font-size:12px;color:var(--txt-secondary)}
+.card{background:var(--bg-card);border:1px solid var(--stroke);border-radius:6px}
+.settingrow{min-height:var(--row-h-2line);display:flex;align-items:center;gap:var(--sp-4);padding:var(--sp-3) var(--sp-4);border-bottom:1px solid var(--stroke)}
+.settingrow:last-child{border-bottom:none}
+.settingrow .sl{flex:1;min-width:0}
+.settingrow .sl .t{font-size:14px}
+.settingrow .sl .d{font-size:12px;color:var(--txt-secondary);margin-top:2px}
+.settingrow .ctl{flex:none;display:flex;align-items:center;gap:var(--sp-3)}
+.expander{background:var(--bg-card);border:1px solid var(--stroke);border-radius:6px;margin-bottom:var(--sp-2)}
+.exp-head{min-height:var(--row-h);display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4)}
+.exp-body{border-top:1px solid var(--stroke);padding:var(--sp-3) var(--sp-4) var(--sp-4) 48px;background:var(--bg-card-secondary);display:flex;flex-direction:column;gap:var(--sp-2)}
+/* radio profile cards */
+.profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-3)}
+.pcard{background:var(--bg-card);border:1px solid var(--stroke);border-radius:6px;padding:var(--sp-4);display:flex;flex-direction:column;gap:var(--sp-2)}
+.pcard.on{border:1px solid var(--accent);outline:1px solid var(--accent);background:#F7FBFF}
+.pcard .ph{display:flex;align-items:center;gap:var(--sp-2);font-weight:600;font-size:14px}
+.pcard .radio{width:16px;height:16px;border-radius:50%;border:1px solid #767676;display:inline-flex;align-items:center;justify-content:center;flex:none}
+.pcard.on .radio{border-color:var(--accent)}
+.pcard.on .radio::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent)}
+.pcard ul{margin-left:16px;font-size:12px;color:var(--txt-secondary);line-height:18px}
+/* banner / danger zone */
+.banner{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);border-radius:6px;font-size:13px;margin-bottom:var(--sp-3)}
+.banner.state{background:var(--bg-card);border:1px solid var(--stroke)}
+.banner.warn{background:var(--warning-bg);border:1px solid #E6D9A8}
+.dangerzone{border:1px solid #E3B23C;background:#FFFBF0;border-radius:8px;padding:var(--sp-4);display:flex;flex-direction:column;gap:var(--sp-3)}
+.dangerzone h4{color:var(--warning-fg);display:flex;align-items:center;gap:var(--sp-2);font-size:14px}
+.kbd{font-family:var(--font-mono);font-size:12px;border:1px solid var(--stroke-strong);border-bottom-width:2px;border-radius:4px;padding:1px 6px;background:#fff}
+.confirm-input{width:240px}
+/* drawer for master-detail demo */
+.detailwrap{flex:1;display:flex;min-width:0}
+.detaildrawer{width:400px;min-width:400px;background:var(--bg-card);border-left:1px solid var(--stroke);display:flex;flex-direction:column;padding:var(--sp-4);gap:var(--sp-3)}
+.detaildrawer h5{font-size:16px;font-weight:600}
+.dd-block{border:1px solid var(--stroke);border-radius:6px;padding:var(--sp-3);background:var(--bg-card-secondary);font-size:12px;color:var(--txt-secondary);display:flex;flex-direction:column;gap:var(--sp-1)}
+.dd-meta{display:flex;justify-content:space-between;font-size:12px}
+.dd-actions{margin-top:auto;display:flex;justify-content:flex-end;gap:var(--sp-2);align-items:center}
+.hr-v{width:1px;height:20px;background:var(--stroke-strong)}
+.note{font-size:11px;color:var(--txt-tertiary)}
+/* dropdown mock (item overflow menu) */
+.menu{position:relative}
+.menu-pop{position:absolute;right:0;top:34px;background:var(--bg-card);border:1px solid var(--stroke);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.12);padding:var(--sp-1);min-width:180px;z-index:5}
+.menu-pop .mi{height:32px;display:flex;align-items:center;padding:0 var(--sp-3);border-radius:4px;font-size:13px}
+.menu-pop .mi:hover{background:rgba(0,0,0,.04)}
+.menu-pop .sep{height:1px;background:var(--stroke);margin:var(--sp-1) 0}
+.progress{height:4px;border-radius:2px;background:#E0E0E0;overflow:hidden;flex:1}
+.progress>div{height:100%;background:var(--accent)}
+.tabbar{height:36px;display:flex;align-items:flex-end;gap:var(--sp-1);padding:0 var(--sp-4);border-bottom:1px solid var(--stroke)}
+.tab{height:30px;padding:0 var(--sp-3);font-size:13px;display:flex;align-items:center;border-radius:4px 4px 0 0;color:var(--txt-secondary)}
+.tab.on{background:var(--bg-card);border:1px solid var(--stroke);border-bottom-color:var(--bg-card);font-weight:600;color:var(--txt-primary)}
+</style>
+</head>
+<body>
+
+<div class="reviewbar">
+  <h1>NexusForge UI 样张 · 静态预览（审核用，非应用代码）</h1>
+  <a href="#s1">① 主工作台骨架·剪切板</a>
+  <a href="#s2">② 系统·软件与卸载</a>
+  <a href="#s3">③ 系统·更新管控(新功能面)</a>
+  <a href="#s4">④ 设置页规范样例</a>
+  <a href="#s5">⑤ 代理·节点与分流规则</a>
+  <a href="../00-ui-layout-spec.md">规范原文 00-spec</a>
+</div>
+
+<!-- ======================= S1 主工作台骨架 ======================= -->
+<section class="screen" id="s1">
+  <div class="caption">
+    <h2>① 主工作台骨架（00§1 全条款示范：SubNav 190 / PanelHeader 48 / DataToolbar 40 / 唯一滚动主体 / Footer 32）</h2>
+    <ul>
+      <li>行高 48、数字右靠 tabular、长文本 ellipsis 不折行（§2/§9-3）；行 hover 才现操作钮且 ≤3+"…"（§3）。</li>
+      <li>master-detail：选中即更新右侧详情抽屉，无"点行再打开"两步（§9-8）；空搜索≠空库两文案（§4-4）。</li>
+      <li>禁用钮带 tooltip 原因（§4-2，见"钉图"示例）；对话框按钮序 [取消][主] 主恒最右（§3）。</li>
+    </ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">剪切板</div>
+        <div class="grp">浏览</div>
+        <div class="item"><span class="ic">◧</span>概览</div>
+        <div class="item sel"><span class="ic">≣</span>历史记录<span class="cnt">1,204</span></div>
+        <div class="item"><span class="ic">⇅</span>粘贴堆栈<span class="cnt">3</span></div>
+        <div class="grp">分组</div>
+        <div class="item"><span class="ic">★</span>收藏<span class="cnt">56</span></div>
+        <div class="item"><span class="ic">▤</span>代码片段<span class="cnt">12</span></div>
+        <div class="item"><span class="ic">🔒</span><span style="font-family:var(--font)">加密条目</span><span class="cnt">7</span></div>
+        <div class="foot">
+          <div class="item"><span class="ic">⚙</span>设置</div>
+        </div>
+      </div>
+      <div class="content">
+        <div class="panel-header">
+          <h3>历史记录</h3><span class="ctx">捕获开启 · 存储 212 MB / 上限 512 MB</span>
+          <span class="ph-spacer"></span>
+          <button class="btn subtle" title="打开 QuickPanel 位置说明">☰ 面板位置：跟随鼠标</button>
+          <button class="btn primary">＋ 手动录入</button>
+        </div>
+        <div class="toolbar">
+          <input class="input xl" placeholder="搜索内容（支持 group: / type: 前缀）">
+          <span class="chip on">类型：文本 <span class="x">✕</span></span>
+          <span class="chip">近 7 天</span>
+          <span class="chip">已加密 ▾</span>
+          <span class="tb-spacer"></span>
+          <button class="btn">已选 2 · 加入收藏</button>
+          <button class="btn subtle">排序：时间 ▾</button>
+        </div>
+        <div class="detailwrap">
+          <div class="listbody" style="flex:1;min-width:0">
+            <div class="thead"><span style="width:16px"></span><span class="grow">内容</span><span style="width:88px">来源</span><span class="num" style="width:72px">字符数</span><span class="date">时间</span><span style="width:60px"></span></div>
+            <div class="row"><span class="cb"></span><div class="grow"><div class="t">cargo clippy --workspace --all-targets -- -D warnings</div><div class="sub">代码 · 组：终端常用</div></div><span class="badge">WindowsTerminal</span><span class="num">62</span><span class="date">今天 21:47</span><span class="rowact"><span class="iconbtn" title="粘贴">⎘</span><span class="iconbtn" title="收藏">☆</span><span class="iconbtn" title="更多">⋯</span></span></div>
+            <div class="row sel"><span class="cb on">✓</span><div class="grow"><div class="t">https://learn.microsoft.com/windows/apps/design/app-settings/</div><div class="sub">链接 · 浏览器标题：Guidelines for app settings</div></div><span class="badge">msedge</span><span class="num">67</span><span class="date">今天 21:02</span><span class="rowact"><span class="iconbtn" title="粘贴">⎘</span><span class="iconbtn" title="收藏">★</span><span class="iconbtn" title="更多">⋯</span></span></div>
+            <div class="row"><span class="cb"></span><div class="grow"><div class="t">sk_live_51H…（敏感条目已加密）</div><div class="sub">密钥形态 · 默认掩码显示，点击揭示</div></div><span class="badge warn">敏感·加密</span><span class="num">•••</span><span class="date">今天 19:30</span><span class="rowact"><span class="iconbtn" title="粘贴">⎘</span><span class="iconbtn" title="揭示">👁</span><span class="iconbtn" title="更多">⋯</span></span></div>
+            <div class="row"><span class="cb"></span><div class="grow"><div class="t">截图 2026-09-19 20-11.png</div><div class="sub">图片 · 1920×1080 · 来自 截图模块</div></div><span class="badge u">图片</span><span class="num">—</span><span class="date">今天 20:11</span><span class="rowact"><span class="iconbtn" title="预览">▣</span><span class="iconbtn" title="钉图" disabled style="opacity:.4">📌</span><span class="iconbtn" title="更多">⋯</span></span></div>
+            <div class="row"><span class="cb"></span><div class="grow"><div class="t">192.168.1.10:49820</div><div class="sub">文本 · 自动分类：地址</div></div><span class="badge">explorer</span><span class="num">19</span><span class="date">今天 18:26</span><span class="rowact"><span class="iconbtn" title="粘贴">⎘</span><span class="iconbtn" title="收藏">☆</span><span class="iconbtn" title="更多">⋯</span></span></div>
+            <div class="row"><span class="cb"></span><div class="grow"><div class="t">"排版方案与二审补充（2026-09-19 复审）" 段落，共 1,842 字——正文预览首行…</div><div class="sub">文本 · 组：写作</div></div><span class="badge">Code</span><span class="num">1,842</span><span class="date">今天 17:54</span><span class="rowact"><span class="iconbtn" title="粘贴">⎘</span><span class="iconbtn" title="收藏">☆</span><span class="iconbtn" title="更多">⋯</span></span></div>
+          </div>
+          <div class="detaildrawer">
+            <h5>详情 · 今天 21:02</h5>
+            <div class="dd-meta"><span>来源 <span class="badge">msedge</span></span><span>类型 <span class="badge u">链接</span></span></div>
+            <div class="dd-block"><div style="color:var(--txt-primary);word-break:break-all;font-family:var(--font-mono)">https://learn.microsoft.com/windows/apps/design/app-settings/</div></div>
+            <div class="dd-block"><b style="color:var(--txt-primary);font-size:12px">识别信息</b>URL · https · learn.microsoft.com</div>
+            <div class="dd-block"><b style="color:var(--txt-primary);font-size:12px">关联</b>同会话共 4 条 · 点此过滤</div>
+            <div class="dd-actions">
+              <button class="btn danger">删除</button><span class="hr-v"></span>
+              <button class="btn">转为待办</button>
+              <button class="btn primary">粘贴</button>
+            </div>
+          </div>
+        </div>
+        <div class="footerbar"><span>2 / 共 1,204（筛选态）</span><span class="f-spacer"></span><span>已选 2 · 共 129 字符</span><span>虚拟滚动 60fps</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S2 系统·软件与卸载 ======================= -->
+<section class="screen" id="s2">
+  <div class="caption">
+    <h2>② 系统管理 · 软件（卸载工作台）——07-sys §8.1 "软件拆三节"</h2>
+    <ul>
+      <li>双栈已装列表（注册表+UWP/MSIX+包源角标），"最近安装"高亮（Geek 借鉴）；多选触发替换式操作条而非叠加（04-file 同语言）。</li>
+      <li>残留扫描结果按置信度分组，Bad 组默认不勾且带 tooltip（BCU 纪律 = 安全网②）；卸载钮为 primary，强制卸载沉入 destructive 分隔区。</li>
+      <li>SubNav 呈现新增的 更新管控/工具箱 两项（样张③）。</li>
+    </ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">系统管理</div>
+        <div class="item"><span class="ic">◧</span>概览</div>
+        <div class="item"><span class="ic">▦</span>进程</div>
+        <div class="item"><span class="ic">↥</span>启动与恢复</div>
+        <div class="item"><span class="ic">◔</span>存储与清理</div>
+        <div class="item sel"><span class="ic">▣</span>软件<span class="cnt">↑3</span></div>
+        <div class="item"><span class="ic">⟳</span>更新管控</div>
+        <div class="item"><span class="ic">⚒</span>工具箱</div>
+        <div class="item"><span class="ic">✎</span>系统调整</div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span>设置</div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header">
+          <h3>软件</h3><span class="ctx">已装 142 · 可升级 3 · 残留待理 0</span>
+          <span class="ph-spacer"></span>
+          <button class="btn">在线搜索并安装</button>
+          <button class="btn primary">扫描已装项残留</button>
+        </div>
+        <div class="toolbar">
+          <div class="tabbar" style="border:none;padding:0;height:40px;align-items:center">
+            <span class="tab on">已装 (142)</span><span class="tab">卸载队列 (1)</span><span class="tab">残留清理 (24)</span><span class="tab">源管理</span>
+          </div>
+          <span class="tb-spacer"></span>
+          <input class="input" style="width:240px" placeholder="按名称过滤">
+          <span class="chip">源：全部 ▾</span>
+        </div>
+        <div class="selbar"><span class="cb on">✓</span><b>已选 3 项</b><span class="note">批量卸载将逐个执行；卸载器冲突会自动串行（BCU 心智）</span><span class="tb-spacer"></span><button class="btn subtle">取消选择</button><button class="btn primary">卸载（3）</button></div>
+        <div class="listbody">
+          <div class="thead"><span style="width:16px"></span><span class="grow">名称</span><span style="width:96px">源</span><span style="width:100px">版本</span><span style="width:88px">大小</span><span class="date">安装时间</span><span style="width:64px">状态</span><span style="width:60px"></span></div>
+          <div class="row sel"><span class="cb on">✓</span><div class="grow"><div class="t">GIMP 2.99</div><div class="sub">注册表 · C:\Program Files\GIMP 2.99</div></div><span class="badge">winget</span><span style="width:100px;font-family:var(--font-mono);font-size:12px">2.99.18</span><span style="width:88px;text-align:right;font-variant-numeric:tabular-nums">412 MB</span><span class="date">2026-08-02</span><span><span class="dot y" title="有可用更新"></span> <span class="badge warn">可升级</span></span><span class="rowact"><span class="iconbtn" title="升级">⟳</span><span class="iconbtn" title="打开位置">📁</span><span class="iconbtn" title="更多">⋯</span></span></div>
+          <div class="row sel"><span class="cb on">✓</span><div class="grow"><div class="t">OpenShot 编辑器</div><div class="sub">注册表 · C:\Program Files\OpenShot</div></div><span class="badge">choco</span><span style="width:100px;font-family:var(--font-mono);font-size:12px">3.1.1</span><span style="width:88px;text-align:right;font-variant-numeric:tabular-nums">289 MB</span><span class="date">2026-07-21</span><span><span class="badge">最新</span></span><span class="rowact"><span class="iconbtn" title="打开位置">📁</span><span class="iconbtn" title="更多">⋯</span></span></div>
+          <div class="row sel"><span class="cb on">✓</span><div class="grow"><div class="t">HoloLens 远程协助（内置）</div><div class="sub">UWP/MSIX · 系统内置包</div></div><span class="badge u">Store</span><span style="width:100px;font-family:var(--font-mono);font-size:12px">—</span><span style="width:88px;text-align:right;font-variant-numeric:tabular-nums">58 MB</span><span class="date">随系统</span><span><span class="badge err">受保护</span></span><span class="rowact"><span class="iconbtn" title="更多">⋯</span></span></div>
+          <div class="row"><span class="cb"></span><div class="grow"><div class="t">PowerToys 0.94 <span class="badge ok">最近安装</span></div><div class="sub">注册表 · C:\Program Files\PowerToys</div></div><span class="badge">winget</span><span style="width:100px;font-family:var(--font-mono);font-size:12px">0.94.0</span><span style="width:88px;text-align:right;font-variant-numeric:tabular-nums">398 MB</span><span class="date">2026-09-18</span><span><span class="badge">最新</span></span><span class="rowact"><span class="iconbtn" title="打开位置">📁</span><span class="iconbtn" title="更多">⋯</span></span></div>
+          <div class="row"><span class="cb"></span><div class="grow"><div class="t">某损坏的程序</div><div class="sub">卸载器缺失 · 需"手动卸载"（列文件+注册表键勾选）</div></div><span class="badge">注册表</span><span style="width:100px;font-family:var(--font-mono);font-size:12px">?</span><span style="width:88px;text-align:right;font-variant-numeric:tabular-nums">—</span><span class="date">2024-11-03</span><span><span class="badge err">卸载器损坏</span></span><span class="rowact"><span class="iconbtn" title="强制卸载（危险区）" style="color:var(--danger)">⚠</span><span class="iconbtn" title="更多">⋯</span></span></div>
+        </div>
+        <div class="footerbar"><span>勾选任意项后可批量卸载；卸载完成后自动残留扫描（默认只勾 Good 置信度以上）</span><span class="f-spacer"></span><span>已选 3 · 共 759 MB</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S3 更新管控 ======================= -->
+<section class="screen" id="s3">
+  <div class="caption">
+    <h2>③ 系统管理 · 更新管控（新功能面，07-sys §8.1/§8.4：档位卡 → 细调 SwitchSetting → 隐藏更新 → 危险区）</h2>
+    <ul>
+      <li>页头常驻"当前生效状态"回读横幅（Get Installed Tweaks 思想：显示系统实态，非本工具最后意图）。</li>
+      <li>档位三选=互斥大卡（§3 枚举 ≤5 用卡片不用下拉）；数值上限来自 MS 官方策略域（暂停≤35 天、质量 0–35、特性 0–365）。</li>
+      <li>危险区黄边容器：ExpertGate 关闭时<b>整容器不渲染</b>；开启后"彻底禁用"需输入确认词「禁止更新」四词才点亮红钮（§4-2、D-18）；banner 只承载状态告警、破坏动作恒 ConfirmDialog（§9-7）。</li>
+    </ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">系统管理</div>
+        <div class="item"><span class="ic">◧</span>概览</div>
+        <div class="item"><span class="ic">▦</span>进程</div>
+        <div class="item"><span class="ic">↥</span>启动与恢复</div>
+        <div class="item"><span class="ic">◔</span>存储与清理</div>
+        <div class="item"><span class="ic">▣</span>软件<span class="cnt">↑3</span></div>
+        <div class="item sel"><span class="ic">⟳</span>更新管控</div>
+        <div class="item"><span class="ic">⚒</span>工具箱</div>
+        <div class="item"><span class="ic">✎</span>系统调整</div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span>设置</div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header">
+          <h3>更新管控</h3><span class="ctx">WUA API 在线 · 服务 wuauserv 运行中</span>
+          <span class="ph-spacer"></span>
+          <button class="btn">检查更新</button>
+          <button class="btn primary">重新读取生效状态</button>
+        </div>
+        <div class="stack">
+          <div class="centercol">
+            <div class="banner state"><span class="dot g"></span><b>当前生效（回读）：推荐档</b><span>NoAutoUpdate=1 · 特性延迟 365 · 质量延迟 4 · 驱动排除=开 · 最近安装 2026-09-09</span><span class="tb-spacer"></span><span class="note">值由系统回读，与本页最后操作无关</span></div>
+
+            <div class="sec">
+              <h4>档位（互斥）</h4>
+              <div class="desc">三档=一组策略键集合的精确写入/删除（WinUtil Profiles 范式；写前自动建还原点——工具箱设置）</div>
+              <div class="profiles">
+                <div class="pcard"><div class="ph"><span class="radio"></span>Windows 默认</div><ul><li>删除全部策略键，恢复原生行为</li><li>更新服务与计划任务恢复</li></ul></div>
+                <div class="pcard on"><div class="ph"><span class="radio"></span>推荐 · 延迟但安全</div><ul><li>特性更新延迟 365 天 / 质量 4 天</li><li>质量更新排除驱动（驱动自己管）</li><li>登录不自动重启</li></ul><span class="badge u">生效中</span></div>
+                <div class="pcard"><div class="ph"><span class="radio"></span>严格 · 完全手动</div><ul><li>NoAutoUpdate=1 + AUOptions=1（通知安装）</li><li>交付优化 BITS 节流</li></ul><span class="badge warn">需管理员</span></div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <h4>细调</h4>
+              <div class="card">
+                <div class="settingrow"><div class="sl"><div class="t">暂停更新到日期</div><div class="d">官方上限 35 天；到期自动恢复，本工具会在活动流提醒</div></div><div class="ctl"><input class="input s" value="2026-10-19"><button class="btn">暂停</button></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">功能/特性更新延迟</div><div class="d">0–365 天（策略域即校验域，越界拒绝）</div></div><div class="ctl"><input class="input s" value="365" style="width:160px"><span class="note">天</span></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">质量更新延迟</div><div class="d">0–35 天</div></div><div class="ctl"><input class="input s" value="4" style="width:160px"><span class="note">天</span></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">驱动更新排除</div><div class="d">ExcludeWUDriversInQualityUpdate=1 + DriverSearching=Disabled（驱动交给设备管理器/厂商工具）</div></div><div class="ctl"><span class="sw"></span></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">按流量计费连接</div><div class="d">Wi-Fi 以太网都标为计量，更新仅连 Wi-Fi 时下载（低风险纯开关）</div></div><div class="ctl"><span class="sw off"></span></div></div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <h4>隐藏 / 恢复单个更新</h4>
+              <div class="banner warn"><b>诚实说明：</b>隐藏依赖组策略例外项；系统的 WaaSMedicSvc（更新自愈服务）可能自行恢复。若需绝对不装，请配合上方"严格档"使用。<span class="tb-spacer"></span><button class="btn">搜索可用更新</button></div>
+              <div class="card">
+                <div class="row" style="border-bottom:1px solid var(--stroke)"><div class="grow"><div class="t">KB5046633 · Windows 11 24H2 累积更新</div><div class="sub">质量更新 · 2026-09-10 · 已安装（可在历史回滚）</div></div><span class="badge ok">已安装</span><span class="hr-v"></span><button class="btn danger">回滚…</button></div>
+                <div class="row"><div class="grow"><div class="t">KB5048945 · .NET Framework 12.1</div><div class="sub">可选更新 · 未安装</div></div><span class="badge err">已隐藏</span><span class="hr-v"></span><button class="btn">恢复显示</button></div>
+              </div>
+            </div>
+
+            <div class="dangerzone">
+              <h4>⚠ 危险区 · 需专家模式</h4>
+              <div class="desc">关闭专家模式时此区完全不渲染。开启即代表你理解：禁用更新会同时影响 Microsoft Store、语音输入、以及一切安全更新的自动到达。</div>
+              <div class="settingrow" style="border-bottom:1px solid var(--stroke)"><div class="sl"><div class="t">启用专家模式</div><div class="d">解锁本区全部操作；每次进入本区都会重新显示副作用清单</div></div><div class="ctl"><span class="sw"></span></div></div>
+              <div class="expander">
+                <div class="exp-head"><div class="sl"><div class="t">彻底禁用更新服务（含 WaaSMedicSvc 屏蔽与防回改锁）</div><div class="d">停并禁用 wuauserv / USO / BITS / WaaSMedicSvc 并禁用相关计划任务（WinUtil Advanced disable 同族）</div></div><div class="ctl"><button class="btn danger" title="请先在下方输入确认词">禁用</button></div></div>
+                <div class="exp-body">
+                  <div style="display:flex;align-items:center;gap:12px">输入确认词 <b>禁止更新</b> 后解锁上方按钮：<input class="input confirm-input" placeholder="禁止更新"><span class="note">当前输入：空</span></div>
+                  <div class="banner warn"><span class="dot y"></span>执行前将自动：创建系统还原点 → 导出当前服务状态 → 本工具登记可"一键撤销全部改动"。</div>
+                </div>
+              </div>
+            </div>
+            <div class="note" style="padding-bottom:24px">修复节（WU 组件重置 12 步 / DISM / SFC，全部走提权 helper + cmd_preview）与更新历史完整表见设计稿 07-sys §8.1，样张省略。</div>
+          </div>
+        </div>
+        <div class="footerbar"><span>本页所有写入均为 HKLM 策略键精确集合读写 · 备份在 BackupStore</span><span class="f-spacer"></span><span>上次状态回读：10:42</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S4 设置页规范样例 ======================= -->
+<section class="screen" id="s4">
+  <div class="caption">
+    <h2>④ 设置页规范样例（代理设置，00§6 + §9-2/4/5/6/9：列宽 ≤1040、可见项≤5、expander 嵌套≤1、项级恢复默认、即时生效无"应用"钮）</h2>
+    <ul>
+      <li>行制 SwitchSetting：`标题+说明 — spacer — 控件右端定宽`，全页控件右缘同一基线（"摆整"=末端对齐）。</li>
+      <li>前置依赖在前：入站与端口组在前，依赖它的 TUN/分流参数在后；父开关关闭时子组<b>折叠</b>而非整段禁用。</li>
+      <li>示例展开的 `…` 溢出菜单呈现"恢复默认（当前值→默认值）"项级入口（§9-6）。</li>
+    </ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">代理</div>
+        <div class="item"><span class="ic">◧</span>总览</div>
+        <div class="item"><span class="ic">◎</span>节点<span class="cnt">48</span></div>
+        <div class="item"><span class="ic">≡</span>分流规则</div>
+        <div class="item"><span class="ic">⟪</span>订阅</div>
+        <div class="item"><span class="ic">▤</span>日志</div>
+        <div class="foot"><div class="item sel"><span class="ic">⚙</span>设置</div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header">
+          <h3>代理设置</h3><span class="ctx">所有修改即时生效 · 标注"需重启内核"的除外</span>
+          <span class="ph-spacer"></span>
+          <input class="input" style="width:240px" placeholder="⌕ 搜索设置（Ctrl+F）"><button class="btn">恢复本页默认</button>
+        </div>
+        <div class="stack">
+          <div class="centercol" style="gap:16px">
+            <div class="sec">
+              <h4>入站与内核</h4>
+              <div class="card">
+                <div class="settingrow"><div class="sl"><div class="t">启动代理内核</div><div class="d">sing-box 1.10（当前内核见总览；换核请先停止）</div></div><div class="ctl"><span class="sw"></span></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">混合端口（HTTP+SOCKS）</div><div class="d">端口占用冲突检测已在 blur 时通过（127.0.0.1:7890 可用）</div></div><div class="ctl menu"><input class="input" style="width:160px;text-align:right" value="7890"><span class="note">TCP · 需重启内核</span><span class="iconbtn">⋯</span>
+                  <div class="menu-pop"><div class="mi">复制当前值</div><div class="mi">恢复默认（7890 → 7890）</div><div class="sep"></div><div class="mi">查看依赖此项的设置（3）</div></div>
+                </div></div>
+                <div class="expander" style="margin:0;border:none;border-top:1px solid var(--stroke);border-radius:0">
+                  <div class="exp-head" style="padding-left:0"><div class="sl"><div class="t">允许局域网连接</div><div class="d">绑定 0.0.0.0 后同网段设备可用——建议同时开启鉴权（TUN 的依赖项在此组之下折叠）</div></div><div class="ctl"><span class="sw off"></span><span class="iconbtn">⌄</span></div></div>
+                </div>
+              </div>
+            </div>
+            <div class="sec">
+              <h4>分流与 DNS</h4>
+              <div class="card">
+                <div class="settingrow"><div class="sl"><div class="t">DNS 模式</div><div class="d">fakeip 兼容性好、防 DNS 泄漏；"仅远端"最保守</div></div><div class="ctl"><button class="btn" style="width:160px;justify-content:space-between">fakeip <span>▾</span></button><span class="note">需重启内核</span></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">规则命中测试</div><div class="d">分流页每条规则的"测一测"输入框允许粘贴域名/IP 现场跑匹配</div></div><div class="ctl"><span class="sw"></span></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">GEOIP 数据库自动周更</div><div class="d">数据源固定为 maxmind 免费镜像（下载通道复用 proxy kernel 模式）</div></div><div class="ctl"><span class="sw"></span></div></div>
+              </div>
+            </div>
+            <div class="sec">
+              <h4>监控与历史</h4>
+              <div class="card">
+                <div class="settingrow"><div class="sl"><div class="t">延迟历史保留</div><div class="d">节点延迟时序（总览页堆叠条数据源）</div></div><div class="ctl"><button class="btn" style="width:160px;justify-content:space-between">30 天 <span>▾</span></button></div></div>
+                <div class="settingrow"><div class="sl"><div class="t">连接日志落盘</div><div class="d">内核连接流水（CSV 导出在日志页）</div></div><div class="ctl"><span class="sw off"></span></div></div>
+              </div>
+            </div>
+            <div class="note" style="padding-bottom:16px">本页演示"设置类即时生效，无底部应用/确定钮"（§9-9）；表单类（新建节点对话框）才有 [取消][保存]（样张①与 02-proxy §7.1）。功能区原"入站设置"卡片处现留 gear 锚点"打开相关设置"（§6 归位纪律）。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= S5 代理·节点与分流规则 ======================= -->
+<section class="screen" id="s5">
+  <div class="caption">
+    <h2>⑤ 代理 · 节点与分流规则（02-proxy §7.1：主功能↔配套件同屏；延迟列定宽 72 数字右靠色阶）</h2>
+    <ul>
+      <li>分流规则行布局 `[把手][Switch][类型 S][值 L][目标 S][删]`；新行恒追加表尾自动聚焦（§4-3）；final 兜底规则行不可删并带说明（§7.2-④）。</li>
+      <li>行 hover 操作 ≤3+"…"；批量条替换式；内核未运行时"测全部延迟"禁用且 tooltip 给解锁路径（§4-2 禁裸禁用）。</li>
+    </ul>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span class="appname">NexusForge</span><span class="tb-spacer"></span><span class="tb-btn">−</span><span class="tb-btn">□</span><span class="tb-btn">✕</span></div>
+    <div class="shell">
+      <div class="subnav">
+        <div class="modname">代理</div>
+        <div class="item"><span class="ic">◧</span>总览</div>
+        <div class="item sel"><span class="ic">◎</span>节点<span class="cnt">48</span></div>
+        <div class="item"><span class="ic">≡</span>分流规则<span class="cnt">62</span></div>
+        <div class="item"><span class="ic">⟪</span>订阅<span class="cnt">3</span></div>
+        <div class="item"><span class="ic">▤</span>日志</div>
+        <div class="foot"><div class="item"><span class="ic">⚙</span>设置</div></div>
+      </div>
+      <div class="content">
+        <div class="panel-header">
+          <h3>节点</h3><span class="ctx">sing-box 运行中 · 入口 :7890 · 策略：Rule</span>
+          <span class="ph-spacer"></span>
+          <button class="btn">✎ 批量测速</button>
+          <button class="btn">⇩ 更新订阅</button>
+          <button class="btn primary">＋ 添加节点</button>
+        </div>
+        <div class="toolbar">
+          <input class="input xl" placeholder="搜索节点（名称/国家/协议）">
+          <span class="chip">订阅：All ▾</span><span class="chip">协议 ▾</span>
+          <span class="tb-spacer"></span>
+          <button class="btn" disabled title="内核未运行时不可用——先到总览启动内核，或改用『离线排序』">测全部延迟</button>
+        </div>
+        <div class="listbody">
+          <div class="thead"><span class="grow">节点</span><span style="width:72px;text-align:right">代理延迟</span><span style="width:72px;text-align:right">直连</span><span style="width:96px">协议</span><span style="width:110px">最后使用</span><span style="width:84px"></span></div>
+          <div class="row"><div class="grow"><div class="t"><span class="dot g"></span> HK-01 · 直通 <span class="badge u">URLTest 组内</span></div><div class="sub">订阅：A 机场 · 上月均延 23ms</div></div><span class="num" style="color:var(--success)">18ms</span><span class="num" style="color:var(--success)">15ms</span><span style="width:96px;font-size:12px">vless+reality</span><span class="date">2 分钟前</span><span class="rowact" style="justify-content:flex-end"><span class="iconbtn" title="设为主出口">◎</span><span class="iconbtn" title="更多">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t"><span class="dot g"></span> JP-B2</div><div class="sub">订阅：A 机场</div></div><span class="num" style="color:var(--success)">96ms</span><span class="num" style="color:var(--txt-tertiary)">—</span><span style="width:96px;font-size:12px">trojan</span><span class="date">今天 11:20</span><span class="rowact" style="justify-content:flex-end"><span class="iconbtn">◎</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t"><span class="dot y"></span> US-West-2 <span class="badge warn">高延迟</span></div><div class="sub">订阅：B 自建 · URLTest 自动降权</div></div><span class="num" style="color:var(--warning-fg)">287ms</span><span class="num" style="color:var(--danger)">超时</span><span style="width:96px;font-size:12px">ss2022</span><span class="date">昨天</span><span class="rowact" style="justify-content:flex-end"><span class="iconbtn">◎</span><span class="iconbtn">⋯</span></span></div>
+          <div class="row"><div class="grow"><div class="t"><span class="dot r"></span> SG-Pool-9 <span class="badge err">失败 ×3</span></div><div class="sub">订阅：C · 失败原因见日志（重连后退避中）</div></div><span class="num" style="color:var(--danger)">超时</span><span class="num">—</span><span style="width:96px;font-size:12px"> hysteria2</span><span class="date">3 天前</span><span class="rowact" style="justify-content:flex-end"><span class="iconbtn">◎</span><span class="iconbtn">⋯</span></span></div>
+        </div>
+        <div style="border-top:1px solid var(--stroke)">
+          <div class="panel-header" style="height:40px"><h4 style="font-size:14px;font-weight:600;margin-left:4px">分流规则（62）</h4><span class="ctx">上拖调整优先级 · 即时生效</span><span class="ph-spacer"></span><button class="btn">从订阅导入…</button><button class="btn primary">＋ 新建规则</button></div>
+          <div class="listbody" style="max-height:206px">
+            <div class="thead"><span style="width:14px"></span><span style="width:36px"></span><span style="width:120px">类型</span><span class="grow">匹配值</span><span style="width:160px">目标</span><span style="width:24px"></span></div>
+            <div class="row" style="height:var(--row-h-compact)"><span class="note">⠿</span><span class="sw" style="transform:scale(.8)"></span><span style="width:120px">GEOSITE</span><span class="grow"><code style="font-family:var(--font-mono);font-size:12px">cn</code></span><span style="width:160px"><span class="badge">DIRECT</span></span><span class="iconbtn">✕</span></div>
+            <div class="row" style="height:var(--row-h-compact)"><span class="note">⠿</span><span class="sw" style="transform:scale(.8)"></span><span style="width:120px">DOMAIN-SUFFIX</span><span class="grow"><code style="font-family:var(--font-mono);font-size:12px">githubcopilot.com</code></span><span style="width:160px"><span class="badge u">✈ PROXY-HK-01</span></span><span class="iconbtn">✕</span></div>
+            <div class="row" style="height:var(--row-h-compact);opacity:.85"><span class="note" title="不可拖动">—</span><span class="sw" style="transform:scale(.8)"></span><span style="width:120px">FINAL 兜底</span><span class="grow"><span class="note">所有规则未命中时 · 不可删除（§7.2-④：删了 final=未定义行为，禁）</span></span><span style="width:160px"><span class="badge">DIRECT</span></span><span class="iconbtn" title="兜底规则不可删除">✕</span></div>
+            <div class="row" style="height:var(--row-h-compact);border:1px dashed var(--accent);margin:8px 16px;border-radius:6px;background:#F7FBFF"><span class="note">⠿</span><span class="sw off" style="transform:scale(.8)"></span><span style="width:120px"><b style="font-size:12px;color:var(--accent)">新行自动聚焦 ▾</b></span><span class="grow"><input class="input" style="width:100%;max-width:520px;height:28px" placeholder="输入匹配值（失焦即查重）"></span><span style="width:160px"><button class="btn" style="height:28px">选择目标 ▾</button></span><span class="iconbtn">✕</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="screen" style="padding-bottom:48px">
+  <div class="caption">
+    <h2>审核指引（对照检查，审毕反馈即可进实现）</h2>
+    <ul>
+      <li>每条样张标题注明其演示的规范条款；发现问题请指"屏号 + 元素"（例：③-危险区-确认词输入框应该先于开关渲染？）。</li>
+      <li>本轮新增设计（更新管控/卸载工作台/工具箱）功能依据与红线在 <a href="../07-sys.md">07-sys.md §8</a>，调研证据在 <a href="../90-research-system-ui.md">90-research-system-ui.md</a>；UI 新条款在 <a href="../00-ui-layout-spec.md">00-spec §9</a>。</li>
+      <li>样张为纯静态 HTML（无脚本、无网络请求），可直接浏览器打开；与 src/ 应用代码零耦合。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

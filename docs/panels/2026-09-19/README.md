@@ -64,6 +64,9 @@ SubNavSection = { id, name, icon?, kind: "view"|"filter"|"group", count?: 动态
 | 13-automation.md | 自动化 | B7 |
 | 14-sync.md | 同步 | B5 |
 | 15-host-shell.md | 宿主壳（导航/命令面板/设置中心/托盘/快捷键总览） | B0+B8 提案 |
+| 90-research-system-ui.md | 三审调研台账：系统管理功能面（卸载/更新管控/工具箱）+ UI 设计案例（结论已归口 07-sys §8 与 00-spec §9） | 证据档 |
+
+UI 预览样张（静态 HTML，浏览器直开，审核用非代码）：[preview/index.html](preview/index.html)——含主工作台骨架、系统面板（软件/更新管控）、设置页、代理节点/分流规则四屏，按 00-spec（含 §9 增补）1:1 摆放。
 
 ## 2. 调研来源（本档借鉴依据，2026-09-19 检索）
 
