@@ -406,7 +406,15 @@ export interface VaultStatusDto {
     vault_id: string;
     kdf: { algo: string; m_cost_kib: number; t_cost: number; p_cost: number; salt_b64: string };
     wrapped_dek: { nonce_b64: string; ct_b64: string };
+    /** V4 Hello 免密信封（D-24；未启用 = null） */
+    hello?: { wrapped_dek_b64: string; verifier: { nonce_b64: string; ct_b64: string } } | null;
   } | null;
+  /** V4：免密路径已启用 */
+  hello_enabled: boolean;
+  /** V4：连续校验失败熔断（本进程仅允许主密码解锁） */
+  hello_forced: boolean;
+  /** 本机 Windows Hello 可用（false = 隐藏免密开关） */
+  hello_available: boolean;
 }
 
 export type FieldKindDto = "password" | "url" | "note" | "otp" | "text";
@@ -497,6 +505,29 @@ export function vaultGeneratePassword(policy: PasswordPolicyDto): Promise<string
 /** 当前 TOTP 码 + 剩余秒数 */
 export function vaultTotpNow(secret: string): Promise<[string, number]> {
   return invoke("vault_totp_now", { secret });
+}
+
+// ---- V4 Windows Hello 免密 / V5 自动锁定（D-24）----
+
+/** 启用免密解锁（会弹一次系统 Hello 校验窗） */
+export function vaultHelloEnable(): Promise<NonNullable<VaultStatusDto["kdf"]>> {
+  return invoke("vault_hello_enable");
+}
+/** 关闭免密解锁 */
+export function vaultHelloDisable(): Promise<NonNullable<VaultStatusDto["kdf"]>> {
+  return invoke("vault_hello_disable");
+}
+/** 免密解锁（Cooling 或熔断期由后端拒绝） */
+export function vaultHelloUnlock(): Promise<void> {
+  return invoke("vault_hello_unlock");
+}
+/** 主窗口失焦/聚焦上报：驱动后端失焦自动锁定计时线 */
+export function vaultNotifyBlur(blurred: boolean): Promise<void> {
+  return invoke("vault_notify_blur", { blurred });
+}
+/** 复制密码字段（后端走回写窗口 + 到期定时清除，D-24/D-10） */
+export function vaultCopyPassword(entryId: string, fieldKey: string): Promise<void> {
+  return invoke("vault_copy_password", { entryId, fieldKey });
 }
 
 // ---------------- 文件与存储（docs/impl/05 F，M6）----------------

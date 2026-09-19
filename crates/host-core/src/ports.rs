@@ -160,6 +160,11 @@ pub trait ClipboardPort: Port {
     }
     /// 写回系统剪贴板；调用方须先标记回写窗口（docs/impl/02 C3 ③ 防循环）
     fn write(&self, content: &ClipContent) -> Result<(), AppError>;
+    /// 当前剪贴板纯文本（D-24：vault 定时清除前"内容仍是原密文"判定）。
+    /// 默认 None = 无法判定，调用方须按保守策略不动剪贴板。
+    fn read_text(&self) -> Option<String> {
+        None
+    }
 }
 
 /// 屏幕捕获（win-integration：Windows.Graphics.Capture，回退 PrintWindow）
@@ -430,6 +435,15 @@ pub trait HotkeyWinPort: Port {
 pub trait CryptoPort: Port {
     fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError>;
     fn unprotect(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError>;
+}
+
+/// 内存锁页（docs/impl/05 V1 内存纪律 / D-24：VirtualLock 防密钥换出）。
+/// win-integration 以 VirtualLock 实现；失败按 false 返回，调用方仅告警不阻断。
+pub trait MemLockPort: Port {
+    /// 锁定 [addr, addr+len) 所在页，禁止换出
+    fn lock(&self, addr: usize, len: usize) -> bool;
+    /// 解锁（密钥清零前调用；尽力而为）
+    fn unlock(&self, addr: usize, len: usize) -> bool;
 }
 
 // ---------------------------------------------------------------------------

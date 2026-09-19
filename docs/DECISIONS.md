@@ -33,6 +33,7 @@
 | D-21 | 仓库治理与开源合规补齐 | 治理 | P0 | 0 | 已完成 |
 | D-22 | 批次划分、执行顺序与质量门槛 | 流程 | P0 | — | 已裁决（文档生效） |
 | D-23 | 多显示器 / 混合 DPI 策略 | 补实现 | P1 | 1 | 已完成 |
+| D-24 | vault V4/V5 安全补齐实施路线（Hello 免密 / 自动锁定 / VirtualLock / 剪贴板限时清除） | 补实现 | P1 | 3 | 已完成 |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -238,6 +239,19 @@
   4. `tauri.conf.json` 的 `pubkey` 占位符在发布前替换为真实签名公钥，`targets` 由 `["nsis"]` 扩为 `["nsis","msi"]`。
 - **理由**：合规文件缺失是**对外承诺**问题（仓库声明 GPL-3.0 却无许可证文本），优先级高于功能补齐。
 - **完成证据（2026-09-18）**：`.gitignore` 已删全部 Python 段（含 `lib/`、`build/`、`*.spec` 误伤项）；`README.md` 重写为 Rust/Tauri/React 口径；`LICENSE` 为 gnu.org 官方 GPL-3.0 全文（35,149 字节）；`THIRD_PARTY_LICENSES.md` 由 `tools/gen-third-party-licenses.mjs` 从 `cargo metadata` + `package-lock.json`/node_modules 生成（Rust 552 + npm 221，无未声明项、无 GPL 传染项，MPL-2.0/CC-BY-4.0 属兼容弱许可）。updater pubkey 与 MSI target 按 D-21 第 4 条留待发布前（批次 3）。
+
+### D-24 vault V4/V5 安全补齐实施路线（补实现）
+
+- **背景**：REVIEW §4 判定 vault ~60%：V4 Windows Hello 缺失、V5 自动锁定缺失、VirtualLock 缺失、90s 剪贴板清除仅配置项（`clear_clipboard_secs` 有 schema 无行为；复制走前端 `navigator.clipboard`，后端不可见）。impl/05 规格为 V4"Hello 派生的 DPAPI 保护密钥包裹 DEK"、V5"失焦 5min / 空闲 15min + 锁定前 30s 托盘气泡预警"。
+- **决策**：
+  1. **V4**：`HelloPort` 由 win-integration 以 `UserConsentVerifier::RequestVerificationAsync` 实现（阻塞等待走专用线程，复用 taskschd 的 COM/WinRT 线程纪律），注册进 state.rs Ports。免密路径 = 解锁态下把 DEK 副本经 `CryptoPort`（已注册的 DPAPI EnvelopeCrypto）包裹存入 `vault.meta.hello`，并以 **DEK 本身**封存 verifier（AES-GCM，aad=vault_id）绑定 DEK↔本库；`vault_hello_unlock` = HelloPort.verify 通过 → unprotect → verifier 校验 → 置 Unlocked。**规范偏离**：DPAPI 无法从 Hello 生物特征"派生"密钥（Windows 侧事实），以"验证门禁 + 用户账户域 + verifier 绑定"三段组合承担原句的安全意图，不改 CryptoPort 签名。失败计数：verify/unprotect 失败 ≥5 次 → 进程内禁用 hello 路径，强制密码解锁（成功一次密码解锁即复位）。
+  2. **V5**：判定逻辑落 vault-core `autolock.rs` 纯函数（输入 now/last_touch/blur_since/策略，输出 Lock/Warn(剩余秒)/None；0 = 禁用）；`VaultModule::start` 挂 watchdog 线程（5s tick）经注入的 `Arc<ConfigStore>` 读 `auto_lock_idle_mins`（默认 15）与新增 `auto_lock_blur_mins`（默认 5）。活动信号 = 任意 vault 命令触达 service（`touch()`）；失焦信号 = 前端 window focus/blur 监听 → `vault_notify_blur(blurred)`。**规范偏离**："锁定前 30s 托盘气泡预警"改发 `vault.auto_lock_warning` 事件 + 应用内 Toast（原生托盘在 #25 落地后接气泡，预警语义不变）。
+  3. **VirtualLock**：host-core 新增 `MemLockPort`（`lock(addr, len) -> bool`），win-integration 以 `VirtualLock` 实现；vault-core `crypto::set_mem_lock` OnceLock 全局槽，DEK 进入 `Inner::Unlocked`（含 create/unlock/hello_unlock）时对密钥缓冲尝试锁页，失败仅 `tracing::warn` 不阻断（未注册端口的测试/降级环境行为不变）。
+  4. **90s 剪贴板清除**：新增后端命令 `vault_copy_password(entry_id, field_key)`——解锁态取字段值经 `ClipboardPort.write` 写入，再按 `clear_clipboard_secs`（默认 90，0 = 关闭）投递延时任务：**仅当剪贴板内容仍是该密文**（`ClipboardPort` 新增 `read_text`，默认实现返回 None = 无法判定则不清除）才清空；前端字段复制改走此命令。
+- **依据**：三段组合与纯函数判定分别是 Windows 平台事实与仓库既有模式（Port 注入、事件驱动 UI、D-03 背压注册表）下的最小忠实地；read_text"无法判定则不动"沿用 D-05"宁可少删不误删"的保守纪律。
+- **代价**：Hello 免密强度弱于理想中的"Hello 派生密钥"（DPAPI blob 在同用户进程可解，安全边界 = verify 门禁 + 同机同账户）；watchdog 线程 + 前端 blur 信号引入一处前端→后端单向依赖（正常，经 IPC）；navigator.clipboard 改后端写剪贴板丢失无焦点粘贴便利性。
+- **验收**：负例必含——①hello 失败 ≥5 后 `vault_hello_unlock` 被拒且正确密码解锁可复位；②meta 的 hello.wrapped 被篡改/异库拷贝 → verifier 失败保持 Locked；③冷却（Cooling）中 hello_unlock 被拒；④自动锁策略纯函数：idle 越界 → Lock、warn 窗口 → Warn、0 → 永不锁、blur 独立计时；⑤剪贴板清除：内容仍是密文 → 清；已被用户替换 → 不动；secs=0 → 不调度；⑥MemLockPort 未注册/失败 → 解锁路径不受影响。
+- **实施记录与完成证据（2026-09-19）**：①②③⑥ 由 `crates/vault-core/tests/hello_vault.rs` 6 个集成测试覆盖（FakeHello/FakeCrypto/FakeMemLock 经 Ports 注册表注入；熔断后密码解锁复位、逐字节翻转 wrapped_dek 密文 → VAULT_UNLOCK_001 保持 Locked、异库 envelope 拒绝、Cooling 中 VAULT_LOCKED_002 且 verify 未被触碰、set_mem_lock 全部失败仍正常解锁）；④ 由 `autolock.rs` 6 个单测覆盖（idle 越界 Lock、30s warn 窗口、0=永不锁、blur 独立、最早预警胜出+时钟回拨安全、`clipboard_clear_due` 负例：None/被替换 → false）；⑤ `vault_copy_password` 写前校验 read_text 恒等 + 600s 上限，secs=0 不调度（命令内 `if clear_secs > 0`）。密码变更保留 envelope（`change_password_preserves_hello_envelope`）、verifier 绑定 DEK↔vault_id（`hello_verifier_binds_dek_and_vault`）另见 crypto 单测。真机 Windows Hello 弹框与锁屏可用性（`WindowsHello::available`）需 PIN/生物特征已注册环境人工验证，代码路径与降级（未注册 → 按钮隐藏 + HELLO_STATE_00x）已由 `hello_available` 状态字段贯通。门禁：`cargo fmt --all --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` 全绿（含 vault-core 26 单测 + 6 集成）、tsc/eslint/vitest(32)/vite build 全绿、`tauri dev` 启动无 panic。
 
 ---
 

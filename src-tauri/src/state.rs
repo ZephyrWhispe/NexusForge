@@ -10,10 +10,10 @@ use host_core::events::EventBus;
 use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
-    CapturePort, ClipboardPort, ConptyPort, CryptoPort, DockerPipePort, HelperSpawnPort,
-    HotkeyWinPort, InputHookPort, InputInjectPort, OcrPort, PerfPort, Ports, RecycleBinPort,
-    RegistryOps, ScreenInfoPort, ServiceCtlPort, ShellPort, SysProxyPort, TaskSchdPort,
-    TaskTogglePort, ThumbPort, UsnIndexPort,
+    CapturePort, ClipboardPort, ConptyPort, CryptoPort, DockerPipePort, HelloPort, HelperSpawnPort,
+    HotkeyWinPort, InputHookPort, InputInjectPort, MemLockPort, OcrPort, PerfPort, Ports,
+    RecycleBinPort, RegistryOps, ScreenInfoPort, ServiceCtlPort, ShellPort, SysProxyPort,
+    TaskSchdPort, TaskTogglePort, ThumbPort, UsnIndexPort,
 };
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
@@ -108,6 +108,13 @@ impl HostState {
         // 真实 Windows 能力注册（win-integration）
         ports.register::<dyn ClipboardPort>(Arc::new(WindowsClipboard::new()));
         ports.register::<dyn CryptoPort>(Arc::new(EnvelopeCrypto::with_dpapi()));
+        // V4 Hello 校验门（docs/impl/05 V4 / D-24）：UserConsentVerifier；
+        // 机器无 Hello 时 availability 查询在 verify 内报错，不影响密码路径
+        ports.register::<dyn HelloPort>(Arc::new(win_integration::hello::WindowsHello::new()));
+        // D-24：VirtualLock 锁页端口注册 + 注入 vault 全局槽（未注入时锁页静默跳过）
+        let mem_lock: Arc<dyn MemLockPort> = Arc::new(win_integration::memlock::WinMemLock);
+        ports.register::<dyn MemLockPort>(mem_lock.clone());
+        vault_core::crypto::set_mem_lock(mem_lock);
         // 屏幕捕获：GDI BitBlt（docs/impl/03 P2，v1 主路径）
         ports.register::<dyn CapturePort>(Arc::new(GdiCapture::new()));
         // 系统 OCR：Windows.Media.Ocr（docs/impl/04 O2）
@@ -206,7 +213,8 @@ impl HostState {
         registry.register(kvm.clone())?;
 
         // ---- P1 安全与凭据（M5，docs/impl/05 V1–V7）----
-        let vault = Arc::new(VaultModule::new());
+        // D-24 V5：看门狗需要配置句柄（ModuleContext 无 config，经构造函数注入）
+        let vault = Arc::new(VaultModule::new_with_config(config.clone()));
         config.register_schema("vault", vault.config_schema());
         registry.register(vault.clone())?;
 

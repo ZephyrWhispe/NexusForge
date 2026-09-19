@@ -52,6 +52,8 @@ features = [
     "Win32_Security",
     # DPAPI（docs/impl/02 C4）
     "Win32_Security_Cryptography",
+    # Windows Hello 校验门 UserConsentVerifier（docs/impl/05 V4 / D-24）
+    "Security_Credentials_UI",
     # 全局快捷键（docs/UI-PLAN.md U2-4）
     "Win32_UI_Input_KeyboardAndMouse",
     # 来源应用识别（GetClipboardOwner → 进程名）

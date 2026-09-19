@@ -71,6 +71,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)] = &[
     ("kvm.control_state", "键鼠共享控制权迁移。payload: {role, device_id?, by?, reason?}", BackpressurePolicy::None),
     ("vault.state_changed", "密码库锁定状态迁移。payload: {state: uninitialized|locked|unlocked}", BackpressurePolicy::None),
     ("vault.entries_changed", "密码库条目/文件夹变更。payload: {action, id?}", BackpressurePolicy::None),
+    ("vault.auto_lock_warning", "自动锁定预警（D-24 V5：锁定前 30s）。payload: {lock_in_secs}", BackpressurePolicy::None),
     ("proxy.state_changed", "代理模式/内核状态迁移。payload: {mode, kernel_running, kernel_id?, inbound_port?}", BackpressurePolicy::None),
     ("proxy.log_line", "代理内核日志行。payload: {line}", BackpressurePolicy::None),
     ("proxy.nodes_changed", "订阅/节点列表变更。payload: {sub_id?, total}", BackpressurePolicy::None),

@@ -7,16 +7,18 @@
 //! 字段加密：AES-256-GCM(DEK)，nonce 随机 12B，aad 绑定条目 id（防密文换位）
 //! ```
 //! 内存纪律：密钥一律 [`SecretKey`]——zeroize on Drop、不派生 Debug/Display。
-//! VirtualLock 锁页属 Windows 能力，后续经 win-integration 端口接入（V4 轮次）。
+//! VirtualLock 锁页经 [`set_mem_lock`] 注入的 win-integration 端口接入（D-24）。
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use std::sync::{Arc, OnceLock};
 use zeroize::Zeroize;
 
 use host_core::error::AppError;
+use host_core::ports::MemLockPort;
 
 /// 信封 AES-GCM nonce 长度
 pub const NONCE_LEN: usize = 12;
@@ -65,6 +67,84 @@ impl Drop for SecretKey {
     }
 }
 
+impl SecretKey {
+    /// 将密钥缓冲区锁定到物理内存（防换页泄露，D-24）。
+    /// 端口未注册或锁定失败仅 warn——明文密钥短暂驻留页文件是降级而非致命错误，
+    /// 绝不阻断解锁流程（D-24 验收⑥）。
+    pub fn lock_in_memory(&self) {
+        let Some(port) = mem_lock_port() else { return };
+        let ptr = self.0.as_ptr() as usize;
+        if !port.lock(ptr, KEY_LEN) {
+            tracing::warn!("VirtualLock 锁页失败：DEK 可能驻留页文件（不阻断解锁）");
+        }
+    }
+
+    /// 解锁缓冲区（锁定前调用；端口缺失时为 no-op）
+    pub fn unlock_memory(&self) {
+        if let Some(port) = mem_lock_port() {
+            port.unlock(self.0.as_ptr() as usize, KEY_LEN);
+        }
+    }
+}
+
+static MEM_LOCK: OnceLock<Arc<dyn MemLockPort>> = OnceLock::new();
+
+/// 注册虚拟内存锁页端口（host 启动时经 win-integration 注入，D-24）
+pub fn set_mem_lock(port: Arc<dyn MemLockPort>) {
+    // 重复注册（测试/热重启）静默忽略首个之外的注入
+    let _ = MEM_LOCK.set(port);
+}
+
+fn mem_lock_port() -> Option<&'static Arc<dyn MemLockPort>> {
+    MEM_LOCK.get()
+}
+
+// ---------------------------------------------------------------------------
+// Windows Hello 免密解锁信封（D-24 V4）
+// ---------------------------------------------------------------------------
+
+/// verifier 明文的域分隔常量（AES-GCM aad=vault_id 之外的第二重绑定）
+pub const HELLO_VERIFIER: &[u8] = b"nf-vault-hello-v1";
+
+/// Hello 路径信封：DEK 副本经 CryptoPort（DPAPI）包裹 + DEK 自证 verifier。
+/// DPAPI 无法"由 Hello 派生"（D-24 决策①偏差记录）：Hello 校验作为解锁
+/// 前置门（verify 通过才允许读取），DPAPI 提供账户域绑定，verifier 提供
+/// 本库绑定——三者缺一即拒绝。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HelloEnvelope {
+    /// CryptoPort.protect(DEK) 的 base64 密文
+    pub wrapped_dek_b64: String,
+    /// AES-GCM(DEK, aad=vault_id) 的固定明文密文，解密须还原 HELLO_VERIFIER
+    pub verifier: WrappedKey,
+}
+
+/// 用 DEK 生成自证信封（启用 Hello 时调用）
+pub fn seal_hello_verifier(dek: &SecretKey, vault_id: &str) -> Result<WrappedKey, AppError> {
+    let (nonce, ct) = seal_raw(dek, HELLO_VERIFIER, vault_id.as_bytes())?;
+    Ok(WrappedKey {
+        nonce_b64: b64(&nonce),
+        ct_b64: b64(&ct),
+    })
+}
+
+/// 解验自证信封；明文必须等于 HELLO_VERIFIER，否则视为跨库/篡改（D-24 验收②）
+pub fn open_hello_verifier(
+    dek: &SecretKey,
+    vault_id: &str,
+    env: &WrappedKey,
+) -> Result<(), AppError> {
+    let nonce_vec = unb64(&env.nonce_b64)?;
+    let ct = unb64(&env.ct_b64)?;
+    let nonce: [u8; NONCE_LEN] = nonce_vec
+        .try_into()
+        .map_err(|_| vault_err("VAULT_CRYPTO_010", "hello verifier nonce 长度非法"))?;
+    let plain = open_raw(dek, &nonce, &ct, vault_id.as_bytes())?;
+    if plain != HELLO_VERIFIER {
+        return Err(vault_err("VAULT_CRYPTO_011", "hello verifier 校验失败"));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 信封头部（持久化 vault.meta.json）
 // ---------------------------------------------------------------------------
@@ -94,6 +174,9 @@ pub struct VaultHeader {
     pub vault_id: String,
     pub kdf: KdfParams,
     pub wrapped_dek: WrappedKey,
+    /// Windows Hello 免密路径（D-24 V4），未启用 = None；旧文件缺字段兼容
+    #[serde(default)]
+    pub hello: Option<HelloEnvelope>,
 }
 
 impl VaultHeader {
@@ -211,6 +294,7 @@ pub fn create_vault_with(
             nonce_b64: b64(&nonce),
             ct_b64: b64(&ct),
         },
+        hello: None,
     };
     Ok((header, dek))
 }
@@ -251,6 +335,8 @@ pub fn change_master_password(
             nonce_b64: b64(&nonce),
             ct_b64: b64(&ct),
         },
+        // DEK 不变 → Hello 信封（DPAPI 包裹的 DEK 副本 + DEK 自证）原样保留
+        hello: header.hello.clone(),
     })
 }
 
@@ -341,5 +427,49 @@ mod tests {
         let last = blob.pop().unwrap();
         blob.push(if last == 'A' { 'B' } else { 'A' });
         assert!(open_field(&dek, "e", &blob).is_err(), "篡改必须被 tag 拒绝");
+    }
+
+    #[test]
+    fn hello_verifier_binds_dek_and_vault() {
+        // D-24 验收②：verifier 必须同时绑定 DEK 与 vault_id，否则信封可跨库重放
+        let (header, dek) = create_vault_with("pw", test_kdf()).unwrap();
+        let v = seal_hello_verifier(&dek, &header.vault_id).unwrap();
+        open_hello_verifier(&dek, &header.vault_id, &v).unwrap();
+        let other = SecretKey::generate();
+        assert!(
+            open_hello_verifier(&other, &header.vault_id, &v).is_err(),
+            "异 DEK 必须解不开（跨库重放防御）"
+        );
+        assert!(
+            open_hello_verifier(&dek, "another-vault-id", &v).is_err(),
+            "aad 绑定：换 vault_id 必须失败"
+        );
+        let mut tampered = v.clone();
+        tampered.ct_b64.pop().unwrap();
+        assert!(
+            open_hello_verifier(&dek, &header.vault_id, &tampered).is_err(),
+            "截断密文必须被拒"
+        );
+    }
+
+    #[test]
+    fn change_password_preserves_hello_envelope() {
+        // D-24：改主密码只重包 KEK 下的 DEK；DEK 不变 → Hello 信封（含 verifier）零改动
+        let (mut header, dek) = create_vault_with("old-pass", test_kdf()).unwrap();
+        header.hello = Some(HelloEnvelope {
+            wrapped_dek_b64: "deadbeef".into(),
+            verifier: seal_hello_verifier(&dek, &header.vault_id).unwrap(),
+        });
+        let before = header.hello.clone();
+        let after = change_master_password(&header, "old-pass", "new-pass").unwrap();
+        assert_eq!(
+            after.hello.as_ref().unwrap().wrapped_dek_b64,
+            before.unwrap().wrapped_dek_b64
+        );
+        assert!(
+            after.hello.as_ref().unwrap().verifier.ct_b64
+                == header.hello.as_ref().unwrap().verifier.ct_b64,
+            "verifier 不随改密码变化（DEK 未变）"
+        );
     }
 }

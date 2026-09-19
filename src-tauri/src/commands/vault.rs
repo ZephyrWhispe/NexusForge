@@ -14,13 +14,22 @@ pub struct VaultStatusDto {
     pub lockout_remaining_secs: u64,
     /// 头部快照（KDF 参数 / vault_id，无机密）
     pub kdf: Option<vault_core::VaultHeader>,
+    /// V4：头部含 Hello 信封（免密路径已启用）
+    pub hello_enabled: bool,
+    /// V4：连续校验失败后的进程级熔断（仅允许主密码解锁）
+    pub hello_forced: bool,
+    /// 本机 Windows Hello 可用性（false = 前端隐藏免密开关）
+    pub hello_available: bool,
 }
 
 fn vault_service(state: &HostState) -> Result<std::sync::Arc<vault_core::VaultService>, AppError> {
-    state
+    let svc = state
         .vault
         .service()
-        .ok_or_else(|| AppError::module("VAULT_IPC_001", "密码库模块未就绪", None))
+        .ok_or_else(|| AppError::module("VAULT_IPC_001", "密码库模块未就绪", None))?;
+    // D-24 V5：任何触及服务的命令都算一次用户活动（空闲线计时基准）
+    svc.touch();
+    Ok(svc)
 }
 
 fn vault_state_str(s: vault_core::VaultState) -> &'static str {
@@ -56,13 +65,20 @@ fn publish_vault_entries(state: &HostState, action: &str, id: Option<&str>) {
 }
 
 #[tauri::command]
-pub fn vault_status(state: State<'_, HostState>) -> Result<VaultStatusDto, AppError> {
+pub async fn vault_status(state: State<'_, HostState>) -> Result<VaultStatusDto, AppError> {
     let svc = vault_service(&state)?;
-    Ok(VaultStatusDto {
-        state: vault_state_str(svc.state()).into(),
-        lockout_remaining_secs: svc.lockout_remaining_secs(),
-        kdf: svc.header(),
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(VaultStatusDto {
+            state: vault_state_str(svc.state()).into(),
+            lockout_remaining_secs: svc.lockout_remaining_secs(),
+            kdf: svc.header(),
+            hello_enabled: svc.hello_enabled(),
+            hello_forced: svc.hello_forced_off(),
+            hello_available: win_integration::hello::WindowsHello::available(),
+        })
     })
+    .await
+    .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
 }
 
 /// 新建保险库（默认 Argon2id 64MiB/t3/p4；秒级耗时 → spawn_blocking）
@@ -121,6 +137,119 @@ pub async fn vault_change_master_password(
     .inspect(|_h| {
         publish_vault_state(&state, &svc);
     })
+}
+
+// ---- V4 Windows Hello 免密（D-24）----
+
+/// 启用免密路径（解锁态；弹一次 Hello 校验）。校验弹窗可长达数十秒 → spawn_blocking
+#[tauri::command]
+pub async fn vault_hello_enable(
+    state: State<'_, HostState>,
+) -> Result<vault_core::VaultHeader, AppError> {
+    let svc = vault_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.hello_enable())
+        .await
+        .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
+}
+
+/// 关闭免密路径（头部 hello 信封移除）
+#[tauri::command]
+pub async fn vault_hello_disable(
+    state: State<'_, HostState>,
+) -> Result<vault_core::VaultHeader, AppError> {
+    let svc = vault_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.hello_disable())
+        .await
+        .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
+}
+
+/// 免密解锁（Cooling / 熔断期同样拒绝；成功后前端 refresh 拉取条目）
+#[tauri::command]
+pub async fn vault_hello_unlock(state: State<'_, HostState>) -> Result<(), AppError> {
+    let svc = vault_service(&state)?;
+    let svc2 = svc.clone();
+    tauri::async_runtime::spawn_blocking(move || svc2.hello_unlock())
+        .await
+        .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))?
+        .map(|_| publish_vault_state(&state, &svc))
+}
+
+/// V5 失焦线信号：主窗口 blur/focus 上报（无窗口可见性问题：纯时间戳记录）
+#[tauri::command]
+pub fn vault_notify_blur(blurred: bool, state: State<'_, HostState>) -> Result<(), AppError> {
+    vault_service(&state)?.set_blur(blurred);
+    Ok(())
+}
+
+/// 复制密码字段到剪贴板（D-24：后端 write_back 走 D-10 回写窗口防自捕获，
+/// 并按 clear_clipboard_secs 延时清除——仅当剪贴板仍是这条密码时才动它）
+#[tauri::command]
+pub async fn vault_copy_password(
+    entry_id: String,
+    field_key: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    use host_core::ports::{ClipContent, ClipboardPort};
+    let svc = vault_service(&state)?;
+    let clipboard = state.clipboard.clone();
+    let secret = tauri::async_runtime::spawn_blocking(move || {
+        let entry = svc
+            .get_entry(&entry_id)?
+            .ok_or_else(|| AppError::module("VAULT_IPC_003", "条目不存在", None))?;
+        let field = entry
+            .fields
+            .iter()
+            .find(|f| f.key == field_key)
+            .ok_or_else(|| AppError::module("VAULT_IPC_004", "字段不存在", None))?;
+        if field.value.is_empty() {
+            return Err(AppError::module("VAULT_IPC_005", "字段为空", None));
+        }
+        let value = field.value.clone();
+        clipboard.write_back(&ClipContent::Text {
+            text: value.clone(),
+            html: None,
+        })?;
+        Ok::<String, AppError>(value)
+    })
+    .await
+    .map_err(|e| AppError::module("VAULT_IPC_002", e.to_string(), None))??;
+
+    // 清除延时（0/缺省=90s）；到期任务只在这条密码仍是剪贴板内容时清除
+    let clear_secs = state
+        .config
+        .get_module("vault")
+        .ok()
+        .and_then(|v| {
+            v.get("clear_clipboard_secs")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or(90)
+        .min(600);
+    if clear_secs > 0 {
+        let clipboard = state.clipboard.clone();
+        let ports = state.ports.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(clear_secs)).await;
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                // 无法判定（read_text=None）或已被替换 → 一律不动剪贴板（D-05 保守纪律）
+                let still_same = vault_core::clipboard_clear_due(
+                    ports
+                        .get::<dyn ClipboardPort>()
+                        .and_then(|p| p.read_text())
+                        .as_deref(),
+                    &secret,
+                );
+                if still_same {
+                    let _ = clipboard.write_back(&ClipContent::Text {
+                        text: String::new(),
+                        html: None,
+                    });
+                }
+            })
+            .await;
+        });
+    }
+    Ok(())
 }
 
 // ---- 文件夹 ----

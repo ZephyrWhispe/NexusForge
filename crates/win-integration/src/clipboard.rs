@@ -359,6 +359,15 @@ impl ClipboardPort for WindowsClipboard {
             r
         }
     }
+
+    /// 读取当前剪贴板文本（D-24：vault 定时清除前核对内容是否仍是那条密码）。
+    /// 打不开剪贴板、无文本格式、文本为空一律返回 None，调用方按"无法判定"不动剪贴板。
+    fn read_text(&self) -> Option<String> {
+        match unsafe { read_clipboard_content() }? {
+            ClipContent::Text { text, .. } => (!text.is_empty()).then_some(text),
+            _ => None,
+        }
+    }
 }
 
 /// PNG → CF_DIB（BITMAPINFOHEADER 40 字节 + 32bpp BGRA bottom-up，alpha 置 255）

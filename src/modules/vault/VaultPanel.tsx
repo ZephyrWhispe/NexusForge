@@ -29,6 +29,7 @@ import {
 } from "@fluentui/react-icons";
 import {
   parseAppError,
+  vaultCopyPassword,
   vaultCreate,
   vaultEntries,
   vaultEntryAdd,
@@ -38,7 +39,11 @@ import {
   vaultFolderDelete,
   vaultFolders,
   vaultGeneratePassword,
+  vaultHelloDisable,
+  vaultHelloEnable,
+  vaultHelloUnlock,
   vaultLock,
+  vaultNotifyBlur,
   vaultStatus,
   vaultTotpNow,
   vaultUnlock,
@@ -48,7 +53,8 @@ import {
   type VaultFolderDto,
   type VaultStatusDto,
 } from "../../ipc/client";
-import { reportError } from "../../stores/notifications";
+import { IN_TAURI } from "../../ipc/env";
+import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
 import InlineError from "../../components/InlineError";
@@ -182,11 +188,20 @@ function TotpBadge({ secret }: { secret: string }) {
 // 字段值渲染：password 打码 + 显示/复制；totp 类型进度条
 // ---------------------------------------------------------------------------
 
-function FieldValue({ field }: { field: EntryFieldDto }) {
+function FieldValue({ field, entryId }: { field: EntryFieldDto; entryId: string }) {
   const styles = useStyles();
   const [shown, setShown] = useState(false);
-  const copy = () =>
-    void navigator.clipboard.writeText(field.value).catch((e) => reportError(e, { context: "复制到剪贴板失败" }));
+  // 密码字段走后端 vault_copy_password：write_back（D-10 回写窗口，防自捕获）
+  // + 到期条件清除（D-24）；非敏感字段直接浏览器剪贴板
+  const copy = () => {
+    if (field.kind === "password" && IN_TAURI) {
+      vaultCopyPassword(entryId, field.key).catch((e) =>
+        reportError(e, { context: "复制密码失败" }),
+      );
+    } else {
+      void navigator.clipboard.writeText(field.value).catch((e) => reportError(e, { context: "复制到剪贴板失败" }));
+    }
+  };
   if (field.kind === "otp") return <TotpBadge secret={field.value} />;
   const masked = field.kind === "password" && !shown;
   return (
@@ -207,7 +222,7 @@ function FieldValue({ field }: { field: EntryFieldDto }) {
         size="small"
         icon={<CopyRegular />}
         onClick={copy}
-        title="复制"
+        title={field.kind === "password" ? "复制（到期后若仍是此密码将自动清除）" : "复制"}
       />
     </span>
   );
@@ -351,6 +366,43 @@ export default function VaultPanel() {
     return () => clearInterval(t);
   }, [status?.state, lockoutLeft]);
 
+  // vault.* 事件驱动刷新 + V5 自动锁定预警（D-24）
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    let unlisten: (() => void) | null = null;
+    import("@tauri-apps/api/event").then(({ listen }) =>
+      listen("nf:event", (e) => {
+        const p = e.payload as { topic?: string; payload?: { lock_in_secs?: number } };
+        if (p.topic === "vault.state_changed" || p.topic === "vault.entries_changed")
+          reloadRef.current();
+        if (p.topic === "vault.auto_lock_warning")
+          notify(
+            "warn",
+            "密码库即将自动锁定",
+            `${p.payload?.lock_in_secs ?? 30}s 后锁定（空闲/失焦超限）`,
+          );
+      }),
+    ).then((u) => {
+      unlisten = u;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // V5 失焦线信号（D-24）：窗口 blur/focus 上报后端计时
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    const onBlur = () => void vaultNotifyBlur(true).catch(() => undefined);
+    const onFocus = () => void vaultNotifyBlur(false).catch(() => undefined);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
   // ---- 动作 ----
 
   const doCreate = async () => {
@@ -389,6 +441,40 @@ export default function VaultPanel() {
     await vaultLock().catch((e) => reportError(e, { context: "锁定密码库失败" }));
     setEntries([]);
     await refresh();
+  };
+
+  // Windows Hello 免密解锁（D-24）：失败后 refresh 以刷新熔断/冷却态
+  const doHelloUnlock = async () => {
+    setFormErr(null);
+    setBusy(true);
+    try {
+      await vaultHelloUnlock();
+      await refresh();
+    } catch (e) {
+      setFormErr(errText(e));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doHelloToggle = async () => {
+    if (!status) return;
+    setBusy(true);
+    try {
+      if (status.hello_enabled) {
+        await vaultHelloDisable();
+        notify("info", "已关闭免密解锁", "此后仅可用主密码解锁。");
+      } else {
+        await vaultHelloEnable();
+        notify("success", "已启用免密解锁", "Windows Hello 与本机账户域绑定，连续失败 5 次自动熔断。");
+      }
+      await refresh();
+    } catch (e) {
+      reportError(e, { context: "切换免密解锁失败" });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const doSaveEntry = async () => {
@@ -586,6 +672,20 @@ export default function VaultPanel() {
             >
               {busy ? "正在解锁…" : "解锁"}
             </Button>
+            {status.hello_available && status.hello_enabled && !status.hello_forced && (
+              <Button
+                icon={<PasswordRegular />}
+                disabled={busy || lockoutLeft > 0}
+                onClick={() => void doHelloUnlock()}
+              >
+                使用 Windows Hello 解锁
+              </Button>
+            )}
+            {status.hello_forced && (
+              <Text className={styles.muted}>
+                免密校验连续失败过多，本次仅允许主密码解锁（主密码解锁成功后自动恢复）。
+              </Text>
+            )}
           </div>
         </div>
       </div>
@@ -606,6 +706,20 @@ export default function VaultPanel() {
         <Button icon={<LockClosedRegular />} onClick={() => void doLock()}>
           立即锁定
         </Button>
+        {status.hello_available && (
+          <Button
+            icon={<PasswordRegular />}
+            disabled={busy}
+            onClick={() => void doHelloToggle()}
+            title={
+              status.hello_enabled
+                ? "关闭后仅可用主密码解锁"
+                : "启用后可用 Windows Hello 免密解锁（本机账户域绑定）"
+            }
+          >
+            {status.hello_enabled ? "关闭免密解锁" : "启用免密解锁"}
+          </Button>
+        )}
         <Text className={styles.muted}>共 {entries.length} 条 · 字段已 AES-256-GCM 加密</Text>
       </div>
 
@@ -682,7 +796,7 @@ export default function VaultPanel() {
                 />
               </div>
               {entry.fields.map((f, i) => (
-                <FieldValue key={i} field={f} />
+                <FieldValue key={i} field={f} entryId={entry.id} />
               ))}
               {entry.totp_secret && <TotpBadge secret={entry.totp_secret} />}
             </div>
