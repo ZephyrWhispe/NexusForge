@@ -53,6 +53,9 @@ lopdf = { version = "0.36", default-features = false }
 # automation-core（docs/impl/07 A5）：WASM 插件沙箱（fuel + 内存限额；wat feature 供测试直接写 wat 样本）
 wasmtime = { version = "29", default-features = false, features = ["cranelift", "runtime", "wat"] }
 
+# D-27：性能基准（DESIGN §9.1/§9.2 阈值断言与 criterion 基准矩阵）
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
 # 发布配置（docs/impl/07 PERF2，阶段四启用前先保持默认可调试）
 [profile.dev]
 opt-level = 0

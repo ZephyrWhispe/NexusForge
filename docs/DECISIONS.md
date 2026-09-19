@@ -36,6 +36,7 @@
 | D-24 | vault V4/V5 安全补齐实施路线（Hello 免密 / 自动锁定 / VirtualLock / 剪贴板限时清除） | 补实现 | P1 | 3 | 已完成 |
 | D-25 | KVM 剪贴板回写与 origin 防循环实施路线（kvm.clip_received 订阅方 / local·remote 入库标记 / 去重晋升） | 补实现 | P1 | 3 | 已完成 |
 | D-26 | 托盘原生实现实施路线（tauri tray-icon 接入 / TrayProvider 动作回路 / Error 置灰 / vault 预警标题接线） | 补实现 | P1 | 3 | 已完成 |
+| D-27 | 性能基准与 §9.1 阈值断言实施路线（criterion 基准 / 搜索与捕获延迟断言 / 启动与内存的判定归属） | 补实现 | P1 | 3 | 已完成 |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -285,6 +286,21 @@
 - **代价**：菜单在每次模块状态迁移时整建重建；托盘任务与进程同生命周期（宿主级服务，无模块级停机义务，与 forward_events 同格）；托盘动作闭包在菜单事件回调线程同步执行——v1 三动作皆为秒内完成（发布事件/置锁），规范文档已在 trait 注释要求"动作须快速返回"。
 - **验收**：负例必含——①Error 模块的条目在 `aggregate_tray` 输出中 enabled=false、Running/Stopped 不受影响（host-core 单测）；②`{module}:{item}` 未命中查表（含畸形无冒号 id）→ 忽略不 panic（src-tauri 纯函数测）；③`vault.auto_lock_warning` 载荷缺 `lock_in_secs`/类型错 → 解析 None，预警标题任务存活；④模块段为空时宿主固定段完整（菜单 plan 形状钉死）。正例——⑤clipboard/screenshot 的 tray_actions 闭包触发后经 bus 订阅可观测到与热键同载荷的事件；⑥托盘存在时 `cargo test --workspace` 与门禁全绿（原生托盘本身无头 CI 不可测，构建路径经 setup 冒烟：tauri dev 实启观察托盘菜单）。
 - **实施记录与完成证据（2026-09-19）**：`TrayAction`/`tray_actions`（默认空实现）落 host-core capability.rs，`aggregate_tray` 增补 Error 置灰（`enabled = item.enabled && status != Error`）；三实现方：clipboard「打开剪切板面板」publish `clipboard.quick_panel_toggled`、screenshot「截图选区」publish `screenshot.overlay_requested {mode:"shot"}`、vault「立即锁定密码库」`svc.lock()` 成功后 publish `vault.state_changed {reason:"tray"}`，全部 init 前返回空动作表。src-tauri 新 `tray.rs`：纯函数 `menu_plan`/`collect_actions`/`lookup_action`/`parse_lock_in_secs`/`warning_title` 钉死形状，`build()` 在 setup 内构建 `TrayIconBuilder`（有 default_window_icon 才建——Windows Shell_NotifyIcon 必须 hIcon，缺失即返回 Err 由 setup warn 降级）、左键抬起显示并聚焦 main 窗、`host.module_state` 订阅 → `run_on_main_thread` 整建重建 + 刷新动作表、`vault.auto_lock_warning` → `set_title` 预警（决策④双通道）；三模块经 `state.rs` `register_ability::<dyn TrayProvider>` 接入。回归证据：host-core lib 53→55（①置灰矩阵 + 默认空/覆写收集）、src-tauri lib 新增 4 测（②查表命中/畸形 id 五例、③载荷四负例、④plan 形状含 Sep 计数）、三模块各 +1 测（⑤bus 可观测正例 + vault init 前负例）；tauri dev 实启冒烟：窗口就绪 970ms、模块引导完成 1278ms、聚合日志呈现 clipboard/screenshot/vault 三段 priority 有序、零 panic/ERROR、无"托盘构建失败"warn。门禁：`cargo fmt --all --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0（type_complexity 以 `ActionTable` 别名收敛、`items_after_test_module` 以 impl 前移闭环）、`cargo test --workspace` 全绿、tsc 0、eslint 0、vitest 32/32、`vite build` 0。环境事故记录：C 盘写满（os error 112/LNK1318）经清理 `target/debug/incremental`（纯再生缓存）释放约 30GB 后复跑全绿。
+
+---
+
+### D-27 性能基准与 §9.1 阈值断言实施路线（补实现）
+
+- **背景**：REVIEW §7 批次 3 要求"性能基准（criterion）与 §9.1 阈值断言"。DESIGN §9.1 给出四个量化门槛（启动 < 1.5s、剪切板捕获延迟 < 100ms、内存基线 < 250MB、FTS 搜索 < 50ms），§9.2 要求"CI 每次提交跑基准：启动/内存/搜索响应/模块加载，退化超阈值即失败"；而仓库现状是**零** `benches/`、无 criterion 依赖、无任何延迟断言——四个数字全部只存在于文档。启动维度并非全零：PERF1 计时日志（窗口就绪/模块引导 elapsed_ms）已在 src-tauri setup 落地并有实启证据（970ms/1278ms），但没有机器可判定的通过/失败线。
+- **决策**：
+  1. **criterion 基准落剪贴板热路径**：workspace 增 criterion dev-dependency，`crates/clipboard-core/benches/clip_store.rs` 以 `ClipStore::open` 真实 SQLite(FTS5) 为对象，基准矩阵 = 语料规模 {1k, 5k, 20k} × 操作 {fts 中文查询, fts 英文查询, 唯一插入, 去重命中插入}。基准只作趋势与回归对比（`--save-baseline`），不承担门禁。
+  2. **§9.1 阈值断言落常规测试**（`clipboard-core/tests/perf_thresholds.rs`）：种子 5k 条语料，FTS 搜索取 100 次采样的 p95 < 50ms；捕获入库（唯一 + 去重两条路径）单次 p95 < 100ms。默认随 `cargo test` 常跑；若 debug 构建波动导致误报，允许改挂 `#[ignore]` + release 专跑，该切换属机制选择而非规范偏离，须在完成证据中记录实测数字与所选档。
+  3. **启动/内存两维的判定归属**：启动以既有 PERF1 日志为判定面（elapsed_ms 阈值断言无法在无头单测里启动 GUI，记实启冒烟为验收证据：窗口就绪 < 1500ms）；内存基线 v1 记真机手动核验（任务管理器/GetProcessHeap 口径未定），自动化内存断言与 CI 实启作业登记 v1.1——不造一个测不准的假断言。
+  4. **CI 侧**：现有 Rust 工作流增加 `cargo bench --workspace --no-run`（基准编译面进 CI，防 benches 腐烂）；阈值断言随既有 `cargo test --workspace` 步骤天然覆盖，不新建独立作业。
+- **依据**：DESIGN §9.2 性能回归条目 + REVIEW §7 批次 3 原文；criterion 是 Rust 事实标准且与既有 rusqlite/bundled 栈零冲突；阈值取 §9.1 字面值，不放宽。
+- **代价**：5k/20k 语料种子使测试时长增加约秒级；断言在无头 CI 共享 runner 上的方差靠 p95 + 实测余量控制（若不足按决策 2 的档切换）；内存维度暂缺自动化门禁（如实登记，非静默跳过）。
+- **验收**：负例必含——①阈值断言在人为压慢路径上能失败（如注入 sleep 的对照或断言方向自检，证明断言不是恒真）；②基准文件在无 DB 权限/临时目录场景不 panic（open 失败走 skip/Err 而非崩）。正例——③`cargo bench --no-run` 编译通过、本地实跑产出四操作 × 三规模矩阵数据并留存于完成证据；④p95 断言 debug+release 双档实测数字入 DECISIONS；⑤门禁全绿。
+- **实施记录与完成证据（2026-09-19）**：workspace 增 `criterion = 0.5（default-features=false + cargo_bench_support）` dev 依赖；`crates/clipboard-core/benches/clip_store.rs`（`[[bench]] harness=false`）以真实 `ClipStore::open`（SQLite FTS5/WAL）跑满矩阵 12 项，语料种子用空格分词的中英混合行（unicode61 分词器对 CJK 连续串按整词切分，"剪贴板"独立成词才可命中——平台事实）；临时目录不可用/种子写入失败均 `eprintln!` 后整档跳过不 panic（验收②）。验收①由 `percentile_detects_slow_series_across_threshold` 自检：100 快样本通过、10% 样本 3× 阈值必使 p95 越限失败、中位/最大手算锚点。判定档选择（决策 2）：**不挂 `#[ignore]`，随 `cargo test` 常跑**——本机 debug 实测 p95：FTS 19.570ms / 捕获 2.394ms；release 实测：FTS 10.673ms / 捕获 5.845ms，两档对 50/100ms 阈值余量充足。criterion 实跑矩阵（本机 release profile，中位数 ms）：1k{fts_zh 2.047, fts_en 2.096, insert_unique 1.473, insert_dedup 2.114}；5k{11.415, 10.011, 2.228, 2.154}；20k{45.487, 45.857, 2.206, 2.172}——插入路径与语料规模基本无关（~2.2ms 恒定，去重命中与唯一同量级），FTS 呈约线性增长且 20k 档（45.5ms）逼近 §9.1 的 50ms 线，作为趋势信号登记（基准不承担门禁，对比用 `--save-baseline`）。启动/内存归属照决策 3 执行：启动判定面为既有 PERF1 实启冒烟（本提交无 UI/启动路径改动，沿用批次 3 #25 实启证据：窗口就绪 970ms、模块引导完成 1278ms，均 < 1500ms）；内存基线真机手动核验，自动化断言与 CI 实启作业登记 v1.1，未造测不准的假断言。CI：`ci.yml` rust 作业在 `cargo test --workspace` 后新增 `bench compile check`（`cargo bench --workspace --no-run`），基准防腐烂进 CI，阈值断言随既有测试步骤天然覆盖。门禁：`cargo fmt --all --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` 全绿（含 perf_thresholds 3 用例）、`cargo bench --workspace --no-run` 0、tsc 0、eslint 0、vitest 32/32、`vite build` 0。
 
 ---
 

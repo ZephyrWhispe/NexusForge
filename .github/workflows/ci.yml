@@ -26,6 +26,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --workspace
+      # D-27：基准矩阵必须随代码演进保持可编译（仅构建不执行，判定阈值在 tests/perf_thresholds.rs）
+      - name: bench compile check
+        run: cargo bench --workspace --no-run
 
   frontend:
     runs-on: ubuntu-latest

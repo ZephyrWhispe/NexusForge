@@ -61,6 +61,8 @@
 | PERF2 | 内存优化（release profile + 数据冷热分层） | — |
 | PERF3 | 前端性能（代码分割/虚拟列表/缓存） | — |
 
+> **v1 交付口径（D-27）**：§9.1 四阈值中可机器判定的两维（FTS 搜索 < 50ms、捕获入库 < 100ms）已落 `clipboard-core/tests/perf_thresholds.rs`（p95 断言随 `cargo test` 常跑）；`benches/clip_store.rs` 为 criterion 趋势矩阵（1k/5k/20k × fts 中英/唯一插入/去重插入，`--save-baseline` 对比，不做门禁），CI 以 `cargo bench --workspace --no-run` 保编译面。启动维判定面 = PERF1 计时日志实启冒烟（< 1500ms）；内存基线 v1 真机手动核验，自动化内存断言与 CI 实启作业记 v1.1。
+
 ### 关键要点
 ```toml
 # PERF2 Cargo.toml release
