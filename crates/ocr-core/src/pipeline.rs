@@ -1,43 +1,39 @@
-//! 识别管线（docs/impl/04 O4）：预处理 → 引擎识别 → 行排序重建 → 文本合并
+//! 识别管线（docs/impl/04 O4）：预处理 → 引擎识别（O1 注册表 pick）→ 行排序重建 → 文本合并
 //!
-//! 引擎抽象说明：v1 仅接入 win-ocr（OcrPort，win-integration 实现）。
-//! Paddle Sidecar（O3）与翻译引擎（O6）为独立里程碑，届时在 pipeline 前挂
-//! EngineRegistry（O1）即可，本文件的排序/合并不变。
+//! 引擎选择与降级统一在 [`EngineRegistry::pick`]（D-09 第 1 步）；
+//! Paddle Sidecar（O3）与翻译引擎（O6）为独立里程碑，届时向注册表追加引擎项即可，
+//! 本文件的排序/合并不变。
 
 use host_core::error::AppError;
-use host_core::ports::{Frame, OcrLine, OcrPort};
+use host_core::ports::{Frame, OcrLine};
 
+use crate::engine::EngineRegistry;
 use crate::types::OcrResultDto;
 
 use host_core::util::app_err as err;
 
-pub struct OcrPipeline {
-    port: std::sync::Arc<dyn OcrPort>,
+pub struct OcrPipeline<'a> {
+    engines: &'a EngineRegistry,
 }
 
-impl OcrPipeline {
-    pub fn new(port: std::sync::Arc<dyn OcrPort>) -> Self {
-        Self { port }
+impl<'a> OcrPipeline<'a> {
+    pub fn new(engines: &'a EngineRegistry) -> Self {
+        Self { engines }
     }
 
     /// 完整识别（阻塞；命令层负责 spawn_blocking + 超时）
     pub fn run(&self, frame: &Frame, langs: &[String]) -> Result<OcrResultDto, AppError> {
-        // ① 预处理：OcrPort 输入为像素帧；> 4096px 的图引擎可能失败，
+        // ① 预处理：OcrEngine 输入为像素帧；> 4096px 的图引擎可能失败，
         //    缩放放命令层（decode 时已知尺寸），此处仅校验
         if frame.width == 0 || frame.height == 0 {
             return Err(err("OCR_INPUT_001", "图像尺寸无效"));
         }
 
-        // ② 选语言：偏好列表中第一个引擎支持的；否则空串（引擎用用户配置语言）
-        let available = self.port.available_languages()?;
-        let lang = langs
-            .iter()
-            .find(|l| available.iter().any(|a| a.eq_ignore_ascii_case(l)))
-            .cloned()
-            .unwrap_or_default();
+        // ② 选引擎与语言（O1）：preferred 优先、注册顺序兜底、全不可用 → OCR_ENGINE_001
+        let (engine, lang) = self.engines.pick(langs)?;
 
         // ③ 引擎识别
-        let raw_lines = self.port.recognize(frame, &lang)?;
+        let raw_lines = engine.recognize(frame, &lang)?;
 
         // ④ 行排序重建（段聚类）
         let lines = segment_lines(raw_lines);
@@ -61,7 +57,7 @@ impl OcrPipeline {
                 .collect(),
             text,
             lang,
-            engine: "win-ocr".into(),
+            engine: engine.id().into(),
         })
     }
 }

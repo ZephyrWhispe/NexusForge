@@ -21,6 +21,7 @@ use host_core::module::{
     priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
 };
 use host_core::ports::{CapturePort, CaptureTarget, ClipboardPort};
+use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::store::ShotStore;
@@ -31,6 +32,27 @@ use crate::types::{
 use crate::util;
 
 use host_core::util::app_err as mod_err;
+
+/// OCR 联动帧的临时目录（{appData}/frames）：finish(ocr) 写入 → ocr-core 消费后删除；
+/// init 时清空上次进程遗留（帧是一次性交接物，崩溃残留无保留价值）
+fn frames_dir(app_data: &std::path::Path) -> std::path::PathBuf {
+    app_data.join("frames")
+}
+
+/// 从 `ocr.completed` 事件解析历史回填载荷（纯函数便于测试）。
+/// `ocr_copy_text` 也发布本主题（{action:"copied"}），故必须同时具备
+/// source_task_id 与 text 才算回填事件。
+fn parse_ocr_backfill(ev: &host_core::events::Event) -> Option<(String, String)> {
+    if ev.source != "ocr" {
+        return None;
+    }
+    let task_id = ev.payload.get("source_task_id").and_then(|v| v.as_str())?;
+    let text = ev.payload.get("text").and_then(|v| v.as_str())?;
+    if task_id.is_empty() {
+        return None;
+    }
+    Some((task_id.to_owned(), text.to_owned()))
+}
 
 /// 进行中的截图任务（同一时刻通常只有一个；新任务替换旧任务）
 struct PendingTask {
@@ -64,6 +86,8 @@ pub struct ScreenshotModule {
     pins: Mutex<Vec<PinRecord>>,
     config: Arc<AsyncMutex<ScreenshotConfig>>,
     state: ModuleStateCell,
+    /// ocr.completed 历史回填协程的停机信道（S4 协作停机，同 automation-core）
+    ocr_shutdown: RwLock<Option<watch::Sender<bool>>>,
 }
 
 impl ScreenshotModule {
@@ -78,6 +102,7 @@ impl ScreenshotModule {
             pins: Mutex::new(Vec::new()),
             config: Arc::new(AsyncMutex::new(ScreenshotConfig::default())),
             state: ModuleStateCell::new(),
+            ocr_shutdown: RwLock::new(None),
         }
     }
 
@@ -155,16 +180,62 @@ impl Module for ScreenshotModule {
         *self.clipboard.write() = Some(clipboard);
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.restore_pins();
+        // 上次进程遗留的 OCR 联动帧一次性清空（交接物消费即删，残留皆孤儿）
+        if let Ok(entries) = std::fs::read_dir(frames_dir(&ctx.app_data_dir)) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
         self.state.set(ModuleState::Stopped);
         Ok(())
     }
 
     fn start(&self) -> Result<(), ModuleError> {
+        // D-09 第 1 步：截图联动 OCR 的历史回填端——订阅 ocr.completed
+        // （ocr-core 消费 screenshot.ocr_requested 后发出），经事件单向交互，
+        // 不经函数调用（DESIGN O1）；每次 start 重建停机信道（S4）
+        if let (Some(bus), Some(store)) = (self.bus.read().clone(), self.store.read().clone()) {
+            match bus.subscribe("ocr.completed") {
+                Ok(mut rx) => {
+                    let (tx, mut shutdown) = watch::channel(false);
+                    *self.ocr_shutdown.write() = Some(tx);
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                ch = shutdown.changed() => {
+                                    if ch.is_err() || *shutdown.borrow_and_update() {
+                                        break;
+                                    }
+                                }
+                                received = rx.recv() => match received {
+                                    Ok(event) => {
+                                        if let Some((task_id, text)) = parse_ocr_backfill(&event) {
+                                            if let Err(e) = store.set_ocr_text(&task_id, &text) {
+                                                tracing::debug!(task_id, error = %e, "OCR 历史回填未命中记录");
+                                            }
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue;
+                                    }
+                                    Err(_) => break,
+                                },
+                            }
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!(error = %e, "ocr.completed 订阅失败，历史回填不可用"),
+            }
+        }
         self.state.set(ModuleState::Running);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), ModuleError> {
+        if let Some(tx) = self.ocr_shutdown.write().take() {
+            tx.send(true).ok();
+        }
         self.pending.lock().clear();
         self.state.set(ModuleState::Stopped);
         Ok(())
@@ -345,7 +416,10 @@ impl ScreenshotModule {
         self.pending.lock().remove(task_id);
     }
 
-    /// 完成：解码前端合成图 → 执行动作（copy/save/pin）→ 入历史 → 发事件
+    /// 完成：解码前端合成图 → 执行动作（copy/save/pin/ocr）→ 入历史 → 发事件
+    ///
+    /// ocr 动作不阻塞识别：帧写 {appData}/frames 后只发 `screenshot.ocr_requested`
+    /// 事件，结果经 `ocr.completed` 异步回流回填历史（D-09 第 1 步）
     pub fn finish(&self, task_id: &str, req: &FinishRequest) -> Result<FinishDto, AppError> {
         let (w, h, rgba) = util::decode_png_b64(&req.image_b64)?;
 
@@ -370,6 +444,7 @@ impl ScreenshotModule {
 
         let mut file: Option<String> = None;
         let mut pin_id: Option<String> = None;
+        let mut request_ocr = false;
         for action in &actions {
             match action.as_str() {
                 "copy" => self.action_copy(w, h, &rgba)?,
@@ -384,6 +459,9 @@ impl ScreenshotModule {
                     )?;
                     pin_id = Some(id);
                 }
+                // docs/impl/03 P5：Ocr 动作只转发事件，识别在 ocr-core 侧异步完成，
+                // 结果经 ocr.completed 回流（历史回填 + 截图 UI），此处登记待触发
+                "ocr" => request_ocr = true,
                 other => tracing::warn!(action = other, "未知截图后处理动作，已忽略"),
             }
         }
@@ -409,8 +487,68 @@ impl ScreenshotModule {
             ))
             .ok();
         }
+        // D-09 联动触发：历史已入库（回填 UPDATE 可命中）后再交接帧。
+        // 帧走文件、事件只带路径引用——forward_events 会把全量 payload 转发到
+        // 每个窗口，MB 级 base64 会淹掉 IPC；识别在 ocr-core 侧异步完成。
+        // best-effort：截图产物已落盘，OCR 请求失败只告警不判 finish 失败。
+        if request_ocr {
+            if let Err(e) = self.dispatch_ocr_request(task_id, w, h, &rgba) {
+                tracing::warn!(error = %e, "截图联动 OCR 请求失败，本次识别跳过");
+            }
+        }
         self.discard(task_id);
         Ok(FinishDto { file, pin_id })
+    }
+
+    /// 写联动帧到 {appData}/frames/{task_id}.png（tmp+rename，规约 5）并发布
+    /// `screenshot.ocr_requested {task_id, frame_ref}`（DESIGN O1：截图与 OCR
+    /// 只经事件交互，不经函数调用；帧文件由消费端读取后删除）
+    fn dispatch_ocr_request(
+        &self,
+        task_id: &str,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+    ) -> Result<(), AppError> {
+        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+        let Some(dir) = self.app_data() else {
+            return Err(mod_err("SCREENSHOT_STATE_001", "模块未初始化"));
+        };
+        let frames = frames_dir(&dir);
+        std::fs::create_dir_all(&frames)
+            .map_err(|e| mod_err("SCREENSHOT_OCR_001", format!("创建帧目录失败: {e}")))?;
+        let path = frames.join(format!("{task_id}.png"));
+        let tmp = frames.join(format!(".{task_id}.png.tmp"));
+        let encoded = {
+            let f = std::fs::File::create(&tmp)
+                .map_err(|e| mod_err("SCREENSHOT_OCR_001", format!("创建帧文件失败: {e}")))?;
+            PngEncoder::new(f).write_image(rgba, w, h, ExtendedColorType::Rgba8)
+        };
+        if let Err(e) = encoded {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(mod_err(
+                "SCREENSHOT_OCR_001",
+                format!("帧 PNG 编码失败: {e}"),
+            ));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(mod_err("SCREENSHOT_OCR_001", format!("帧落盘失败: {e}")));
+        }
+        let bus = self
+            .bus
+            .read()
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "模块未就绪"))?;
+        if let Err(e) = bus.publish(Event::new(
+            "screenshot.ocr_requested",
+            "screenshot",
+            serde_json::json!({ "task_id": task_id, "frame_ref": path.to_string_lossy() }),
+        )) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn action_copy(&self, w: u32, h: u32, rgba: &[u8]) -> Result<(), AppError> {
@@ -606,5 +744,73 @@ impl ScreenshotModule {
     /// 历史库句柄（screenshot_history_list IPC 用）
     pub fn history_store(&self) -> Option<Arc<ShotStore>> {
         self.store.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ocr_event(source: &'static str, payload: serde_json::Value) -> Event {
+        Event::new("ocr.completed", source, payload)
+    }
+
+    #[test]
+    fn parse_ocr_backfill_accepts_text_completion() {
+        let ev = ocr_event(
+            "ocr",
+            json!({ "source_task_id": "t1", "text": "你好", "engine": "mock" }),
+        );
+        assert_eq!(parse_ocr_backfill(&ev), Some(("t1".into(), "你好".into())));
+    }
+
+    #[test]
+    fn parse_ocr_backfill_rejects_copied_and_malformed() {
+        // ocr_copy_text 也发布本主题（{action:"copied"}），不得回填
+        let copied = ocr_event("ocr", json!({ "action": "copied" }));
+        assert_eq!(parse_ocr_backfill(&copied), None);
+        // 空 task_id / 非 ocr 来源 / 缺 text 均忽略
+        let empty = ocr_event("ocr", json!({ "source_task_id": "", "text": "x" }));
+        assert_eq!(parse_ocr_backfill(&empty), None);
+        let foreign = ocr_event("screenshot", json!({ "source_task_id": "t1", "text": "x" }));
+        assert_eq!(parse_ocr_backfill(&foreign), None);
+        let no_text = ocr_event("ocr", json!({ "source_task_id": "t1" }));
+        assert_eq!(parse_ocr_backfill(&no_text), None);
+    }
+
+    /// D-09 验收：ocr 动作写联动帧文件并发布只含路径引用的 ocr_requested 事件
+    #[tokio::test]
+    async fn dispatch_ocr_request_writes_frame_and_publishes_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = ScreenshotModule::new();
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe("screenshot.ocr_requested").unwrap();
+        *m.app_data_dir.write() = Some(dir.path().to_path_buf());
+        *m.bus.write() = Some(bus);
+
+        let rgba = vec![10u8, 20, 30, 255, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        m.dispatch_ocr_request("task-9", 2, 2, &rgba).unwrap();
+
+        let frame_path = dir.path().join("frames").join("task-9.png");
+        assert!(frame_path.is_file());
+        // tmp 文件不得残留（规约 5 原子写）
+        assert!(!dir.path().join("frames").join(".task-9.png.tmp").exists());
+
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.payload["task_id"], "task-9");
+        assert_eq!(
+            ev.payload["frame_ref"],
+            frame_path.to_string_lossy().as_ref()
+        );
+        // 事件只带路径，不带像素载荷
+        assert!(ev.payload.get("png_b64").is_none());
+    }
+
+    #[test]
+    fn dispatch_ocr_request_requires_init() {
+        let m = ScreenshotModule::new();
+        let e = m.dispatch_ocr_request("t", 1, 1, &[0; 4]).unwrap_err();
+        assert_eq!(e.code(), "SCREENSHOT_STATE_001");
     }
 }

@@ -103,7 +103,8 @@ pub struct CropDto {
 pub struct FinishRequest {
     /// 前端 canvas 合成后的最终图（PNG Base64）——预览即导出，保证一致性
     pub image_b64: String,
-    /// save | copy | pin
+    /// save | copy | pin | ocr（ocr 只发布 screenshot.ocr_requested 事件，
+    /// 识别结果经 ocr.completed 异步回流，见 D-09）
     #[serde(default)]
     pub actions: Vec<String>,
     /// Pin 初始位置（屏幕物理像素）

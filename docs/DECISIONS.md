@@ -18,7 +18,7 @@
 | D-06 | blob 路径采用扁平结构 | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-07 | 截图捕获 v1 以 GDI/PrintWindow 为主路径 | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-08 | 录屏（P7）移出 v1，列入 v1.1 | 改规范 | P1 | 3 | 已裁决（文档生效） |
-| D-09 | OCR v1 单引擎 + 保留引擎抽象扩展点 | 改规范 + 补骨架 | P1 | 2/3 | 待实施 |
+| D-09 | OCR v1 单引擎 + 保留引擎抽象扩展点 | 改规范 + 补骨架 | P1 | 2/3 | 第 1 步已完成（第 2 步待批次 3） |
 | D-10 | OCR「复制全部」走剪贴板回写窗口 | 补实现 | P1 | 1 | 已完成 |
 | D-11 | 编辑器 PDF 保持纯 Rust（lopdf） | 改规范 | P2 | — | 已裁决（文档生效） |
 | D-12 | 同步库归位 `db/sync.db` | 补实现 | P1 | 1 | 已完成 |
@@ -91,6 +91,8 @@
   1. **补骨架（批次 2，低成本）**：实现 DESIGN §4.3 要求的 `OcrEngine` trait 与引擎注册表，把现硬编码的 `win-ocr`（`crates/ocr-core/src/module.rs:93-99`）改为注册表中的一项；**接线 `screenshot.ocr_requested` 事件**（现仅注册未消费），使"截图联动 OCR"闭环可用。
   2. **改规范（v1.1）**：PaddleOCR sidecar 与翻译引擎移出 v1（依赖 O5 下载通道与额外语言模型分发）。
 - **理由**：Windows.Media.Ocr 为真实 WinRT 调用且带可操作降级提示（`crates/win-integration/src/ocr.rs:64-71`），单引擎在 v1 可用；但把引擎写死会让 v1.1 引入 PaddleOCR 时改动面过大，故骨架必须先补。
+- **实施记录（2026-09-19，第 1 步）**：`ocr-core/src/engine.rs` 落地 `OcrEngine` trait（`id/display_name/available/recognize`，同步 + `Send + Sync`——全仓端口均为同步、阻塞边界由命令/事件层 `spawn_blocking` 承担，属对 DESIGN §4.3 async 草图的有意偏差）；`WinOcrEngine` 把原 `module.rs` 硬编码的 win-ocr 收编为注册表项；`EngineRegistry` 按 docs/impl/04 O1 算法 `pick(langs)`：preferred 引擎可用且支持则优先，否则按登记序取首个支持引擎，偏好语言无一被支持时语言回落空串（引擎按用户配置语言自选，与旧管线口径一致），全部引擎不可用报 `OCR_ENGINE_001` 并并入各引擎错误、hint 给"安装语言包或下载 PaddleOCR 引擎"；`set_preferred` 拒绝未知 id（`OCR_ENGINE_003`），preferred_engine 经既有 `config_schema/apply_config` 通道暴露（不新增 IPC）。`OcrPipeline` 改持 `&EngineRegistry`。`screenshot.ocr_requested` 接线（DESIGN O1 红线：两模块只经事件、不经函数调用）：截图 `finish` 新增 `"ocr"` 动作 → `dispatch_ocr_request` 将合成图写 `{appData}/frames/{task_id}.png`（tmp+rename 原子落盘）后发布 `{task_id, frame_ref}`——**事件只带路径引用不带 base64**，因 `forward_events` 将全量 payload 转发每个窗口，MB 级帧会淹掉 IPC；ocr-core `start()` 起消费协程（S4 watch 协作停机，同 automation-core）读帧→识别→发 `ocr.completed {source_task_id, text, engine}` / `ocr.failed`，**帧文件无论成败即删**，init 清空上次进程遗留帧目录；截图侧 `start()` 订阅 `ocr.completed` 回填历史 `ocr_text`（`parse_ocr_backfill` 纯函数要求 source_task_id+text 齐备，过滤 `ocr_copy_text` 的 `{action:"copied"}` 同主题发布）。请求为 best-effort：截图产物已落盘，OCR 请求失败仅告警不判 finish 失败。直接命令路径（`ocr_recognize` + `record_ocr_text`）本批**有意不动**，事件回填与之双写幂等（同文本 UPDATE），命令层清理归 S6 commands.rs 拆分批。已知存量限制如实记录：覆盖层 ocr 模式在 finish 入库**前**走直接命令路径，回填 UPDATE 命中 0 行（与接线前行为一致，非本批回归；事件路径在入库后触发，回填正确）。
+- **完成证据（2026-09-19）**：新增 16 条回归测试——engine.rs 8 条（登记序默认/prefers 优先/preferred 不可用回落/语言回落空串/全不可用 001+hint 断言/set_preferred 拒绝/status+languages 并集/WinOcrEngine 适配 MockPort），ocr-core module.rs 4 条（**publish screenshot.ocr_requested → 消费协程识别 → ocr.completed 闭环** + 帧文件被消费删除 + 停机信道退出、坏路径/缺 frame_ref 发 ocr.failed、直接 recognize 发布、apply_config 偏好设置），screenshot-core 4 条（回填解析 2 条、`dispatch_ocr_request` 写帧+发布只带路径的事件+tmp 无残留、未初始化报 SCREENSHOT_STATE_001）；`cargo fmt --all --check` 0、`cargo clippy --workspace --all-targets -- -D warnings` 0、`cargo test --workspace` EXIT=0（ocr-core 17/17、screenshot-core 10/10）。
 
 ### D-11 编辑器 PDF 保持纯 Rust（lopdf）（改规范）
 
