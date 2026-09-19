@@ -322,6 +322,22 @@
 
 ---
 
+### D-29 蓝图对齐·面板内容补深实施路线（代理多内核 / 文件网盘多协议 / sync 深化 / 全模块按参考软件"全部功能"对齐；附方案文档前置流程裁定）（扩新范围，部分取代 §5）
+
+- **背景**：用户以蓝本愿景文档（DeepSeek 聊天导出《集合软件开源蓝本》2026-09-14，用户 Downloads，见 memory reference）度量现应用，裁定现有面板"内容很浅——光有功能面板，里面更详细的内容都没有"，明确选择四条优先补深轨道（代理多内核、文件/网盘多协议、sync 深化、差距登记+UI 占位可见），并加一条总纲："**全部功能面板根据功能做最深度的设置，尽可能实现参考软件的全部功能，而不是主要功能**"；同时立流程规则："**后面的要求也要先出方案文档**"。另用户实报：截图与 OCR 面板显示"模块界面待实现"。前后端双路深度勘查（逐文件盘点 12 面板 + 177 命令 + 7 个关键 crate 能力面）产出三类事实：**(a) UI 壳缺失**——`src/modules/` 下根本没有 screenshot、ocr 两目录，MainWorkbench 导航 14 模块只映射 12 面板，两个 P0 模块命中兜底空态（连带发现：设置中心硬编码 `moduleId="clipboard"`，任意模块点设置都只渲染剪切板 schema；三处 12 层嵌套三元是可测缺陷面）；**(b) 未登记的静默收窄**——proxy-core `KernelDriver` trait 只有 `SingBoxDriver` 单实现（`service.rs:463` 硬编码构造、`config.rs` 与 sing-box JSON 强耦合无中间 IR、`sub.rs` 节点协议封闭枚举仅 ss/vmess/trojan/vless），蓝本 §3.2 的多内核（xray/mihomo 换核、Pre-Socks TUN 协作）在 DESIGN 阶段即被裁成 sing-box-only 且**从未登记 D-NN**；办公助手（蓝本第八节）全链无踪迹；**(c) 后端能力超出 UI**——177 个 IPC 命令中约 30 个已实现但前端零入口（vault_change_master_password、vault_folder_rename、file_search、file_preview、file_rename_*、file_drivers、sys_clean_targets、winops_catalog、kvm_send_clip/send_file、term_ssh_known_hosts/forget_host、editor_save_as、editor_update、clipboard_clear、desktop_notes_due、notes 后端搜索链路、ocr_engine_status、screenshot_history_list 等），"面板里详细内容没有"相当一部分实为"后端有、UI 没接"。
+- **决策**：
+  1. **方案文档总纲**：新增 `docs/impl/09-blueprint-alignment.md` 为本决策唯一实施底稿（逐模块"参考软件功能 → 现状缺口 → 实施项 → 验收点"表）；**流程裁定（与 §6 规则 1 同权重）：后续每一补深批次开工前必须先在该文档追加/修订对应小节方案，再动代码**；单批次方案超出一节容量时拆独立子方案文档并在总纲挂链接。
+  2. **批次划分 B0–B8**（详见总纲 §2，依赖序）：B0 UI 壳补齐（截图/OCR 主面板、设置中心 moduleId 修复、MainWorkbench 嵌套三元→注册表化）；B1 孤儿命令接线批（约 30 条后端已有能力的纯 UI 补齐，收益/工作量比最高）；B2 代理多内核（协议无关配置 IR → sing-box/xray/mihomo 三生成器、内核注册表与换核生命周期、订阅协议扩展 hysteria2/tuic/wireguard/ssr + Clash YAML 解析、geoip/geosite 规则体系、HTTP 204 真实延迟测速与节点选定/自动优选）；B3 剪贴板深化（粘贴堆栈、规则分类器智能分组、敏感掩码与按需揭示、暂停捕获持久化、导出/导入、RTF）；B4 截图/OCR 深化（图层系统、窗口/滚动捕获、取色器与自定义颜色、美化、导出格式矩阵、上传 Provider 插件化、任务流水线配置、Tesseract 回退引擎、图片文件批量识别、OCR 语言选择 UI；PaddleOCR sidecar 因模型分发另立子方案）；B5 sync 深化（per-peer 状态 DTO 与游标查询、变更后自动/定时同步、发现层端口复用免手填、冲突历史视图、数据集选择）；B6 文件/网盘多协议（`TransferProtocol` 抽象：FTP(suppaftp)/SFTP(russh-sftp)/WebDAV(reqwest)/HTTP + rclone 驱动注册表扩展位）；B7 kvm/term/sys/automation/desktop/editor/notes 深化（KVM 会话表+send_clip/send_file UI+XButton/水平滚轮+上下缘；term 端口转发 -L/-R/-D 与 ProxyJump（T4 提前）、known_hosts 管理 UI、SFTP 写操作、Docker exec；sys 进程 top-N/结束进程、包管理仓库搜索安装、提权重试；automation ipc_command 动作、多动作 then 数组、条件嵌套、执行历史；desktop 启动器管理入口与整理规则；editor 原生文件对话框/另存为/编码切换/草稿恢复；notes Monaco 复用/双链补全/后端搜索接线）；B8 待裁决项（办公助手立项与否、i18n 复审）只出方案不写代码，等用户单独裁决。
+  3. **部分推翻 §5**（按 §6 规则 3 原行不删、追加标注）：「网盘驱动（经 rclone）」与「端口转发/跳板机（T4）」两行从"不做"改为纳入 D-29 B6/B7 排期；D-08 的"PaddleOCR/翻译 v1.1"**维持不变**（B4 先做 Tesseract 与管线，Paddle 另立子方案后再议）。
+  4. **已推迟项 UI 占位可见**：凡 D-08/D-23/§5 登记未做的能力，所属面板以统一「计划中（v1.1）」Badge 占位并在 tooltip 指回本文件对应条目，消除"静默缺失"观感；随各批次落地逐步移除。
+  5. **回归**：每批沿用战役规则（每提交带回归测试、安全红线含负例）；B0 额外立永久断言——vitest 遍历 `MODULES` 表每个 id 必有对应面板组件或显式占位声明（新模块再缺 UI 壳即测试红）；B2 换核以测试双 driver + 三内核配置生成 golden-file 断言收口；B6 涉及凭据与网络面按安全红线批处理。
+- **依据**：三份事实底账均为本次会话只读勘查逐行产出（12/12 面板功能区块+IPC 清单；177 命令全量分组；proxy/sync/file/term/kvm/ocr/sys 七个 crate 的能力面、锁死点与扩展位证据，全部带文件路径行号）；蓝本 §3.1–3.12 原文逐节读取（参考软件：Ortu/EcoPaste、v2rayN/IRBox/FlowZ、Vaultwarden、Oxyde_FM、OpenList、AeroFTP/Filestash、Lan Mouse/Deskflow、UniGetUI、ShareX/OpenSnap/Ksnip、Umi-OCR/PaddleOCR/Tesseract、NyaTerm、NeoHtop）；用户多选项选择与总纲原话为本决策输入（2026-09-19）。
+- **代价**：这是新增范围而非清尾——B1–B7 每批体量约等于既有战役批次，全周期长；B2 要求先把 config.rs 重构为 IR+生成器两层（sing-box 既有路径与测试迁移）；B6 引入外部网络栈与凭据存储面（提权/密钥管理红线）；PaddleOCR/录屏等重资产 sidecar 项的模型分发与体积问题不随本决策自动解决；方案文档存在漂移风险（以总纲为唯一底稿、状态随批次就地标注缓解）。
+- **验收**：B0——截图/OCR 面板实启实数据（历史列表/引擎状态/贴图管理）、设置中心跟随当前模块、`MODULES` 无兜底空态断言绿；B1——每条接线命令有 UI 路径测试或实启冒烟记录，且面板无"只写日志的假按钮"（死按钮负例）；B2——三内核切换 e2e（测试双驱动 + sing-box 真实对照）、订阅新协议解析含畸形负例、换核时系统代理/TUN 态不破；B3–B7——各批按总纲对应小节验收点逐项过既有门禁全组（fmt/clippy/test/bench --no-run/tsc/eslint/vitest/build）；§5 两行修订与 D-08 维持声明落字；全部门禁绿。
+- **状态**：待实施（总纲方案已落 `docs/impl/09-blueprint-alignment.md`，批次未开工）。
+
+---
+
 ## 5. 明确不做（v1 范围外，已记录不再重开）
 
 | 项 | 原因 | 处置 |
@@ -329,8 +345,8 @@
 | 国际化（i18n） | DESIGN 未要求；出货范围是简体中文桌面工具。安装器提供 English 但 UI 为中文的割裂感已知 | 不立项；先把 `MainWorkbench` 的 14 层嵌套三元抽为 `MODULES[].subtitle` 常量表，为将来留唯一落点 |
 | 每显示器独立覆盖窗口 | 架构级改动，见 D-23 | v1.1 |
 | 同步 3-way 合并 / 中继服务器 | 与"本地优先、服务端不见明文"的定位冲突 | v1.1+，需新决策 |
-| 端口转发 / 跳板机（T4） | 依赖 SSH 会话复用重构 | v1.1 |
-| 网盘驱动（SMB/FTP/WebDAV/S3，经 rclone） | 依赖 sidecar 分发通道（D-08 同源） | v1.1 |
+| 端口转发 / 跳板机（T4） | 依赖 SSH 会话复用重构 | **取代：D-29**——提前纳入 B7 排期（docs/impl/09 §7），本行保留为历史裁决记录 |
+| 网盘驱动（SMB/FTP/WebDAV/S3，经 rclone） | 依赖 sidecar 分发通道（D-08 同源） | **取代：D-29**——提前纳入 B6 排期（docs/impl/09 §6），本行保留为历史裁决记录 |
 | WASM 插件市场签名与分发 | 需后端与信任根设计 | v1.1+ |
 | 性能基准（criterion）与启动/内存/搜索阈值断言 | 门禁体系（D-01/D-17）就绪后才有意义 | 批次 3 |
 
