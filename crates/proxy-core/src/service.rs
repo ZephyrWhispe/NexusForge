@@ -80,16 +80,11 @@ fn default_kernel() -> String {
 /// 当前唯一注册内核 id（T-B2-5/6 增 xray/mihomo）
 pub const KERNEL_SINGBOX: &str = "sing-box";
 
-/// 安装入口预检（T-B2-3）：当前仅 sing-box 有下载通道，其余内核 id 在任何 IO 前如实拒
-/// （sidecar 资产表泛化归 T-B2-4 的 KERNEL_ASSETS）。纯函数以便单测钉住 async 安装路径。
-pub fn check_install_kernel(kernel: &str) -> Result<()> {
-    if kernel == KERNEL_SINGBOX {
-        Ok(())
-    } else {
-        Err(ProxyError::Kernel(format!(
-            "内核 {kernel} 的二进制下载通道尚未接入：当前仅支持 sing-box"
-        )))
-    }
+/// 安装入口内核解析（T-B2-4）：kernel 缺省 None = "sing-box"（旧调用兼容）；
+/// 未知/未接入下载通道的内核 id 在任何触网前由 [`sidecar::asset_for`] 如实拒。
+/// 纯函数以便单测钉住 async 安装路径（tauri State 在单测不可构造，命令层透传由此 seam 覆盖）。
+pub fn resolve_install_kernel(kernel: Option<&str>) -> Result<&'static sidecar::AssetSpec> {
+    sidecar::asset_for(kernel.unwrap_or(KERNEL_SINGBOX))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -221,7 +216,6 @@ impl ProxyService {
 
     pub fn status(&self) -> StatusDto {
         let inner = self.inner.read();
-        let manifest = sidecar::read_manifest(&self.bin_dir());
         let running_id = inner.handle.as_ref().map(|h| h.driver_id().to_string());
         let kernels: Vec<KernelInfoDto> = KERNEL_IDS
             .iter()
@@ -230,11 +224,9 @@ impl ProxyService {
                 id: d.id().to_string(),
                 display_name: d.display_name().to_string(),
                 installed: d.exe_path().is_file(),
-                // 旧单 manifest 仅 sing-box 有版本记录（per-kernel manifest 归 T-B2-4）
-                version: manifest
-                    .as_ref()
-                    .filter(|m| m.kernel_id == d.id())
-                    .map(|m| m.kernel_version.clone()),
+                // per-kernel manifest（T-B2-4）：manifest-<id>.json 优先，
+                // 旧单文件仅 sing-box 兼容读（零迁移）
+                version: sidecar::read_manifest(&self.bin_dir(), d.id()).map(|m| m.kernel_version),
                 running: running_id.as_deref() == Some(d.id()),
                 caps: d.caps(),
                 supported_kinds: d
@@ -264,28 +256,38 @@ impl ProxyService {
         }
     }
 
-    /// 内核安装（PR2；T-B2-3 参数化）：kernel 缺省 "sing-box"（旧调用兼容），
-    /// 非 sing-box 在触网前被 [`check_install_kernel`] 如实拒。官方 Release 直链下载 → zip 校验解压 → manifest。
+    /// 内核安装（PR2；T-B2-4 资产表泛化）：kernel 缺省 "sing-box"（旧调用兼容），
+    /// 未知内核在触网前被 [`sidecar::asset_for`] 如实拒。官方 Release 直链下载 →
+    /// zip 校验解压 → per-kernel manifest + TOFU pin（ack_pin 恒 false：UI 确认通道归 B9，
+    /// 本行只保证"篡改面不因缺 UI 而静默放行"）。
     pub async fn kernel_install(
         &self,
         kernel: Option<&str>,
         version: Option<String>,
     ) -> Result<sidecar::Manifest> {
-        check_install_kernel(kernel.unwrap_or(KERNEL_SINGBOX))?;
-        let version = version.unwrap_or_else(|| sidecar::DEFAULT_SINGBOX_VERSION.to_string());
-        let url = sidecar::singbox_download_url(&version);
+        let spec = resolve_install_kernel(kernel)?;
+        let version = version.unwrap_or_else(|| spec.default_version.to_string());
+        let url = (spec.url_for)(&version);
         let bytes = self.http_get(&url).await?;
-        let manifest = sidecar::install_singbox_from_zip(&self.bin_dir(), &bytes, &version)?;
-        tracing::info!(version = %version, sha256 = %manifest.sha256, "sing-box 内核安装完成");
+        let manifest =
+            sidecar::install_binary_from_zip(spec, &self.bin_dir(), &bytes, &version, false)?;
+        tracing::info!(kernel = %spec.id, version = %version, sha256 = %manifest.sha256, "内核安装完成");
         self.publish_state();
         Ok(manifest)
     }
 
-    /// wintun.dll 安装（PR5 TUN 前置）
+    /// wintun.dll 安装（PR5 TUN 前置；T-B2-4 起与内核走同一 install_binary_from_zip 通道）
     pub async fn wintun_install(&self) -> Result<()> {
-        let url = sidecar::wintun_download_url(sidecar::DEFAULT_WINTUN_VERSION);
+        let spec = &sidecar::WINTUN_ASSET;
+        let url = (spec.url_for)(spec.default_version);
         let bytes = self.http_get(&url).await?;
-        sidecar::install_wintun_from_zip(&self.bin_dir(), &bytes)?;
+        sidecar::install_binary_from_zip(
+            spec,
+            &self.bin_dir(),
+            &bytes,
+            spec.default_version,
+            false,
+        )?;
         self.publish_state();
         Ok(())
     }
@@ -1252,23 +1254,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---------------- T-B2-3：安装扩参诚实门 / 内核重启 ----------------
+    // ---------------- T-B2-3/T-B2-4：安装扩参 / 内核参数透传 ----------------
 
     #[test]
-    fn kernelInstallGate_nonSingbox_honestReject() {
-        // 扩参落 T-B2-3（09 §5.2 实施更正）：内核卡安装钮点名内核，但下载通道
-        // 泛化归 T-B2-4——非 sing-box 必须在任何 IO 前被纯函数如实拒并指路，
-        // 绝不允许"按 xray 却悄悄装 sing-box"。
-        assert!(check_install_kernel(KERNEL_SINGBOX).is_ok());
-        let e = check_install_kernel("xray").unwrap_err();
+    fn installKernel_command_kernelParamPassthrough() {
+        // 命令层 kernel 参数（Option<&str>）→ 资产表解析：缺省 = sing-box（旧调用
+        // 兼容零迁移），xray/mihomo 各命中自身规格（T-B2-3 时代"仅 sing-box 可装"
+        // 的 kernelInstallGate_nonSingbox_honestReject 由本行 KERNEL_ASSETS 接管），
+        // 未知 id 在触网前 Kernel 拒并指路支持面。
+        assert_eq!(resolve_install_kernel(None).unwrap().id, KERNEL_SINGBOX);
+        assert_eq!(resolve_install_kernel(Some("xray")).unwrap().id, "xray");
+        assert_eq!(resolve_install_kernel(Some("mihomo")).unwrap().id, "mihomo");
+        assert_eq!(
+            (resolve_install_kernel(Some("xray")).unwrap().url_for)("26.3.27"),
+            sidecar::xray_download_url("26.3.27"),
+            "fn 指针必须接各自官方直链，不得串道"
+        );
+        let e = resolve_install_kernel(Some("bogus")).unwrap_err();
         match e {
             ProxyError::Kernel(msg) => {
-                assert!(msg.contains("xray"), "错误必须点名被拒内核: {msg}");
+                assert!(msg.contains("bogus"), "错误必须点名被拒内核: {msg}");
                 assert!(msg.contains("下载通道"), "错误必须指路未接入原因: {msg}");
             }
-            other => panic!("非 sing-box 必须是 Kernel 错，实得 {other:?}"),
+            other => panic!("未知内核必须是 Kernel 错，实得 {other:?}"),
         }
-        assert!(check_install_kernel("mihomo").is_err());
     }
 
     #[test]

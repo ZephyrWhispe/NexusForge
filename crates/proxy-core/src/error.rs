@@ -18,6 +18,8 @@ pub enum ProxyError {
     Subscription(String),
     #[error("下载/校验失败: {0}")]
     Download(String),
+    #[error("完整性校验失败: {0}")]
+    Integrity(String),
     #[error("系统代理错误: {0}")]
     SysProxy(String),
     #[error("权限不足: {0}")]
@@ -38,6 +40,7 @@ impl ProxyError {
             Self::Config(_) => "PROXY_CONFIG_001",
             Self::Subscription(_) => "PROXY_SUB_001",
             Self::Download(_) => "PROXY_DOWNLOAD_001",
+            Self::Integrity(_) => "PROXY_INTEGRITY_001",
             Self::SysProxy(_) => "PROXY_SYS_001",
             Self::Permission(_) => "PROXY_TUN_002",
             Self::Io(_) => "PROXY_IO_001",
