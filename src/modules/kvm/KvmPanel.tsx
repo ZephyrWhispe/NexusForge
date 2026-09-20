@@ -7,6 +7,13 @@ import {
   Button,
   Input,
   Select,
+  Dialog,
+  DialogSurface,
+  DialogBody,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Textarea,
   Table,
   TableBody,
   TableCell,
@@ -23,6 +30,8 @@ import {
   kvmPairedPeers,
   kvmPairWith,
   kvmReleaseControl,
+  kvmSendClip,
+  kvmSendFile,
   kvmSessionList,
   kvmSetEdgeMap,
   kvmUnpair,
@@ -32,7 +41,7 @@ import {
   type PeerInfoDto,
   type SessionDto,
 } from "../../ipc/client";
-import { reportError } from "../../stores/notifications";
+import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
@@ -42,6 +51,9 @@ import EmptyState from "../../components/EmptyState";
  * 键鼠共享面板（docs/impl/05 K8，M4 v1）：
  * ① 本端一次性码展示（对端输入用）② 发现设备配对 ③ 已配对管理 + 边缘映射
  * ④ 会话/控制状态。kvm.* 事件驱动刷新（host.module_state 转发契约）。
+ * T-B1-7：推送剪贴板/推送文件仅对 role=client 的出站会话开放（核账⑤：
+ * 后端 session_to 两种角色均可解析，客户端门禁是产品语义——server 会话是
+ * 对端在控制本机，不是推送目标）；「活跃会话」卡按角色列出全部会话。
  */
 const useStyles = makeStyles({
   root: {
@@ -85,6 +97,13 @@ export default function KvmPanel() {
   const [busy, setBusy] = useState<string>("");
   // 首轮刷新是否落定：未落定前两个设备列表渲染加载态而非"暂无"文案（D-18 假空态修正）
   const [loaded, setLoaded] = useState(false);
+  // 推送回落对话框（readText 被拒）与文件路径对话框（T-B1-7）
+  const [pushTextFor, setPushTextFor] = useState<PairedPeerDto | null>(null);
+  const [pushTextValue, setPushTextValue] = useState("");
+  const [pushTextBusy, setPushTextBusy] = useState(false);
+  const [fileFor, setFileFor] = useState<PairedPeerDto | null>(null);
+  const [filePath, setFilePath] = useState("");
+  const [fileBusy, setFileBusy] = useState(false);
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -243,8 +262,98 @@ export default function KvmPanel() {
     }
   };
 
+  const hasClientSession = (deviceId: string) =>
+    sessions.some((s) => s.device_id === deviceId && s.role === "client");
+
+  const notAllowedError = () => {
+    const e = new Error("clipboard unavailable");
+    e.name = "NotAllowedError";
+    return e;
+  };
+
+  // 推送剪贴板（T-B1-7）：首径 navigator.clipboard.readText()；被拒（NotAllowedError）
+  // 或 API 缺失 → 回落「推送文本」对话框（用户 Ctrl+V，无需任何权限）。两路都真 invoke。
+  const doPushClip = async (device: PairedPeerDto) => {
+    if (!hasClientSession(device.device_id)) return;
+    setBusy(device.device_id);
+    try {
+      const readText = navigator.clipboard?.readText?.bind(navigator.clipboard);
+      if (!readText) throw notAllowedError();
+      const text = await readText();
+      if (!text) {
+        setError("本地剪贴板没有文本内容，未推送");
+        return;
+      }
+      await kvmSendClip(device.device_id, { Text: { text, html: null } });
+      setError("");
+      notify("success", `已推送剪贴板文本到「${device.device_name}」`, "对端将收到并写入其剪贴板");
+    } catch (e) {
+      if ((e as { name?: string } | null)?.name === "NotAllowedError") {
+        setPushTextFor(device);
+        setPushTextValue("");
+      } else {
+        setError(parseAppError(e)?.data.message ?? String(e));
+      }
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doPushTextSend = async () => {
+    const device = pushTextFor;
+    const text = pushTextValue;
+    if (!device || !text) return;
+    setPushTextBusy(true);
+    try {
+      await kvmSendClip(device.device_id, { Text: { text, html: null } });
+      setError("");
+      setPushTextFor(null);
+      notify("success", `已推送文本到「${device.device_name}」`, "对端将收到并写入其剪贴板");
+    } catch (e) {
+      setError(parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      setPushTextBusy(false);
+    }
+  };
+
+  const doFileSend = async () => {
+    const device = fileFor;
+    const path = filePath.trim();
+    if (!device || !path) return;
+    if (
+      !(await confirmAction({
+        title: "发送文件到对端",
+        impact: [
+          `将向「${device.device_name}」发送 1 个文件`,
+          `路径 ${path}`,
+          "对端将接收并落盘，文件内容对对方可见",
+        ],
+        detail:
+          "仅发送单个已存在文件路径（目录与通配符不会展开，多个文件请逐次发送）；" +
+          "传输在后台进行，进度与回执经会话事件回报。",
+        confirmLabel: "发送",
+      }))
+    )
+      return;
+    setFileBusy(true);
+    try {
+      await kvmSendFile(device.device_id, path);
+      setError("");
+      setFileFor(null);
+      notify("success", `已开始发送文件到「${device.device_name}」`, "进度与回执经会话事件回报");
+    } catch (e) {
+      setError(parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      setFileBusy(false);
+    }
+  };
+
   const onlineIds = new Set(discovered.map((p) => p.device_id));
+  // sessionIds 保持任意角色语义（「会话中」徽标 + 连接互斥）；推送门禁只看 client 出站会话
   const sessionIds = new Set(sessions.map((s) => s.device_id));
+  const clientSessionIds = new Set(
+    sessions.filter((s) => s.role === "client").map((s) => s.device_id),
+  );
   const unpaired = discovered.filter((p) => !paired.some((q) => q.device_id === p.device_id));
 
   return (
@@ -410,6 +519,34 @@ export default function KvmPanel() {
                       >
                         {busy === d.device_id ? "连接中…" : "连接"}
                       </Button>
+                      <Button
+                        size="small"
+                        disabled={!clientSessionIds.has(d.device_id)}
+                        title={
+                          clientSessionIds.has(d.device_id)
+                            ? "推送本机剪贴板文本（被拒时可手动输入）"
+                            : "需先点「连接」建立本端发起的出站会话（对端接入的会话不视为推送目标）"
+                        }
+                        onClick={() => void doPushClip(d)}
+                      >
+                        推送剪贴板
+                      </Button>
+                      <Button
+                        size="small"
+                        disabled={!clientSessionIds.has(d.device_id)}
+                        title={
+                          clientSessionIds.has(d.device_id)
+                            ? "发送单个本地文件到对端"
+                            : "需先点「连接」建立本端发起的出站会话（对端接入的会话不视为推送目标）"
+                        }
+                        onClick={() => {
+                          if (!clientSessionIds.has(d.device_id)) return;
+                          setFileFor(d);
+                          setFilePath("");
+                        }}
+                      >
+                        推送文件
+                      </Button>
                       <Button size="small" onClick={() => void doUnpair(d)}>
                         解除配对
                       </Button>
@@ -422,7 +559,49 @@ export default function KvmPanel() {
         )}
       </Section>
 
-      {/* ④ 边缘切换说明 */}
+      {/* ④ 活跃会话（T-B1-7）：按角色列出，client=本端发起（可推送），server=对端接入 */}
+      <Section
+        title="活跃会话"
+        actions={<Badge appearance="outline">{sessions.length}</Badge>}
+      >
+        {sessions.length === 0 ? (
+          <EmptyState
+            text="当前无活跃会话（点已配对设备的「连接」发起，或等待对端接入）"
+            loading={!loaded}
+          />
+        ) : (
+          <Table size="small">
+            <TableHeader>
+              <TableRow>
+                <TableHeaderCell>设备</TableHeaderCell>
+                <TableHeaderCell>角色</TableHeaderCell>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sessions.map((s) => (
+                <TableRow key={`${s.role}:${s.device_id}`}>
+                  <TableCell>
+                    <Text weight="semibold">{s.device_name}</Text>
+                  </TableCell>
+                  <TableCell>
+                    {s.role === "client" ? (
+                      <Badge appearance="filled" color="brand">
+                        client · 本端发起（可推送）
+                      </Badge>
+                    ) : (
+                      <Badge appearance="filled" color="warning">
+                        server · 对端接入
+                      </Badge>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </Section>
+
+      {/* ⑤ 边缘切换说明 */}
       <Section title="边缘切换工作方式">
         <Text size={200} className={styles.muted}>
           为设备设置"共享边缘"后（如 设备 B = 本机右缘），本机鼠标推到屏幕右缘即开始用键鼠控制
@@ -430,6 +609,80 @@ export default function KvmPanel() {
           Ctrl+Alt+Shift+Q 切回。边缘映射会话建立后即时生效。
         </Text>
       </Section>
+
+      {/* 推送文本回落对话框：readText 被拒时手动输入/粘贴（无需剪贴板权限） */}
+      <Dialog
+        open={pushTextFor !== null}
+        onOpenChange={(_, d) => {
+          if (!d.open) setPushTextFor(null);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>推送文本到「{pushTextFor?.device_name ?? ""}」</DialogTitle>
+            <DialogContent>
+              <Text size={200} className={styles.muted}>
+                自动读取本机剪贴板被系统拒绝，已回落手动模式：在下方输入或 Ctrl+V
+                粘贴要推送的文本（此路径不需要任何剪贴板权限）。
+              </Text>
+              <Textarea
+                rows={5}
+                value={pushTextValue}
+                onChange={(_, d) => setPushTextValue(d.value)}
+                placeholder="要推送到对端剪贴板的文本"
+              />
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setPushTextFor(null)}>
+                取消
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={!pushTextValue.trim() || pushTextBusy}
+                onClick={() => void doPushTextSend()}
+              >
+                {pushTextBusy ? "推送中…" : "推送"}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      {/* 推送文件对话框：单个已存在文件路径 + D-18 确认（跨机可见内容） */}
+      <Dialog
+        open={fileFor !== null}
+        onOpenChange={(_, d) => {
+          if (!d.open) setFileFor(null);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>发送文件到「{fileFor?.device_name ?? ""}」</DialogTitle>
+            <DialogContent>
+              <Text size={200} className={styles.muted}>
+                仅发送单个已存在文件路径（目录与通配符不会展开）。
+              </Text>
+              <Input
+                value={filePath}
+                onChange={(_, d) => setFilePath(d.value)}
+                placeholder="例如 C:\Users\me\Downloads\report.pdf"
+              />
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setFileFor(null)}>
+                取消
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={!filePath.trim() || fileBusy}
+                onClick={() => void doFileSend()}
+              >
+                {fileBusy ? "发送中…" : "发送"}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }

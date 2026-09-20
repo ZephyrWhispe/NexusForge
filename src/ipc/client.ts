@@ -352,6 +352,17 @@ export interface ControlStateDto {
   device_id?: string;
 }
 
+/**
+ * 剪贴板内容跨机投影（host_core ports.rs ClipContent，serde 外部 tagging：
+ * JSON 恰为单键对象 `{Text|Image|Files}`，键名区分大小写）。
+ * `html` 在 TS 侧可选、上线必带 null——Rust `Option` 字段缺键即反序列化失败；
+ * `bytes` 是 Arc<[u8]> 的 JSON 数字数组（大图请走 send_file，超 CLIP_MAX 报 KVM_TRANSFER_006）。
+ */
+export type ClipContentDto =
+  | { Text: { text: string; html?: string | null } }
+  | { Image: { format: string; width: number; height: number; bytes: number[] } }
+  | { Files: { paths: string[] } };
+
 /** 签发一次性配对码（返回 [码, 有效期毫秒]） */
 export function kvmIssuePairCode(): Promise<[string, number]> {
   return invoke("kvm_issue_pair_code");
@@ -376,11 +387,8 @@ export function kvmDiscoveredPeers(): Promise<PeerInfoDto[]> {
 export function kvmConnectTo(addr: string): Promise<string> {
   return invoke("kvm_connect_to", { addr });
 }
-/** 发送剪贴板内容（Text/Image） */
-export function kvmSendClip(
-  deviceId: string,
-  content: { Text?: { text: string; html?: string | null } } | { Image?: unknown },
-): Promise<void> {
+/** 发送剪贴板内容（Text/Image；Files 变体后端不支持单帧推送，逐文件走 kvmSendFile） */
+export function kvmSendClip(deviceId: string, content: ClipContentDto): Promise<void> {
   return invoke("kvm_send_clip", { deviceId, content });
 }
 /** 发送本地文件 */
