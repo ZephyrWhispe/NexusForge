@@ -9,6 +9,18 @@ import {
   Dropdown,
   Option,
   Spinner,
+  Dialog,
+  DialogSurface,
+  DialogBody,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Table,
+  TableBody,
+  TableCell,
+  TableRow,
+  TableHeader,
+  TableHeaderCell,
 } from "@fluentui/react-components";
 import "@xterm/xterm/css/xterm.css";
 import { Terminal } from "@xterm/xterm";
@@ -27,12 +39,15 @@ import {
   termSpawnLocal,
   termSpawnWsl,
   termSshConnect,
+  termSshForgetHost,
+  termSshKnownHosts,
   termWslList,
   termWrite,
   parseAppError,
   type DockerContainerDto,
   type SftpEntryDto,
   type SshAuthDto,
+  type SshKnownHostDto,
   type TermSessionDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
@@ -48,6 +63,7 @@ import EmptyState from "../../components/EmptyState";
  * - T1 本地 ConPTY 会话（PowerShell / 自定义命令行）+ T5 WSL 分发
  * - T2 输出经 term.output 事件写入 xterm；ack 背压（累计字节回传）
  * - T3 SSH 会话（密码/密钥，TOFU 指纹自动记录，变更报错）+ SFTP 列表/上传/下载
+ *   （T-B1-8：「已知主机」Dialog 列表+删除，host 串一律原样回传保 [h]:port 形状）
  * - T6 Docker：容器列表（手动刷新）/ 启停 / 日志 tail
  */
 const useStyles = makeStyles({
@@ -132,6 +148,11 @@ export default function TerminalPanel() {
   const [sshPass, setSshPass] = useState("");
   const [sshKeyPath, setSshKeyPath] = useState("");
   const [useKey, setUseKey] = useState(false);
+  // 已知主机管理（T-B1-8）：host 串含 [h]:port 复合形态一律原样回传，
+  // parse_host_port（commands/term.rs:195-203）依赖该形状，前端禁止拆解重组。
+  const [khOpen, setKhOpen] = useState(false);
+  const [khList, setKhList] = useState<SshKnownHostDto[] | null>(null);
+  const [khBusy, setKhBusy] = useState(false);
   // SFTP
   const [sftpPath, setSftpPath] = useState("/root");
   const [sftpEntries, setSftpEntries] = useState<SftpEntryDto[]>([]);
@@ -405,6 +426,48 @@ export default function TerminalPanel() {
     [lifecycle],
   );
 
+  // ---- 已知主机（TOFU）管理（T-B1-8）----
+  const loadKnownHosts = useCallback(async () => {
+    try {
+      setKhList(await termSshKnownHosts());
+    } catch (e) {
+      setKhList([]);
+      fail(e);
+    }
+  }, [fail]);
+
+  const forgetHost = useCallback(
+    async (h: SshKnownHostDto) => {
+      // B1 内唯一 danger 删除项：指纹信任记录删除不可逆，command 预览点名原样 host 串
+      if (
+        !(await confirmAction({
+          title: "删除已知主机指纹",
+          impact: `将删除「${h.host}」的 TOFU 指纹记录（1 条）`,
+          detail:
+            "删除后下次连接该主机将按首次连接重新记录指纹（TOFU）；" +
+            "若对端并未重建密钥，重连时的指纹不符告警意味着中间人风险，请先核实。",
+          command: h.host,
+          danger: true,
+          confirmLabel: "删除",
+        }))
+      )
+        return;
+      setKhBusy(true);
+      try {
+        const removed = await termSshForgetHost(h.host);
+        setMsg(
+          removed ? `已删除「${h.host}」的指纹记录` : `「${h.host}」未删除（可能已被移除）`,
+        );
+        await loadKnownHosts();
+      } catch (e) {
+        fail(e);
+      } finally {
+        setKhBusy(false);
+      }
+    },
+    [fail, loadKnownHosts],
+  );
+
   return (
     <div className={styles.root}>
       <Tabs
@@ -459,6 +522,17 @@ export default function TerminalPanel() {
             <Input className={styles.grow} placeholder={useKey ? "密钥口令（可空）" : "密码"} type="password" value={sshPass} onChange={(_, d) => setSshPass(d.value)} />
             <Button size="small" appearance="primary" onClick={() => void spawnSsh()}>
               SSH 连接
+            </Button>
+            <Button
+              size="small"
+              appearance="outline"
+              title="查看并管理 SSH 首次连接记录的 TOFU 主机指纹"
+              onClick={() => {
+                setKhOpen(true);
+                void loadKnownHosts();
+              }}
+            >
+              已知主机
             </Button>
           </div>
 
@@ -614,6 +688,63 @@ export default function TerminalPanel() {
           )}
         </Section>
       )}
+
+      {/* 已知主机（TOFU）管理 Dialog（T-B1-8）：host 列原样展示原样回传 */}
+      <Dialog
+        open={khOpen}
+        onOpenChange={(_, d) => {
+          if (!d.open) setKhOpen(false);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>已知主机（SSH 指纹管理）</DialogTitle>
+            <DialogContent>
+              {khList === null ? (
+                <EmptyState text="指纹列表加载中" loading />
+              ) : khList.length === 0 ? (
+                <EmptyState text="暂无已知主机（SSH 首次连接确认后自动记录）" />
+              ) : (
+                <Table size="small">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHeaderCell>主机</TableHeaderCell>
+                      <TableHeaderCell>指纹</TableHeaderCell>
+                      <TableHeaderCell>操作</TableHeaderCell>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {khList.map((h) => (
+                      <TableRow key={h.host}>
+                        <TableCell>
+                          <span className={styles.muted}>{h.host}</span>
+                        </TableCell>
+                        <TableCell>
+                          <span className={styles.muted}>{h.fingerprint}</span>
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            size="small"
+                            disabled={khBusy}
+                            onClick={() => void forgetHost(h)}
+                          >
+                            删除
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setKhOpen(false)}>
+                关闭
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }
