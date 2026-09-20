@@ -1,0 +1,136 @@
+{
+  "dns": {
+    "final": "remote",
+    "rules": [
+      {
+        "outbound": "any",
+        "server": "local"
+      }
+    ],
+    "servers": [
+      {
+        "address": "https://1.1.1.1/dns-query",
+        "detour": "proxy",
+        "tag": "remote"
+      },
+      {
+        "address": "local",
+        "detour": "direct",
+        "tag": "local"
+      }
+    ],
+    "strategy": "prefer_ipv4"
+  },
+  "inbounds": [
+    {
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "auto_route": true,
+      "interface_name": "NexusForge0",
+      "stack": "mixed",
+      "strict_route": true,
+      "tag": "tun-in",
+      "type": "tun"
+    }
+  ],
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "default": "sub0aaaa:hk-1",
+      "outbounds": [
+        "sub0aaaa:hk-1",
+        "sub0aaaa:tokyo-2",
+        "sub1bbbb:lg-vless",
+        "sub1bbbb:fr-vmess",
+        "auto"
+      ],
+      "tag": "proxy",
+      "type": "selector"
+    },
+    {
+      "interval": "5m",
+      "outbounds": [
+        "sub0aaaa:hk-1",
+        "sub0aaaa:tokyo-2",
+        "sub1bbbb:lg-vless",
+        "sub1bbbb:fr-vmess"
+      ],
+      "tag": "auto",
+      "type": "urltest",
+      "url": "https://www.gstatic.com/generate_204"
+    },
+    {
+      "method": "aes-256-gcm",
+      "password": "p1",
+      "server": "1.2.3.4",
+      "server_port": 8388,
+      "tag": "sub0aaaa:hk-1",
+      "type": "shadowsocks"
+    },
+    {
+      "password": "p2",
+      "server": "example.com",
+      "server_port": 443,
+      "tag": "sub0aaaa:tokyo-2",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "type": "trojan"
+    },
+    {
+      "flow": "xtls-rprx-vision",
+      "server": "5.6.7.8",
+      "server_port": 8443,
+      "tag": "sub1bbbb:lg-vless",
+      "tls": {
+        "enabled": true,
+        "server_name": "cdn.example.net"
+      },
+      "transport": {
+        "path": "/rain",
+        "type": "ws"
+      },
+      "type": "vless",
+      "uuid": "c0ee752e-de1a-4fde-a6bf-0f04b1c9d6e3"
+    },
+    {
+      "alter_id": 0,
+      "security": "auto",
+      "server": "9.9.9.9",
+      "server_port": 2053,
+      "tag": "sub1bbbb:fr-vmess",
+      "transport": {
+        "path": "/",
+        "type": "ws"
+      },
+      "type": "vmess",
+      "uuid": "8a4c2b1e-3f60-4a2d-9e5b-7c1d0f2a3b4c"
+    },
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "final": "proxy",
+    "rules": [
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [
+          ".corp.example.com",
+          "internal.local"
+        ],
+        "outbound": "direct"
+      }
+    ]
+  }
+}

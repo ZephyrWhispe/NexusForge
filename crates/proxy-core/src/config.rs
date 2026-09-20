@@ -1,13 +1,18 @@
 //! PR3 配置生成（docs/impl/05 PR3 后半）：节点 + 模式 → sing-box 配置 JSON。
 //!
+//! B2 T-B2-1 后本模块是**兼容适配层**：语义组装搬入 [`crate::ir::build`]（内核无关 IR），
+//! 方言投影搬入 [`crate::singbox::render`]；`generate` 签名与输出逐字节不变
+//! （golden 夹具锁死，见 `tests/golden_singbox.rs`）。
+//!
 //! - 入站：mixed（HTTP+SOCKS，系统代理指向它）或 tun（PR5，需管理员 + wintun.dll）
 //! - 出站：selector(proxy) + urltest(auto) + 节点 + direct
 //! - 路由：私有地址恒直连；规则模式追加用户直连域名列表；global 模式 final=proxy
 
 use serde::Serialize;
 
-use crate::error::{ProxyError, Result};
-use crate::sub::{Node, NodeKind};
+use crate::error::Result;
+use crate::ir::{self, IrRule};
+use crate::sub::Node;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -30,162 +35,28 @@ pub struct GenOptions<'a> {
 
 /// 生成 sing-box 配置 JSON（写入 `{appData}/proxy/config.json` 由内核消费）
 pub fn generate(opts: &GenOptions) -> Result<serde_json::Value> {
-    if opts.nodes.is_empty() {
-        return Err(ProxyError::Config("无可用节点：请先添加并更新订阅".into()));
-    }
-    let node_tags: Vec<String> = opts.nodes.iter().map(|n| n.outbound_tag()).collect();
-    let mut node_outbounds: Vec<serde_json::Value> =
-        opts.nodes.iter().map(node_to_outbound).collect();
-
-    let mut selector_outbounds = node_tags.clone();
-    selector_outbounds.push("auto".into());
-    let mut outbounds = vec![
-        serde_json::json!({
-            "type": "selector",
-            "tag": "proxy",
-            "outbounds": selector_outbounds,
-            "default": node_tags[0],
-        }),
-        serde_json::json!({
-            "type": "urltest",
-            "tag": "auto",
-            "outbounds": node_tags,
-            "url": "https://www.gstatic.com/generate_204",
-            "interval": "5m",
-        }),
-    ];
-    outbounds.append(&mut node_outbounds);
-    outbounds.push(serde_json::json!({ "type": "direct", "tag": "direct" }));
-
-    // 路由规则：私有地址恒直连（回环/内网走直连避免自旋）
-    let mut rules = vec![serde_json::json!({ "ip_is_private": true, "outbound": "direct" })];
-    if opts.mode == RouteMode::Rule && !opts.direct_domains.is_empty() {
-        rules.push(serde_json::json!({
-            "domain_suffix": opts.direct_domains,
-            "outbound": "direct",
-        }));
-    }
-
-    let inbounds = if opts.tun {
-        vec![serde_json::json!({
-            "type": "tun",
-            "tag": "tun-in",
-            "interface_name": "NexusForge0",
-            "address": ["172.19.0.1/30"],
-            "auto_route": true,
-            "strict_route": true,
-            "stack": "mixed",
-        })]
-    } else {
-        vec![serde_json::json!({
-            "type": "mixed",
-            "tag": "mixed-in",
-            "listen": "127.0.0.1",
-            "listen_port": opts.mixed_port,
-        })]
-    };
-
-    Ok(serde_json::json!({
-        "log": { "level": "info", "timestamp": true },
-        "dns": {
-            "servers": [
-                { "tag": "remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy" },
-                { "tag": "local", "address": "local", "detour": "direct" }
-            ],
-            "rules": [
-                { "outbound": "any", "server": "local" }
-            ],
-            "final": "remote",
-            "strategy": "prefer_ipv4"
+    // 旧语义保持：仅 Rule 模式消费 direct_domains，Off/Global 一律忽略
+    let empty: &[String] = &[];
+    let ir = ir::build(
+        opts.mixed_port,
+        opts.tun,
+        opts.nodes,
+        &[] as &[IrRule],
+        ir::TAG_PROXY,
+        if opts.mode == RouteMode::Rule {
+            opts.direct_domains
+        } else {
+            empty
         },
-        "inbounds": inbounds,
-        "outbounds": outbounds,
-        "route": {
-            "rules": rules,
-            "final": "proxy",
-            "auto_detect_interface": true
-        }
-    }))
-}
-
-/// 单节点 → sing-box 出站（PR3 协议投影；v1 覆盖 4 类常见协议）
-fn node_to_outbound(node: &Node) -> serde_json::Value {
-    let tag = node.outbound_tag();
-    match node.kind {
-        NodeKind::Shadowsocks => serde_json::json!({
-            "type": "shadowsocks",
-            "tag": tag,
-            "server": node.server,
-            "server_port": node.port,
-            "method": node.extra["method"],
-            "password": node.extra["password"],
-        }),
-        NodeKind::Vmess => {
-            let mut o = serde_json::json!({
-                "type": "vmess",
-                "tag": tag,
-                "server": node.server,
-                "server_port": node.port,
-                "uuid": node.extra["uuid"],
-                "security": node.extra["security"],
-                "alter_id": node.extra["alter_id"],
-            });
-            apply_transport_tls(&mut o, node);
-            o
-        }
-        NodeKind::Trojan => {
-            let mut o = serde_json::json!({
-                "type": "trojan",
-                "tag": tag,
-                "server": node.server,
-                "server_port": node.port,
-                "password": node.extra["password"],
-            });
-            apply_transport_tls(&mut o, node);
-            o
-        }
-        NodeKind::Vless => {
-            let mut o = serde_json::json!({
-                "type": "vless",
-                "tag": tag,
-                "server": node.server,
-                "server_port": node.port,
-                "uuid": node.extra["uuid"],
-            });
-            if let Some(flow) = node.extra["flow"].as_str() {
-                if !flow.is_empty() {
-                    o["flow"] = serde_json::json!(flow);
-                }
-            }
-            apply_transport_tls(&mut o, node);
-            o
-        }
-    }
-}
-
-/// network/tls/sni 通用投影（vmess/vless/trojan 共用）
-fn apply_transport_tls(outbound: &mut serde_json::Value, node: &Node) {
-    if node.extra["tls"] == serde_json::json!(true) {
-        let sni = node.extra["sni"].as_str().unwrap_or_default();
-        let mut tls = serde_json::json!({ "enabled": true });
-        if !sni.is_empty() {
-            tls["server_name"] = serde_json::json!(sni);
-        }
-        outbound["tls"] = tls;
-    }
-    if let Some(network) = node.extra["network"].as_str() {
-        if network == "ws" {
-            outbound["transport"] = serde_json::json!({
-                "type": "ws",
-                "path": node.extra["path"].as_str().unwrap_or("/")
-            });
-        }
-    }
+    )?;
+    Ok(crate::singbox::render(&ir))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProxyError;
+    use crate::sub::NodeKind;
 
     fn nodes() -> Vec<Node> {
         vec![

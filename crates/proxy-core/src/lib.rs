@@ -8,10 +8,12 @@
 
 pub mod config;
 pub mod error;
+pub mod ir;
 pub mod kernel;
 pub mod module;
 pub mod service;
 pub mod sidecar;
+pub mod singbox;
 pub mod sub;
 pub mod sysproxy;
 
