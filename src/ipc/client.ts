@@ -1280,6 +1280,8 @@ export interface WinopsTweakDto {
   category: string;
   description: string;
   requires_admin: boolean;
+  /** 维护型 tweak（clear_cache 等）：无「已应用」状态，scan 恒 not_applied（核账③补） */
+  maintenance: boolean;
   actions: WinopsActionDto[];
 }
 

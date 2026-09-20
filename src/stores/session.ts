@@ -19,10 +19,13 @@ interface SessionState {
   lastModule: ModuleId;
   clipGroup: string;
   clipSearch: string;
+  /** 系统清理勾选态（T-B1-9）：目标 id 列表，跨会话持久；旧快照缺键由 merge 落默认 [] */
+  sysCleanSelected: string[];
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
   setClipSearch: (q: string) => void;
+  setSysCleanSelected: (ids: string[]) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -33,11 +36,13 @@ export const useSession = create<SessionState>()(
       lastModule: "clipboard",
       clipGroup: "all",
       clipSearch: "",
+      sysCleanSelected: [],
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
       setClipGroup: (clipGroup) => set({ clipGroup }),
       setClipSearch: (clipSearch) => set({ clipSearch }),
+      setSysCleanSelected: (sysCleanSelected) => set({ sysCleanSelected }),
     }),
     {
       name: "nf-session",
@@ -46,6 +51,7 @@ export const useSession = create<SessionState>()(
         activeModule: s.activeModule,
         lastModule: s.lastModule,
         clipGroup: s.clipGroup,
+        sysCleanSelected: s.sysCleanSelected,
       }),
     },
   ),

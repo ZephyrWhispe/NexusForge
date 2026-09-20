@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   makeStyles,
   tokens,
@@ -8,29 +8,41 @@ import {
   Input,
   Checkbox,
   Spinner,
+  Dialog,
+  DialogSurface,
+  DialogBody,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from "@fluentui/react-components";
 import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
 import { confirmAction } from "../../stores/confirm";
+import { useSession } from "../../stores/session";
 import {
   parseAppError,
   sysCleanExecute,
   sysCleanScan,
+  sysCleanTargets,
   sysMetricsHistory,
   sysPkgAction,
   sysPkgCmdPreview,
   sysPkgList,
   sysPkgSources,
   winopsApply,
+  winopsCatalog,
   winopsRollback,
   winopsScan,
   winopsAuditExport,
   type CleanScanItemDto,
+  type CleanTargetDto,
   type MetricsPointDto,
   type PkgEntryDto,
   type PkgSourceDto,
+  type WinopsActionDto,
   type WinopsScanItemDto,
+  type WinopsTweakDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
 
@@ -39,7 +51,30 @@ import { reportError } from "../../stores/notifications";
  * - SY4 监控：CPU/内存/网络 1s 采样折线（SVG 自绘，300 点缓冲；uPlot 偏离为减依赖，可后换）
  * - SY3 清理：扫描（24h 白名单）→ 勾选 → 执行（回收站可恢复）
  * - SY1/SY2 包管理：winget/scoop/choco 源探测 + 合并清单 + 变更（确切命令行确认）
+ * - T-B1-9：清理页扫描前即呈现 sys_clean_targets 静态清单（dir/exts/optional 可见、
+ *   safe_default 只做「推荐」角标不自动勾选），勾选态持久化在 session store；
+ *   调整页「浏览目录」Dialog 按 category 分组展示全目录（含 maintenance 与生效方式）。
  */
+
+/** 动作 type → 生效方式中文说明（前端纯函数；type 对照 winops.rs:52-105 serde tag） */
+export function winopsEffectHint(actions: WinopsActionDto[]): string {
+  const types = new Set(actions.map((a) => a.type));
+  const HINTS: [string, string][] = [
+    ["registry", "注册表写入（多数项需注销/重启后由系统读取）"],
+    ["service", "服务启停/启动类型变更（需管理员）"],
+    ["task", "计划任务启用/禁用（系统内置任务需管理员）"],
+    ["file_clean", "文件清理（维护型动作，无「已应用」状态）"],
+    ["appx_remove", "移除 Appx 包（全体用户预装移除需管理员）"],
+    ["exec", "执行白名单系统命令"],
+    ["restore_point", "创建系统还原点"],
+    ["empty_working_set", "内存整理（清理各进程工作集）"],
+    ["defender_realtime", "Defender 实时保护开关（篡改保护可能拦截）"],
+    ["unsupported", "含需更高版本支持的动作类型"],
+  ];
+  const parts = HINTS.filter(([t]) => types.has(t)).map(([, hint]) => hint);
+  return parts.length ? `生效方式：${parts.join(" · ")}` : "生效方式：见条目说明";
+}
+
 const useStyles = makeStyles({
   root: {
     flex: 1,
@@ -119,8 +154,12 @@ export default function SysPanel() {
   const historyRef = useRef<MetricsPointDto[]>([]);
 
   // ---- 清理 ----
+  const [targets, setTargets] = useState<CleanTargetDto[]>([]);
   const [scan, setScan] = useState<CleanScanItemDto[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // 勾选态即 session store 持久键（T-B1-9），不再是面板内一次性 Set
+  const sysCleanSelected = useSession((s) => s.sysCleanSelected);
+  const setSysCleanSelected = useSession((s) => s.setSysCleanSelected);
+  const selected = useMemo(() => new Set(sysCleanSelected), [sysCleanSelected]);
   const [scanning, setScanning] = useState(false);
   const [useRecycle, setUseRecycle] = useState(true);
 
@@ -137,6 +176,9 @@ export default function SysPanel() {
   const [busyTweak, setBusyTweak] = useState<string | null>(null);
   // W4 回归检测（WUB 式防自愈）：模块 start 时后端比对，回归项在此黄条提示
   const [regressed, setRegressed] = useState<string[]>([]);
+  // 浏览目录 Dialog（T-B1-9）：winops_catalog 全量静态目录，按 category 分组
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalog, setCatalog] = useState<WinopsTweakDto[] | null>(null);
 
   // 事件驱动：sys.metrics 1s 推送
   useEffect(() => {
@@ -179,6 +221,16 @@ export default function SysPanel() {
     };
   }, []);
 
+  // 静态清理目标清单（T-B1-9）：挂载即取——sys_clean_targets 是内置 4 条静态清单，
+  // 扫描前后都可呈现，扫描前供勾选偏好落地（勾选持久化在 session store）。
+  useEffect(() => {
+    void sysCleanTargets()
+      .then(setTargets)
+      .catch((e) =>
+        reportError(e, { context: "清理目标清单加载失败", dedupeKey: "sys-clean-targets", toast: false }),
+      );
+  }, []);
+
   const loadPkgs = useCallback(async () => {
     setPkgsLoading(true);
     setErr(null);
@@ -198,13 +250,25 @@ export default function SysPanel() {
     try {
       const items = await sysCleanScan();
       setScan(items);
-      setSelected(new Set(items.filter((i) => i.safe_default && i.files > 0).map((i) => i.target_id)));
+      // safe_default 不自动勾选（勾选态是用户持久偏好）；仅剔除本次不可执行的 id
+      const executable = new Set(
+        items.filter((i) => !i.missing && i.files > 0).map((i) => i.target_id),
+      );
+      setSysCleanSelected(useSession.getState().sysCleanSelected.filter((id) => executable.has(id)));
     } catch (e) {
       fail(e);
     } finally {
       setScanning(false);
     }
-  }, [fail]);
+  }, [fail, setSysCleanSelected]);
+
+  const toggleTarget = useCallback(
+    (id: string, on: boolean) => {
+      const cur = useSession.getState().sysCleanSelected;
+      setSysCleanSelected(on ? [...new Set([...cur, id])] : cur.filter((x) => x !== id));
+    },
+    [setSysCleanSelected],
+  );
 
   const doExecute = useCallback(async () => {
     setErr(null);
@@ -336,10 +400,27 @@ export default function SysPanel() {
     }
   }, [fail]);
 
+  // 浏览目录（T-B1-9）：winops_catalog 不经扫描即可通读全目录，按 category 分组
+  const openCatalog = useCallback(() => {
+    setCatalogOpen(true);
+    setCatalog(null);
+    void winopsCatalog()
+      .then(setCatalog)
+      .catch(fail);
+  }, [fail]);
+
   const cpuSeries = history.map((p) => p.cpu);
   const memSeries = history.map((p) => (p.mem_total ? (p.mem_used / p.mem_total) * 100 : 0));
   const netSeries = history.map((p) => p.net_bps / 1024);
   const latest = history[history.length - 1];
+  const targetById = new Map(targets.map((t) => [t.id, t]));
+  // 目录按 category 分组（核账：分组键是 category 非 family），保持后端目录顺序
+  const catalogGroups: [string, WinopsTweakDto[]][] = [];
+  for (const tw of catalog ?? []) {
+    const g = catalogGroups.find(([c]) => c === tw.category);
+    if (g) g[1].push(tw);
+    else catalogGroups.push([tw.category, [tw]]);
+  }
 
   const fmtBytes = (b: number) =>
     b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(0)} MB` : `${(b / 1024).toFixed(0)} KB`;
@@ -406,42 +487,92 @@ export default function SysPanel() {
             <Button
               size="small"
               appearance="primary"
-              disabled={selected.size === 0}
+              disabled={scan.length === 0 || selected.size === 0}
+              title={scan.length === 0 ? "未扫描仅见清单，扫描后方可执行" : undefined}
               onClick={() => void doExecute()}
             >
               执行清理（{selected.size} 项）
             </Button>
           </div>
+          {scan.length === 0 && (
+            <Text className={styles.muted}>
+              未扫描仅见清单：勾选是持久偏好（「推荐」= safe_default 角标，不自动勾选），扫描后方可执行；24h 内修改的文件自动跳过
+            </Text>
+          )}
           <div className={styles.list}>
-            {scan.map((s) => (
-              <div key={s.target_id} className={styles.item}>
-                <Checkbox
-                  checked={selected.has(s.target_id)}
-                  disabled={s.missing || s.files === 0}
-                  onChange={(_, d) =>
-                    setSelected((prev) => {
-                      const next = new Set(prev);
-                      if (d.checked) next.add(s.target_id);
-                      else next.delete(s.target_id);
-                      return next;
-                    })
-                  }
-                />
-                <Text size={200} weight="semibold">
-                  {s.label}
-                </Text>
-                {s.need_admin && <Badge size="small" appearance="outline">管理员</Badge>}
-                {s.missing ? (
-                  <Text className={styles.muted}>目录不存在</Text>
-                ) : (
-                  <Text className={styles.muted}>
-                    可清理 {s.files} 文件 / {fmtBytes(s.reclaim_bytes)}
-                    {s.skipped_recent > 0 && ` · 白名单跳过 ${s.skipped_recent}（24h 内修改）`}
-                  </Text>
-                )}
-              </div>
-            ))}
-            {scan.length === 0 && <Text className={styles.muted}>点击「扫描」统计各目录可回收空间（24h 内修改的文件自动跳过）</Text>}
+            {scan.length === 0
+              ? targets.map((t) => (
+                  <div key={t.id} className={styles.item}>
+                    <Checkbox
+                      checked={selected.has(t.id)}
+                      onChange={(_, d) => toggleTarget(t.id, !!d.checked)}
+                    />
+                    <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                      <Text size={200} weight="semibold">
+                        {t.label}
+                        {t.safe_default && (
+                          <Badge size="small" appearance="filled" color="brand" style={{ marginLeft: 6 }}>
+                            推荐
+                          </Badge>
+                        )}
+                        {t.need_admin && (
+                          <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
+                            需管理员
+                          </Badge>
+                        )}
+                        {t.optional && (
+                          <Badge size="small" appearance="outline" color="subtle" style={{ marginLeft: 6 }}>
+                            缺失自动跳过
+                          </Badge>
+                        )}
+                      </Text>
+                      <Text size={100} className={styles.muted}>
+                        目录 {t.dir} · 范围 {t.exts.length ? `仅 .${t.exts.join("/.")}` : "全部文件"}
+                      </Text>
+                    </div>
+                  </div>
+                ))
+              : scan.map((s) => {
+                  const t = targetById.get(s.target_id);
+                  return (
+                    <div key={s.target_id} className={styles.item}>
+                      <Checkbox
+                        checked={selected.has(s.target_id)}
+                        disabled={s.missing || s.files === 0}
+                        onChange={(_, d) => toggleTarget(s.target_id, !!d.checked)}
+                      />
+                      <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                        <Text size={200} weight="semibold">
+                          {s.label}
+                          {s.safe_default && (
+                            <Badge size="small" appearance="filled" color="brand" style={{ marginLeft: 6 }}>
+                              推荐
+                            </Badge>
+                          )}
+                          {s.need_admin && (
+                            <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
+                              管理员
+                            </Badge>
+                          )}
+                        </Text>
+                        <Text size={100} className={styles.muted}>
+                          {s.missing ? (
+                            "目录不存在"
+                          ) : (
+                            <>
+                              可清理 {s.files} 文件 / {fmtBytes(s.reclaim_bytes)}
+                              {s.skipped_recent > 0 && ` · 白名单跳过 ${s.skipped_recent}（24h 内修改）`}
+                            </>
+                          )}
+                          {t && ` —— 目录 ${t.dir} · 范围 ${t.exts.length ? `仅 .${t.exts.join("/.")}` : "全部文件"}`}
+                        </Text>
+                      </div>
+                    </div>
+                  );
+                })}
+            {scan.length === 0 && targets.length === 0 && (
+              <Text className={styles.muted}>清理目标清单加载中（内置 4 项）</Text>
+            )}
           </div>
         </Section>
       )}
@@ -554,6 +685,14 @@ export default function SysPanel() {
             <Button size="small" appearance="subtle" onClick={() => void doAuditExport()}>
               导出审计
             </Button>
+            <Button
+              size="small"
+              appearance="outline"
+              title="不经扫描通读全目录：按分类列出说明、提权要求与维护型标记"
+              onClick={openCatalog}
+            >
+              浏览目录
+            </Button>
             <Text className={styles.muted}>
               BAVR 语义：应用前自动备份原值 · 校验失败自动回滚 · 回滚恢复最近一次应用前的状态
             </Text>
@@ -617,6 +756,65 @@ export default function SysPanel() {
           </div>
         </Section>
       )}
+
+      {/* 浏览目录 Dialog（T-B1-9）：category 分组 + 提权/维护徽标 + 生效方式映射 */}
+      <Dialog
+        open={catalogOpen}
+        onOpenChange={(_, d) => {
+          if (!d.open) setCatalogOpen(false);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>系统调整目录（按分类）</DialogTitle>
+            <DialogContent>
+              {catalog === null ? (
+                <Spinner size="tiny" />
+              ) : (
+                <div className={styles.list}>
+                  {catalogGroups.map(([cat, list]) => (
+                    <div key={cat}>
+                      <Text size={200} weight="semibold">
+                        {cat}（{list.length}）
+                      </Text>
+                      {list.map((tw) => (
+                        <div key={tw.id} style={{ padding: "4px 8px 8px 12px" }}>
+                          <Text size={200}>
+                            {tw.name}
+                            {tw.requires_admin && (
+                              <Badge size="small" appearance="filled" color="warning" style={{ marginLeft: 6 }}>
+                                需管理员
+                              </Badge>
+                            )}
+                            {tw.maintenance && (
+                              <Badge size="small" appearance="outline" color="subtle" style={{ marginLeft: 6 }}>
+                                维护型
+                              </Badge>
+                            )}
+                          </Text>
+                          {tw.description && (
+                            <Text size={100} className={styles.muted}>
+                              {tw.description}
+                            </Text>
+                          )}
+                          <Text size={100} className={styles.muted}>
+                            {winopsEffectHint(tw.actions)}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setCatalogOpen(false)}>
+                关闭
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }
