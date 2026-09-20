@@ -110,6 +110,7 @@
     "allow-proxy-delay-test",
     "allow-proxy-direct-rules",
     "allow-proxy-kernel-install",
+    "allow-proxy-kernel-restart",
     "allow-proxy-kernel-select",
     "allow-proxy-logs",
     "allow-proxy-nodes",

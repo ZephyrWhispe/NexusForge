@@ -210,6 +210,7 @@ pub fn run() {
             commands::file_rename_apply,
             commands::proxy_status,
             commands::proxy_kernel_install,
+            commands::proxy_kernel_restart,
             commands::proxy_kernel_select,
             commands::proxy_wintun_install,
             commands::proxy_subs,

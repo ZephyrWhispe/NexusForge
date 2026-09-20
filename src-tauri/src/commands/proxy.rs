@@ -28,14 +28,28 @@ pub async fn proxy_status(state: State<'_, HostState>) -> Result<proxy_core::Sta
         .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
 }
 
-/// 安装/更新 sing-box 内核（官方 Release 直链；version 空则用默认版本）
+/// 安装/更新内核（T-B2-3 参数化：kernel 缺省 sing-box=旧调用兼容，其余 id 触网前如实拒；version 空则用默认版本）
 #[tauri::command]
 pub async fn proxy_kernel_install(
+    kernel: Option<String>,
     version: Option<String>,
     state: State<'_, HostState>,
 ) -> Result<proxy_core::Manifest, AppError> {
     let svc = proxy_service(&state)?;
-    svc.kernel_install(version).await.map_err(proxy_err)
+    svc.kernel_install(kernel.as_deref(), version)
+        .await
+        .map_err(proxy_err)
+}
+
+/// 内核重启（T-B2-3）：仅运行中有效；停旧→以当前模式重生成配置→起新，mode/kernel 不变，
+/// 起新失败后端按缺陷⑧纪律归零
+#[tauri::command]
+pub async fn proxy_kernel_restart(state: State<'_, HostState>) -> Result<(), AppError> {
+    let svc = proxy_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.restart_kernel())
+        .await
+        .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
+        .map_err(proxy_err)
 }
 
 /// 安装 wintun.dll（TUN 模式前置）

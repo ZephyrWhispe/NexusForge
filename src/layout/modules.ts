@@ -89,7 +89,20 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
   ],
   screenshot: [],
   ocr: [],
-  proxy: [],
+  // T-B2-3（09 §5.2）：代理六子面板入口，id 与 session store proxySubPanel 联合类型一一对应
+  proxy: [
+    {
+      group: "代理",
+      items: [
+        { id: "overview", label: "总览" },
+        { id: "nodes", label: "节点" },
+        { id: "subs", label: "订阅" },
+        { id: "rules", label: "分流" },
+        { id: "kernel", label: "内核" },
+        { id: "logs", label: "日志" },
+      ],
+    },
+  ],
   vault: [],
   file: [],
   desktop: [],

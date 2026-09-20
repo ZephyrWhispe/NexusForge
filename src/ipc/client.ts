@@ -795,8 +795,16 @@ export interface ProxyManifestDto {
 export function proxyStatus(): Promise<ProxyStatusDto> {
   return invoke("proxy_status");
 }
-export function proxyKernelInstall(version?: string | null): Promise<ProxyManifestDto> {
-  return invoke("proxy_kernel_install", { version });
+/** 安装/更新指定内核（T-B2-3 参数化：安装钮点名内核，version 空=默认版本；非 sing-box 后端触网前如实拒） */
+export function proxyKernelInstall(
+  kernel: string,
+  version?: string | null,
+): Promise<ProxyManifestDto> {
+  return invoke("proxy_kernel_install", { kernel, version });
+}
+/** 内核重启（T-B2-3）：仅运行中有效；mode/kernel 不变，起新失败后端归零为关闭态 */
+export function proxyKernelRestart(): Promise<void> {
+  return invoke("proxy_kernel_restart");
 }
 export function proxyWintunInstall(): Promise<void> {
   return invoke("proxy_wintun_install");

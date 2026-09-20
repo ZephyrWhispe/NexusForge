@@ -1,45 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import ProxyPanel from "../ProxyPanel";
 import { proxyKernelSelect, proxyStatus, type ProxyStatusDto } from "../../../ipc/client";
+import { useSession } from "../../../stores/session";
 
-// D-29 B2/T-B2-2 回归：状态徽章区最小内核选择器接线 ——
-// optionValue → proxyKernelSelect → refresh 单链、同内核幂等负例、busy 门与
-// 失败经 run() 错误通道如实落 InlineError（换核回滚语义在后端，UI 不猜中间态）。
-//
-// 桩边界：@fluentui/react-components 的 Dropdown 弹出/定位属 Fluent 自身测试面，
-// jsdom 下不可控；此处只替换 Dropdown/Option 为记录 props 的桩，其余组件
-// （Badge/Button/Table/makeStyles…）保持真实渲染。
-type DropdownStubProps = {
-  value?: string;
-  disabled?: boolean;
-  children?: ReactNode;
-  onOptionSelect?: (e: unknown, data: { optionValue?: string }) => void;
-};
-
-const harness = vi.hoisted(() => ({
-  dropdownProps: null as DropdownStubProps | null,
-}));
-
-vi.mock("@fluentui/react-components", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@fluentui/react-components")>();
-  return {
-    ...actual,
-    Dropdown: (props: DropdownStubProps) => {
-      harness.dropdownProps = props;
-      return (
-        <div data-testid="kernel-dropdown">
-          <span data-testid="kernel-dropdown-value">{props.value}</span>
-          {props.children}
-        </div>
-      );
-    },
-    Option: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
-  };
-});
+// D-29 B2/T-B2-3：T-B2-2 的状态徽章区最小 Dropdown 选择器已被「内核」子面板的
+// 完整内核卡取代（09 §5.2 内核卡行字面）。四枚测试名逐字保留，驱动方式改为
+// 内核卡行的「切换」按钮；Dropdown 桩就此删除——代理面板已无 Fluent Dropdown。
+// 换核回滚语义仍全在后端，UI 只经 run() 错误通道如实呈现上抛原错。
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -51,6 +21,9 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     proxyDirectRules: vi.fn(async () => []),
     proxyLogs: vi.fn(async () => []),
     proxyKernelSelect: vi.fn(async () => {}),
+    proxyKernelInstall: vi.fn(async () => ({})),
+    proxyKernelRestart: vi.fn(async () => {}),
+    proxyWintunInstall: vi.fn(async () => {}),
   };
 });
 
@@ -63,19 +36,22 @@ vi.mock("../../../stores/confirm", () => ({
   confirmAction: vi.fn(async () => true),
 }));
 
-/** 双内核注册表夹具：UI 只按数据渲染列表（今天真机注册表只 1 项不构成分支差异） */
+/**
+ * 三内核注册表夹具（UI 只按数据渲染，禁内核特例分支）：
+ * sing-box = 当前且运行中；xray-core = 已装未选（合法切换目标）；mihomo = 未装。
+ */
 function statusDto(overrides: Partial<ProxyStatusDto> = {}): ProxyStatusDto {
   return {
-    mode: "off",
-    kernel_running: false,
-    kernel_id: null,
+    mode: "system",
+    kernel_running: true,
+    kernel_id: "sing-box",
     inbound_port: 7890,
-    nodes_total: 1,
+    nodes_total: 0,
     subs_total: 0,
-    admin: false,
+    admin: true,
     wintun_installed: false,
     kernel_installed: true,
-    kernel_version: "1.10.0",
+    kernel_version: "1.11.0",
     has_backup: false,
     restored_last_run: false,
     kernel: "sing-box",
@@ -84,19 +60,28 @@ function statusDto(overrides: Partial<ProxyStatusDto> = {}): ProxyStatusDto {
         id: "sing-box",
         display_name: "sing-box",
         installed: true,
-        version: "1.10.0",
-        running: false,
+        version: "1.11.0",
+        running: true,
         caps: { tun: true, policy_groups: true, external_controller: true },
         supported_kinds: ["shadowsocks", "vmess", "trojan", "vless"],
       },
       {
         id: "xray",
         display_name: "xray-core",
-        installed: false,
-        version: null,
+        installed: true,
+        version: "26.3.27",
         running: false,
         caps: { tun: false, policy_groups: false, external_controller: false },
         supported_kinds: ["shadowsocks", "vmess", "trojan", "vless"],
+      },
+      {
+        id: "mihomo",
+        display_name: "mihomo",
+        installed: false,
+        version: null,
+        running: false,
+        caps: { tun: true, policy_groups: true, external_controller: true },
+        supported_kinds: ["shadowsocks", "vmess", "trojan", "vless", "hysteria2"],
       },
     ],
     ...overrides,
@@ -105,6 +90,21 @@ function statusDto(overrides: Partial<ProxyStatusDto> = {}): ProxyStatusDto {
 
 let container: HTMLDivElement;
 let root: Root;
+
+const btnWithText = (scope: Element, text: string) =>
+  Array.from(scope.querySelectorAll("button")).find((b) => b.textContent?.trim() === text);
+
+/** 从内核 display_name 标签上溯到含「切换」按钮的最近祖先行容器（= 内核卡行 div） */
+function kernelRow(displayName: string): Element {
+  const label = Array.from(container.querySelectorAll("span")).find(
+    (el) => el.children.length === 0 && el.textContent?.trim() === displayName,
+  );
+  expect(label, `内核行标签 ${displayName} 未渲染`).toBeTruthy();
+  let el: HTMLElement | null = (label as HTMLElement).parentElement;
+  while (el && !btnWithText(el, "切换")) el = el.parentElement;
+  expect(el, `${displayName} 行容器`).toBeTruthy();
+  return el as Element;
+}
 
 async function mount(status: ProxyStatusDto) {
   vi.mocked(proxyStatus).mockResolvedValue(status);
@@ -115,9 +115,16 @@ async function mount(status: ProxyStatusDto) {
   await act(async () => {});
 }
 
-async function selectOption(optionValue: string) {
+async function gotoKernel() {
   await act(async () => {
-    harness.dropdownProps?.onOptionSelect?.({}, { optionValue });
+    useSession.getState().setProxySubPanel("kernel");
+  });
+  await act(async () => {});
+}
+
+async function click(el: Element) {
+  await act(async () => {
+    (el as HTMLElement).click();
   });
   await act(async () => {});
 }
@@ -126,7 +133,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
-  harness.dropdownProps = null;
+  useSession.getState().setProxySubPanel("overview");
 });
 
 afterEach(() => {
@@ -138,51 +145,77 @@ afterEach(() => {
     }
   });
   container.remove();
+  useSession.getState().setProxySubPanel("overview");
   vi.clearAllMocks();
 });
 
-describe("ProxyPanel 内核选择器（T-B2-2 状态徽章区）", () => {
+describe("ProxyPanel 内核卡换核接线（T-B2-3 接管 T-B2-2 四测）", () => {
   it("kernelSelect_statusBadge_listsRegistryAndMarksCurrent", async () => {
     await mount(statusDto());
-    expect(harness.dropdownProps).not.toBeNull();
-    expect(harness.dropdownProps?.value).toContain("内核：sing-box");
-    // 当前核高亮 + 未装核如实标注（禁前端内核特例分支，全靠注册表数据）
-    expect(container.textContent).toContain("sing-box（当前）");
-    expect(container.textContent).toContain("xray-core（未安装）");
-    // 纯渲染零副作用：没选就不许碰后端
+    await gotoKernel();
+    const sb = kernelRow("sing-box");
+    const xr = kernelRow("xray-core");
+    const mh = kernelRow("mihomo");
+    // 当前核 + 运行中标记；其余行不得沾（禁前端猜，全按注册表数据渲染）
+    expect(sb.textContent).toContain("当前");
+    expect(sb.textContent).toContain("运行中");
+    expect(sb.textContent).toContain("v1.11.0");
+    expect(xr.textContent).not.toContain("当前");
+    expect(xr.textContent).not.toContain("运行中");
+    expect(mh.textContent).toContain("未安装");
+    // 能力行如实（TUN 门禁的数据源）
+    expect(xr.textContent).toContain("TUN 不支持");
+    expect(mh.textContent).toContain("TUN 支持");
+    // 纯渲染零副作用：没点就不许碰后端
     expect(proxyKernelSelect).not.toHaveBeenCalled();
   });
 
   it("kernelSelect_differentOption_invokesOnceAndRefreshes", async () => {
     await mount(statusDto());
+    await gotoKernel();
     const statusCallsAfterMount = vi.mocked(proxyStatus).mock.calls.length;
-    await selectOption("xray");
+    const switchBtn = btnWithText(kernelRow("xray-core"), "切换");
+    expect(switchBtn).toBeTruthy();
+    await click(switchBtn as Element);
     expect(proxyKernelSelect).toHaveBeenCalledTimes(1);
     expect(proxyKernelSelect).toHaveBeenCalledWith("xray");
     // 换核后必须重拉状态（选择/运行标记以内端为真源，UI 不本地改写）
     expect(vi.mocked(proxyStatus).mock.calls.length).toBe(statusCallsAfterMount + 1);
-    // busy 落定后选择器重新可用
-    expect(harness.dropdownProps?.disabled).toBe(false);
+    // busy 落定后按钮重新可用
+    expect((btnWithText(kernelRow("xray-core"), "切换") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
   });
 
-  it("kernelSelect_sameCurrentIdempotent：同核与空值双双零 invoke（负例）", async () => {
+  it("kernelSelect_sameCurrentIdempotent：同核与未装核双双零 invoke（负例）", async () => {
     await mount(statusDto());
+    await gotoKernel();
     const statusCalls = vi.mocked(proxyStatus).mock.calls.length;
-    await selectOption("sing-box"); // 已是当前核
-    await selectOption(""); // 空 optionValue 防御臂
+    // 两枚门禁都以属性钉死（jsdom 会对 disabled 按钮派发 click，处理器防御臂仍在）
+    const same = btnWithText(kernelRow("sing-box"), "切换") as HTMLButtonElement;
+    const notInstalled = btnWithText(kernelRow("mihomo"), "切换") as HTMLButtonElement;
+    expect(same.disabled).toBe(true);
+    expect(same.title).toBe("已是当前内核");
+    expect(notInstalled.disabled).toBe(true);
+    expect(notInstalled.title).toBe("该内核未安装：先安装后切换");
+    await click(same);
+    await click(notInstalled);
     expect(proxyKernelSelect).not.toHaveBeenCalled();
     expect(vi.mocked(proxyStatus).mock.calls.length).toBe(statusCalls);
   });
 
   it("kernelSelect_failureLandsInErrorChannel：后端回滚上抛原错如实可见", async () => {
     await mount(statusDto());
+    await gotoKernel();
     vi.mocked(proxyKernelSelect).mockRejectedValueOnce(
       new Error("切换内核 xray 失败：测试内核启动失败；回滚原内核成功"),
     );
-    await selectOption("xray");
+    await click(btnWithText(kernelRow("xray-core"), "切换") as Element);
     expect(proxyKernelSelect).toHaveBeenCalledTimes(1);
     // run() 错误通道：InlineError 呈现原错文本，且不得静默吞掉
     expect(container.textContent).toContain("回滚原内核成功");
-    expect(harness.dropdownProps?.disabled).toBe(false);
+    expect(
+      (btnWithText(kernelRow("xray-core"), "切换") as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 });

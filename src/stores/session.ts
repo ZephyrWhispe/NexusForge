@@ -12,6 +12,22 @@ import { isModuleId, type ModuleId } from "../layout/modules";
 
 export type ThemeMode = "auto" | "light" | "dark";
 
+/** 代理子面板 id（T-B2-3，09 §5.2）：与 SUBNAV[proxy] 六项一一对应 */
+export type ProxySubPanel = "overview" | "nodes" | "subs" | "rules" | "kernel" | "logs";
+
+const PROXY_SUB_PANEL_IDS: readonly string[] = [
+  "overview",
+  "nodes",
+  "subs",
+  "rules",
+  "kernel",
+  "logs",
+];
+
+export function isProxySubPanel(v: string): v is ProxySubPanel {
+  return PROXY_SUB_PANEL_IDS.includes(v);
+}
+
 interface SessionState {
   themeMode: ThemeMode;
   activeModule: string;
@@ -21,11 +37,14 @@ interface SessionState {
   clipSearch: string;
   /** 系统清理勾选态（T-B1-9）：目标 id 列表，跨会话持久；旧快照缺键由 merge 落默认 [] */
   sysCleanSelected: string[];
+  /** 代理子面板选择态（T-B2-3）：与 clipGroup 分键——分组筛选与子面板切换两种语义不得互污；旧快照缺键回退 overview */
+  proxySubPanel: ProxySubPanel;
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
   setClipSearch: (q: string) => void;
   setSysCleanSelected: (ids: string[]) => void;
+  setProxySubPanel: (id: string) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -37,12 +56,15 @@ export const useSession = create<SessionState>()(
       clipGroup: "all",
       clipSearch: "",
       sysCleanSelected: [],
+      proxySubPanel: "overview",
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
       setClipGroup: (clipGroup) => set({ clipGroup }),
       setClipSearch: (clipSearch) => set({ clipSearch }),
       setSysCleanSelected: (sysCleanSelected) => set({ sysCleanSelected }),
+      // 持久化快照可能被手改成野值：非注册 id 不落 store（面板侧恒有 overview 兜底）
+      setProxySubPanel: (id) => set(isProxySubPanel(id) ? { proxySubPanel: id } : {}),
     }),
     {
       name: "nf-session",
@@ -52,6 +74,7 @@ export const useSession = create<SessionState>()(
         lastModule: s.lastModule,
         clipGroup: s.clipGroup,
         sysCleanSelected: s.sysCleanSelected,
+        proxySubPanel: s.proxySubPanel,
       }),
     },
   ),

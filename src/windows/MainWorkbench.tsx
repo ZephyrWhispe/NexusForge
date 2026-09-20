@@ -86,6 +86,10 @@ export default function MainWorkbench() {
   const settingsModule = useSession((s) => s.lastModule);
   const group = useSession((s) => s.clipGroup);
   const setGroup = useSession((s) => s.setClipGroup);
+  // T-B2-3：代理 SUBNAV 项是"子面板"而非"分组"——选择态走 proxySubPanel 专键，
+  // 与 clipGroup 分道（否则在代理页点「分流」会把剪切板回来后的筛选悄悄改掉）
+  const proxySub = useSession((s) => s.proxySubPanel);
+  const setProxySub = useSession((s) => s.setProxySubPanel);
   const search = useSession((s) => s.clipSearch);
   const setSearch = useSession((s) => s.setClipSearch);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -150,6 +154,8 @@ export default function MainWorkbench() {
 
   // 持久化的会话值可能是历史/损坏 id：收窄失败确定性回落剪切板（首屏默认模块）
   const moduleId = isModuleId(active) ? active : "clipboard";
+  const subActive = moduleId === "proxy" ? proxySub : group;
+  const subSelect = moduleId === "proxy" ? setProxySub : setGroup;
   const current = MODULES.find((m) => m.id === moduleId);
   const def = PANELS[moduleId];
   const ModulePanel = def.panel;
@@ -171,7 +177,7 @@ export default function MainWorkbench() {
         <ModuleNav active={active} onChange={setActive} />
         <div className={styles.work}>
           {SUBNAV[moduleId].length > 0 && !isSettings && (
-            <SubNav moduleId={moduleId} active={group} onSelect={setGroup} counts={counts} />
+            <SubNav moduleId={moduleId} active={subActive} onSelect={subSelect} counts={counts} />
           )}
           <section className={styles.content} aria-label="内容区">
             {isSettings ? (

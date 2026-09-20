@@ -80,6 +80,18 @@ fn default_kernel() -> String {
 /// 当前唯一注册内核 id（T-B2-5/6 增 xray/mihomo）
 pub const KERNEL_SINGBOX: &str = "sing-box";
 
+/// 安装入口预检（T-B2-3）：当前仅 sing-box 有下载通道，其余内核 id 在任何 IO 前如实拒
+/// （sidecar 资产表泛化归 T-B2-4 的 KERNEL_ASSETS）。纯函数以便单测钉住 async 安装路径。
+pub fn check_install_kernel(kernel: &str) -> Result<()> {
+    if kernel == KERNEL_SINGBOX {
+        Ok(())
+    } else {
+        Err(ProxyError::Kernel(format!(
+            "内核 {kernel} 的二进制下载通道尚未接入：当前仅支持 sing-box"
+        )))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusDto {
     pub mode: String,
@@ -252,8 +264,14 @@ impl ProxyService {
         }
     }
 
-    /// 内核安装（PR2）：官方 Release 直链下载 → zip 校验解压 → manifest。网络路径 async。
-    pub async fn kernel_install(&self, version: Option<String>) -> Result<sidecar::Manifest> {
+    /// 内核安装（PR2；T-B2-3 参数化）：kernel 缺省 "sing-box"（旧调用兼容），
+    /// 非 sing-box 在触网前被 [`check_install_kernel`] 如实拒。官方 Release 直链下载 → zip 校验解压 → manifest。
+    pub async fn kernel_install(
+        &self,
+        kernel: Option<&str>,
+        version: Option<String>,
+    ) -> Result<sidecar::Manifest> {
+        check_install_kernel(kernel.unwrap_or(KERNEL_SINGBOX))?;
         let version = version.unwrap_or_else(|| sidecar::DEFAULT_SINGBOX_VERSION.to_string());
         let url = sidecar::singbox_download_url(&version);
         let bytes = self.http_get(&url).await?;
@@ -548,6 +566,28 @@ impl ProxyService {
                 Err(e)
             }
         }
+    }
+
+    /// 内核重启（T-B2-3）：仅运行中有意义——停旧进程 → 以当前模式重生成配置 → 起新，
+    /// mode/kernel 均不变（System 态系统代理注册表值从未被还原，端口复用即恢复）。
+    /// 起新失败按缺陷⑧纪律归零（旧进程已停无从回滚，restore 兜底 + 状态如实 Off）。
+    pub fn restart_kernel(self: &Arc<Self>) -> Result<()> {
+        let mode = {
+            let inner = self.inner.read();
+            if inner.handle.is_none() {
+                return Err(ProxyError::BadState("内核未在运行：无需重启".into()));
+            }
+            inner.mode
+        };
+        let tun = mode == Mode::Tun;
+        if let Err(e) = self.restart_with_config(tun) {
+            let _ = self.stop_kernel_and_restore();
+            return Err(ProxyError::Kernel(format!(
+                "内核重启失败：{e}（已停止为关闭态）"
+            )));
+        }
+        tracing::info!(mode = mode.as_str(), "内核已重启");
+        Ok(())
     }
 
     /// 驱动解析：测试注入表优先（生产路径恒空），其后走注册表
@@ -1208,6 +1248,82 @@ mod tests {
         assert_eq!(s.mode, "off", "失败后模式必须归零而非停留 system");
         assert!(!s.kernel_running);
         assert!(!sp.read().unwrap().enable, "系统代理已如实还原");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- T-B2-3：安装扩参诚实门 / 内核重启 ----------------
+
+    #[test]
+    fn kernelInstallGate_nonSingbox_honestReject() {
+        // 扩参落 T-B2-3（09 §5.2 实施更正）：内核卡安装钮点名内核，但下载通道
+        // 泛化归 T-B2-4——非 sing-box 必须在任何 IO 前被纯函数如实拒并指路，
+        // 绝不允许"按 xray 却悄悄装 sing-box"。
+        assert!(check_install_kernel(KERNEL_SINGBOX).is_ok());
+        let e = check_install_kernel("xray").unwrap_err();
+        match e {
+            ProxyError::Kernel(msg) => {
+                assert!(msg.contains("xray"), "错误必须点名被拒内核: {msg}");
+                assert!(msg.contains("下载通道"), "错误必须指路未接入原因: {msg}");
+            }
+            other => panic!("非 sing-box 必须是 Kernel 错，实得 {other:?}"),
+        }
+        assert!(check_install_kernel("mihomo").is_err());
+    }
+
+    #[test]
+    fn restartKernel_offHonestErr() {
+        // 红线负例：未运行内核"重启"必须 BadState 如实拒（不是静默成功也不是启动）
+        let (svc, _sp, dir) = open_service("restart_off");
+        let e = svc.restart_kernel().unwrap_err();
+        assert!(
+            matches!(e, ProxyError::BadState(_)),
+            "关闭态重启必须是 BadState 错"
+        );
+        assert!(e.to_string().contains("无需重启"));
+        let s = svc.status();
+        assert!(!s.kernel_running && s.mode == "off", "被拒后状态零漂移");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restartKernel_running_keepsModeAndRestartsSameKernel() {
+        // 重启 = 停旧进程 → 当前配置重起：mode/kernel 双双不变、系统代理不复挂
+        let (svc, sp, dir) = open_service("restart_run");
+        let a = TestKernelDriver::new("test-core-a", "config-a.json");
+        inject(&svc, a.clone());
+        add_demo_node(&svc);
+        let (listener, port) = stub_health_port(&svc);
+        svc.set_kernel("test-core-a").unwrap();
+        svc.set_mode(Mode::System).unwrap();
+        assert_eq!(a.start_attempts.load(Ordering::SeqCst), 1);
+        svc.restart_kernel().unwrap();
+        assert_eq!(
+            a.start_attempts.load(Ordering::SeqCst),
+            2,
+            "重启必须真实重起一次同内核进程"
+        );
+        let s = svc.status();
+        assert_eq!(s.mode, "system", "重启不改模式");
+        assert_eq!(s.kernel, "test-core-a");
+        assert_eq!(s.kernel_id.as_deref(), Some("test-core-a"));
+        assert!(s.kernel_running);
+        {
+            let st = sp.read().unwrap();
+            assert!(
+                st.enable && st.server.contains(&port.to_string()),
+                "System 态重启全程不动系统代理（端口复用即恢复服务）"
+            );
+        }
+        // 失败纪律（缺陷⑧同款）：起新败 → 归零关闭态 + Kernel 错文案指路
+        a.fail_next.store(true, Ordering::SeqCst);
+        let e = svc.restart_kernel().unwrap_err();
+        assert!(matches!(e, ProxyError::Kernel(_)));
+        assert!(e.to_string().contains("已停止为关闭态"));
+        let s = svc.status();
+        assert_eq!(s.mode, "off", "重启失败不得残留运行假象");
+        assert!(!s.kernel_running);
+        assert!(!sp.read().unwrap().enable, "失败后系统代理已如实还原");
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
