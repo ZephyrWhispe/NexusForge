@@ -24,6 +24,7 @@
     "allow-clipboard-pin",
     "allow-clipboard-search",
     "allow-desktop-launcher-launch",
+    "allow-desktop-launcher-reindex",
     "allow-desktop-launcher-search",
     "allow-desktop-launcher-status",
     "allow-desktop-note-add",

@@ -224,6 +224,7 @@ pub fn run() {
             commands::desktop_launcher_search,
             commands::desktop_launcher_launch,
             commands::desktop_launcher_status,
+            commands::desktop_launcher_reindex,
             commands::desktop_tidy_plan,
             commands::desktop_tidy_apply,
             commands::desktop_tidy_restore,

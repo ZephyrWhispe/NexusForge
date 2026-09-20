@@ -16,6 +16,11 @@ description = "允许前端调用 desktop_launcher_status 命令（D-28 按窗�
 commands.allow = ["desktop_launcher_status"]
 
 [[permission]]
+identifier = "allow-desktop-launcher-reindex"
+description = "允许前端调用 desktop_launcher_reindex 命令（D-28 按窗最小授权；主窗专属，辅助窗禁入）"
+commands.allow = ["desktop_launcher_reindex"]
+
+[[permission]]
 identifier = "allow-desktop-tidy-plan"
 description = "允许前端调用 desktop_tidy_plan 命令（D-28 按窗最小授权）"
 commands.allow = ["desktop_tidy_plan"]

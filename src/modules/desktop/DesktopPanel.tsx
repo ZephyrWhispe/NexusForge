@@ -12,6 +12,8 @@ import {
   TableRow,
 } from "@fluentui/react-components";
 import {
+  desktopLauncherReindex,
+  desktopLauncherStatus,
   desktopNoteAdd,
   desktopNoteDone,
   desktopNoteList,
@@ -24,7 +26,7 @@ import {
   type DesktopNoteDto,
   type DesktopTidyPlanDto,
 } from "../../ipc/client";
-import { reportError } from "../../stores/notifications";
+import { useDesktopReminders } from "../../stores/desktopReminders";
 import { confirmAction } from "../../stores/confirm";
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
@@ -32,8 +34,10 @@ import EmptyState from "../../components/EmptyState";
 
 /**
  * 桌面效率面板（docs/impl/05 D3+D4，M8 v1）：
- * ① 随记管理（列表/新增/完成/删除；提醒到期由 desktop.remind_due 事件+轮询提示）
- * ② 桌面整理（预览分类 → 应用 → 一键还原；lnk/目录不动）
+ * ① 随记管理（列表/新增/完成/删除）② 桌面整理（预览→应用→还原）
+ * ③ 启动器索引重建（D1：core 内 build 后重放内置动作）。
+ * 提醒到期横幅读 `useDesktopReminders` 缓冲（订阅在 MainWorkbench 级，面板外事件不丢）；
+ * 刻意不调 `desktop_notes_due`——该命令 take_due 是破坏性消费，会抢走后台轮询的事件。
  * 启动器（D1/D2）为全局 Alt+Q 独立窗口，不内嵌。
  */
 const useStyles = makeStyles({
@@ -96,7 +100,8 @@ export default function DesktopPanel() {
   // D-18：成功提示与错误分离（旧实现把"整理完成"塞进 setError，随即被 run 的 setError("") 抹掉）
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState("");
-  const [dueNote, setDueNote] = useState<DesktopNoteDto | null>(null);
+  const due = useDesktopReminders((s) => s.due);
+  const dismissDue = useDesktopReminders((s) => s.dismissDue);
   // 首轮 refresh 是否落定：未落定前随记列表渲染加载态而非"暂无随记"（D-18 假空态修正）
   const [loaded, setLoaded] = useState(false);
   const mounted = useRef(true);
@@ -115,7 +120,7 @@ export default function DesktopPanel() {
       const [tidyStatus, tidyPlan, idx] = await Promise.all([
         desktopTidyStatus(),
         desktopTidyPlan(),
-        import("../../ipc/client").then((c) => c.desktopLauncherStatus()),
+        desktopLauncherStatus(),
       ]);
       if (!mounted.current) return;
       setHasManifest(tidyStatus);
@@ -130,36 +135,12 @@ export default function DesktopPanel() {
     }
   }, [refreshNotes]);
 
+  // 提醒事件订阅已上移到 MainWorkbench 级 feed（startDesktopRemindFeed），
+  // 面板只在关闭时也不丢缓冲；这里不再自行 listen。
   useEffect(() => {
     mounted.current = true;
     void refresh();
-    // 提醒到期事件 → 顶部提示条（事件驱动，30s 轮询由后端负责）
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    import("@tauri-apps/api/event")
-      .then(({ listen }) =>
-        listen("nf:event", (e) => {
-          if ((e.payload as { topic?: string }).topic !== "desktop.remind_due") return;
-          const p = (e.payload as { payload?: DesktopNoteDto }).payload;
-          if (p && mounted.current) {
-            setDueNote(p);
-            void refreshNotes();
-          }
-        }),
-      )
-      .then((u) => {
-        if (cancelled) {
-          u();
-          return;
-        }
-        unlisten = u;
-      })
-      .catch((e) => reportError(e, { context: "桌面面板事件监听注册失败", toast: false }));
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [refresh, refreshNotes]);
+  }, [refresh]);
 
   const run = useCallback(async (key: string, action: () => Promise<unknown>) => {
     setBusy(key);
@@ -247,15 +228,30 @@ export default function DesktopPanel() {
       });
     })();
 
+  // 启动器索引重建（T-B1-6）：core 内 build 会整体替换条目并重放内置动作，
+  // 返回数是 App 条目（不含动作），徽标以重建后的 status 合计为准，两处数字不混用。
+  const doReindex = () =>
+    run("reindex", async () => {
+      const apps = await desktopLauncherReindex();
+      const idx = await desktopLauncherStatus();
+      if (mounted.current) {
+        setIndexReady(idx);
+        setMsg(`索引已重建：应用 ${apps} 条 + 内置动作（当前合计 ${idx[1]} 条）`);
+      }
+    });
+
   return (
     <div className={styles.root}>
-      {dueNote && (
+      {due.length > 0 && (
         <Section>
           <div className={styles.row}>
             <Badge appearance="filled" color="warning">提醒</Badge>
-            <span className={styles.remind}>{dueNote.content}</span>
+            <span className={styles.remind}>{due[0].content}</span>
+            {due.length > 1 && (
+              <Badge appearance="outline" color="warning">缓冲 {due.length} 条</Badge>
+            )}
             <span className={styles.grow} />
-            <Button size="small" onClick={() => setDueNote(null)}>知道了</Button>
+            <Button size="small" onClick={() => dismissDue(due[0].id)}>知道了</Button>
           </div>
         </Section>
       )}
@@ -382,19 +378,25 @@ export default function DesktopPanel() {
         )}
       </Section>
 
-      {/* 启动器（D1/D2 状态说明） */}
+      {/* 启动器（D1/D2 状态说明 + 索引重建入口） */}
       <Section
         title="快速启动器"
         actions={
-          indexReady[0] ? (
-            <Badge appearance="outline" color="success">索引就绪 · {indexReady[1]} 条</Badge>
-          ) : (
-            <Badge appearance="outline">索引构建中</Badge>
-          )
+          <>
+            <Button size="small" disabled={busy !== ""} onClick={doReindex}>
+              {busy === "reindex" ? "重建中…" : "重建索引"}
+            </Button>
+            {indexReady[0] ? (
+              <Badge appearance="outline" color="success">索引就绪 · {indexReady[1]} 条</Badge>
+            ) : (
+              <Badge appearance="outline">索引构建中</Badge>
+            )}
+          </>
         }
       >
         <span className={styles.muted}>
           全局 Alt+Q 呼出；打分 = 前缀命中 0.5 + 子序列连续度 0.3 + 频次衰减 0.2。
+          新装软件未出现在启动器时点「重建索引」重新扫描开始菜单与 PATH（内置快捷动作会自动恢复）。
         </span>
       </Section>
 

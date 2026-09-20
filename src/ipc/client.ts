@@ -859,6 +859,9 @@ export function desktopLauncherLaunch(id: string): Promise<void> {
 export function desktopLauncherStatus(): Promise<[boolean, number]> {
   return invoke("desktop_launcher_status");
 }
+export function desktopLauncherReindex(): Promise<number> {
+  return invoke("desktop_launcher_reindex");
+}
 export function desktopTidyPlan(): Promise<DesktopTidyPlanDto> {
   return invoke("desktop_tidy_plan");
 }

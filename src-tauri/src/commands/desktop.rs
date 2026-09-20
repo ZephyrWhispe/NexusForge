@@ -50,6 +50,15 @@ pub async fn desktop_launcher_status(
         .map_err(|e| AppError::module("DESKTOP_IPC_001", e.to_string(), None))?
 }
 
+/// 重建启动器索引（09 §4.2 T-B1-6：core 内 build 后重放内置动作）。返回 App 条目数。
+#[tauri::command]
+pub async fn desktop_launcher_reindex(state: State<'_, HostState>) -> Result<usize, AppError> {
+    let m = desktop_module(&state);
+    tauri::async_runtime::spawn_blocking(move || Ok(m.reindex()))
+        .await
+        .map_err(|e| AppError::module("DESKTOP_IPC_001", e.to_string(), None))?
+}
+
 /// 桌面整理预览（D3）
 #[tauri::command]
 pub async fn desktop_tidy_plan(

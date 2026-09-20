@@ -106,6 +106,41 @@ impl DesktopModule {
         Ok(())
     }
 
+    /// 注册内置动作（init 与 reindex 共用；build() 整体替换条目，重放是唯一保留路径）
+    fn register_builtin_actions(&self) {
+        self.index.register_action(
+            "clipboard_panel",
+            "剪切板面板",
+            "clipboard.quick_panel_toggled",
+            serde_json::json!({}),
+        );
+        self.index.register_action(
+            "screenshot",
+            "截图",
+            "screenshot.overlay_requested",
+            serde_json::json!({ "mode": "shot" }),
+        );
+        self.index.register_action(
+            "ocr",
+            "文字识别 (OCR)",
+            "screenshot.overlay_requested",
+            serde_json::json!({ "mode": "ocr" }),
+        );
+    }
+
+    /// D1：重建启动器索引（UI「重建索引」入口）。返回 App 条目数（不含内置动作）。
+    pub fn reindex(&self) -> usize {
+        self.reindex_with(&crate::index::start_menu_dirs(), &crate::index::path_dirs())
+    }
+
+    /// 目录注入版（测试确定性）：build 会整体替换条目，故随后必须重放内置动作
+    pub fn reindex_with(&self, start_menu: &[PathBuf], path_dirs: &[PathBuf]) -> usize {
+        let total = self.index.build(start_menu, path_dirs);
+        self.register_builtin_actions();
+        tracing::info!(total, "启动器索引重建完成");
+        total
+    }
+
     /// 提醒轮询线程（start 在 spawn_blocking 内被调用，无 tokio 上下文 → std::thread）
     fn start_remind_loop(&self) {
         let already = self.remind_cancel.swap(false, Ordering::SeqCst);
@@ -197,24 +232,7 @@ impl Module for DesktopModule {
         tracing::info!(total, "启动器索引构建完成");
 
         // 内置动作（docs/impl/05 D1：剪贴板/截图/OCR 快捷入口）
-        self.index.register_action(
-            "clipboard_panel",
-            "剪切板面板",
-            "clipboard.quick_panel_toggled",
-            serde_json::json!({}),
-        );
-        self.index.register_action(
-            "screenshot",
-            "截图",
-            "screenshot.overlay_requested",
-            serde_json::json!({ "mode": "shot" }),
-        );
-        self.index.register_action(
-            "ocr",
-            "文字识别 (OCR)",
-            "screenshot.overlay_requested",
-            serde_json::json!({ "mode": "ocr" }),
-        );
+        self.register_builtin_actions();
 
         self.state.set(ModuleState::Stopped);
         Ok(())
@@ -308,5 +326,51 @@ impl HotkeyProvider for DesktopModule {
                 }),
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 红线回归（09 §4.2 T-B1-6）：build() 整体替换条目，重放是内置动作的唯一保留路径
+    #[test]
+    fn launcher_reindex_preserves_registered_actions() {
+        let dir = std::env::temp_dir().join(format!("nf_desktop_reindex_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sm = dir.join("sm");
+        std::fs::create_dir_all(&sm).unwrap();
+        std::fs::write(sm.join("记事本.lnk"), b"fake-lnk").unwrap();
+
+        let m = DesktopModule::new(&dir);
+        let total = m.reindex_with(std::slice::from_ref(&sm), &[]);
+        assert_eq!(total, 1, "返回 App 条目数（不含内置动作）");
+
+        for id in ["action:clipboard_panel", "action:screenshot", "action:ocr"] {
+            assert!(m.index().get(id).is_ok(), "reindex 后内置动作丢失: {id}");
+        }
+        let hits = m.index().search("截图", 10).unwrap();
+        let hit = hits
+            .iter()
+            .find(|h| h.item.id == "action:screenshot")
+            .expect("search(截图) 未命中内置截图动作");
+        assert_eq!(hit.item.kind, ItemKind::Action);
+        assert_eq!(hit.item.topic, Some("screenshot.overlay_requested"));
+        assert_eq!(hit.item.payload.as_ref().unwrap()["mode"], "shot");
+
+        // 对照臂：裸 build() 不重放确实会抹掉动作——证明上述判据由重放兑现而非巧合
+        m.index().build(std::slice::from_ref(&sm), &[]);
+        assert!(
+            m.index().get("action:ocr").is_err(),
+            "裸 build 后动作仍在说明判据是摆设"
+        );
+
+        // 再次 reindex：动作恢复且不重复累积（register_action 覆盖语义）
+        assert_eq!(m.reindex_with(&[sm], &[]), 1);
+        let (ready, n) = m.index().status();
+        assert!(ready);
+        assert_eq!(n, 4, "1 App + 3 Action，重放不重复");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

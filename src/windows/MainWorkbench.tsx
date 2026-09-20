@@ -20,6 +20,7 @@ import { toggleQuickPanel } from "./quickPanelController";
 import { reportError } from "../stores/notifications";
 import { useSession } from "../stores/session";
 import { startModuleStatusFeed } from "../stores/modules";
+import { startDesktopRemindFeed } from "../stores/desktopReminders";
 
 /**
  * 主工作台（docs/DESIGN.md §3 像素级布局：40/44/1fr/28 四行 + 228/190 双列导航）。
@@ -94,6 +95,8 @@ export default function MainWorkbench() {
   // 模块状态事实源：初始快照 + host.module_state 事件流（StatusBar/ModuleNav 共用）
   useEffect(() => {
     startModuleStatusFeed();
+    // 到期提醒缓冲（T-B1-6）：订阅挂主窗口级，桌面面板未打开也不丢提醒
+    startDesktopRemindFeed();
   }, []);
 
   // U2-4/U3-5：全局快捷键 → OS → 事件 → 快速面板 / 截图覆盖层
