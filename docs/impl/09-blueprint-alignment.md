@@ -36,7 +36,7 @@
 | 批次 | 内容 | 依赖 | 规模档 | 状态 |
 |------|------|------|--------|------|
 | B0 | UI 壳补齐：截图/OCR 主面板、设置中心 moduleId、MainWorkbench 注册表化、占位 Badge 机制 | 无 | M | 已完成（dab1074/61940b2/03dd885/96894da） |
-| B1 | §4 孤儿命令接线全表（纯前端 + 少量 DTO 补齐） | B0（注册表化先行） | L–M/面板，可切多提交 | 未开工 |
+| B1 | §4 孤儿命令接线全表（纯前端 + 少量 DTO 补齐） | B0（注册表化先行） | L–M/面板，可切多提交 | 已完成（1757c40…9844956 九提交 + 批次尾修复 cd96b83，证据见 §12 状态表） |
 | B2 | 代理多内核（§5） | B1 中代理相关项 | XL | 未开工 |
 | B3 | 剪贴板深化（§8） | B1 | L | 未开工 |
 | B4 | 截图/OCR 深化（§9） | B0/B1 | XL | 未开工 |
@@ -208,7 +208,7 @@
 | 批次 | 状态 | 证据 |
 |------|------|------|
 | B0 | 已完成（2026-09-19） | 代码四提交 dab1074（T-B0-1+6）/ 61940b2（T-B0-2）/ 03dd885（T-B0-3）/ 96894da（T-B0-4+5），每提交全组门禁绿（vitest 39→50/12 文件、cargo test 50 ok 行零 FAILED 等）；批次尾实启冒烟（dev 二进制 + WebView2 CDP 走查，一次性脚本跑完即删）全绿：截图面板出"开始截取/截图历史/两个延后 Badge"且空库时诚实显示引导文案；覆盖层真实截取回放（拖框→Enter→保存）后历史"1 条"且缩略图为真 data:image/png、点"复制图片"弹"已复制到剪贴板"成功提示；OCR 面板引擎卡"1/1 引擎可用"+ 语言行 + PaddleOCR 延后 Badge + "尚未识别"引导；设置中心随模块切换——OCR 模块下显"优先 OCR 引擎"且无剪切板字段泄漏，切回剪切板中枢下显剪切板字段；主窗 error 日志仅两条已核源码的良性噪声（Keyborg 卸载警告；/favicon.ico 404——index.html 无 icon link，浏览器自动请求）。遗留记录：冒烟在开发实例历史中留下 1 条桌面截帧条目，后端今日无按 id 删除命令（module.rs 仅容量 prune），用户可见即证据，删除入口随 B1/B4 接线 |
-| B1 | 未开工 | — |
+| B1 | 已完成（2026-09-20） | 十代码提交：1757c40（T-B1-1+2 剪切板工具栏清空局部 Dialog 承载"保留置顶"+详情 Dialog，核账缺陷①ClipContentDto Files 变体随批修）、fef24e0（T-B1-3 vault 改密 Dialog/夹行内改名/搜索传参，缺陷②返回类型修为 VaultHeaderDto；改密红线文案：change_master_password 不经 unlock，不宣称尝试锁定）、bc0b087（T-B1-4 file 搜索+预览分栏，degraded=true 显式"索引降级：本次为目录遍历"横幅）、df7c9b2（T-B1-5 批量重命名 DSL 预览表/等待队列 drop/压缩解压 kind 透传）、ab95412（T-B1-6 本批唯一新命令 desktop_launcher_reindex——rebuild 后重放三个内建 Action 的 Rust 对照臂负例 + D-28 ACL 同步 permissions/desktop.toml+main.json + desktopReminders 事件缓冲 store）、14ce39d（T-B1-7 推送×2 + 活跃会话表 + clientSessionIds/serverSessionIds 拆分修核账⑤，readText 拒绝回落手输对话框）、5cd922f（T-B1-8 known_hosts 对话框，复合 host "[h]:port" 原样回传负例 + danger 删除取消零 invoke 红线负例）、f9e3c3a（T-B1-9 清理静态清单+sysCleanSelected persist 零迁移+winops 目录按 category 浏览，缺陷③maintenance 字段补）、9844956（T-B1-10 editor 另存为换绑刷页签 + notes 手动同步 busy 防重，缺陷④后端修 save_as size=raw.len() 字节数 Rust 负例锁死）；批次尾修复 cd96b83（冒烟抓出 EditorPanel 两真实缺陷：创建 effect deps [activeId,sessions] 随每次会话刷新 dispose 重建→在途 autosave 落在已销毁 model 抛 "Model is disposed!"，改经 ref 桥接+deps 收为「是否存在活跃会话」布尔——初版 [] 因宿主 div 条件渲染被新回归当场判红，故上布尔非 []；程序化 setValue 误置脏由 loadingLoadRef 抑制；monaco 销毁期上游 ~200 条/3s Canceled 噪声由 isMonacoTeardownCanceled 窄谓词过滤且六负例臂证明不可能掩护真实错误）。每提交全组门禁绿（vitest 50→80/22 文件，批次尾 87/24；cargo test 50 ok 行零 FAILED）。批次尾实启冒烟（dev 二进制 + WebView2 CDP，一次性脚本跑完即删）16/16 PASS：十条行 UI 挂点全走查——搜索命中/降级横幅、双击开预览、批量重命名真实改盘（run-3 残留 *_x 文件反而兑现出冲突分支诚实：app 跳过冲突项保住 b1_alpha.txt，toast 如实报"冲突与未勾选条目未执行"）、reindex 条数徽标、kvm 推送回落、known_hosts 对话框、清理勾选 localStorage 往返、另存为换绑、notes 手动同步；破坏性操作（剪切板清空/known_hosts 删除/清理执行）统一停在确认取消（零 invoke 由 vitest 负例证明）。日志核账全数归因：USN 非提权降级与 WSL 缺失=环境事实、Canceled=monaco 上游（根修后实启复验 raw rejection 实测 0、编辑器全程只建一次、程序化载入不置脏，6/6 PASS）、Model disposed=真实缺陷已 cd96b83 根治。如实遗留：vault 改密 Dialog 字段级证明仅 run-2 入口 + vitest（改密动作未真提交），known_hosts 本机 0 条记录（行渲染/删除证明依赖 vitest 夹具），B0 遗留"冒烟留下 1 条截图历史无按 id 删除命令"不变、仍随 B4 接线 |
 | B2 | 未开工 | — |
 | B3–B7 | 未开工 | — |
 | B8 | 方案待裁决 | — |
