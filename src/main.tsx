@@ -7,7 +7,7 @@ import Toaster from "./components/Toaster";
 import ConfirmDialogHost from "./components/ConfirmDialog";
 import { buildThemeSet } from "./theme/theme";
 import { hostSystemAccent } from "./ipc/client";
-import { reportError } from "./stores/notifications";
+import { reportError, isMonacoTeardownCanceled } from "./stores/notifications";
 import { useSession, resolveIsLight } from "./stores/session";
 
 /**
@@ -20,6 +20,7 @@ const role = new URLSearchParams(window.location.search).get("w") ?? "main";
 
 // D-19：漏网异常统一进全局通道（日志 + 角标 + toast），不再无声消失在 console
 window.addEventListener("unhandledrejection", (e) => {
+  if (isMonacoTeardownCanceled(e.reason)) return; // monaco 销毁期内部噪声，见谓词注释
   reportError(e.reason, { context: "未处理的异步错误", dedupeKey: String(e.reason).slice(0, 120) });
 });
 window.addEventListener("error", (e) => {

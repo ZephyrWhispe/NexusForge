@@ -113,6 +113,22 @@ function humanize(e: unknown): string {
 }
 
 /**
+ * monaco-editor 销毁编辑器时会把它内部各 Delayer 的在途 Promise 逐个以
+ * Canceled 错误 reject（上游行为，业务侧无法根治）。这类 rejection 进全局
+ * 通道会把宿主日志刷屏（实启冒烟实测：切离编辑器面板 3 秒内 ~200 条
+ * 「未处理的异步错误: Canceled」），按栈特征精确滤除；无 monaco 栈的
+ * Canceled 一律照常上报，不掩护真实错误。
+ */
+export function isMonacoTeardownCanceled(reason: unknown): boolean {
+  const r = reason as { name?: unknown; stack?: unknown } | null | undefined;
+  return (
+    r?.name === "Canceled" &&
+    typeof r?.stack === "string" &&
+    r.stack.includes("Delayer.cancel")
+  );
+}
+
+/**
  * 全局错误上报：normalize AppErrorDto → 宿主日志（必有）→ 错误角标（必有）→ toast（默认）。
  * 幂等防递归：hostLog 自身失败不再回流 reportError。
  */

@@ -140,8 +140,20 @@ export default function EditorPanel() {
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map());
   const autosaveTimer = useRef<number | null>(null);
   const mounted = useRef(true);
+  // 编辑器只创建一次（见下方 effect），内容变更监听器闭包不随渲染更新，
+  // 最新会话事实经这两个 ref 桥接；程序化载入用 loadingLoadRef 抑制置脏。
+  const activeIdRef = useRef("");
+  const sessionsRef = useRef(sessions);
+  const loadingLoadRef = useRef(false);
+  activeIdRef.current = activeId;
+  sessionsRef.current = sessions;
 
-  // Monaco 编辑器创建（一次）
+  // Monaco 编辑器创建（deps 曾为 [activeId, sessions]——每次会话/脏标记变化都
+  // dispose 重建编辑器与全部 model，实启冒烟证实这会把在途 autosave 定时器留在已 dispose
+  // 的 model 上抛 "Model is disposed!"，故监听器一律经 ref 读当前值）。
+  // 宿主编辑区是条件渲染（{active ? ...}，无活跃会话时挂点不存在），deps 取
+  // 「是否存在活跃会话」这一布尔：false→true 建一次，其后切会话/置脏布尔不变即不再重建；
+  // 全部关闭→重开才走 dispose/重建（editorRef.current 守卫兜底 StrictMode 双跑）。
   useEffect(() => {
     if (!editorHostRef.current || editorRef.current) return;
     editorRef.current = monaco.editor.create(editorHostRef.current, {
@@ -156,24 +168,31 @@ export default function EditorPanel() {
     // 内容变更 → 脏标记 + 3s 防抖 autosave（E2 崩溃恢复入口）
     ed.onDidChangeModelContent(() => {
       const model = ed.getModel();
-      if (!activeId || model === null) return;
-      const session = sessions.find((s) => s.id === activeId);
+      const id = activeIdRef.current;
+      if (!id || model === null || loadingLoadRef.current) return;
+      const session = sessionsRef.current.find((s) => s.id === id);
       if (session?.readonly) return; // >50MB 只读：不置脏不存草稿
-      setSessions((prev) => prev.map((s) => (s.id === activeId ? { ...s, dirty: true } : s)));
+      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, dirty: true } : s)));
       if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
       autosaveTimer.current = window.setTimeout(() => {
-        void editorAutosave(activeId, model?.getValue() ?? "").catch((e) =>
+        // 3s 窗口内 model 可能随会话换绑/卸载被 dispose，getValue() 会抛
+        // "Model is disposed!"（未捕获 → 全局错误通道刷日志）
+        if (model.isDisposed()) return;
+        void editorAutosave(id, model.getValue()).catch((e) =>
           reportError(e, { context: "草稿自动保存失败", dedupeKey: "editor-autosave", toast: false }),
         );
       }, 3000);
     });
     return () => {
+      if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
       editorRef.current?.dispose();
       editorRef.current = null;
       models.forEach((m) => m.dispose());
       models.clear();
     };
-  }, [activeId, sessions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 布尔表达式即上方纪律的全部依赖语义；会话事实经 ref 桥接
+  }, [sessions.some((s) => s.id === activeId)]);
 
   // 切换会话：换 model + 更新降级配置 + MD 预览内容
   useEffect(() => {
@@ -187,7 +206,15 @@ export default function EditorPanel() {
       modelsRef.current.set(key, model);
       void editorContent(session.id)
         .then((text) => {
-          if (model && !model.isDisposed()) model.setValue(text);
+          if (model && !model.isDisposed()) {
+            // 程序化载入不是用户编辑：monaco 变更事件同步派发，抑制置脏与草稿
+            loadingLoadRef.current = true;
+            try {
+              model.setValue(text);
+            } finally {
+              loadingLoadRef.current = false;
+            }
+          }
         })
         .catch((e) => setError(parseAppError(e)?.data.message ?? String(e)));
     }
