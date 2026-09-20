@@ -377,6 +377,34 @@ fn aux_windows_never_reach_main_only_commands() {
     );
 }
 
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantProxyKernelSelect() {
+    // T-B2-2 红线负例：换核命令可停/起内核进程，只允许主窗代理页触达
+    let caps = load_capabilities();
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&"allow-proxy-kernel-select");
+            continue;
+        }
+        assert!(
+            !perms.contains(&"allow-proxy-kernel-select"),
+            "辅助窗 capability {name} 不得持有 allow-proxy-kernel-select（内核生命周期是 main-only 面）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 allow-proxy-kernel-select，否则本负例是空洞"
+    );
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

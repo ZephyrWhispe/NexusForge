@@ -42,10 +42,11 @@ pub struct Node {
 }
 
 impl Node {
-    /// 出站 tag：`{sub_id短8位}:{tag}` 避免跨订阅重名
+    /// 出站 tag：`{sub_id前8字符}:{tag}` 避免跨订阅重名。
+    /// 缺陷⑫（09 §5.1）修复：必须按 chars 而非 &str[..8] 字节切片 ——
+    /// 订阅 id 今天恒为 uuid v7（ASCII）但 tag/历史数据不保证，多字节 id 曾直接 panic。
     pub fn outbound_tag(&self) -> String {
-        let sub = &self.sub_id;
-        let sub = if sub.len() > 8 { &sub[..8] } else { sub };
+        let sub: String = self.sub_id.chars().take(8).collect();
         format!("{sub}:{}", self.tag)
     }
 }
@@ -402,5 +403,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(n.outbound_tag(), "abcdefgh:x");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn outboundTag_nonAscii_noPanic() {
+        // 缺陷⑫回归：多字节 sub_id 曾按字节切片 &sub[..8] 直接 panic（跨字符边界）
+        let n = Node {
+            tag: "节点一".into(),
+            kind: NodeKind::Trojan,
+            server: "example.com".into(),
+            port: 443,
+            sub_id: "订阅中文标识abcdef".into(),
+            extra: serde_json::json!({"password": "p"}),
+        };
+        // chars().take(8)：6 个汉字 + a + b = 8 个字符（旧字节切片在此直接 panic）
+        assert_eq!(n.outbound_tag(), "订阅中文标识ab:节点一");
+        // ASCII 短 id 不截断（旧行为保持）
+        let m = Node {
+            sub_id: "abc".into(),
+            ..n
+        };
+        assert_eq!(m.outbound_tag(), "abc:节点一");
     }
 }

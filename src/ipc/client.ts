@@ -720,6 +720,23 @@ export function fileRenameApply(plans: RenamePlanDto[]): Promise<number> {
 
 // ======================== 代理（M7 PR，docs/impl/05） ========================
 
+export interface ProxyKernelCapsDto {
+  tun: boolean;
+  policy_groups: boolean;
+  external_controller: boolean;
+}
+
+/** 单内核注册表条目（T-B2-2；UI 只按 caps 渲染能力，禁内核特例分支） */
+export interface ProxyKernelInfoDto {
+  id: string;
+  display_name: string;
+  installed: boolean;
+  version: string | null;
+  running: boolean;
+  caps: ProxyKernelCapsDto;
+  supported_kinds: string[];
+}
+
 export interface ProxyStatusDto {
   mode: "off" | "system" | "tun";
   kernel_running: boolean;
@@ -733,6 +750,10 @@ export interface ProxyStatusDto {
   kernel_version: string | null;
   has_backup: boolean;
   restored_last_run: boolean;
+  /** 选定内核 id（proxy_state.json 持久化；内核卡高亮） */
+  kernel: string;
+  /** 全部已注册内核的装机/能力清单 */
+  kernels: ProxyKernelInfoDto[];
 }
 
 export interface ProxySubDto {
@@ -779,6 +800,10 @@ export function proxyKernelInstall(version?: string | null): Promise<ProxyManife
 }
 export function proxyWintunInstall(): Promise<void> {
   return invoke("proxy_wintun_install");
+}
+/** 选定/切换代理内核：未运行只落选择；运行中新核起、失败后端自动回滚旧核并上抛原错 */
+export function proxyKernelSelect(kernel: string): Promise<void> {
+  return invoke("proxy_kernel_select", { kernel });
 }
 export function proxySubs(): Promise<ProxySubDto[]> {
   return invoke("proxy_subs");

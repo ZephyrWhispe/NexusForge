@@ -6,6 +6,7 @@
 //!   （内核死亡 + 系统代理仍指向死端口 = 用户断网最高危场景）
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -15,11 +16,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{ProxyError, Result};
+use crate::ir::IrConfig;
+use crate::sub::NodeKind;
 
 const LOG_CAP: usize = 500;
 
-type LogCb = Arc<dyn Fn(&str) + Send + Sync>;
-type ExitCb = Arc<dyn Fn(i32) + Send + Sync>;
+/// 内核日志行回调（proxy.log_line 事件转发的源头）
+pub type LogCb = Arc<dyn Fn(&str) + Send + Sync>;
+/// 内核意外退出回调（非 stop 触发的进程结束）
+pub type ExitCb = Arc<dyn Fn(i32) + Send + Sync>;
+
+/// 内核能力表（单一真源：UI 只按 caps 渲染，不支持的参数组整组折叠，禁"能看见点不动"）
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelCaps {
+    pub tun: bool,
+    pub policy_groups: bool,
+    pub external_controller: bool,
+}
 
 /// 内核日志行（环形缓冲快照 / proxy.log_line 事件载荷）
 #[derive(Clone, Debug, serde::Serialize)]
@@ -37,12 +50,45 @@ impl LogLine {
     }
 }
 
-/// 内核驱动抽象（PR1）。实现方负责进程 spawn 与日志采集。
+/// 内核驱动抽象（B2 T-B2-2 trait v2）。实现方负责方言渲染与进程 spawn 参数；
+/// 生命周期装配（渲染→写 `work_dir/cfg_name()`→spawn+守护+日志）由默认 [`start`](KernelDriver::start) 承担。
 pub trait KernelDriver: Send + Sync {
     fn id(&self) -> &'static str;
     fn exe_path(&self) -> PathBuf;
+    /// UI 展示名（内核卡标题）
+    fn display_name(&self) -> &'static str;
+    /// 配置文件名（同目录并存互踩的根源参数：sing-box 恒 `config.json` 保旧路径）
+    fn cfg_name(&self) -> &'static str;
+    /// 该内核可渲染的协议族（换核前协议兼容性预检的输入）
+    fn supported_kinds(&self) -> &'static [NodeKind];
+    fn caps(&self) -> KernelCaps;
+    /// IR → 方言配置文本；Err = 校验失败（渲染即校验，validate_config 不单列 trait 方法）
+    fn config_render(&self, ir: &IrConfig) -> Result<String>;
+    /// 组装进程命令（`work_dir` 供 mihomo 类 `-d` 语义；`cfg` 为已写盘配置路径）
+    fn build_command(&self, work_dir: &Path, cfg: &Path) -> Command;
     /// 启动内核。`on_exit` 在进程非预期退出（非 [`stop`](KernelHandle::stop) 触发）时以退出码回调。
-    fn start(&self, cfg: &Path, on_exit: ExitCb) -> Result<KernelHandle>;
+    fn start(&self, work_dir: &Path, cfg: &Path, on_exit: ExitCb) -> Result<KernelHandle> {
+        let exe = self.exe_path();
+        if !exe.is_file() {
+            return Err(ProxyError::Kernel(format!(
+                "内核未安装: {}（请在代理页安装内核）",
+                exe.display()
+            )));
+        }
+        let cmd = self.build_command(work_dir, cfg);
+        spawn_kernel(self.id(), cmd, on_exit)
+    }
+}
+
+/// 已注册内核全集（T-B2-5/6 新增驱动 = 此处加臂 + sidecar AssetSpec 同步）
+pub const KERNEL_IDS: &[&str] = &["sing-box"];
+
+/// 内核注册表：id → 驱动实例（exe 可以不存在——installed 由调用方按 exe_path 判定）。
+pub fn driver_for(bin_dir: &Path, id: &str) -> Result<Arc<dyn KernelDriver>> {
+    match id {
+        "sing-box" => Ok(Arc::new(SingBoxDriver::new(bin_dir.join("sing-box.exe")))),
+        other => Err(ProxyError::Kernel(format!("未知内核: {other}"))),
+    }
 }
 
 /// 内核句柄：停止 / 存活 / 日志快照 / 健康检查。
@@ -101,8 +147,8 @@ impl Drop for KernelHandle {
     }
 }
 
-/// spawn 子进程 + 守护线程 + 日志采集线程的共用装配（sing-box 与测试驱动共用）
-pub(super) fn spawn_kernel(
+/// spawn 子进程 + 守护线程 + 日志采集线程的共用装配（各方言驱动与测试驱动共用）
+pub fn spawn_kernel(
     driver_id: &'static str,
     mut cmd: Command,
     on_exit: ExitCb,
@@ -215,28 +261,50 @@ impl KernelDriver for SingBoxDriver {
         self.exe.clone()
     }
 
-    fn start(&self, cfg: &Path, on_exit: ExitCb) -> Result<KernelHandle> {
-        if !self.exe.is_file() {
-            return Err(ProxyError::Kernel(format!(
-                "内核未安装: {}（请在代理页安装内核）",
-                self.exe.display()
-            )));
+    fn display_name(&self) -> &'static str {
+        "sing-box"
+    }
+
+    /// 恒 `config.json`：保 B2 前旧落盘路径一字不动（golden 同链）
+    fn cfg_name(&self) -> &'static str {
+        "config.json"
+    }
+
+    fn supported_kinds(&self) -> &'static [NodeKind] {
+        use NodeKind::*;
+        &[Shadowsocks, Vmess, Trojan, Vless]
+    }
+
+    fn caps(&self) -> KernelCaps {
+        KernelCaps {
+            tun: true,
+            policy_groups: true,
+            external_controller: true,
         }
+    }
+
+    fn config_render(&self, ir: &IrConfig) -> Result<String> {
+        Ok(serde_json::to_string_pretty(&crate::singbox::render(ir))?)
+    }
+
+    fn build_command(&self, _work_dir: &Path, cfg: &Path) -> Command {
         let mut cmd = Command::new(&self.exe);
         cmd.arg("run")
             .arg("-c")
             .arg(cfg)
             // sing-box 1.10+ 关闭彩色输出，日志按行解析更稳
             .arg("--disable-color");
-        spawn_kernel("sing-box", cmd, on_exit)
+        cmd
     }
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
 mod tests {
     use super::*;
+    use crate::ir::IrConfig;
 
-    /// 测试驱动：跑 cmd 子进程（Windows 专项）
+    /// 测试驱动：跑 cmd 子进程（Windows 专项）；trait v2 只留方言三件事
     struct CmdDriver(Arc<dyn Fn() -> Command + Send + Sync>);
 
     impl KernelDriver for CmdDriver {
@@ -244,10 +312,25 @@ mod tests {
             "cmd"
         }
         fn exe_path(&self) -> PathBuf {
-            PathBuf::from("cmd.exe")
+            PathBuf::from(std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()))
         }
-        fn start(&self, _cfg: &Path, on_exit: ExitCb) -> Result<KernelHandle> {
-            spawn_kernel("cmd", (self.0)(), on_exit)
+        fn display_name(&self) -> &'static str {
+            "cmd 测试驱动"
+        }
+        fn cfg_name(&self) -> &'static str {
+            "config.json"
+        }
+        fn supported_kinds(&self) -> &'static [NodeKind] {
+            &[]
+        }
+        fn caps(&self) -> KernelCaps {
+            KernelCaps::default()
+        }
+        fn config_render(&self, _ir: &IrConfig) -> Result<String> {
+            Ok("{}\n".into())
+        }
+        fn build_command(&self, _work_dir: &Path, _cfg: &Path) -> Command {
+            (self.0)()
         }
     }
 
@@ -261,11 +344,34 @@ mod tests {
     }
 
     #[test]
+    fn registry_unknownKernel_rejected() {
+        let dir = std::path::Path::new("");
+        match driver_for(dir, "v2ray-classic") {
+            Err(ProxyError::Kernel(msg)) => {
+                assert!(
+                    msg.contains("未知内核") && msg.contains("v2ray-classic"),
+                    "{msg}"
+                );
+            }
+            // dyn KernelDriver 无 Debug，match 只拆 Err 侧（ProxyError 有 Debug）
+            Err(other) => panic!("必须是 Kernel 形态错误，得 {other:?}"),
+            Ok(_) => panic!("未注册内核必须拒绝"),
+        }
+        // 正对照：sing-box 允许 exe 不存在地构造（installed 判定归调用方）
+        // expect 而非 unwrap：dyn KernelDriver 无 Debug，unwrap 的 T: Debug 约束不成立
+        let d = driver_for(dir, "sing-box").expect("sing-box 必须可构造");
+        assert_eq!(d.id(), "sing-box");
+        assert_eq!(d.cfg_name(), "config.json");
+        assert_eq!(d.supported_kinds().len(), 4);
+    }
+
+    #[test]
     fn handle_reports_unexpected_exit_code() {
         let fired = Arc::new(Mutex::new(None::<i32>));
         let fired2 = fired.clone();
         let h = cmd_driver(&["exit 7"])
             .start(
+                Path::new("unused"),
                 Path::new("unused"),
                 Arc::new(move |code| {
                     *fired2.lock() = Some(code);
@@ -291,6 +397,7 @@ mod tests {
         let h = cmd_driver(&["ping", "-n", "3", "127.0.0.1"])
             .start(
                 Path::new("unused"),
+                Path::new("unused"),
                 Arc::new(move |_| {
                     *fired2.lock() = true;
                 }),
@@ -307,7 +414,7 @@ mod tests {
     fn log_ring_buffer_caps_at_500() {
         // echo 3000 行：超过 LOG_CAP，快照应只有最后 500 行
         let h = cmd_driver(&["for /L %i in (1,1,3000) do @echo line%i"])
-            .start(Path::new("unused"), Arc::new(|_| {}))
+            .start(Path::new("unused"), Path::new("unused"), Arc::new(|_| {}))
             .unwrap();
         for _ in 0..100 {
             if h.logs_snapshot(LOG_CAP).len() >= LOG_CAP {

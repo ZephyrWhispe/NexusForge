@@ -14,9 +14,9 @@ use host_core::events::{Event, EventBus};
 use host_core::ports::SysProxyPort;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{generate, GenOptions, RouteMode};
 use crate::error::{ProxyError, Result};
-use crate::kernel::{KernelDriver, KernelHandle, LogLine, SingBoxDriver};
+use crate::ir;
+use crate::kernel::{driver_for, KernelCaps, KernelDriver, KernelHandle, LogLine, KERNEL_IDS};
 use crate::sidecar;
 use crate::sub::Node;
 use crate::sysproxy;
@@ -24,7 +24,6 @@ use crate::sysproxy;
 const STATE_FILE: &str = "proxy_state.json";
 const SUBS_FILE: &str = "subs.json";
 const RULES_FILE: &str = "rules.json";
-const CONFIG_FILE: &str = "config.json";
 const BIN_DIR: &str = "bin";
 const SUBS_DIR: &str = "subs";
 const APP_UA: &str = concat!("NexusForge/", env!("CARGO_PKG_VERSION"));
@@ -69,7 +68,17 @@ pub struct Sub {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistState {
     mixed_port: u16,
+    /// 选定内核（T-B2-2）；serde default 零迁移：旧文件缺键 = sing-box
+    #[serde(default = "default_kernel")]
+    kernel: String,
 }
+
+fn default_kernel() -> String {
+    KERNEL_SINGBOX.to_string()
+}
+
+/// 当前唯一注册内核 id（T-B2-5/6 增 xray/mihomo）
+pub const KERNEL_SINGBOX: &str = "sing-box";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusDto {
@@ -86,6 +95,23 @@ pub struct StatusDto {
     pub has_backup: bool,
     /// 上次启动扫描是否自动还原了残留代理（UI 提示）
     pub restored_last_run: bool,
+    /// 选定内核 id（持久化于 proxy_state.json；UI 内核卡高亮）
+    pub kernel: String,
+    /// 全部已注册内核的装机/能力清单（内核选择卡数据源）
+    pub kernels: Vec<KernelInfoDto>,
+}
+
+/// 单内核条目（注册表驱动，UI 禁写内核特例分支）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KernelInfoDto {
+    pub id: String,
+    pub display_name: String,
+    pub installed: bool,
+    pub version: Option<String>,
+    /// 该内核当前是否就是运行中的句柄
+    pub running: bool,
+    pub caps: KernelCaps,
+    pub supported_kinds: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -109,6 +135,7 @@ struct Inner {
     mode: Mode,
     handle: Option<KernelHandle>,
     mixed_port: u16,
+    kernel: String,
     subs: Vec<Sub>,
     nodes: Vec<Node>,
     direct_domains: Vec<String>,
@@ -120,6 +147,9 @@ pub struct ProxyService {
     sp: Arc<dyn SysProxyPort>,
     inner: RwLock<Inner>,
     restored_last_run: RwLock<bool>,
+    /// 测试专用驱动注入位（换核生命周期须真实双进程；生产路径恒空）
+    #[cfg(test)]
+    test_drivers: RwLock<Vec<(String, Arc<dyn KernelDriver>)>>,
 }
 
 impl ProxyService {
@@ -136,7 +166,10 @@ impl ProxyService {
         let state: PersistState = std::fs::read(proxy_dir.join(STATE_FILE))
             .ok()
             .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .unwrap_or(PersistState { mixed_port: 7890 });
+            .unwrap_or(PersistState {
+                mixed_port: 7890,
+                kernel: default_kernel(),
+            });
         let direct_domains: Vec<String> = std::fs::read(proxy_dir.join(RULES_FILE))
             .ok()
             .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -153,11 +186,14 @@ impl ProxyService {
                 mode: Mode::Off,
                 handle: None,
                 mixed_port: state.mixed_port,
+                kernel: state.kernel,
                 subs,
                 nodes,
                 direct_domains,
             }),
             restored_last_run: RwLock::new(false),
+            #[cfg(test)]
+            test_drivers: RwLock::new(Vec::new()),
         });
 
         // 启动扫描：上次运行残留的系统代理 → 自动还原（验收「kill -9 → 重启恢复」）
@@ -174,19 +210,45 @@ impl ProxyService {
     pub fn status(&self) -> StatusDto {
         let inner = self.inner.read();
         let manifest = sidecar::read_manifest(&self.bin_dir());
+        let running_id = inner.handle.as_ref().map(|h| h.driver_id().to_string());
+        let kernels: Vec<KernelInfoDto> = KERNEL_IDS
+            .iter()
+            .filter_map(|id| driver_for(&self.bin_dir(), id).ok())
+            .map(|d| KernelInfoDto {
+                id: d.id().to_string(),
+                display_name: d.display_name().to_string(),
+                installed: d.exe_path().is_file(),
+                // 旧单 manifest 仅 sing-box 有版本记录（per-kernel manifest 归 T-B2-4）
+                version: manifest
+                    .as_ref()
+                    .filter(|m| m.kernel_id == d.id())
+                    .map(|m| m.kernel_version.clone()),
+                running: running_id.as_deref() == Some(d.id()),
+                caps: d.caps(),
+                supported_kinds: d
+                    .supported_kinds()
+                    .iter()
+                    .map(|k| k.as_str().to_string())
+                    .collect(),
+            })
+            .collect();
+        let selected = kernels.iter().find(|k| k.id == inner.kernel);
         StatusDto {
             mode: inner.mode.as_str().into(),
             kernel_running: inner.handle.as_ref().map(|h| h.alive()).unwrap_or(false),
-            kernel_id: inner.handle.as_ref().map(|h| h.driver_id().into()),
+            kernel_id: running_id,
             inbound_port: inner.mixed_port,
             nodes_total: inner.nodes.len(),
             subs_total: inner.subs.len(),
             admin: self.sp.is_admin(),
             wintun_installed: sidecar::wintun_installed(&self.bin_dir()),
-            kernel_installed: self.bin_dir().join("sing-box.exe").is_file(),
-            kernel_version: manifest.map(|m| m.kernel_version),
+            // 旧两字段的"内核"语义 = 选定内核（sing-box 时代与旧行为重合）
+            kernel_installed: selected.map(|k| k.installed).unwrap_or(false),
+            kernel_version: selected.and_then(|k| k.version.clone()),
             has_backup: sysproxy::has_backup(&self.proxy_dir),
             restored_last_run: *self.restored_last_run.read(),
+            kernel: inner.kernel.clone(),
+            kernels,
         }
     }
 
@@ -355,9 +417,17 @@ impl ProxyService {
         }
         let mut inner = self.inner.write();
         inner.mixed_port = port;
+        self.persist_state(&inner)
+    }
+
+    /// 持久化状态文件唯一写点（双字段整包写，杜绝 set_mixed_port 曾有的 kernel 覆盖）
+    fn persist_state(&self, inner: &Inner) -> Result<()> {
         std::fs::write(
             self.proxy_dir.join(STATE_FILE),
-            serde_json::to_vec(&PersistState { mixed_port: port })?,
+            serde_json::to_vec(&PersistState {
+                mixed_port: inner.mixed_port,
+                kernel: inner.kernel.clone(),
+            })?,
         )?;
         Ok(())
     }
@@ -367,6 +437,10 @@ impl ProxyService {
     /// 切换模式。同步方法（内核 spawn / 注册表写均为毫秒级），IPC 层 spawn_blocking。
     /// `self: &Arc<Self>`：on_exit 回调需要 Weak 引用避免 Service↔Handle 循环持有。
     pub fn set_mode(self: &Arc<Self>, mode: Mode) -> Result<()> {
+        // 同模式重入 = 显式 no-op（旧行为会白白重启一次内核）
+        if self.inner.read().mode == mode {
+            return Ok(());
+        }
         match mode {
             Mode::Off => self.stop_kernel_and_restore(),
             Mode::System => self.enter_system(),
@@ -375,8 +449,11 @@ impl ProxyService {
     }
 
     fn enter_system(self: &Arc<Self>) -> Result<()> {
-        // TUN → System 切换：先停旧内核
-        self.restart_with_config(false)?;
+        // TUN → System 切换：先停旧内核；起核失败不得留 stale mode（⑧同型窗口，归零如实 Off）
+        if let Err(e) = self.restart_with_config(false) {
+            let _ = self.stop_kernel_and_restore();
+            return Err(e);
+        }
         // 系统代理：备份原值 → 写入我们的 mixed 入站
         let port = self.inner.read().mixed_port;
         sysproxy::enable(&self.proxy_dir, self.sp.as_ref(), port)?;
@@ -400,7 +477,11 @@ impl ProxyService {
         }
         // 互斥：TUN 接管全流量，系统代理必须还原（否则双重代理）
         sysproxy::restore_quiet(&self.proxy_dir, self.sp.as_ref());
-        self.restart_with_config(true)?;
+        // 缺陷⑧随行修：起核失败不得留下 stale mode——立即归零 + 还原，状态如实 Off
+        if let Err(e) = self.restart_with_config(true) {
+            let _ = self.stop_kernel_and_restore();
+            return Err(e);
+        }
         let mut inner = self.inner.write();
         inner.mode = Mode::Tun;
         drop(inner);
@@ -423,33 +504,94 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 用当前节点重新生成配置并（重）启内核；起后健康探活 3s
+    /// 换内核（T-B2-2）。Off 态只改选择并持久化；运行态以当前模式配置重启新核，
+    /// 起新核失败 = 回滚旧核（系统代理从未被还原过、端口复用即恢复，无需重挂）。
+    /// 持久化文件只写成功态——失败回滚后磁盘上仍是旧核。
+    pub fn set_kernel(self: &Arc<Self>, id: &str) -> Result<()> {
+        self.driver(id)?; // 未知 id 在任何状态变更前被拒（restart 内部会再解析同一驱动）
+        let (old, mode) = {
+            let inner = self.inner.read();
+            (inner.kernel.clone(), inner.mode)
+        };
+        if old == id {
+            return Ok(());
+        }
+        self.inner.write().kernel = id.to_string();
+        if mode == Mode::Off {
+            let inner = self.inner.read();
+            self.persist_state(&inner)?;
+            drop(inner);
+            self.publish_state();
+            tracing::info!(kernel = %id, "代理内核选择已更新（未运行，下次启动生效）");
+            return Ok(());
+        }
+        let tun = mode == Mode::Tun;
+        match self.restart_with_config(tun) {
+            Ok(()) => {
+                let inner = self.inner.read();
+                self.persist_state(&inner)?;
+                drop(inner);
+                self.publish_state();
+                tracing::info!(kernel = %id, "运行中换核完成");
+                Ok(())
+            }
+            Err(e) => {
+                self.inner.write().kernel = old.clone();
+                if let Err(re) = self.restart_with_config(tun) {
+                    // 回滚也起不来：兜底归零（断网最高危场景纪律），合并上报两错
+                    let _ = self.stop_kernel_and_restore();
+                    return Err(ProxyError::Kernel(format!(
+                        "切换内核 {id} 失败：{e}；回滚原内核同样失败：{re}（已停止为关闭态）"
+                    )));
+                }
+                self.publish_state();
+                Err(e)
+            }
+        }
+    }
+
+    /// 驱动解析：测试注入表优先（生产路径恒空），其后走注册表
+    fn driver(&self, id: &str) -> Result<Arc<dyn KernelDriver>> {
+        #[cfg(test)]
+        {
+            if let Some((_, d)) = self.test_drivers.read().iter().find(|(k, _)| k == id) {
+                return Ok(d.clone());
+            }
+        }
+        driver_for(&self.bin_dir(), id)
+    }
+
+    /// 用当前节点重新生成配置并（重）启选定内核；起后健康探活 3s
     fn restart_with_config(self: &Arc<Self>, tun: bool) -> Result<()> {
-        let (nodes, direct, port) = {
+        let (nodes, direct, port, kernel) = {
             let inner = self.inner.read();
             (
                 inner.nodes.clone(),
                 inner.direct_domains.clone(),
                 inner.mixed_port,
+                inner.kernel.clone(),
             )
         };
-        // 停旧内核（模式切换）
+        // 停旧内核（模式切换 / 换核）
         {
             let mut inner = self.inner.write();
             if let Some(h) = inner.handle.take() {
                 h.stop();
             }
         }
-        let cfg = generate(&GenOptions {
-            mixed_port: port,
-            // v1 路由：私有地址 + 用户直连域名恒直连，其余走代理（generate 内实现）
-            mode: RouteMode::Rule,
-            direct_domains: &direct,
+        let driver = self.driver(&kernel)?;
+        // v1 路由：私有地址 + 用户直连域名恒直连，其余走代理（ir::build 内实现）
+        let ir_cfg = ir::build(
+            port,
             tun,
-            nodes: &nodes,
-        })?;
-        let cfg_path = self.proxy_dir.join(CONFIG_FILE);
-        std::fs::write(&cfg_path, serde_json::to_vec_pretty(&cfg)?)?;
+            &nodes,
+            &[] as &[ir::IrRule],
+            ir::TAG_PROXY,
+            &direct,
+        )?;
+        let rendered = driver.config_render(&ir_cfg)?;
+        let cfg_path = self.proxy_dir.join(driver.cfg_name());
+        std::fs::write(&cfg_path, rendered.as_bytes())?;
 
         let weak = Arc::downgrade(self);
         let on_exit: Arc<dyn Fn(i32) + Send + Sync> = Arc::new(move |code| {
@@ -460,8 +602,7 @@ impl ProxyService {
             }
         });
 
-        let driver = SingBoxDriver::new(self.bin_dir().join("sing-box.exe"));
-        let handle = driver.start(&cfg_path, on_exit)?;
+        let handle = driver.start(&self.proxy_dir, &cfg_path, on_exit)?;
         handle.set_log_cb({
             let bus = self.bus.clone();
             Arc::new(move |line: &str| {
@@ -589,6 +730,7 @@ impl ProxyService {
                     "kernel_running": s.kernel_running,
                     "kernel_id": s.kernel_id,
                     "inbound_port": s.inbound_port,
+                    "kernel": s.kernel,
                 }),
             ))
             .ok();
@@ -639,21 +781,29 @@ async fn resolve_host(host: &str) -> Option<std::net::IpAddr> {
 use host_core::util::now_ms_u64 as now_ms;
 
 #[cfg(test)]
+#[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
 mod tests {
     use super::*;
+    use crate::ir::IrConfig;
+    use crate::kernel::spawn_kernel;
+    use crate::sub::NodeKind;
     use host_core::ports::SysProxyState;
     use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc as StdArc;
 
     #[derive(Clone)]
     struct MockSp {
         state: StdArc<Mutex<SysProxyState>>,
+        /// T-B2-2：enter_tun 负例需可控管理员位（默认 false = 旧行为，存量 5 测零改动）
+        admin: StdArc<AtomicBool>,
     }
 
     impl MockSp {
         fn new() -> Self {
             Self {
                 state: StdArc::new(Mutex::new(SysProxyState::default())),
+                admin: StdArc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -673,7 +823,89 @@ mod tests {
             Ok(())
         }
         fn is_admin(&self) -> bool {
-            false
+            self.admin.load(Ordering::SeqCst)
+        }
+    }
+
+    /// 测试内核驱动：真实子进程（cmd ping 长驻）走 spawn_kernel 全生命周期，
+    /// 但 exe 检查被覆写 start 绕过；succeeds=false 模拟"起核必败"（换核回滚红线）。
+    struct TestKernelDriver {
+        id: &'static str,
+        cfg: &'static str,
+        succeeds: bool,
+        start_attempts: AtomicUsize,
+        /// 置位后下一次 start 强制失败（缺陷⑧复现：运行中再入失败）
+        fail_next: AtomicBool,
+    }
+
+    impl TestKernelDriver {
+        fn new(id: &'static str, cfg: &'static str) -> StdArc<Self> {
+            Self::with(id, cfg, true)
+        }
+        /// 起核必败驱动（换核回滚红线专用）
+        fn failing(id: &'static str, cfg: &'static str) -> StdArc<Self> {
+            Self::with(id, cfg, false)
+        }
+        fn with(id: &'static str, cfg: &'static str, succeeds: bool) -> StdArc<Self> {
+            StdArc::new(Self {
+                id,
+                cfg,
+                succeeds,
+                start_attempts: AtomicUsize::new(0),
+                fail_next: AtomicBool::new(false),
+            })
+        }
+    }
+
+    impl KernelDriver for TestKernelDriver {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn exe_path(&self) -> PathBuf {
+            // 覆写了 start，此路径从不被探测；给个非空值防误用
+            PathBuf::from("test-kernel.exe")
+        }
+        fn display_name(&self) -> &'static str {
+            "测试内核"
+        }
+        fn cfg_name(&self) -> &'static str {
+            self.cfg
+        }
+        fn supported_kinds(&self) -> &'static [NodeKind] {
+            &[NodeKind::Shadowsocks]
+        }
+        fn caps(&self) -> KernelCaps {
+            KernelCaps {
+                tun: true,
+                policy_groups: false,
+                external_controller: false,
+            }
+        }
+        fn config_render(&self, _ir: &IrConfig) -> Result<String> {
+            Ok("{}\n".to_string())
+        }
+        fn build_command(&self, _work_dir: &Path, _cfg: &Path) -> std::process::Command {
+            let mut c = std::process::Command::new(
+                std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+            );
+            c.arg("/C")
+                .arg("ping")
+                .arg("-n")
+                .arg("600")
+                .arg("127.0.0.1");
+            c
+        }
+        fn start(
+            &self,
+            work_dir: &Path,
+            cfg: &Path,
+            on_exit: crate::kernel::ExitCb,
+        ) -> Result<KernelHandle> {
+            self.start_attempts.fetch_add(1, Ordering::SeqCst);
+            if !self.succeeds || self.fail_next.swap(false, Ordering::SeqCst) {
+                return Err(ProxyError::Kernel(format!("测试内核 {} 启动失败", self.id)));
+            }
+            spawn_kernel(self.id, self.build_command(work_dir, cfg), on_exit)
         }
     }
 
@@ -760,5 +992,223 @@ mod tests {
                 .unwrap(),
             b"hello"
         );
+    }
+
+    // ---------------- T-B2-2：内核注册表 / 持久化 / 换核生命周期 ----------------
+
+    fn inject(svc: &Arc<ProxyService>, d: StdArc<TestKernelDriver>) {
+        svc.test_drivers.write().push((d.id.to_string(), d));
+    }
+
+    /// ir::build 空节点即拒（"无可用节点"），生命周期测必须至少一枚节点
+    fn add_demo_node(svc: &Arc<ProxyService>) {
+        svc.inner.write().nodes.push(Node {
+            tag: "n1".into(),
+            kind: NodeKind::Shadowsocks,
+            server: "127.0.0.1".into(),
+            port: 9,
+            sub_id: "sub-test".into(),
+            extra: serde_json::Value::Null,
+        });
+    }
+
+    /// 健康探活桩：TCP listener 占住 ephemeral mixed_port——
+    /// handle.health_check(port) 对 backlog 中的连接即成功，测试驱动真实通过探活。
+    fn stub_health_port(svc: &Arc<ProxyService>) -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        svc.set_mixed_port(port).unwrap();
+        (listener, port)
+    }
+
+    #[test]
+    fn stateLegacy_missingKernel_defaultsSingbox() {
+        let (svc, _sp, dir) = open_service("legacy");
+        drop(svc);
+        // 旧文件形态：仅 mixed_port 无 kernel 键 → serde default 零迁移
+        std::fs::write(
+            dir.join("proxy").join(STATE_FILE),
+            br#"{"mixed_port":8899}"#,
+        )
+        .unwrap();
+        let svc2 = ProxyService::open(
+            &dir,
+            Arc::new(host_core::events::EventBus::new()),
+            StdArc::new(MockSp::new()),
+        )
+        .unwrap();
+        let s = svc2.status();
+        assert_eq!(
+            s.kernel, KERNEL_SINGBOX,
+            "缺 kernel 键的旧状态必须落到 sing-box"
+        );
+        assert_eq!(s.inbound_port, 8899);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kernelSelect_persistsAcrossReopen() {
+        let (svc, _sp, dir) = open_service("kselect");
+        let a = TestKernelDriver::new("test-core-a", "config-a.json");
+        inject(&svc, a.clone());
+        // 红线预检：未知核在任何状态变更前被拒（持久化文件不落坏选择）
+        assert!(matches!(
+            svc.set_kernel("bogus-core"),
+            Err(ProxyError::Kernel(_))
+        ));
+        assert_eq!(svc.status().kernel, KERNEL_SINGBOX);
+        assert_eq!(
+            a.start_attempts.load(Ordering::SeqCst),
+            0,
+            "Off 态选择只写不启动"
+        );
+        svc.set_mixed_port(8899).unwrap();
+        svc.set_kernel("test-core-a").unwrap();
+        svc.set_kernel("test-core-a").unwrap(); // 同核 = no-op
+        assert_eq!(svc.status().kernel, "test-core-a");
+        drop(svc);
+        let svc2 = ProxyService::open(
+            &dir,
+            Arc::new(host_core::events::EventBus::new()),
+            StdArc::new(MockSp::new()),
+        )
+        .unwrap();
+        let s = svc2.status();
+        assert_eq!(s.kernel, "test-core-a", "选定内核必须跨重启持久");
+        assert_eq!(s.inbound_port, 8899, "双字段整包写不得互踩 mixed_port");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kernelSwap_running_restartsNewDriverAndKeepsSysproxy() {
+        let (svc, sp, dir) = open_service("swap");
+        let a = TestKernelDriver::new("test-core-a", "config-a.json");
+        let b = TestKernelDriver::new("test-core-b", "config-b.json");
+        inject(&svc, a.clone());
+        inject(&svc, b.clone());
+        add_demo_node(&svc);
+        let (listener, port) = stub_health_port(&svc);
+        svc.set_kernel("test-core-a").unwrap();
+        svc.set_mode(Mode::System).unwrap();
+        assert_eq!(a.start_attempts.load(Ordering::SeqCst), 1);
+        {
+            let st = sp.read().unwrap();
+            assert!(st.enable && st.server.contains(&port.to_string()));
+        }
+        // 运行中换核：新核起、旧核停、System 模式与系统代理全程不动
+        svc.set_kernel("test-core-b").unwrap();
+        assert_eq!(b.start_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            a.start_attempts.load(Ordering::SeqCst),
+            1,
+            "换核不得重起旧核"
+        );
+        let s = svc.status();
+        assert_eq!(s.kernel, "test-core-b");
+        assert_eq!(s.kernel_id.as_deref(), Some("test-core-b"));
+        assert!(s.kernel_running);
+        assert_eq!(s.mode, "system");
+        {
+            let st = sp.read().unwrap();
+            assert!(
+                st.enable && st.server.contains(&port.to_string()),
+                "换核窗口系统代理必须仍指向同一 mixed 端口（内核托管不断线）"
+            );
+        }
+        let raw = std::fs::read_to_string(dir.join("proxy").join(STATE_FILE)).unwrap();
+        assert!(raw.contains("test-core-b"));
+        assert!(raw.contains(&format!("\"mixed_port\":{port}")));
+        svc.set_mode(Mode::Off).unwrap();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kernelSwap_newKernelFails_rollsBackOld() {
+        let (svc, sp, dir) = open_service("rollback");
+        let a = TestKernelDriver::new("test-core-a", "config-a.json");
+        let b = TestKernelDriver::failing("test-core-b", "config-b.json");
+        inject(&svc, a.clone());
+        inject(&svc, b.clone());
+        add_demo_node(&svc);
+        let (listener, port) = stub_health_port(&svc);
+        svc.set_kernel("test-core-a").unwrap();
+        svc.set_mode(Mode::System).unwrap();
+        assert_eq!(a.start_attempts.load(Ordering::SeqCst), 1);
+        // 红线：新核起不来 → 回滚旧核恢复服务，选择/磁盘都停在旧核，绝不静默降级
+        let e = svc.set_kernel("test-core-b").unwrap_err();
+        assert!(
+            matches!(e, ProxyError::Kernel(_)),
+            "换核失败必须是 Kernel 错"
+        );
+        let s = svc.status();
+        assert_eq!(s.kernel, "test-core-a", "失败后选定内核回滚");
+        assert_eq!(s.kernel_id.as_deref(), Some("test-core-a"));
+        assert!(s.kernel_running, "回滚后旧核句柄必须真实存活");
+        assert_eq!(s.mode, "system");
+        assert_eq!(b.start_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            a.start_attempts.load(Ordering::SeqCst),
+            2,
+            "回滚 = 旧核重起一次"
+        );
+        {
+            let st = sp.read().unwrap();
+            assert!(st.enable && st.server.contains(&port.to_string()));
+        }
+        let raw = std::fs::read_to_string(dir.join("proxy").join(STATE_FILE)).unwrap();
+        assert!(!raw.contains("test-core-b"), "失败换核不得污染持久化文件");
+        svc.set_mode(Mode::Off).unwrap();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setMode_sameMode_isNoop() {
+        let (svc, _sp, dir) = open_service("noop");
+        let a = TestKernelDriver::new("test-core-a", "config-a.json");
+        inject(&svc, a.clone());
+        add_demo_node(&svc);
+        let (listener, _port) = stub_health_port(&svc);
+        svc.set_kernel("test-core-a").unwrap();
+        svc.set_mode(Mode::System).unwrap();
+        assert_eq!(a.start_attempts.load(Ordering::SeqCst), 1);
+        // 抽掉探活桩：同模式再入若真的重启内核，3s 探活必败 → Err；no-op 则 Ok
+        drop(listener);
+        svc.set_mode(Mode::System).unwrap();
+        assert_eq!(svc.status().mode, "system");
+        assert_eq!(
+            a.start_attempts.load(Ordering::SeqCst),
+            1,
+            "同模式重入不得停核重启（无谓断网窗口）"
+        );
+        svc.set_mode(Mode::Off).unwrap();
+        svc.set_mode(Mode::Off).unwrap();
+        assert_eq!(svc.status().mode, "off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enterTun_startFails_stateHonestOff() {
+        // 缺陷⑧复现：System 运行中 → Tun 起核失败 → 状态如实 Off，
+        // 绝不残留 "system" 文案 + 已还原代理 + 已停内核的三重不符
+        let (svc, sp, dir) = open_service("tunfail");
+        sp.admin.store(true, Ordering::SeqCst);
+        std::fs::write(dir.join("proxy").join("bin").join("wintun.dll"), b"mock").unwrap();
+        let a = TestKernelDriver::new("test-core-a", "config-a.json");
+        inject(&svc, a.clone());
+        add_demo_node(&svc);
+        let (listener, _port) = stub_health_port(&svc);
+        svc.set_kernel("test-core-a").unwrap();
+        svc.set_mode(Mode::System).unwrap();
+        a.fail_next.store(true, Ordering::SeqCst);
+        let r = svc.set_mode(Mode::Tun);
+        assert!(matches!(r, Err(ProxyError::Kernel(_))), "起核失败必须上抛");
+        let s = svc.status();
+        assert_eq!(s.mode, "off", "失败后模式必须归零而非停留 system");
+        assert!(!s.kernel_running);
+        assert!(!sp.read().unwrap().enable, "系统代理已如实还原");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -45,6 +45,19 @@ pub async fn proxy_wintun_install(state: State<'_, HostState>) -> Result<(), App
     svc.wintun_install().await.map_err(proxy_err)
 }
 
+/// 选定/切换代理内核（T-B2-2）：未运行 = 只落选择；运行中 = 新核起、失败自动回滚旧核
+#[tauri::command]
+pub async fn proxy_kernel_select(
+    kernel: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let svc = proxy_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.set_kernel(&kernel))
+        .await
+        .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
+        .map_err(proxy_err)
+}
+
 /// 订阅列表
 #[tauri::command]
 pub async fn proxy_subs(state: State<'_, HostState>) -> Result<Vec<proxy_core::Sub>, AppError> {

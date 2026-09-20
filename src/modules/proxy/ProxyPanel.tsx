@@ -5,7 +5,9 @@ import {
   Text,
   Badge,
   Button,
+  Dropdown,
   Input,
+  Option,
   Textarea,
   Spinner,
   Table,
@@ -17,6 +19,7 @@ import {
   proxyDelayTest,
   proxyDirectRules,
   proxyKernelInstall,
+  proxyKernelSelect,
   proxyLogs,
   proxyNodes,
   proxySetDirectRules,
@@ -182,6 +185,13 @@ export default function ProxyPanel() {
       await refresh();
     });
 
+  // 换核生命周期全在后端（运行中=起新核、失败自动回滚旧核并上抛原错），UI 只刷新如实状态
+  const selectKernel = (id: string) =>
+    run("kernel-select", async () => {
+      await proxyKernelSelect(id);
+      await refresh();
+    });
+
   const delayKey = (d: ProxyNodeDelayDto) => `${d.sub_id}|${d.tag}`;
 
   const testDelays = () =>
@@ -237,6 +247,27 @@ export default function ProxyPanel() {
               </Badge>
             )}
             {st?.has_backup && <Badge appearance="outline">存在原设置备份</Badge>}
+            {/* T-B2-2 最小选择器（完整内核卡归 T-B2-3）：只按后端注册表渲染，禁前端内核特例分支 */}
+            {st && (
+              <Dropdown
+                size="small"
+                style={{ minWidth: "148px" }}
+                disabled={busy !== ""}
+                value={`内核：${st.kernels.find((k) => k.id === st.kernel)?.display_name ?? st.kernel}`}
+                selectedOptions={[st.kernel]}
+                onOptionSelect={(_, d) => {
+                  const id = String(d.optionValue ?? "");
+                  if (id !== "" && id !== st.kernel) void selectKernel(id);
+                }}
+              >
+                {st.kernels.map((k) => (
+                  <Option key={k.id} value={k.id} text={k.display_name}>
+                    {k.display_name}
+                    {k.id === st.kernel ? "（当前）" : k.installed ? "" : "（未安装）"}
+                  </Option>
+                ))}
+              </Dropdown>
+            )}
           </>
         }
       >
