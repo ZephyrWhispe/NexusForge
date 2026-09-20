@@ -14,6 +14,7 @@ import {
   editorContent,
   editorOpen,
   editorSave,
+  editorSaveAs,
   editorSessions,
   pdfCompress,
   pdfInfo,
@@ -39,6 +40,8 @@ import EmptyState from "../../components/EmptyState";
  * - E3 Markdown 分栏预览（滚动比例同步）
  * - E4 PDF：合并/拆分/压缩/水印（lopdf，压缩结果更大自动保留原文件）
  * - D-18：脏缓冲区关闭、PDF 原地改写（压缩/水印）一律经 confirmAction 二次确认
+ * - T-B1-10：另存为——目标路径 Input 沿用打开惯例，后端 save_as 换绑会话 path，
+ *   页签名经 refreshSessions（同 editorSessions 真相源）刷新
  */
 const useStyles = makeStyles({
   root: {
@@ -120,6 +123,7 @@ function baseName(path: string): string {
 export default function EditorPanel() {
   const styles = useStyles();
   const [openPath, setOpenPath] = useState("");
+  const [saveAsPath, setSaveAsPath] = useState("");
   const [sessions, setSessions] = useState<EditorSessionInfoDto[]>([]);
   const [activeId, setActiveId] = useState("");
   const [error, setError] = useState("");
@@ -284,6 +288,18 @@ export default function EditorPanel() {
       );
     });
 
+  // 另存为（T-B1-10）：后端 save_as 把会话 path 换绑到目标并返回新 SessionInfo，
+  // 页签按面板惯例经 refreshSessions（editorSessions 真相源）刷新；目标路径走与打开
+  // 同一 Input 惯例（trim + Enter 触发）。目标若已存在将被覆写——路径由用户亲手输入。
+  const doSaveAs = (id: string) =>
+    run(`save-as-${id}`, async () => {
+      const target = saveAsPath.trim();
+      const info = await editorSaveAs(id, target);
+      await refreshSessions();
+      setSaveAsPath("");
+      setStatus(`已另存为 ${info.name}（${info.encoding_label} / ${info.eol.toUpperCase()}）`);
+    });
+
   // 关闭会话（D-18）：后端 close() 会销毁缓冲区并删除 .nforge-autosave 草稿，
   // 未保存内容彻底丢失 → 脏缓冲区必须二次确认，干净的直接关不打扰。
   const doClose = async (s: EditorSessionInfoDto) => {
@@ -399,6 +415,16 @@ export default function EditorPanel() {
                 保存（Ctrl+S）
               </Button>
             )}
+            {active && (
+              <Button
+                size="small"
+                disabled={busy !== "" || saveAsPath.trim() === ""}
+                title="目标路径填在下方输入框；另存后会话换绑到新文件"
+                onClick={() => doSaveAs(active.id)}
+              >
+                另存为
+              </Button>
+            )}
           </>
         }
       >
@@ -416,6 +442,18 @@ export default function EditorPanel() {
           <Button size="small" appearance="primary" disabled={busy !== "" || openPath.trim() === ""} onClick={doOpen}>
             打开
           </Button>
+          {active && (
+            <Input
+              className={styles.grow}
+              placeholder="另存为目标绝对路径（填好后点右上方「另存为」，Enter 亦可）"
+              value={saveAsPath}
+              onChange={(_, d) => setSaveAsPath(d.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && saveAsPath.trim()) void doSaveAs(active.id);
+              }}
+              size="small"
+            />
+          )}
           {active && active.path.toLowerCase().endsWith(".md") && (
             <Button size="small" onClick={() => setMdPreview((v) => !v)}>
               {mdPreview ? "隐藏预览" : "显示预览"}

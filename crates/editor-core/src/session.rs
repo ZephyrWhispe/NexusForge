@@ -201,13 +201,13 @@ impl EditorSessions {
 
     /// 另存为（编码保持；不改动原会话绑定的路径语义之外的脏状态）
     pub fn save_as(&self, id: &str, target: &Path) -> Result<SessionInfo> {
-        let (raw, unified, eol) = {
+        let raw = {
             let map = self.lock();
             let s = map
                 .get(id)
                 .ok_or_else(|| EditorError::NotFound(id.to_string()))?;
             let unified = normalize_eol(&s.content, s.eol);
-            (encode(&unified, s.encoding), unified, s.eol)
+            encode(&unified, s.encoding)
         };
         std::fs::write(target, &raw)?;
         let mut map = self.lock();
@@ -217,8 +217,8 @@ impl EditorSessions {
         s.path = target.to_path_buf();
         s.dirty = false;
         s.eol_mixed = false;
-        s.size = unified.len() as u64;
-        let _ = eol;
+        // size 恒为写盘字节数（与 save 同锚）：GBK 等宽字节下 String::len（UTF-8）会虚高
+        s.size = raw.len() as u64;
         Ok(session_info(id, s))
     }
 
@@ -531,6 +531,38 @@ mod tests {
         assert_eq!(new_info.path, b.display().to_string());
         assert_eq!(std::fs::read(&b).unwrap(), b"content v2");
         assert!(!new_info.dirty);
+    }
+
+    #[test]
+    fn save_as_reports_disk_byte_size_not_char_len() {
+        let dir = tmpdir("sizebytes");
+        let a = dir.join("gbk_src.txt");
+        let b = dir.join("gbk_copy.txt");
+        // "你好世界" GBK 写盘 8 字节，而 String::len（UTF-8 视角）是 12——缺陷式（unified.len）必现 12
+        std::fs::write(&a, &encoding_rs::GBK.encode("你好世界").0).unwrap();
+
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&a).unwrap();
+        assert_eq!(info.size as usize, 8);
+
+        let saved = sessions.save_as(&info.id, &b).unwrap();
+        let on_disk = std::fs::read(&b).unwrap();
+        assert_eq!(on_disk.len(), 8);
+        assert_eq!(
+            saved.size as usize,
+            on_disk.len(),
+            "save_as 的 size 必须是写盘字节数（与 save 同锚），不是 UTF-8 长度"
+        );
+        assert_eq!(sessions.list()[0].size, saved.size);
+
+        // save 同锚回归位：save_as 已把会话换绑到 b，后续 save 写 b——变更后 size 同样等于磁盘字节数
+        // （GBK 6 字 = 12 字节；a 保持打开时的 8 字节不动）
+        sessions.update(&info.id, "你好世界你好").unwrap();
+        sessions.save(&info.id).unwrap();
+        let on_disk = std::fs::read(&b).unwrap();
+        assert_eq!(on_disk.len(), 12);
+        assert_eq!(sessions.list()[0].size as usize, on_disk.len());
+        assert_eq!(std::fs::read(&a).unwrap().len(), 8);
     }
 
     #[test]

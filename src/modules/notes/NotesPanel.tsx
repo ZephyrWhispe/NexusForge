@@ -36,6 +36,7 @@ import {
   type NoteCardDto,
   type NoteLinkDto,
   type NoteMetaDto,
+  type NoteSyncResultDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
@@ -51,7 +52,8 @@ import EmptyState from "../../components/EmptyState";
  * - N2 双链：[[目标|别名]] 出链与反链面板；重命名全库引用改写
  * - N3 画布：目录级 .nforge-canvas.json，节点拖拽 + 便签/笔记引用 + 有向连线
  * - N4 复习：SM-2 简化版四档评分（忘记1/困难3/良好4/简单5），到期队列
- * - sync：外部编辑器改动增量收敛（进入面板与 notes.changed 事件触发）
+ * - sync：外部编辑器改动增量收敛（进入面板与 notes.changed 事件触发）；
+ *   「手动同步」按钮与自动 effect 共用同一在途 promise 去重（T-B1-10）
  */
 const useStyles = makeStyles({
   root: {
@@ -251,13 +253,42 @@ export default function NotesPanel() {
   }, [refreshList, refreshReview]);
 
   // 进入面板时增量收敛外部编辑器的改动
+  // 手动同步（T-B1-10）与自动 effect 共用同一在途 promise（syncInFlight）：
+  // busy 期（含连点、含与进面板 effect 竞速）都复用同一次 notes_sync invoke
+  const syncInFlight = useRef<Promise<NoteSyncResultDto> | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const startSync = useCallback(() => {
+    if (syncInFlight.current) return syncInFlight.current;
+    setSyncBusy(true);
+    const p = notesSync().finally(() => {
+      syncInFlight.current = null;
+      setSyncBusy(false);
+    });
+    syncInFlight.current = p;
+    return p;
+  }, []);
   useEffect(() => {
-    void notesSync()
+    void startSync()
       .then((r) => {
         if (r.updated + r.added + r.removed > 0) void refreshList();
       })
       .catch((e) => reportError(e, { context: "笔记索引增量同步失败", dedupeKey: "notes-sync" }));
-  }, [refreshList]);
+  }, [startSync, refreshList]);
+
+  const doManualSync = useCallback(async () => {
+    try {
+      const r = await startSync();
+      const changed = r.added + r.updated + r.removed;
+      setMsg(
+        changed > 0
+          ? `同步完成：新增 ${r.added} · 更新 ${r.updated} · 移除 ${r.removed}`
+          : `同步完成：无外部改动（索引 ${r.total} 篇）`,
+      );
+      if (changed > 0) await refreshList();
+    } catch (e) {
+      fail(e);
+    }
+  }, [startSync, refreshList, fail]);
 
   const saveNote = useCallback(async () => {
     if (!active) return;
@@ -602,6 +633,9 @@ export default function NotesPanel() {
                 </Button>
               </>
             )}
+            <Button size="small" disabled={syncBusy} onClick={() => void doManualSync()}>
+              {syncBusy ? "同步中…" : "手动同步"}
+            </Button>
           </div>
           <div className={styles.split}>
             <div className={styles.list}>
