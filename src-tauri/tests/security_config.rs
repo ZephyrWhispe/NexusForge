@@ -433,6 +433,36 @@ fn auxWindows_neverGrantProxyKernelRestart() {
     );
 }
 
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantProxyRulesV2() {
+    // T-B2-9 红线负例：分流规则 v2 读写（可改全局出口路由）只允许主窗代理页触达
+    let caps = load_capabilities();
+    for ident in ["allow-proxy-rules-get", "allow-proxy-rules-set"] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（分流路由面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

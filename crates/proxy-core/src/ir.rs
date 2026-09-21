@@ -67,7 +67,7 @@ pub enum IrOutbound {
     },
 }
 
-/// 规则匹配字段（Process/GeoSite/GeoIp 由 T-B2-9/10 扩：变体新增=编译期强制全渲染臂同步）
+/// 规则匹配字段（GeoSite/GeoIp 由 T-B2-10 扩：变体新增=编译期强制全渲染臂同步）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrRuleField {
     IpIsPrivate,
@@ -75,6 +75,9 @@ pub enum IrRuleField {
     DomainSuffix,
     Keyword,
     IpCidr,
+    /// T-B2-9 分应用代理数据面：进程名（basename，无路径）；
+    /// 仅 Tun 入站可归因进程，System 态方言照常渲染但不命中（拾取器 UI 归 B7）
+    Process,
 }
 
 #[derive(Clone, Debug)]

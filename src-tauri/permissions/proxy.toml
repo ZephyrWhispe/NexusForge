@@ -61,6 +61,16 @@ description = "允许前端调用 proxy_set_direct_rules 命令（D-28 按窗最
 commands.allow = ["proxy_set_direct_rules"]
 
 [[permission]]
+identifier = "allow-proxy-rules-get"
+description = "允许前端调用 proxy_rules_get 命令（T-B2-9 分流规则 v2；D-28 按窗最小授权）"
+commands.allow = ["proxy_rules_get"]
+
+[[permission]]
+identifier = "allow-proxy-rules-set"
+description = "允许前端调用 proxy_rules_set 命令（T-B2-9 分流规则 v2；D-28 按窗最小授权）"
+commands.allow = ["proxy_rules_set"]
+
+[[permission]]
 identifier = "allow-proxy-set-mode"
 description = "允许前端调用 proxy_set_mode 命令（D-28 按窗最小授权）"
 commands.allow = ["proxy_set_mode"]

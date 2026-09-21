@@ -28,7 +28,12 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
       { id: "s1", name: "主订阅", url: "https://example.test/sub", updated_ms: 1, node_count: 3 },
     ]),
     proxyNodes: vi.fn(async () => NODES),
-    proxyDirectRules: vi.fn(async () => ["bilibili.com"]),
+    proxyRulesGet: vi.fn(async () => ({
+      rules: [{ kind: "suffix", pattern: "bilibili.com", target: "direct", enabled: true }],
+      final_target: "proxy",
+      route_mode: "rule",
+    })),
+    proxyRulesSet: vi.fn(async () => {}),
     proxyLogs: vi.fn(async () => LOGS),
     proxyKernelSelect: vi.fn(async () => {}),
     proxyKernelInstall: vi.fn(async () => ({})),
@@ -192,7 +197,7 @@ describe("ProxyPanel 子面板化骨架（T-B2-3 六字面）", () => {
       overview: ["运行模式", "检测到上次异常退出残留的系统代理", "存在原设置备份", "当前内核：sing-box", "换核与重启在「内核」子面板操作"],
       nodes: ["测速（TCP）", "HK-A", "TO-HY2"],
       subs: ["添加并拉取", "主订阅"],
-      rules: ["保存规则", "命中即不走代理"],
+      rules: ["保存规则", "应用大陆直连预设", "兜底"],
       kernel: ["安装 wintun.dll（TUN 前置）", "内核按需下载", "xray-core"],
       logs: ["复制全部", "全部（6）"],
     } as const;

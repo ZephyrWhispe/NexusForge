@@ -114,6 +114,8 @@
     "allow-proxy-kernel-select",
     "allow-proxy-logs",
     "allow-proxy-nodes",
+    "allow-proxy-rules-get",
+    "allow-proxy-rules-set",
     "allow-proxy-set-direct-rules",
     "allow-proxy-set-mode",
     "allow-proxy-status",

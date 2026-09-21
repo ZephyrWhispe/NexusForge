@@ -240,6 +240,11 @@ fn render_rule_lines(r: &IrRule, target: &str) -> Result<Vec<String>> {
                 )?;
             }
         }
+        IrRuleField::Process => {
+            for p in &r.patterns {
+                one("PROCESS-NAME", p)?;
+            }
+        }
     }
     Ok(out)
 }

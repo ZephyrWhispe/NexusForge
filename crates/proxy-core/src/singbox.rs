@@ -103,6 +103,7 @@ fn render_rule(rule: &IrRule) -> Value {
         IrRuleField::DomainSuffix => json!({ "domain_suffix": rule.patterns }),
         IrRuleField::Keyword => json!({ "keyword": rule.patterns }),
         IrRuleField::IpCidr => json!({ "ip_cidr": rule.patterns }),
+        IrRuleField::Process => json!({ "process_name": rule.patterns }),
     };
     r["outbound"] = Value::String(rule.target.clone());
     r

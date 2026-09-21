@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ProxyError, Result};
 use crate::ir;
 use crate::kernel::{driver_for, KernelCaps, KernelDriver, KernelHandle, LogLine, KERNEL_IDS};
+use crate::rules::{self, RuleV2, RulesV2};
 use crate::sidecar;
 use crate::sub::Node;
 use crate::sysproxy;
@@ -24,6 +25,8 @@ use crate::sysproxy;
 const STATE_FILE: &str = "proxy_state.json";
 const SUBS_FILE: &str = "subs.json";
 const RULES_FILE: &str = "rules.json";
+/// T-B2-9 分流规则 v2 数据文件（缺失=open 时由 rules.json 派生，首次保存才落盘）
+const RULES_V2_FILE: &str = "rules_v2.json";
 const BIN_DIR: &str = "bin";
 const SUBS_DIR: &str = "subs";
 const APP_UA: &str = concat!("NexusForge/", env!("CARGO_PKG_VERSION"));
@@ -148,7 +151,8 @@ struct Inner {
     kernel: String,
     subs: Vec<Sub>,
     nodes: Vec<Node>,
-    direct_domains: Vec<String>,
+    /// T-B2-9：分流规则 v2（旧直连域名清单是其 suffix+direct 投影）
+    rules_v2: RulesV2,
 }
 
 pub struct ProxyService {
@@ -180,10 +184,15 @@ impl ProxyService {
                 mixed_port: 7890,
                 kernel: default_kernel(),
             });
-        let direct_domains: Vec<String> = std::fs::read(proxy_dir.join(RULES_FILE))
+        let legacy_domains: Vec<String> = std::fs::read(proxy_dir.join(RULES_FILE))
             .ok()
             .and_then(|raw| serde_json::from_slice(&raw).ok())
             .unwrap_or_default();
+        // v2 优先；缺失/损坏视同缺失 → 旧清单派生（不落盘，首次保存才物化=零迁移）
+        let rules_v2: RulesV2 = std::fs::read(proxy_dir.join(RULES_V2_FILE))
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_else(|| rules::derive_legacy(&legacy_domains));
 
         // 订阅元数据 + 节点文件加载
         let (subs, nodes) = load_subs(&proxy_dir)?;
@@ -199,7 +208,7 @@ impl ProxyService {
                 kernel: state.kernel,
                 subs,
                 nodes,
-                direct_domains,
+                rules_v2,
             }),
             restored_last_run: RwLock::new(false),
             #[cfg(test)]
@@ -413,24 +422,73 @@ impl ProxyService {
             .collect()
     }
 
-    // ---------------- 直连规则 ----------------
+    // ---------------- 直连规则（v1 投影）与分流规则 v2（T-B2-9） ----------------
 
+    /// 旧命令语义：v2 表的 suffix+direct 投影（读写双向兼容，rules.json 恒双写）
     pub fn direct_rules(&self) -> Vec<String> {
-        self.inner.read().direct_domains.clone()
+        self.inner
+            .read()
+            .rules_v2
+            .rules
+            .iter()
+            .filter(|r| r.kind == "suffix" && r.target == "direct" && r.enabled)
+            .map(|r| r.pattern.clone())
+            .collect()
     }
 
+    /// 旧命令语义"全量替换直连集"：仅置换 suffix+direct 桶，其余 v2 规则不动；
+    /// 双写 rules.json（回滚兼容）+ rules_v2.json（物化）。
+    /// 去重=保序首现 retain（缺陷随行修：旧 `Vec::dedup` 只删相邻重复）。
     pub fn set_direct_rules(&self, rules: Vec<String>) -> Result<()> {
-        let mut cleaned: Vec<String> = rules
-            .into_iter()
-            .map(|r| r.trim().to_string())
-            .filter(|r| !r.is_empty())
+        let mut seen: Vec<String> = Vec::new();
+        for r in rules {
+            let r = r.trim().to_string();
+            if !r.is_empty() && !seen.contains(&r) {
+                seen.push(r);
+            }
+        }
+        let mut inner = self.inner.write();
+        inner
+            .rules_v2
+            .rules
+            .retain(|r| !(r.kind == "suffix" && r.target == "direct"));
+        inner
+            .rules_v2
+            .rules
+            .extend(seen.iter().cloned().map(|pattern| RuleV2 {
+                kind: "suffix".to_string(),
+                pattern,
+                target: "direct".to_string(),
+                enabled: true,
+            }));
+        std::fs::write(self.proxy_dir.join(RULES_FILE), serde_json::to_vec(&seen)?)?;
+        std::fs::write(
+            self.proxy_dir.join(RULES_V2_FILE),
+            serde_json::to_vec(&inner.rules_v2)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn rules_v2(&self) -> RulesV2 {
+        self.inner.read().rules_v2.clone()
+    }
+
+    /// 全量写 v2 表：[`rules::sanitize`] 是唯一校验闸（CIDR/域形态/进程名/枚举白名单，
+    /// 违规 Config 点名字段值）；rules.json 随写投影保持双文件一致。
+    pub fn set_rules_v2(&self, v2: RulesV2) -> Result<()> {
+        let v2 = rules::sanitize(&v2)?;
+        let legacy: Vec<String> = v2
+            .rules
+            .iter()
+            .filter(|r| r.kind == "suffix" && r.target == "direct" && r.enabled)
+            .map(|r| r.pattern.clone())
             .collect();
-        cleaned.dedup();
+        std::fs::write(self.proxy_dir.join(RULES_V2_FILE), serde_json::to_vec(&v2)?)?;
         std::fs::write(
             self.proxy_dir.join(RULES_FILE),
-            serde_json::to_vec(&cleaned)?,
+            serde_json::to_vec(&legacy)?,
         )?;
-        self.inner.write().direct_domains = cleaned;
+        self.inner.write().rules_v2 = v2;
         Ok(())
     }
 
@@ -617,11 +675,11 @@ impl ProxyService {
 
     /// 用当前节点重新生成配置并（重）启选定内核；起后健康探活 3s
     fn restart_with_config(self: &Arc<Self>, tun: bool) -> Result<()> {
-        let (nodes, direct, port, kernel) = {
+        let (nodes, rules_v2, port, kernel) = {
             let inner = self.inner.read();
             (
                 inner.nodes.clone(),
-                inner.direct_domains.clone(),
+                inner.rules_v2.clone(),
                 inner.mixed_port,
                 inner.kernel.clone(),
             )
@@ -657,15 +715,10 @@ impl ProxyService {
                 "当前内核（{kernel}）不支持任何已添加节点协议：请换内核或更新订阅（{excluded} 个节点被剔除）"
             )));
         }
-        // v1 路由：私有地址 + 用户直连域名恒直连，其余走代理（ir::build 内实现）
-        let ir_cfg = ir::build(
-            port,
-            tun,
-            &nodes,
-            &[] as &[ir::IrRule],
-            ir::TAG_PROXY,
-            &direct,
-        )?;
+        // v2 分流表 → IR 规则组 + 兜底 tag（route_mode=global/direct_all 时规则全跳过；
+        // block 出站由 ir::build 仅在被引用时注入——方言渲染零条件跟随）
+        let (user_rules, final_target) = rules::to_ir(&rules_v2)?;
+        let ir_cfg = ir::build(port, tun, &nodes, &user_rules, &final_target, &[])?;
         let rendered = driver.config_render(&ir_cfg)?;
         let cfg_path = self.proxy_dir.join(driver.cfg_name());
         // mihomo 方言 config.yaml 住 proxy/mihomo/ 子目录（09 ④ -d 语义）：
@@ -1076,6 +1129,123 @@ mod tests {
             svc.direct_rules(),
             vec![".corp.example.com", "internal.local"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- T-B2-9：分流规则 v2（09 §5.2 字面回归） ----------------
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn rulesV2_legacyFile_derivesSuffixDirect() {
+        let dir = std::env::temp_dir().join(format!(
+            "nf_proxy_svc_rulesv2_legacy_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let proxy_dir = dir.join("proxy");
+        std::fs::create_dir_all(&proxy_dir).unwrap();
+        std::fs::write(
+            proxy_dir.join(RULES_FILE),
+            serde_json::to_vec(&vec!["bilibili.com".to_string(), "cn".to_string()]).unwrap(),
+        )
+        .unwrap();
+        let svc = ProxyService::open(
+            &dir,
+            Arc::new(host_core::events::EventBus::new()),
+            StdArc::new(MockSp::new()),
+        )
+        .unwrap();
+        let v2 = svc.rules_v2();
+        assert_eq!(v2.final_target, "proxy");
+        assert_eq!(v2.route_mode, "rule");
+        assert_eq!(v2.rules.len(), 2);
+        assert!(v2
+            .rules
+            .iter()
+            .all(|r| r.kind == "suffix" && r.target == "direct" && r.enabled));
+        assert_eq!(
+            v2.rules
+                .iter()
+                .map(|r| r.pattern.as_str())
+                .collect::<Vec<_>>(),
+            ["bilibili.com", "cn"]
+        );
+        // 零迁移承诺：open 只派生不物化，首次保存才写 rules_v2.json
+        assert!(!proxy_dir.join(RULES_V2_FILE).exists());
+        assert_eq!(svc.direct_rules(), vec!["bilibili.com", "cn"]);
+        svc.set_rules_v2(v2.clone()).unwrap();
+        assert!(proxy_dir.join(RULES_V2_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn rulesV2_badCidr_rejected() {
+        // 红线：非法 CIDR（段越界 999 与注入串 a;b）均拒且点名违规值；
+        // 拒后内存/盘上状态原样（单条坏输入不得打翻既有规则表）
+        let (svc, _sp, dir) = open_service("rulesv2_badcidr");
+        svc.set_direct_rules(vec!["cn".into()]).unwrap();
+        for bad in ["999.1.1.1/8", "a;b"] {
+            let attempt = RulesV2 {
+                rules: vec![RuleV2 {
+                    kind: "ip_cidr".into(),
+                    pattern: bad.into(),
+                    target: "direct".into(),
+                    enabled: true,
+                }],
+                final_target: "proxy".into(),
+                route_mode: "rule".into(),
+            };
+            match svc.set_rules_v2(attempt) {
+                Err(ProxyError::Config(msg)) => {
+                    assert!(msg.contains(bad), "错误须点名违规值 {bad}：{msg}");
+                }
+                other => panic!("{bad} 必须被 Config 拒绝，得 {other:?}"),
+            }
+        }
+        assert_eq!(svc.direct_rules(), vec!["cn"], "拒写不得扰动现表");
+        // 正对照：合法 v6/v4 前缀放行
+        assert!(svc
+            .set_rules_v2(RulesV2 {
+                rules: vec![
+                    RuleV2 {
+                        kind: "ip_cidr".into(),
+                        pattern: "2001:db8::/32".into(),
+                        target: "direct".into(),
+                        enabled: true,
+                    },
+                    RuleV2 {
+                        kind: "ip_cidr".into(),
+                        pattern: "10.0.0.0/8".into(),
+                        target: "block".into(),
+                        enabled: false,
+                    },
+                ],
+                final_target: "proxy".into(),
+                route_mode: "rule".into(),
+            })
+            .is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn setDirectRules_nonAdjacentDup_removed() {
+        // 缺陷随行修：旧 `Vec::dedup` 只删相邻重复，"a b a" 会留两个 a
+        let (svc, _sp, dir) = open_service("directdup");
+        svc.set_direct_rules(vec![
+            "a.com".into(),
+            "b.com".into(),
+            "a.com".into(),
+            "  ".into(),
+            " b.com ".into(),
+        ])
+        .unwrap();
+        assert_eq!(svc.direct_rules(), vec!["a.com", "b.com"]);
+        let raw: Vec<String> =
+            serde_json::from_slice(&std::fs::read(dir.join("proxy").join(RULES_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(raw, vec!["a.com", "b.com"], "盘上须与内存同清单");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

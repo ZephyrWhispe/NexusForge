@@ -2,13 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { makeStyles } from "@fluentui/react-components";
 import {
   proxyDelayTest,
-  proxyDirectRules,
   proxyKernelInstall,
   proxyKernelRestart,
   proxyKernelSelect,
   proxyLogs,
   proxyNodes,
-  proxySetDirectRules,
+  proxyRulesGet,
+  proxyRulesSet,
   proxySetMode,
   proxyStatus,
   proxySubAdd,
@@ -20,6 +20,7 @@ import {
   type ProxyLogLineDto,
   type ProxyNodeDelayDto,
   type ProxyNodeDto,
+  type ProxyRulesV2Dto,
   type ProxyStatusDto,
   type ProxySubDto,
 } from "../../ipc/client";
@@ -58,7 +59,9 @@ export default function ProxyPanel() {
   const [subs, setSubs] = useState<ProxySubDto[]>([]);
   const [nodes, setNodes] = useState<ProxyNodeDto[]>([]);
   const [delays, setDelays] = useState<Record<string, number | null>>({});
-  const [rulesText, setRulesText] = useState("");
+  const [rulesV2, setRulesV2] = useState<ProxyRulesV2Dto | null>(null);
+  // 缺陷⑪b 脏位：未保存的分流编辑不被事件驱动的 refresh 覆写（保存成功即清脏）
+  const rulesDirty = useRef(false);
   const [logs, setLogs] = useState<ProxyLogLineDto[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
@@ -78,13 +81,13 @@ export default function ProxyPanel() {
         proxyStatus(),
         proxySubs(),
         proxyNodes(),
-        proxyDirectRules(),
+        proxyRulesGet(),
       ]);
       if (!mounted.current) return;
       setStatus(st);
       setSubs(ss);
       setNodes(ns);
-      setRulesText(rs.join("\n"));
+      if (!rulesDirty.current) setRulesV2(rs);
       setError("");
     } catch (e) {
       if (mounted.current) setError(parseAppError(e)?.data.message ?? String(e));
@@ -210,7 +213,17 @@ export default function ProxyPanel() {
 
   const saveRules = () =>
     void run("rules", async () => {
-      await proxySetDirectRules(rulesText.split("\n"));
+      if (!rulesV2) return;
+      await proxyRulesSet(rulesV2);
+      rulesDirty.current = false;
+      await refresh();
+    });
+
+  // 预设走"确认→合并→直接落库"路径（任务书：合并清单即保存，避免预设停在脏位待存）
+  const applyRulesPreset = (next: ProxyRulesV2Dto) =>
+    void run("rules", async () => {
+      await proxyRulesSet(next);
+      rulesDirty.current = false;
       await refresh();
     });
 
@@ -267,10 +280,15 @@ export default function ProxyPanel() {
       )}
       {view === "rules" && (
         <RulesSection
-          rulesText={rulesText}
-          setRulesText={setRulesText}
+          value={rulesV2}
+          loaded={loaded}
           busy={busy}
+          onChange={(v) => {
+            rulesDirty.current = true;
+            setRulesV2(v);
+          }}
           onSave={saveRules}
+          onApplyPreset={applyRulesPreset}
         />
       )}
       {view === "kernel" && (

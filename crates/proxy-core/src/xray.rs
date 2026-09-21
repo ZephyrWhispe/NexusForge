@@ -204,6 +204,9 @@ fn render_rule(rule: &IrRule, egress: &str) -> Value {
             json!({ "type": "field", "domain": prefixed(&rule.patterns, "keyword:") })
         }
         IrRuleField::IpCidr => json!({ "type": "field", "ip": rule.patterns }),
+        // 核证 xtls.github.io/config/routing.html：processName 为 Windows/macOS
+        // 用户级字段，数组形态与 sing-box process_name 同构
+        IrRuleField::Process => json!({ "type": "field", "processName": rule.patterns }),
     };
     v["outboundTag"] = json!(target);
     v

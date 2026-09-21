@@ -126,7 +126,7 @@ pub async fn proxy_nodes(
         .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
 }
 
-/// 直连域名规则
+/// 直连域名规则（v2 投影适配器：读=suffix+direct 桶；写=全量替换该桶并双写旧文件）
 #[tauri::command]
 pub async fn proxy_direct_rules(state: State<'_, HostState>) -> Result<Vec<String>, AppError> {
     let svc = proxy_service(&state)?;
@@ -135,7 +135,7 @@ pub async fn proxy_direct_rules(state: State<'_, HostState>) -> Result<Vec<Strin
         .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
 }
 
-/// 设置直连域名规则（trim + 去空 + 去重；模式重新切换后生效）
+/// 设置直连域名规则（trim + 去空 + 保序去重；模式重新切换后生效）
 #[tauri::command]
 pub async fn proxy_set_direct_rules(
     rules: Vec<String>,
@@ -143,6 +143,29 @@ pub async fn proxy_set_direct_rules(
 ) -> Result<(), AppError> {
     let svc = proxy_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || svc.set_direct_rules(rules))
+        .await
+        .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
+        .map_err(proxy_err)
+}
+
+/// 分流规则 v2 全表（T-B2-9：三目标规则 + 兜底 final + 全局模式）
+#[tauri::command]
+pub async fn proxy_rules_get(state: State<'_, HostState>) -> Result<proxy_core::RulesV2, AppError> {
+    let svc = proxy_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(svc.rules_v2()))
+        .await
+        .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
+}
+
+/// 全量写分流规则 v2（后端 sanitize 校验闸：CIDR/域字符集/进程名/枚举白名单，
+/// 违规 Config 点名字段值；改后需重新切换模式生效——与旧直连规则同语义）
+#[tauri::command]
+pub async fn proxy_rules_set(
+    rules: proxy_core::RulesV2,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let svc = proxy_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.set_rules_v2(rules))
         .await
         .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
         .map_err(proxy_err)

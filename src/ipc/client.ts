@@ -836,6 +836,30 @@ export function proxyDirectRules(): Promise<string[]> {
 export function proxySetDirectRules(rules: string[]): Promise<void> {
   return invoke("proxy_set_direct_rules", { rules });
 }
+
+/** 分流规则 v2 单行（T-B2-9；枚举串与后端 rules.rs 白名单单一真源） */
+export interface ProxyRuleV2Dto {
+  kind: "domain" | "suffix" | "keyword" | "ip_cidr" | "process";
+  pattern: string;
+  target: "direct" | "proxy" | "block";
+  enabled: boolean;
+}
+
+/** 分流规则 v2 全表：规则 + 兜底 final + 全局分流模式 */
+export interface ProxyRulesV2Dto {
+  rules: ProxyRuleV2Dto[];
+  /** 兜底出口（route_mode=rule 时生效） */
+  final_target: "proxy" | "direct" | "block";
+  /** global=全部走代理（规则跳过）；rule=规则分流；direct_all=全直连透明兜底档 */
+  route_mode: "global" | "rule" | "direct_all";
+}
+
+export function proxyRulesGet(): Promise<ProxyRulesV2Dto> {
+  return invoke("proxy_rules_get");
+}
+export function proxyRulesSet(rules: ProxyRulesV2Dto): Promise<void> {
+  return invoke("proxy_rules_set", { rules });
+}
 export function proxySetMode(mode: "off" | "system" | "tun"): Promise<void> {
   return invoke("proxy_set_mode", { mode });
 }

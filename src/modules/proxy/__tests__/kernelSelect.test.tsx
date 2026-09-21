@@ -18,7 +18,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     proxyStatus: vi.fn(),
     proxySubs: vi.fn(async () => []),
     proxyNodes: vi.fn(async () => []),
-    proxyDirectRules: vi.fn(async () => []),
+    proxyRulesGet: vi.fn(async () => ({ rules: [], final_target: "proxy", route_mode: "rule" })),
     proxyLogs: vi.fn(async () => []),
     proxyKernelSelect: vi.fn(async () => {}),
     proxyKernelInstall: vi.fn(async () => ({})),

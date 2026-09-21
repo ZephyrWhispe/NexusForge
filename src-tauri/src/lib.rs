@@ -220,6 +220,8 @@ pub fn run() {
             commands::proxy_nodes,
             commands::proxy_direct_rules,
             commands::proxy_set_direct_rules,
+            commands::proxy_rules_get,
+            commands::proxy_rules_set,
             commands::proxy_set_mode,
             commands::proxy_delay_test,
             commands::proxy_logs,
