@@ -52,6 +52,41 @@ pub async fn proxy_kernel_restart(state: State<'_, HostState>) -> Result<(), App
         .map_err(proxy_err)
 }
 
+/// 选定出口节点（T-B2-11）：手动选点走 Selector.default_tag 真分流；
+/// 不存在的节点后端 NotFound 拒，运行中换点即重启生效（失败按缺陷⑧纪律归零）
+#[tauri::command]
+pub async fn proxy_node_select(
+    sub_id: String,
+    tag: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let svc = proxy_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.select_node(&sub_id, &tag))
+        .await
+        .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
+        .map_err(proxy_err)
+}
+
+/// 回到自动出口（T-B2-11）：清选定，urltest 组自选
+#[tauri::command]
+pub async fn proxy_node_auto(state: State<'_, HostState>) -> Result<(), AppError> {
+    let svc = proxy_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.set_node_auto())
+        .await
+        .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
+        .map_err(proxy_err)
+}
+
+/// 出口自检（T-B2-11）：经本地 mixed 代理 GET gstatic 204；
+/// 内核未运行/TUN 态后端 BadState 如实拒（不假 200）
+#[tauri::command]
+pub async fn proxy_egress_probe(
+    state: State<'_, HostState>,
+) -> Result<proxy_core::EgressProbeDto, AppError> {
+    let svc = proxy_service(&state)?;
+    svc.egress_probe().await.map_err(proxy_err)
+}
+
 /// 安装 wintun.dll（TUN 模式前置）
 #[tauri::command]
 pub async fn proxy_wintun_install(state: State<'_, HostState>) -> Result<(), AppError> {

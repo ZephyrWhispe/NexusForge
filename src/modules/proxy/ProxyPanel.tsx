@@ -3,11 +3,14 @@ import { makeStyles } from "@fluentui/react-components";
 import {
   proxyArtifactInstall,
   proxyDelayTest,
+  proxyEgressProbe,
   proxyKernelInstall,
   proxyKernelRestart,
   proxyKernelSelect,
   proxyLogs,
+  proxyNodeAuto,
   proxyNodes,
+  proxyNodeSelect,
   proxyRulesGet,
   proxyRulesSet,
   proxySetMode,
@@ -19,6 +22,7 @@ import {
   proxyWintunInstall,
   parseAppError,
   type ProxyArtifactInfoDto,
+  type ProxyEgressProbeDto,
   type ProxyLogLineDto,
   type ProxyNodeDelayDto,
   type ProxyNodeDto,
@@ -61,6 +65,8 @@ export default function ProxyPanel() {
   const [subs, setSubs] = useState<ProxySubDto[]>([]);
   const [nodes, setNodes] = useState<ProxyNodeDto[]>([]);
   const [delays, setDelays] = useState<Record<string, number | null>>({});
+  // 出口自检结果（T-B2-11）：null=未测；自检失败（ok:false）也是值不是错
+  const [egress, setEgress] = useState<ProxyEgressProbeDto | null>(null);
   const [rulesV2, setRulesV2] = useState<ProxyRulesV2Dto | null>(null);
   // 缺陷⑪b 脏位：未保存的分流编辑不被事件驱动的 refresh 覆写（保存成功即清脏）
   const rulesDirty = useRef(false);
@@ -176,6 +182,35 @@ export default function ProxyPanel() {
       if (mounted.current) setDelays(map);
     });
 
+  // T-B2-11：手动出口选点/切回自动（后端 NotFound 拒幽灵节点、运行中换点即重启生效）
+  const selectNode = (subId: string, tag: string) =>
+    void run("node-select", async () => {
+      await proxyNodeSelect(subId, tag);
+      await refresh();
+    });
+
+  const nodeAuto = () =>
+    void run("node-auto", async () => {
+      await proxyNodeAuto();
+      await refresh();
+    });
+
+  // 单节点测速：复用全量 proxy_delay_test（后端并发定长），只回写该行——
+  // 不新增按点命令，行级按钮是纯前端过滤器（delayRow_singleNodeFiltered 判据）
+  const testOneDelay = (subId: string, tag: string) =>
+    void run(`delay-${subId}|${tag}`, async () => {
+      const result = await proxyDelayTest();
+      const hit = result.find((x) => x.sub_id === subId && x.tag === tag);
+      if (mounted.current && hit)
+        setDelays((prev) => ({ ...prev, [delayKey(hit)]: hit.ms }));
+    });
+
+  const egressProbe = () =>
+    void run("egress", async () => {
+      const r = await proxyEgressProbe();
+      if (mounted.current) setEgress(r);
+    });
+
   const addSub = async (name: string, url: string) =>
     run("sub-add", async () => {
       const sub = await proxySubAdd(name, url);
@@ -267,7 +302,13 @@ export default function ProxyPanel() {
   return (
     <div className={styles.root}>
       {view === "overview" && (
-        <OverviewSection st={status} busy={busy} onMode={switchMode} />
+        <OverviewSection
+          st={status}
+          busy={busy}
+          onMode={switchMode}
+          egress={egress}
+          onEgressProbe={egressProbe}
+        />
       )}
       {view === "nodes" && (
         <NodesSection
@@ -276,6 +317,11 @@ export default function ProxyPanel() {
           busy={busy}
           loaded={loaded}
           onTestDelays={testDelays}
+          selected={status?.selected_node ?? null}
+          selectedStale={status?.selected_stale ?? false}
+          onSelectNode={selectNode}
+          onNodeAuto={nodeAuto}
+          onTestOne={testOneDelay}
         />
       )}
       {view === "subs" && (

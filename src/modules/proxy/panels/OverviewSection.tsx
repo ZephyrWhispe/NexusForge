@@ -6,7 +6,7 @@ import {
   Spinner,
   Text,
 } from "@fluentui/react-components";
-import type { ProxyStatusDto } from "../../../ipc/client";
+import type { ProxyEgressProbeDto, ProxyStatusDto } from "../../../ipc/client";
 import Section from "../../../components/Section";
 import DeferredBadge from "../../../components/DeferredBadge";
 
@@ -30,10 +30,14 @@ export default function OverviewSection({
   st,
   busy,
   onMode,
+  egress,
+  onEgressProbe,
 }: {
   st: ProxyStatusDto | null;
   busy: string;
   onMode: (mode: ProxyStatusDto["mode"]) => void;
+  egress: ProxyEgressProbeDto | null;
+  onEgressProbe: () => void;
 }) {
   const styles = useStyles();
   return (
@@ -93,9 +97,47 @@ export default function OverviewSection({
                 运行：{st.kernels.find((k) => k.id === st.kernel_id)?.display_name ?? st.kernel_id}
               </Badge>
             )}
+            <span className={styles.muted}>
+              当前出口：
+              {st.selected_node
+                ? `手动 ${st.selected_node[1]}${st.selected_stale ? "（已失效：订阅更新删除了该节点，实际回落自动优选）" : ""}`
+                : "自动（urltest 组自选）"}
+            </span>
             <span className={styles.muted}>换核与重启在「内核」子面板操作</span>
           </div>
         )}
+      </Section>
+
+      <Section
+        title="出口自检"
+        actions={
+          <>
+            {egress === null ? (
+              <Badge appearance="outline" color="subtle">
+                未测
+              </Badge>
+            ) : egress.ok ? (
+              <Badge appearance="filled" color="success">
+                出口连通{egress.ms != null ? `（${egress.ms} ms）` : ""}
+              </Badge>
+            ) : (
+              <Badge appearance="filled" color="danger">
+                出口不通
+              </Badge>
+            )}
+            <Button
+              size="small"
+              disabled={busy !== ""}
+              onClick={onEgressProbe}
+            >
+              {busy === "egress" ? "自检中…" : "自检（HTTP 204）"}
+            </Button>
+          </>
+        }
+      >
+        <span className={styles.muted}>
+          经本地代理向 gstatic 发一次 204 探测：内核未运行/TUN 态后端如实报错（不自检假成功）。
+        </span>
       </Section>
     </>
   );

@@ -21,6 +21,21 @@ description = "允许前端调用 proxy_kernel_restart 命令（D-28 按窗最�
 commands.allow = ["proxy_kernel_restart"]
 
 [[permission]]
+identifier = "allow-proxy-node-select"
+description = "允许前端调用 proxy_node_select 命令（T-B2-11 手动选出口；D-28 按窗最小授权）"
+commands.allow = ["proxy_node_select"]
+
+[[permission]]
+identifier = "allow-proxy-node-auto"
+description = "允许前端调用 proxy_node_auto 命令（T-B2-11 切回自动出口；D-28 按窗最小授权）"
+commands.allow = ["proxy_node_auto"]
+
+[[permission]]
+identifier = "allow-proxy-egress-probe"
+description = "允许前端调用 proxy_egress_probe 命令（T-B2-11 出口自检；D-28 按窗最小授权）"
+commands.allow = ["proxy_egress_probe"]
+
+[[permission]]
 identifier = "allow-proxy-wintun-install"
 description = "允许前端调用 proxy_wintun_install 命令（D-28 按窗最小授权）"
 commands.allow = ["proxy_wintun_install"]

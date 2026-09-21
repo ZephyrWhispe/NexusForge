@@ -84,6 +84,10 @@ struct PersistState {
     /// 选定内核（T-B2-2）；serde default 零迁移：旧文件缺键 = sing-box
     #[serde(default = "default_kernel")]
     kernel: String,
+    /// 手动选定出口节点 (sub_id, tag)（T-B2-11）；serde default 零迁移：
+    /// 缺键/None = 自动（urltest 组首选），旧 proxy_state.json 原样可读
+    #[serde(default)]
+    selected_node: Option<(String, String)>,
 }
 
 fn default_kernel() -> String {
@@ -157,6 +161,20 @@ pub struct StatusDto {
     pub kernels: Vec<KernelInfoDto>,
     /// geo/数据资产装机清单（T-B2-10，GEO_ASSETS 数据驱动，UI 禁资产特例分支）
     pub artifacts: Vec<ArtifactStatusDto>,
+    /// 手动选定出口节点 (sub_id, tag)（T-B2-11）；None = 自动（urltest 组首选）
+    pub selected_node: Option<(String, String)>,
+    /// 选定节点因订阅更新/能力过滤已不在场 = 本代配置实际回落首节点，如实上报
+    /// （UI 出口灯/节点行徽章据此显示"选定已失效"而非假装仍在生效）
+    pub selected_stale: bool,
+}
+
+/// 出口自检结果（T-B2-11）：经本地 mixed 出口 GET gstatic generate_204。
+/// 内核未运行是 BadState 错误（不假 200），可达但出口不通 = ok:false 的正常结果。
+#[derive(Clone, Debug, Serialize)]
+pub struct EgressProbeDto {
+    pub ok: bool,
+    pub ms: Option<u64>,
+    pub status: Option<u16>,
 }
 
 /// 单资产条目（sidecar::GEO_ASSETS 镜像 + manifest 版本对账）
@@ -210,6 +228,8 @@ struct Inner {
     nodes: Vec<Node>,
     /// T-B2-9：分流规则 v2（旧直连域名清单是其 suffix+direct 投影）
     rules_v2: RulesV2,
+    /// T-B2-11：手动选定出口 (sub_id, tag)；None = 自动（urltest）
+    selected_node: Option<(String, String)>,
 }
 
 pub struct ProxyService {
@@ -221,6 +241,9 @@ pub struct ProxyService {
     /// 测试专用驱动注入位（换核生命周期须真实双进程；生产路径恒空）
     #[cfg(test)]
     test_drivers: RwLock<Vec<(String, Arc<dyn KernelDriver>)>>,
+    /// 测试注入：这些 tag 的 delay 任务必 panic（缺陷⑨ 定长向量红线入口）
+    #[cfg(test)]
+    delay_panic_tags: RwLock<Vec<String>>,
 }
 
 impl ProxyService {
@@ -240,6 +263,7 @@ impl ProxyService {
             .unwrap_or(PersistState {
                 mixed_port: 7890,
                 kernel: default_kernel(),
+                selected_node: None,
             });
         let legacy_domains: Vec<String> = std::fs::read(proxy_dir.join(RULES_FILE))
             .ok()
@@ -262,7 +286,8 @@ impl ProxyService {
                 mode: Mode::Off,
                 handle: None,
                 mixed_port: state.mixed_port,
-                kernel: state.kernel,
+                kernel: state.kernel.clone(),
+                selected_node: state.selected_node.clone(),
                 subs,
                 nodes,
                 rules_v2,
@@ -270,6 +295,8 @@ impl ProxyService {
             restored_last_run: RwLock::new(false),
             #[cfg(test)]
             test_drivers: RwLock::new(Vec::new()),
+            #[cfg(test)]
+            delay_panic_tags: RwLock::new(Vec::new()),
         });
 
         // 启动扫描：上次运行残留的系统代理 → 自动还原（验收「kill -9 → 重启恢复」）
@@ -333,6 +360,14 @@ impl ProxyService {
             kernel: inner.kernel.clone(),
             kernels,
             artifacts,
+            selected_node: inner.selected_node.clone(),
+            // 失效判定与 apply_selected 的回落条件同源：(sub_id, tag) 不在现节点表
+            selected_stale: inner.selected_node.as_ref().is_some_and(|(sid, tag)| {
+                !inner
+                    .nodes
+                    .iter()
+                    .any(|n| &n.sub_id == sid && &n.tag == tag)
+            }),
         }
     }
 
@@ -676,13 +711,15 @@ impl ProxyService {
         self.persist_state(&inner)
     }
 
-    /// 持久化状态文件唯一写点（双字段整包写，杜绝 set_mixed_port 曾有的 kernel 覆盖）
+    /// 持久化状态文件唯一写点（整包写，杜绝 set_mixed_port 曾有的 kernel 覆盖；
+    /// T-B2-11 起 selected_node 同包持久化）
     fn persist_state(&self, inner: &Inner) -> Result<()> {
         std::fs::write(
             self.proxy_dir.join(STATE_FILE),
             serde_json::to_vec(&PersistState {
                 mixed_port: inner.mixed_port,
                 kernel: inner.kernel.clone(),
+                selected_node: inner.selected_node.clone(),
             })?,
         )?;
         Ok(())
@@ -836,6 +873,148 @@ impl ProxyService {
         Ok(())
     }
 
+    // ---------------- 手动选节点（T-B2-11） ----------------
+
+    /// 选定出口节点：存在性校验不过即 NotFound 拒（红线：不存在的节点不写状态，
+    /// 幽灵选定会在下一次 restart 才爆成内核拒写）。运行中按当前模式重启生效
+    /// （selector.default 换人），失败走缺陷⑧同款纪律：归零关闭态 + Kernel 上抛。
+    pub fn select_node(self: &Arc<Self>, sub_id: &str, tag: &str) -> Result<()> {
+        {
+            let inner = self.inner.read();
+            if !inner
+                .nodes
+                .iter()
+                .any(|n| n.sub_id == sub_id && n.tag == tag)
+            {
+                return Err(ProxyError::NotFound(format!(
+                    "节点不存在：{sub_id}/{tag}（请先更新订阅核对节点名）"
+                )));
+            }
+        }
+        let mode = {
+            let mut inner = self.inner.write();
+            inner.selected_node = Some((sub_id.to_string(), tag.to_string()));
+            self.persist_state(&inner)?;
+            inner.mode
+        };
+        if mode == Mode::Off || self.inner.read().handle.is_none() {
+            self.publish_state();
+            return Ok(());
+        }
+        let tun = mode == Mode::Tun;
+        if let Err(e) = self.restart_with_config(tun) {
+            let _ = self.stop_kernel_and_restore();
+            return Err(ProxyError::Kernel(format!(
+                "选定节点后内核重启失败：{e}（已停止为关闭态）"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 回到自动出口（清 selected_node；语义 = urltest 组自选，非"停"）
+    pub fn set_node_auto(self: &Arc<Self>) -> Result<()> {
+        let mode = {
+            let mut inner = self.inner.write();
+            inner.selected_node = None;
+            self.persist_state(&inner)?;
+            inner.mode
+        };
+        if mode == Mode::Off || self.inner.read().handle.is_none() {
+            self.publish_state();
+            return Ok(());
+        }
+        let tun = mode == Mode::Tun;
+        if let Err(e) = self.restart_with_config(tun) {
+            let _ = self.stop_kernel_and_restore();
+            return Err(ProxyError::Kernel(format!(
+                "切回自动出口后内核重启失败：{e}（已停止为关闭态）"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 出口自检（02§5-1 种子）：reqwest 走本地 mixed 代理 GET gstatic 204，5s 超时。
+    /// 内核未运行 = BadState 如实（不假 200 也不假 ok:false）；TUN 态本代无本地
+    /// mixed 入站，同样 BadState 点名（出口面归 B7 外部 API 演进）。
+    /// 连通但出口不通（内核在跑、上游全挂）= Ok(EgressProbeDto{ok:false})——这是
+    /// 自检的正常失败结果而非命令错误。
+    pub async fn egress_probe(&self) -> Result<EgressProbeDto> {
+        let (running, tun, port) = {
+            let inner = self.inner.read();
+            (
+                inner.handle.as_ref().is_some_and(|h| h.alive()),
+                inner.mode == Mode::Tun,
+                inner.mixed_port,
+            )
+        };
+        if !running {
+            return Err(ProxyError::BadState(
+                "内核未在运行：无出口可自检：请先切换系统代理/TUN 模式".into(),
+            ));
+        }
+        if tun {
+            return Err(ProxyError::BadState(
+                "TUN 模式下代配置无本地 mixed 入站：出口自检暂不可用".into(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))
+                    .map_err(|e| ProxyError::BadState(format!("自检代理地址构造失败: {e}")))?,
+            )
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| ProxyError::BadState(format!("自检客户端构造失败: {e}")))?;
+        let start = std::time::Instant::now();
+        let resp = client
+            .get("https://www.gstatic.com/generate_204")
+            .send()
+            .await;
+        let dto = match resp {
+            Ok(r) => EgressProbeDto {
+                ok: r.status().is_success(),
+                ms: Some(start.elapsed().as_millis() as u64),
+                status: Some(r.status().as_u16()),
+            },
+            Err(_) => EgressProbeDto {
+                ok: false,
+                ms: None,
+                status: None,
+            },
+        };
+        Ok(dto)
+    }
+
+    /// 消费臂纯函数（restart_with_config 与单测共用）：手动选定 → Selector.default_tag。
+    /// 选点在本代节点集（已过能力过滤）在场=换人；缺件（订阅更新删点/过滤剔除）=
+    /// 回落首节点旧行为，失效面由 [`StatusDto::selected_stale`] 如实上报。
+    fn apply_selected(
+        cfg: &mut crate::ir::IrConfig,
+        nodes: &[Node],
+        selected: Option<&(String, String)>,
+    ) {
+        let Some(sel) = selected else { return };
+        let Some(default) = nodes
+            .iter()
+            .find(|n| n.sub_id == sel.0 && n.tag == sel.1)
+            .or_else(|| nodes.first())
+            .map(Node::outbound_tag)
+        else {
+            return; // nodes 空 = ir::build 已拒，此臂不可达仅防
+        };
+        for ob in &mut cfg.outbounds {
+            if let crate::ir::IrOutbound::Selector {
+                tag, default_tag, ..
+            } = ob
+            {
+                if tag == crate::ir::TAG_PROXY {
+                    *default_tag = Some(default);
+                    return;
+                }
+            }
+        }
+    }
+
     /// 驱动解析：测试注入表优先（生产路径恒空），其后走注册表
     fn driver(&self, id: &str) -> Result<Arc<dyn KernelDriver>> {
         #[cfg(test)]
@@ -849,13 +1028,14 @@ impl ProxyService {
 
     /// 用当前节点重新生成配置并（重）启选定内核；起后健康探活 3s
     fn restart_with_config(self: &Arc<Self>, tun: bool) -> Result<()> {
-        let (nodes, rules_v2, port, kernel) = {
+        let (nodes, rules_v2, port, kernel, selected_node) = {
             let inner = self.inner.read();
             (
                 inner.nodes.clone(),
                 inner.rules_v2.clone(),
                 inner.mixed_port,
                 inner.kernel.clone(),
+                inner.selected_node.clone(),
             )
         };
         // 停旧内核（模式切换 / 换核）
@@ -895,7 +1075,11 @@ impl ProxyService {
         // T-B2-10 渲染预检：geo 类规则在场且本内核消费本地资产缺失 → 写盘前诚实拒
         //（内核读缺文件 = 启动失败堆在日志页，不如此处点名资产+指路安装入口）
         check_geo_prereqs(driver.as_ref(), &self.proxy_dir, &user_rules)?;
-        let ir_cfg = ir::build(port, tun, &nodes, &user_rules, &final_target, &[])?;
+        let mut ir_cfg = ir::build(port, tun, &nodes, &user_rules, &final_target, &[])?;
+        // T-B2-11 消费臂：手动选定 → Selector.default_tag（缺件回落首节点，
+        // 失效面经 status().selected_stale 如实上报；None=自动 urltest 原样）
+        Self::apply_selected(&mut ir_cfg, &nodes, selected_node.as_ref());
+
         let rendered = driver.config_render(&ir_cfg)?;
         let cfg_path = self.proxy_dir.join(driver.cfg_name());
         // mihomo 方言 config.yaml 住 proxy/mihomo/ 子目录（09 ④ -d 语义）：
@@ -966,40 +1150,46 @@ impl ProxyService {
 
     // ---------------- 延迟测试（PR6） ----------------
 
-    /// TCP 连接延迟（v1 轻量方案；每节点并发、3s 超时）
+    /// TCP 连接延迟（v1 轻量方案；每节点并发、3s 超时）。
+    /// 缺陷⑨ 修：结果向量恒等于节点数——(tag, sub_id) 在 spawn 前登记，
+    /// join Err（任务 panic/abort）臂补 ms:None 占位，节点行不会凭空丢列。
     pub async fn delay_test(&self) -> Vec<NodeDelayDto> {
         let nodes = self.inner.read().nodes.clone();
         let mut tasks = Vec::with_capacity(nodes.len());
         for n in nodes {
-            tasks.push(tokio::spawn(async move {
-                let addr = std::net::SocketAddr::new(
-                    resolve_host(&n.server)
-                        .await
-                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-                    n.port,
-                );
-                let start = std::time::Instant::now();
-                let ms = match tokio::time::timeout(
-                    Duration::from_secs(3),
-                    tokio::net::TcpStream::connect(addr),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => Some(start.elapsed().as_millis() as u64),
-                    _ => None,
-                };
-                NodeDelayDto {
-                    tag: n.tag,
-                    sub_id: n.sub_id,
-                    ms,
-                }
-            }));
+            #[cfg(test)]
+            let force_panic = self.delay_panic_tags.read().contains(&n.tag);
+            tasks.push((
+                (n.tag.clone(), n.sub_id.clone()),
+                tokio::spawn(async move {
+                    #[cfg(test)]
+                    if force_panic {
+                        panic!("测试注入：delay 任务 abort（缺陷⑨ 红线入口）");
+                    }
+                    let addr = std::net::SocketAddr::new(
+                        resolve_host(&n.server)
+                            .await
+                            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                        n.port,
+                    );
+                    let start = std::time::Instant::now();
+                    match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        tokio::net::TcpStream::connect(addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => Some(start.elapsed().as_millis() as u64),
+                        _ => None,
+                    }
+                }),
+            ));
         }
         let mut out = Vec::with_capacity(tasks.len());
-        for t in tasks {
-            if let Ok(dto) = t.await {
-                out.push(dto);
-            }
+        for ((tag, sub_id), t) in tasks {
+            // JoinError（panic/cancel）→ None 占位仍入列：长度恒等的定长向量红线
+            let ms = t.await.unwrap_or(None);
+            out.push(NodeDelayDto { tag, sub_id, ms });
         }
         out
     }
@@ -1954,6 +2144,165 @@ mod tests {
         arc.restart_with_config(false).unwrap();
         assert_eq!(d.start_attempts.load(Ordering::SeqCst), 1);
         arc.set_mode(Mode::Off).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- T-B2-11：测速与选节点（09 §5.2 字面回归） ----------------
+
+    /// 多节点版 add_demo_node：同订阅 "sub-test"，按给定 tag 落内存态
+    fn add_demo_nodes(svc: &Arc<ProxyService>, tags: &[&str]) {
+        let mut inner = svc.inner.write();
+        for t in tags {
+            inner.nodes.push(Node {
+                tag: (*t).into(),
+                kind: NodeKind::Shadowsocks,
+                server: "127.0.0.1".into(),
+                port: 9,
+                sub_id: "sub-test".into(),
+                groups: Vec::new(),
+                extra: serde_json::Value::Null,
+            });
+        }
+    }
+
+    fn selector_default_of(cfg: &crate::ir::IrConfig) -> Option<String> {
+        cfg.outbounds.iter().find_map(|ob| match ob {
+            crate::ir::IrOutbound::Selector {
+                tag, default_tag, ..
+            } if tag == crate::ir::TAG_PROXY => default_tag.clone(),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    async fn delayTest_resultVectorFixedLength() {
+        // 缺陷⑨ 红线：任一节点测速任务 panic/abort，结果向量长度仍恒等于节点数，
+        // 挂掉的以 ms:None 占位（前端节点行不会凭空丢列）
+        let (svc, _sp, dir) = open_service("delayvec");
+        let arc: Arc<ProxyService> = svc;
+        add_demo_nodes(&arc, &["ok1", "boom", "ok2"]);
+        arc.delay_panic_tags.write().push("boom".into());
+        let out = arc.delay_test().await;
+        assert_eq!(out.len(), 3, "结果向量必须定长 == 节点数");
+        let boom = out
+            .iter()
+            .find(|d| d.tag == "boom")
+            .expect("boom 行不得消失");
+        assert_eq!(boom.ms, None, "panic 臂须以 None 占位");
+        assert_eq!(boom.sub_id, "sub-test");
+        assert_eq!(
+            out.iter().filter(|d| d.tag != "boom").count(),
+            2,
+            "其余节点照常出列"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn nodeSelect_absentTag_rejected() {
+        // 红线：不存在的 (sub_id, tag) 即 NotFound 拒，且幽灵选定零写入（内存+状态皆原样）
+        let (svc, _sp, dir) = open_service("selectabsent");
+        let arc: Arc<ProxyService> = svc;
+        add_demo_node(&arc);
+        let err = arc.select_node("sub-test", "ghost").unwrap_err();
+        match err {
+            ProxyError::NotFound(msg) => assert!(
+                msg.contains("sub-test/ghost") && msg.contains("节点不存在"),
+                "须点名被拒节点：{msg}"
+            ),
+            other => panic!("缺失节点必须 NotFound 拒，得 {other:?}"),
+        }
+        let st = arc.status();
+        assert_eq!(st.selected_node, None, "拒写不得扰动选定态");
+        assert!(!st.selected_stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn nodeSelect_staleAfterSubUpdate_fallsBackFirstAndFlagsStale() {
+        // 选定 → 订阅更新把该节点删掉：sticky 展示 + selected_stale 如实置位；
+        // 消费侧回落首节点（= 手动选点前的旧行为），绝不把幽灵 tag 写进配置
+        let (svc, _sp, dir) = open_service("selectstale");
+        let arc: Arc<ProxyService> = svc;
+        add_demo_nodes(&arc, &["n1", "n2"]);
+        arc.select_node("sub-test", "n2").unwrap();
+        let st = arc.status();
+        assert_eq!(st.selected_node, Some(("sub-test".into(), "n2".into())));
+        assert!(!st.selected_stale);
+
+        // 模拟 sub_update 后 n2 被删的内存态（与真实更新对 inner.nodes 的替换等价）
+        arc.inner.write().nodes.retain(|n| n.tag != "n2");
+        let st = arc.status();
+        assert_eq!(
+            st.selected_node,
+            Some(("sub-test".into(), "n2".into())),
+            "失效不静默清选：sticky 展示供用户改选"
+        );
+        assert!(st.selected_stale, "删点后必须如实置 stale");
+        // 再选幽灵即 NotFound（存在性校验收口）
+        assert!(matches!(
+            arc.select_node("sub-test", "n2"),
+            Err(ProxyError::NotFound(_))
+        ));
+
+        // 消费臂回落：stale 选定 → 首节点 tag（既有单节点场景行为不变）
+        let nodes = arc.inner.read().nodes.clone();
+        let mut cfg =
+            crate::ir::build(7890, false, &nodes, &[], crate::ir::TAG_PROXY, &[]).unwrap();
+        ProxyService::apply_selected(&mut cfg, &nodes, Some(&("sub-test".into(), "n2".into())));
+        assert_eq!(
+            selector_default_of(&cfg).as_deref(),
+            Some("sub-test:n1"),
+            "stale 回落首节点"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn selectorDefaultTag_followsSelected() {
+        // 纯函数消费臂（TestKernelDriver 渲染 "{}"，方言消费由各方言 golden 锁）：
+        // 手动选定 → TAG_PROXY selector 的 default_tag 换人；None（自动）→ 不写幽灵
+        let (svc, _sp, dir) = open_service("selectorsel");
+        let arc: Arc<ProxyService> = svc;
+        add_demo_nodes(&arc, &["n1", "n2"]);
+        let nodes = arc.inner.read().nodes.clone();
+
+        let base =
+            || crate::ir::build(7890, false, &nodes, &[], crate::ir::TAG_PROXY, &[]).unwrap();
+
+        let mut cfg = base();
+        assert_eq!(selector_default_of(&cfg), None, "build 默认即自动");
+        ProxyService::apply_selected(&mut cfg, &nodes, Some(&("sub-test".into(), "n2".into())));
+        assert_eq!(selector_default_of(&cfg).as_deref(), Some("sub-test:n2"));
+        ProxyService::apply_selected(&mut cfg, &nodes, Some(&("sub-test".into(), "n1".into())));
+        assert_eq!(
+            selector_default_of(&cfg).as_deref(),
+            Some("sub-test:n1"),
+            "换人即改写"
+        );
+        let mut cfg = base();
+        ProxyService::apply_selected(&mut cfg, &nodes, None);
+        assert_eq!(selector_default_of(&cfg), None, "自动态零扰动");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    async fn egressProbe_kernelOff_honestErr() {
+        // 红线：内核未在运行 ≠ 假 200 也 ≠ Ok(ok:false)——BadState 点名指路
+        let (svc, _sp, dir) = open_service("egressoff");
+        let arc: Arc<ProxyService> = svc;
+        let err = arc.egress_probe().await.unwrap_err();
+        match err {
+            ProxyError::BadState(msg) => {
+                assert!(msg.contains("内核未在运行"), "须点名真因：{msg}");
+            }
+            other => panic!("关闭态自检必须 BadState，得 {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

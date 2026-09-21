@@ -14,10 +14,11 @@ import EmptyState from "../../../components/EmptyState";
 import DeferredBadge from "../../../components/DeferredBadge";
 
 /**
- * 节点子面板（T-B2-3 迁移自旧「节点」块；分组 Tab/收藏/行操作列归 T-B2-11 与 B7）：
- * 现表 = 名称/协议/地址/TCP 延迟。
+ * 节点子面板（T-B2-3 迁移自旧「节点」块；T-B2-11 出口选点行 + 单节点测速；
+ * 收藏/HTTP 测速归 B7）：现表 = 名称/协议/地址/TCP 延迟/出口操作。
  */
 const useStyles = makeStyles({
+  row: { display: "flex", alignItems: "center", gap: "8px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
 });
@@ -28,12 +29,24 @@ export default function NodesSection({
   busy,
   loaded,
   onTestDelays,
+  selected,
+  selectedStale,
+  onSelectNode,
+  onNodeAuto,
+  onTestOne,
 }: {
   nodes: ProxyNodeDto[];
   delays: Record<string, number | null>;
   busy: string;
   loaded: boolean;
   onTestDelays: () => void;
+  /** 手动选定的出口 [sub_id, tag]；null = 自动（urltest 组自选） */
+  selected: [string, string] | null;
+  /** 选定节点已被订阅更新删除（消费侧回落首节点，UI 如实标注） */
+  selectedStale: boolean;
+  onSelectNode: (subId: string, tag: string) => void;
+  onNodeAuto: () => void;
+  onTestOne: (subId: string, tag: string) => void;
 }) {
   const styles = useStyles();
   return (
@@ -41,8 +54,21 @@ export default function NodesSection({
       title="节点"
       actions={
         <>
+          <Badge
+            appearance={selected ? (selectedStale ? "outline" : "filled") : "outline"}
+            color={selected ? (selectedStale ? "danger" : "brand") : "subtle"}
+          >
+            {selected
+              ? `手动出口: ${selected[1]}${selectedStale ? "（已失效，实际走自动优选）" : ""}`
+              : "自动出口（urltest）"}
+          </Badge>
+          {selected && (
+            <Button size="small" disabled={busy !== ""} onClick={onNodeAuto}>
+              {busy === "node-auto" ? "切换中…" : "切回自动"}
+            </Button>
+          )}
           <Button size="small" disabled={busy !== "" || nodes.length === 0} onClick={onTestDelays}>
-            {busy === "delay" ? "测速中…" : "测速（TCP）"}
+            {busy === "delay" ? "测速中…" : "测速全部（TCP）"}
           </Button>
           <DeferredBadge label="逐节点 HTTP 测速" decisionRef="B7" />
         </>
@@ -55,6 +81,7 @@ export default function NodesSection({
           <TableBody>
             {nodes.map((n) => {
               const ms = delays[`${n.sub_id}|${n.tag}`];
+              const isSel = selected != null && selected[0] === n.sub_id && selected[1] === n.tag;
               return (
                 <TableRow key={`${n.sub_id}|${n.tag}`}>
                   <TableCell>
@@ -82,6 +109,34 @@ export default function NodesSection({
                         {ms} ms
                       </Badge>
                     )}
+                  </TableCell>
+                  <TableCell>
+                    <span className={styles.row}>
+                      {isSel ? (
+                        <Badge
+                          appearance="filled"
+                          color={selectedStale ? "danger" : "brand"}
+                          title={selectedStale ? "该节点已被订阅更新删除：实际出口回落自动优选" : undefined}
+                        >
+                          出口
+                        </Badge>
+                      ) : (
+                        <Button
+                          size="small"
+                          disabled={busy !== ""}
+                          onClick={() => onSelectNode(n.sub_id, n.tag)}
+                        >
+                          {busy === "node-select" ? "切换中…" : "选定"}
+                        </Button>
+                      )}
+                      <Button
+                        size="small"
+                        disabled={busy !== ""}
+                        onClick={() => onTestOne(n.sub_id, n.tag)}
+                      >
+                        {busy === `delay-${n.sub_id}|${n.tag}` ? "测速中…" : "TCP 测"}
+                      </Button>
+                    </span>
                   </TableCell>
                 </TableRow>
               );

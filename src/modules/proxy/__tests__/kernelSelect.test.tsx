@@ -93,6 +93,8 @@ function statusDto(overrides: Partial<ProxyStatusDto> = {}): ProxyStatusDto {
       },
     ],
     artifacts: [],
+    selected_node: null,
+    selected_stale: false,
     ...overrides,
   };
 }

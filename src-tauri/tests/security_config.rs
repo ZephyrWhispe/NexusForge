@@ -465,6 +465,41 @@ fn auxWindows_neverGrantProxyRulesV2() {
 
 #[test]
 #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantProxyNodeSelectAndEgressProbe() {
+    // T-B2-11 红线负例：手动选出口会停/起内核并改写全局路由，出口自检触网——
+    // 三者（node-select/node-auto/egress-probe）均为 main-only 面
+    let caps = load_capabilities();
+    for ident in [
+        "allow-proxy-node-select",
+        "allow-proxy-node-auto",
+        "allow-proxy-egress-probe",
+    ] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（出口选择/自检是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
 fn auxWindows_neverGrantProxyArtifactInstall() {
     // T-B2-10 红线负例：geo 数据资产安装会向 proxy 目录写盘并触网下载，main-only
     let caps = load_capabilities();

@@ -79,6 +79,8 @@ function statusDto(): ProxyStatusDto {
     kernel: "sing-box",
     kernels: [],
     artifacts: [],
+    selected_node: null,
+    selected_stale: false,
   };
 }
 

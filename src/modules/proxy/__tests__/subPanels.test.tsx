@@ -4,10 +4,14 @@ import { createRoot, type Root } from "react-dom/client";
 
 import ProxyPanel from "../ProxyPanel";
 import {
+  proxyDelayTest,
+  proxyEgressProbe,
   proxyKernelInstall,
   proxyKernelSelect,
   proxyLogs,
+  proxyNodeAuto,
   proxyNodes,
+  proxyNodeSelect,
   proxyStatus,
   proxySubs,
   type ProxyNodeDto,
@@ -44,6 +48,9 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     proxyArtifactInstall: vi.fn(async () => ({})),
     proxySetMode: vi.fn(async () => {}),
     proxyDelayTest: vi.fn(async () => []),
+    proxyNodeSelect: vi.fn(async () => {}),
+    proxyNodeAuto: vi.fn(async () => {}),
+    proxyEgressProbe: vi.fn(),
   };
 });
 
@@ -121,7 +128,14 @@ function statusDto(): ProxyStatusDto {
       },
     ],
     artifacts: [],
+    selected_node: null,
+    selected_stale: false,
   };
+}
+
+/** 选定态克隆器（T-B2-11 夹具）：只动 selected 两键 */
+function statusWithSel(sel: [string, string] | null, stale = false): ProxyStatusDto {
+  return { ...statusDto(), selected_node: sel, selected_stale: stale };
 }
 
 let container: HTMLDivElement;
@@ -199,7 +213,7 @@ describe("ProxyPanel 子面板化骨架（T-B2-3 六字面）", () => {
     // rules 不用 textarea 内容做钉——React 把 value 设在属性上，textContent 不含它）
     const markers = {
       overview: ["运行模式", "检测到上次异常退出残留的系统代理", "存在原设置备份", "当前内核：sing-box", "换核与重启在「内核」子面板操作"],
-      nodes: ["测速（TCP）", "HK-A", "TO-HY2"],
+      nodes: ["测速全部（TCP）", "HK-A", "TO-HY2"],
       subs: ["添加并拉取", "主订阅"],
       rules: ["保存规则", "应用大陆直连预设", "兜底"],
       kernel: ["安装 wintun.dll（TUN 前置）", "内核按需下载", "xray-core"],
@@ -378,5 +392,76 @@ describe("订阅卡流量/到期头（T-B2-10）", () => {
     expect(container.textContent).not.toContain("已用");
     expect(container.textContent).not.toContain("剩余");
     expect(container.textContent).not.toContain("到期");
+  });
+});
+
+describe("出口选点与测速（T-B2-11）", () => {
+  const btns = (text: string) =>
+    Array.from(container.querySelectorAll("button")).filter(
+      (b) => b.textContent?.trim() === text,
+    );
+
+  it("nodeRow_select_invokesAndShowsExitBadge", async () => {
+    await mount();
+    await goto("nodes");
+    expect(btns("选定")).toHaveLength(3); // 正对照：每行出口选点钮在场
+    expect(container.textContent).not.toContain("手动出口");
+    vi.mocked(proxyStatus).mockResolvedValue(statusWithSel(["s1", "HK-B"]));
+    await click(btns("选定")[1] as Element);
+    expect(proxyNodeSelect).toHaveBeenCalledWith("s1", "HK-B");
+    expect(container.textContent).toContain("手动出口: HK-B");
+    // 被选行换成「出口」徽标：剩余选点钮 3→2
+    expect(btns("选定")).toHaveLength(2);
+  });
+
+  it("nodeRow_autoMode_clearsSelection", async () => {
+    await mount();
+    await goto("nodes");
+    // 先进手动态（选 HK-A），再走「切回自动」出口
+    vi.mocked(proxyStatus).mockResolvedValue(statusWithSel(["s1", "HK-A"]));
+    await click(btns("选定")[0] as Element);
+    expect(container.textContent).toContain("手动出口: HK-A");
+    const back = btnWithText(container, "切回自动");
+    expect(back).toBeTruthy();
+    vi.mocked(proxyStatus).mockResolvedValue(statusDto());
+    await click(back as Element);
+    expect(proxyNodeAuto).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("自动出口（urltest）");
+    expect(btnWithText(container, "切回自动")).toBeUndefined();
+    expect(btns("选定")).toHaveLength(3);
+  });
+
+  it("egressProbe_overviewLightOkAndFail", async () => {
+    await mount();
+    await goto("overview");
+    expect(container.textContent).toContain("未测");
+    vi.mocked(proxyEgressProbe).mockResolvedValue({ ok: true, ms: 123, status: 204 });
+    await click(btnWithText(container, "自检（HTTP 204）") as Element);
+    expect(proxyEgressProbe).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("出口连通");
+    expect(container.textContent).toContain("123 ms");
+    // Ok(ok:false) 是自检的正常失败结果而非命令错误 → 红灯而非 InlineError
+    vi.mocked(proxyEgressProbe).mockResolvedValue({ ok: false, ms: null, status: null });
+    await click(btnWithText(container, "自检（HTTP 204）") as Element);
+    expect(container.textContent).toContain("出口不通");
+    expect(container.textContent).not.toContain("出口连通");
+  });
+
+  it("delayRow_singleNodeFiltered", async () => {
+    await mount();
+    await goto("nodes");
+    vi.mocked(proxyDelayTest).mockResolvedValue([
+      { tag: "HK-A", sub_id: "s1", ms: 42 },
+      { tag: "HK-B", sub_id: "s1", ms: null },
+      { tag: "TO-HY2", sub_id: "s1", ms: 7 },
+    ]);
+    const testBtns = btns("TCP 测");
+    expect(testBtns).toHaveLength(3);
+    await click(testBtns[0] as Element);
+    // 红线：单节点测速零新命令——复用全量 proxy_delay_test，仅回写该行
+    expect(proxyDelayTest).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("42 ms");
+    expect(container.textContent).not.toContain("7 ms");
+    expect(container.textContent).not.toContain("不可达");
   });
 });

@@ -764,6 +764,20 @@ export interface ProxyStatusDto {
   kernels: ProxyKernelInfoDto[];
   /** geo 数据资产装机清单（内核区安装钮数据源） */
   artifacts: ProxyArtifactInfoDto[];
+  /** 手动选定的出口节点 [sub_id, tag]；null = 自动（urltest 组自选） */
+  selected_node: [string, string] | null;
+  /** 选定节点已被订阅更新删除（sticky 展示 + 消费侧回落首节点） */
+  selected_stale: boolean;
+}
+
+/** 出口自检结果（T-B2-11）：经本地 mixed 代理 GET gstatic 204；
+ * 内核未运行/TUN 态后端直接 BadState 错误上抛，不会给假 dto */
+export interface ProxyEgressProbeDto {
+  ok: boolean;
+  /** 往返毫秒；null = 请求未得出（连接层失败） */
+  ms: number | null;
+  /** HTTP 状态码；null = 未收到响应 */
+  status: number | null;
 }
 
 /** 订阅标准头流量信息（T-B2-10；面板未发头 = null，UI 不谎显） */
@@ -894,6 +908,18 @@ export function proxySetMode(mode: "off" | "system" | "tun"): Promise<void> {
 }
 export function proxyDelayTest(): Promise<ProxyNodeDelayDto[]> {
   return invoke("proxy_delay_test");
+}
+/** 选定/切换出口节点（T-B2-11）：后端 NotFound 拒幽灵节点；运行中换点即重启生效 */
+export function proxyNodeSelect(subId: string, tag: string): Promise<void> {
+  return invoke("proxy_node_select", { subId, tag });
+}
+/** 切回自动出口（urltest 组自选） */
+export function proxyNodeAuto(): Promise<void> {
+  return invoke("proxy_node_auto");
+}
+/** 出口自检：本地 mixed 代理 → gstatic 204；关闭态/TUN 后端 BadState 如实上抛 */
+export function proxyEgressProbe(): Promise<ProxyEgressProbeDto> {
+  return invoke("proxy_egress_probe");
 }
 export function proxyLogs(limit?: number): Promise<ProxyLogLineDto[]> {
   return invoke("proxy_logs", { limit });
