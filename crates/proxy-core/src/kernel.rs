@@ -91,7 +91,7 @@ pub trait KernelDriver: Send + Sync {
 }
 
 /// 已注册内核全集（T-B2-5/6 新增驱动 = 此处加臂 + sidecar AssetSpec 同步）
-pub const KERNEL_IDS: &[&str] = &["sing-box", "xray"];
+pub const KERNEL_IDS: &[&str] = &["sing-box", "xray", "mihomo"];
 
 /// 内核注册表：id → 驱动实例（exe 可以不存在——installed 由调用方按 exe_path 判定）。
 pub fn driver_for(bin_dir: &Path, id: &str) -> Result<Arc<dyn KernelDriver>> {
@@ -99,6 +99,9 @@ pub fn driver_for(bin_dir: &Path, id: &str) -> Result<Arc<dyn KernelDriver>> {
         "sing-box" => Ok(Arc::new(SingBoxDriver::new(bin_dir.join("sing-box.exe")))),
         "xray" => Ok(Arc::new(crate::xray::XrayDriver::new(
             bin_dir.join("xray.exe"),
+        ))),
+        "mihomo" => Ok(Arc::new(crate::mihomo::MihomoDriver::new(
+            bin_dir.join("mihomo.exe"),
         ))),
         other => Err(ProxyError::Kernel(format!("未知内核: {other}"))),
     }
@@ -380,7 +383,7 @@ mod tests {
 
     #[test]
     fn registry_xrayArm_landsSecondKernel() {
-        // T-B2-5 完成判据：注册表计数——三 id 中已落地 sing-box + xray 两臂
+        // T-B2-5 完成判据：注册表第二臂（第三臂 mihomo 由 T-B2-6 落地，见下方三臂齐测）
         let dir = std::path::Path::new("");
         assert!(KERNEL_IDS.contains(&"xray"));
         let d = driver_for(dir, "xray").expect("xray 必须可构造");
@@ -393,11 +396,27 @@ mod tests {
             !caps.tun && !caps.policy_groups && !caps.external_controller,
             "xray 能力表如实全关（09 §5.1-⑭ 核证）"
         );
-        // mihomo 尚未落地（T-B2-6）：注册表必须继续诚实拒
-        assert!(matches!(
-            driver_for(dir, "mihomo"),
-            Err(ProxyError::Kernel(_))
-        ));
+    }
+
+    #[test]
+    fn registry_mihomoArm_thirdKernelLanded() {
+        // T-B2-6 完成判据「三内核注册表齐」：三 id 全可解析
+        let dir = std::path::Path::new("");
+        assert_eq!(KERNEL_IDS, &["sing-box", "xray", "mihomo"]);
+        for id in KERNEL_IDS {
+            driver_for(dir, id)
+                .unwrap_or_else(|_| panic!("{id} 必须可构造（exe 存在性归 installed 判定）"));
+        }
+        let d = driver_for(dir, "mihomo").expect("mihomo 必须可构造");
+        assert_eq!(d.id(), "mihomo");
+        assert_eq!(d.display_name(), "mihomo (Clash 内核)");
+        // 09 ④ 裁定：文件名段=config.yaml，目录段=proxy/mihomo/ 子目录
+        assert_eq!(d.cfg_name(), "mihomo/config.yaml");
+        let caps = d.caps();
+        assert!(
+            caps.tun && caps.policy_groups && caps.external_controller,
+            "mihomo 能力表全开（09 §5.2 行字面）"
+        );
     }
 
     #[test]

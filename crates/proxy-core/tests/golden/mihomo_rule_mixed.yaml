@@ -1,0 +1,48 @@
+# NexusForge mihomo config (generated from IR; edit in-app, not on disk)
+mixed-port: 7890
+bind-address: "127.0.0.1"
+mode: rule
+log-level: warning
+external-controller: ""
+secret: ""
+tun:
+  enable: false
+  stack: mixed
+  device-name: "NexusForge0"
+  addresses:
+  - "172.19.0.1/30"
+proxies:
+  - name: "sub0aaaa:hk-1", server: "1.2.3.4", port: 8388, udp: true, type: ss, cipher: "aes-256-gcm", password: "p1"
+  - name: "sub0aaaa:tokyo-2", server: "example.com", port: 443, udp: true, type: trojan, password: "p2", tls: true, servername: "example.com"
+  - name: "sub1bbbb:lg-vless", server: "5.6.7.8", port: 8443, udp: true, type: vless, uuid: "c0ee752e-de1a-4fde-a6bf-0f04b1c9d6e3", flow: "xtls-rprx-vision", tls: true, servername: "cdn.example.net", network: ws, ws-path: "/rain"
+  - name: "sub1bbbb:fr-vmess", server: "9.9.9.9", port: 2053, udp: true, type: vmess, uuid: "8a4c2b1e-3f60-4a2d-9e5b-7c1d0f2a3b4c", alterId: 0, cipher: "auto", network: ws, ws-path: "/"
+proxy-groups:
+  - name: "AUTO"
+    type: url-test
+    proxies:
+      - "sub0aaaa:hk-1"
+      - "sub0aaaa:tokyo-2"
+      - "sub1bbbb:lg-vless"
+      - "sub1bbbb:fr-vmess"
+    url: "https://www.gstatic.com/generate_204"
+    interval: 300
+  - name: "NexusForge"
+    type: select
+    proxies:
+      - "AUTO"
+      - "sub0aaaa:hk-1"
+      - "sub0aaaa:tokyo-2"
+      - "sub1bbbb:lg-vless"
+      - "sub1bbbb:fr-vmess"
+rules:
+  - "IP-CIDR,10.0.0.0/8,DIRECT"
+  - "IP-CIDR,100.64.0.0/10,DIRECT"
+  - "IP-CIDR,127.0.0.0/8,DIRECT"
+  - "IP-CIDR,169.254.0.0/16,DIRECT"
+  - "IP-CIDR,172.16.0.0/12,DIRECT"
+  - "IP-CIDR,192.168.0.0/16,DIRECT"
+  - "IP-CIDR6,::1/128,DIRECT"
+  - "IP-CIDR6,fc00::/7,DIRECT"
+  - "DOMAIN-SUFFIX,.corp.example.com,DIRECT"
+  - "DOMAIN-SUFFIX,internal.local,DIRECT"
+  - "MATCH,NexusForge"

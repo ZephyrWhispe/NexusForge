@@ -641,6 +641,11 @@ impl ProxyService {
         )?;
         let rendered = driver.config_render(&ir_cfg)?;
         let cfg_path = self.proxy_dir.join(driver.cfg_name());
+        // mihomo 方言 config.yaml 住 proxy/mihomo/ 子目录（09 ④ -d 语义）：
+        // 通用建父目录，两臂方言（config.json/config-xray.json 在根）下为无害 no-op
+        if let Some(parent) = cfg_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(&cfg_path, rendered.as_bytes())?;
 
         let weak = Arc::downgrade(self);
