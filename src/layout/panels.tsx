@@ -84,7 +84,7 @@ export const PANELS: Record<ModuleId, PanelDef> = {
   ocr: { panel: OcrPanel, subtitle: "识别 · 引擎状态 · 分行结果 · 一键复制" },
   proxy: {
     panel: ProxyPanel,
-    subtitle: "系统代理/TUN · 多内核框架（已注册 sing-box/xray/mihomo） · 订阅解析（8 协议） · 崩溃自动还原",
+    subtitle: "系统代理/TUN · 多内核框架（已注册 sing-box/xray/mihomo） · 订阅解析（8 协议 + Clash YAML 白名单） · 崩溃自动还原",
   },
   vault: { panel: VaultPanel, subtitle: "Argon2id 信封 · AES-256-GCM 条目 · TOTP" },
   file: {

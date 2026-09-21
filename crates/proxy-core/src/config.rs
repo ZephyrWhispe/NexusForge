@@ -66,6 +66,7 @@ mod tests {
                 server: "1.2.3.4".into(),
                 port: 8388,
                 sub_id: "sub1".into(),
+                groups: Vec::new(),
                 extra: serde_json::json!({"method": "aes-256-gcm", "password": "p1"}),
             },
             Node {
@@ -74,6 +75,7 @@ mod tests {
                 server: "example.com".into(),
                 port: 443,
                 sub_id: "sub1".into(),
+                groups: Vec::new(),
                 extra: serde_json::json!({"password": "p2", "sni": "example.com", "tls": true}),
             },
         ]

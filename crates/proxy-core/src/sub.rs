@@ -55,6 +55,12 @@ pub struct Node {
     pub sub_id: String,
     /// 协议细节（method/password/uuid/sni/flow...），生成出站时展开
     pub extra: serde_json::Value,
+    /// T-B2-8：Clash YAML 订阅中该节点所属 proxy-groups 组名（URI 路恒空）。
+    /// **[收窄 v1 登记]**（09 §5.2 行字面）：订阅内嵌组**不驱动** IR 选择器，
+    /// 仅供 UI 过滤列展示；组驱动策略组归 B7 与外部控制 API 同批。
+    /// nodes.json 新键 serde-default 零迁移；⑬ 单向门与 T-B2-7 同批登记。
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 impl Node {
@@ -67,8 +73,15 @@ impl Node {
     }
 }
 
-/// 解析订阅正文 → 节点列表。整体 base64 或纯文本多行 URI 自动探测。
+/// 解析订阅正文 → 节点列表。Clash YAML 正文探测优先；其余整体 base64 或纯文本多行 URI 自动探测。
 pub fn parse_subscription(content: &str, sub_id: &str) -> Result<Vec<Node>> {
+    // T-B2-8（09 §5.2 行字面）：行首顶层键 proxies:/proxy-groups: 探测**先于**
+    // b64 启发式——YAML 正文含 `:`/换行/中文本来就出不了 b64 字符集，但顺序
+    // 钉死防"某 YAML 恰好整体是合法 b64 字符集"的畸形重叠样本被误当 URI 解码。
+    if crate::clash_yaml::is_clash_yaml(content) {
+        let (nodes, _groups) = crate::clash_yaml::parse_clash_subscription(content, sub_id)?;
+        return Ok(nodes);
+    }
     let text = detect_and_decode(content);
     let mut nodes = Vec::new();
     let mut unknown = 0usize;
@@ -159,6 +172,7 @@ fn parse_ss(rest: &str, sub_id: &str) -> Result<Node> {
             server: host,
             port,
             sub_id: sub_id.into(),
+            groups: Vec::new(),
             extra,
         });
     }
@@ -177,6 +191,7 @@ fn parse_ss(rest: &str, sub_id: &str) -> Result<Node> {
         server: host,
         port,
         sub_id: sub_id.into(),
+        groups: Vec::new(),
         extra: serde_json::json!({ "method": method, "password": password }),
     })
 }
@@ -202,6 +217,7 @@ fn parse_vmess(rest: &str, sub_id: &str) -> Result<Node> {
         server,
         port,
         sub_id: sub_id.into(),
+        groups: Vec::new(),
         extra: serde_json::json!({
             "uuid": v["id"].as_str().unwrap_or_default(),
             "alter_id": v["aid"].as_u64().unwrap_or(0),
@@ -290,6 +306,7 @@ fn parse_authority(rest: &str, sub_id: &str, kind: NodeKind) -> Result<Node> {
         server: host,
         port,
         sub_id: sub_id.into(),
+        groups: Vec::new(),
         extra,
     })
 }
@@ -331,6 +348,7 @@ fn parse_hy2(rest: &str, sub_id: &str) -> Result<Node> {
         server: host,
         port,
         sub_id: sub_id.into(),
+        groups: Vec::new(),
         extra,
     })
 }
@@ -368,6 +386,7 @@ fn parse_tuic(rest: &str, sub_id: &str) -> Result<Node> {
         server: host,
         port,
         sub_id: sub_id.into(),
+        groups: Vec::new(),
         extra,
     })
 }
@@ -405,6 +424,7 @@ fn parse_wg(rest: &str, sub_id: &str) -> Result<Node> {
         server: host,
         port,
         sub_id: sub_id.into(),
+        groups: Vec::new(),
         extra,
     })
 }
@@ -448,6 +468,7 @@ fn parse_ssr(rest: &str, sub_id: &str) -> Result<Node> {
         server: segs[0].to_string(),
         port,
         sub_id: sub_id.into(),
+        groups: Vec::new(),
         extra,
     })
 }
@@ -798,6 +819,7 @@ mod tests {
             server: "example.com".into(),
             port: 443,
             sub_id: "订阅中文标识abcdef".into(),
+            groups: Vec::new(),
             extra: serde_json::json!({"password": "p"}),
         };
         // chars().take(8)：6 个汉字 + a + b = 8 个字符（旧字节切片在此直接 panic）
@@ -808,5 +830,24 @@ mod tests {
             ..n
         };
         assert_eq!(m.outbound_tag(), "abc:节点一");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn subDetectsClashYaml_beforeB64Heuristic() {
+        // T-B2-8：正文含中文/冒号/换行（出得了 b64 字符集但走不进 URI 路）→
+        // 行首顶层键探测必须先接管，解析出节点并带上组归属
+        let yaml = "proxies:\n\
+- {name: 香港A, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: p1}\n\
+proxy-groups:\n\
+- {name: 落地, type: select, proxies: [香港A]}\n";
+        let nodes = super::parse_subscription(yaml, "sub0aaaa").unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].tag, "香港A");
+        assert_eq!(nodes[0].groups, vec!["落地".to_string()]);
+        // 正控对立面：URI 多行正文不受探测分支影响（旧路原样）
+        let uri =
+            "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#s1\ntrojan://pw@ex.com:443#t1";
+        assert_eq!(super::parse_subscription(uri, "sub0aaaa").unwrap().len(), 2);
     }
 }

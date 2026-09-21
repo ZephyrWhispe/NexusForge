@@ -21,6 +21,7 @@ fn golden_nodes() -> Vec<Node> {
             server: "1.2.3.4".into(),
             port: 8388,
             sub_id: "sub0aaaabbbbcccc".into(),
+            groups: Vec::new(),
             extra: serde_json::json!({ "method": "aes-256-gcm", "password": "p1" }),
         },
         Node {
@@ -29,6 +30,7 @@ fn golden_nodes() -> Vec<Node> {
             server: "example.com".into(),
             port: 443,
             sub_id: "sub0aaaabbbbcccc".into(),
+            groups: Vec::new(),
             extra: serde_json::json!({ "password": "p2", "sni": "example.com", "tls": true }),
         },
         Node {
@@ -37,6 +39,7 @@ fn golden_nodes() -> Vec<Node> {
             server: "5.6.7.8".into(),
             port: 8443,
             sub_id: "sub1bbbbccccdddd".into(),
+            groups: Vec::new(),
             extra: serde_json::json!({
                 "uuid": "c0ee752e-de1a-4fde-a6bf-0f04b1c9d6e3",
                 "tls": true,
@@ -52,6 +55,7 @@ fn golden_nodes() -> Vec<Node> {
             server: "9.9.9.9".into(),
             port: 2053,
             sub_id: "sub1bbbbccccdddd".into(),
+            groups: Vec::new(),
             extra: serde_json::json!({
                 "uuid": "8a4c2b1e-3f60-4a2d-9e5b-7c1d0f2a3b4c",
                 "security": "auto",

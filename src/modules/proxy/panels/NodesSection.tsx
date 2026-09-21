@@ -59,6 +59,10 @@ export default function NodesSection({
                 <TableRow key={`${n.sub_id}|${n.tag}`}>
                   <TableCell>
                     <span className={styles.mono}>{n.tag}</span>
+                    {/* T-B2-8 组名过滤列（订阅内嵌 proxy-groups 归属；URI 订阅恒空即不渲染） */}
+                    {n.groups.length > 0 && (
+                      <div className={styles.muted}>组: {n.groups.join(" · ")}</div>
+                    )}
                   </TableCell>
                   <TableCell>{n.kind}</TableCell>
                   <TableCell>

@@ -770,6 +770,8 @@ export interface ProxyNodeDto {
   server: string;
   port: number;
   sub_id: string;
+  /** Clash YAML 订阅内该节点所属 proxy-groups 组名（T-B2-8；URI 订阅恒空） */
+  groups: string[];
 }
 
 export interface ProxyNodeDelayDto {

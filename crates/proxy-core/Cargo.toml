@@ -19,3 +19,4 @@ base64 = { workspace = true }
 zip = { workspace = true }
 # rustls：不受本模块自身开启的系统代理影响（自举下载内核/订阅）
 reqwest = { workspace = true }
+yaml-rust2 = "0.13.0"

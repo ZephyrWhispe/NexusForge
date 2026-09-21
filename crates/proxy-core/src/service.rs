@@ -128,6 +128,9 @@ pub struct NodeDto {
     pub server: String,
     pub port: u16,
     pub sub_id: String,
+    /// T-B2-8：Clash YAML 订阅内该节点所属 proxy-groups 组名（UI 过滤列；
+    /// URI 路订阅恒空数组，收窄登记见 clash_yaml 模块头）
+    pub groups: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -405,6 +408,7 @@ impl ProxyService {
                 server: n.server.clone(),
                 port: n.port,
                 sub_id: n.sub_id.clone(),
+                groups: n.groups.clone(),
             })
             .collect()
     }
@@ -1102,6 +1106,7 @@ mod tests {
             server: "127.0.0.1".into(),
             port: 9,
             sub_id: "sub-test".into(),
+            groups: Vec::new(),
             extra: serde_json::Value::Null,
         });
     }

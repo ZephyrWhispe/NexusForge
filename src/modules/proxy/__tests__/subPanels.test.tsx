@@ -50,9 +50,9 @@ vi.mock("../../../stores/confirm", async (importOriginal) => {
 });
 
 const NODES: ProxyNodeDto[] = [
-  { tag: "HK-A", kind: "vmess", server: "1.2.3.4", port: 443, sub_id: "s1" },
-  { tag: "HK-B", kind: "shadowsocks", server: "5.6.7.8", port: 8388, sub_id: "s1" },
-  { tag: "TO-HY2", kind: "hysteria2", server: "9.10.11.12", port: 8443, sub_id: "s1" },
+  { tag: "HK-A", kind: "vmess", server: "1.2.3.4", port: 443, sub_id: "s1", groups: ["HK 分组"] },
+  { tag: "HK-B", kind: "shadowsocks", server: "5.6.7.8", port: 8388, sub_id: "s1", groups: [] },
+  { tag: "TO-HY2", kind: "hysteria2", server: "9.10.11.12", port: 8443, sub_id: "s1", groups: [] },
 ];
 
 const LOGS = [

@@ -468,6 +468,7 @@ mod tests {
                 server: "1.2.3.4".into(),
                 port: 8388,
                 sub_id: "sub0aaaabbbbcccc".into(),
+                groups: Vec::new(),
                 extra: json!({ "method": "aes-256-gcm", "password": "p1" }),
             },
             Node {
@@ -476,6 +477,7 @@ mod tests {
                 server: "example.com".into(),
                 port: 443,
                 sub_id: "sub0aaaabbbbcccc".into(),
+                groups: Vec::new(),
                 extra: json!({ "password": "p2", "sni": "example.com", "tls": true }),
             },
         ]
@@ -619,6 +621,7 @@ mod tests {
             server: "1.1.1.1".into(),
             port: 443,
             sub_id: "sub0aaaabbbbcccc".into(),
+            groups: Vec::new(),
             extra,
         };
         let cases = [

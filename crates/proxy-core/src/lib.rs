@@ -6,6 +6,7 @@
 //! 高危安全语义：系统代理还原挂四点 —— panic hook / module stop / `--restore-proxy`
 //! / 启动扫描（[`sysproxy::restore_if_ours`]，覆盖 kill -9 残留）。
 
+pub mod clash_yaml;
 pub mod config;
 pub mod error;
 pub mod ir;
