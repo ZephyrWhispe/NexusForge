@@ -487,6 +487,14 @@ impl ProxyService {
     }
 
     fn enter_tun(self: &Arc<Self>) -> Result<()> {
+        // 内核能力门禁（T-B2-5 红线）：caps.tun=false 的内核（xray 主线）在一切
+        // 权限/组件噪音之前如实拒——用户先看到的是"换核"这一真正解法
+        let kernel = self.inner.read().kernel.clone();
+        if !self.driver(&kernel)?.caps().tun {
+            return Err(ProxyError::BadState(
+                "当前内核不支持 TUN：请换 sing-box/mihomo".into(),
+            ));
+        }
         if !self.sp.is_admin() {
             return Err(ProxyError::Permission("TUN 模式需要管理员权限".into()));
         }
@@ -657,14 +665,16 @@ impl ProxyService {
             })
         });
 
-        // 健康探活：mixed 模式等端口可连；TUN 无本地端口 → 等进程存活即认为就绪
+        // 健康探活：mixed 模式等端口可连（端口由驱动 probe_port 决议：xray 双入站
+        // 时即 http 端口，恒等于 mixed_port）；TUN 无本地端口 → 等进程存活即认为就绪
         let healthy = if tun {
             std::thread::sleep(Duration::from_millis(300));
             handle.alive()
         } else {
+            let probe = driver.probe_port(&ir_cfg);
             let deadline = std::time::Instant::now() + Duration::from_millis(HEALTH_WAIT_MS);
             loop {
-                if handle.health_check(port) {
+                if handle.health_check(probe) {
                     break true;
                 }
                 if !handle.alive() {
@@ -878,23 +888,35 @@ mod tests {
         start_attempts: AtomicUsize,
         /// 置位后下一次 start 强制失败（缺陷⑧复现：运行中再入失败）
         fail_next: AtomicBool,
+        /// T-B2-5：能力位 tun=false 的建模（xray 主线门禁红线）
+        tun_cap: bool,
     }
 
     impl TestKernelDriver {
         fn new(id: &'static str, cfg: &'static str) -> StdArc<Self> {
-            Self::with(id, cfg, true)
+            Self::with(id, cfg, true, true)
         }
         /// 起核必败驱动（换核回滚红线专用）
         fn failing(id: &'static str, cfg: &'static str) -> StdArc<Self> {
-            Self::with(id, cfg, false)
+            Self::with(id, cfg, false, true)
         }
-        fn with(id: &'static str, cfg: &'static str, succeeds: bool) -> StdArc<Self> {
+        /// 无 TUN 能力驱动（xray 门禁红线专用，真实形态=全关能力表）
+        fn no_tun(id: &'static str, cfg: &'static str) -> StdArc<Self> {
+            Self::with(id, cfg, true, false)
+        }
+        fn with(
+            id: &'static str,
+            cfg: &'static str,
+            succeeds: bool,
+            tun_cap: bool,
+        ) -> StdArc<Self> {
             StdArc::new(Self {
                 id,
                 cfg,
                 succeeds,
                 start_attempts: AtomicUsize::new(0),
                 fail_next: AtomicBool::new(false),
+                tun_cap,
             })
         }
     }
@@ -918,7 +940,7 @@ mod tests {
         }
         fn caps(&self) -> KernelCaps {
             KernelCaps {
-                tun: true,
+                tun: self.tun_cap,
                 policy_groups: false,
                 external_controller: false,
             }
@@ -1334,6 +1356,45 @@ mod tests {
         assert!(!s.kernel_running);
         assert!(!sp.read().unwrap().enable, "失败后系统代理已如实还原");
         drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- T-B2-5：xray 能力门禁红线 ----------------
+
+    #[test]
+    fn xrayTun_rejectedWithHonestError() {
+        // 红线：caps.tun=false 内核请求 TUN，必须在权限/组件检查**之前**如实拒——
+        // 管理员与 wintun 全部就位仍须拒，且文案给出真正解法"换核"
+        let (svc, sp, dir) = open_service("xray_tun");
+        sp.admin.store(true, Ordering::SeqCst);
+        std::fs::write(dir.join("proxy").join("bin").join("wintun.dll"), b"mock").unwrap();
+        let x = TestKernelDriver::no_tun("xray", "config-xray.json");
+        inject(&svc, x.clone());
+        add_demo_node(&svc);
+        svc.set_kernel("xray").unwrap(); // Off 态换核 = 纯持久化不起核
+        let e = svc.set_mode(Mode::Tun).unwrap_err();
+        match e {
+            ProxyError::BadState(msg) => {
+                assert!(
+                    msg.contains("不支持 TUN") && msg.contains("换 sing-box/mihomo"),
+                    "{msg}"
+                )
+            }
+            other => panic!("TUN 能力拒必须是 BadState（非 Permission、非起核），实得 {other:?}"),
+        }
+        assert_eq!(
+            x.start_attempts.load(Ordering::SeqCst),
+            0,
+            "被拒内核必须零起核（拒在一切副作用之前）"
+        );
+        let s = svc.status();
+        assert_eq!(s.mode, "off", "拒后状态如实 Off");
+        assert_eq!(s.kernel, "xray", "拒绝不回滚内核选择");
+        assert!(
+            !dir.join("proxy").join("config-xray.json").exists(),
+            "被拒配置不得落盘"
+        );
+        assert!(!sp.read().unwrap().enable, "系统代理全程未动");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

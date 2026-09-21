@@ -16,6 +16,7 @@ pub mod sidecar;
 pub mod singbox;
 pub mod sub;
 pub mod sysproxy;
+pub mod xray;
 
 pub use config::RouteMode;
 pub use error::{ProxyError, Result};
@@ -24,3 +25,4 @@ pub use module::ProxyModule;
 pub use service::{Mode, NodeDelayDto, NodeDto, ProxyService, StatusDto, Sub};
 pub use sidecar::Manifest;
 pub use sub::{Node, NodeKind};
+pub use xray::XrayDriver;

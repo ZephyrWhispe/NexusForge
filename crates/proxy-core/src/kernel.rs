@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{ProxyError, Result};
-use crate::ir::IrConfig;
+use crate::ir::{IrConfig, IrInbound};
 use crate::sub::NodeKind;
 
 const LOG_CAP: usize = 500;
@@ -66,6 +66,16 @@ pub trait KernelDriver: Send + Sync {
     fn config_render(&self, ir: &IrConfig) -> Result<String>;
     /// 组装进程命令（`work_dir` 供 mihomo 类 `-d` 语义；`cfg` 为已写盘配置路径）
     fn build_command(&self, work_dir: &Path, cfg: &Path) -> Command;
+    /// 健康探活端口（T-B2-5）：默认 = mixed 入站端口（sing-box 直接监听该端口；
+    /// xray 的 http 入站恒等于 mixed_port，见 xray.rs `xrayDualInbound_probePortHttp`）。
+    /// TUN 入站无本地端口 → 0（service 侧走 alive() 分支，此值不被消费）。
+    fn probe_port(&self, ir: &IrConfig) -> u16 {
+        match &ir.inbound {
+            IrInbound::Mixed { port, .. } => *port,
+            IrInbound::Tun { .. } => 0,
+        }
+    }
+
     /// 启动内核。`on_exit` 在进程非预期退出（非 [`stop`](KernelHandle::stop) 触发）时以退出码回调。
     fn start(&self, work_dir: &Path, cfg: &Path, on_exit: ExitCb) -> Result<KernelHandle> {
         let exe = self.exe_path();
@@ -81,12 +91,15 @@ pub trait KernelDriver: Send + Sync {
 }
 
 /// 已注册内核全集（T-B2-5/6 新增驱动 = 此处加臂 + sidecar AssetSpec 同步）
-pub const KERNEL_IDS: &[&str] = &["sing-box"];
+pub const KERNEL_IDS: &[&str] = &["sing-box", "xray"];
 
 /// 内核注册表：id → 驱动实例（exe 可以不存在——installed 由调用方按 exe_path 判定）。
 pub fn driver_for(bin_dir: &Path, id: &str) -> Result<Arc<dyn KernelDriver>> {
     match id {
         "sing-box" => Ok(Arc::new(SingBoxDriver::new(bin_dir.join("sing-box.exe")))),
+        "xray" => Ok(Arc::new(crate::xray::XrayDriver::new(
+            bin_dir.join("xray.exe"),
+        ))),
         other => Err(ProxyError::Kernel(format!("未知内核: {other}"))),
     }
 }
@@ -363,6 +376,28 @@ mod tests {
         assert_eq!(d.id(), "sing-box");
         assert_eq!(d.cfg_name(), "config.json");
         assert_eq!(d.supported_kinds().len(), 4);
+    }
+
+    #[test]
+    fn registry_xrayArm_landsSecondKernel() {
+        // T-B2-5 完成判据：注册表计数——三 id 中已落地 sing-box + xray 两臂
+        let dir = std::path::Path::new("");
+        assert!(KERNEL_IDS.contains(&"xray"));
+        let d = driver_for(dir, "xray").expect("xray 必须可构造");
+        assert_eq!(d.id(), "xray");
+        assert_eq!(d.display_name(), "Xray-core");
+        assert_eq!(d.cfg_name(), "config-xray.json");
+        assert_eq!(d.supported_kinds().len(), 4);
+        let caps = d.caps();
+        assert!(
+            !caps.tun && !caps.policy_groups && !caps.external_controller,
+            "xray 能力表如实全关（09 §5.1-⑭ 核证）"
+        );
+        // mihomo 尚未落地（T-B2-6）：注册表必须继续诚实拒
+        assert!(matches!(
+            driver_for(dir, "mihomo"),
+            Err(ProxyError::Kernel(_))
+        ));
     }
 
     #[test]

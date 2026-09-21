@@ -1,0 +1,144 @@
+{
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 7890,
+      "protocol": "http",
+      "tag": "http-in"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 7891,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "tag": "socks-in"
+    }
+  ],
+  "log": {
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "1.2.3.4",
+            "method": "aes-256-gcm",
+            "password": "p1",
+            "port": 8388
+          }
+        ]
+      },
+      "tag": "sub0aaaa:hk-1"
+    },
+    {
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "example.com",
+            "password": "p2",
+            "port": 443
+          }
+        ]
+      },
+      "streamSettings": {
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "example.com"
+        }
+      },
+      "tag": "sub0aaaa:tokyo-2"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "5.6.7.8",
+            "port": 8443,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "id": "c0ee752e-de1a-4fde-a6bf-0f04b1c9d6e3"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "cdn.example.net"
+        },
+        "wsSettings": {
+          "path": "/rain"
+        }
+      },
+      "tag": "sub1bbbb:lg-vless"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "9.9.9.9",
+            "port": 2053,
+            "users": [
+              {
+                "alterId": 0,
+                "id": "8a4c2b1e-3f60-4a2d-9e5b-7c1d0f2a3b4c",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/"
+        }
+      },
+      "tag": "sub1bbbb:fr-vmess"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "direct"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "ip": [
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.168.0.0/16",
+          "::1/128",
+          "fc00::/7"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "suffix:.corp.example.com",
+          "suffix:internal.local"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      }
+    ]
+  }
+}
