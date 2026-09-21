@@ -19,7 +19,7 @@ pub fn render(ir: &IrConfig) -> Result<Value> {
         .iter()
         .map(render_outbound)
         .collect::<Result<Vec<Value>>>()?;
-    Ok(json!({
+    let mut cfg = json!({
         "log": { "level": "info", "timestamp": true },
         "dns": render_dns(ir),
         "inbounds": render_inbound(&ir.inbound),
@@ -29,7 +29,41 @@ pub fn render(ir: &IrConfig) -> Result<Value> {
             "final": ir.route.final_target,
             "auto_detect_interface": true,
         },
-    }))
+    });
+    // T-B2-10：geo 规则在场才注入 rule_set 数据面块——与 block 出口"仅被引用才
+    // 注入"同款纪律：预声明不存在的本地文件会让内核在无 geo 规则时也起不来。
+    if let Some(sets) = render_rule_sets(ir) {
+        cfg["rule_set"] = Value::Array(sets);
+    }
+    Ok(cfg)
+}
+
+/// geo 规则引用的码表 → sing-box 本地 rule_set 条目。通道核证⑭（2026-09-21，
+/// releases/expanded_assets）：SagerNet/sing-geoip·geosite 官方 release 只发布
+/// `.db` 编译体（**无 .srs 资产**，任务书预测的 srs 通道不存在）→ 定档 geoip.db/
+/// geosite.db，rule_set format=binary（.db 即 sing-box 二进制编译格式）。
+/// 路径相对配置文件所在 proxy/ 目录解析。
+fn render_rule_sets(ir: &IrConfig) -> Option<Vec<Value>> {
+    let mut cats: Vec<&'static str> = Vec::new();
+    for r in &ir.route.rules {
+        if let Some(c) = r.field.geo_category() {
+            if !cats.contains(&c) {
+                cats.push(c);
+            }
+        }
+    }
+    (!cats.is_empty()).then(|| {
+        cats.iter()
+            .map(|c| {
+                json!({
+                    "type": "local",
+                    "format": "binary",
+                    "path": format!("geo/{c}.db"),
+                    "tag": c,
+                })
+            })
+            .collect()
+    })
 }
 
 /// 方言能力入口（T-B2-2 trait config_render 消费）：sing-box 全量支持 v1 IR，
@@ -97,13 +131,17 @@ fn render_outbound(outbound: &IrOutbound) -> Result<Value> {
 }
 
 fn render_rule(rule: &IrRule) -> Value {
-    let mut r = match rule.field {
+    let mut r = match &rule.field {
         IrRuleField::IpIsPrivate => json!({ "ip_is_private": true }),
         IrRuleField::Domain => json!({ "domain": rule.patterns }),
         IrRuleField::DomainSuffix => json!({ "domain_suffix": rule.patterns }),
         IrRuleField::Keyword => json!({ "keyword": rule.patterns }),
         IrRuleField::IpCidr => json!({ "ip_cidr": rule.patterns }),
         IrRuleField::Process => json!({ "process_name": rule.patterns }),
+        // T-B2-10（09 §5.2 行字面形）：rule_set 引用 + 单码 payload，
+        // 数据面块由 render_rule_sets 在场注入（缺件预检在 service 层）
+        IrRuleField::GeoSite(code) => json!({ "rule_set": ["geosite"], "payload": code }),
+        IrRuleField::GeoIp(code) => json!({ "rule_set": ["geoip"], "payload": code }),
     };
     r["outbound"] = Value::String(rule.target.clone());
     r
@@ -374,5 +412,53 @@ mod tests {
             let ob = &cfg["outbounds"][2];
             assert_eq!(ob["type"], singbox_type, "{} 出站 type 错位", kind.as_str());
         }
+    }
+
+    #[test]
+    fn geoRules_singboxRenderRuleSet() {
+        // T-B2-10 红线：geo 规则在场才注入 rule_set 数据面块（.db binary 编译体，
+        // 核证⑭：官方通道无 .srs），引用规则=row literal 形 {rule_set,payload}
+        let nodes = [node(NodeKind::Shadowsocks)];
+        let rules = vec![
+            IrRule {
+                field: IrRuleField::GeoSite("cn".into()),
+                patterns: Vec::new(),
+                target: ir::TAG_DIRECT.into(),
+            },
+            IrRule {
+                field: IrRuleField::GeoIp("private".into()),
+                patterns: Vec::new(),
+                target: ir::TAG_PROXY.into(),
+            },
+        ];
+        let cfg = ir::build(7890, false, &nodes, &rules, ir::TAG_PROXY, &[]).unwrap();
+        let rendered = render(&cfg).unwrap();
+        assert_eq!(
+            rendered["rule_set"],
+            json!([
+                { "type": "local", "format": "binary", "path": "geo/geosite.db", "tag": "geosite" },
+                { "type": "local", "format": "binary", "path": "geo/geoip.db", "tag": "geoip" }
+            ]),
+            "rule_set 段=按引用序的 local/binary 条目：{rendered}"
+        );
+        let geo: Vec<&Value> = rendered["route"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("rule_set").is_some())
+            .collect();
+        assert_eq!(
+            geo,
+            vec![
+                &json!({ "payload": "cn", "rule_set": ["geosite"], "outbound": "direct" }),
+                &json!({ "payload": "private", "rule_set": ["geoip"], "outbound": "proxy" }),
+            ]
+        );
+        // 负对照：无 geo 规则 → 全配置无 rule_set 键（三内核 golden 零漂移的机制面）
+        let plain = render(&ir_of(&nodes)).unwrap();
+        assert!(
+            plain.get("rule_set").is_none(),
+            "无 geo 规则不得混入数据面块：{plain}"
+        );
     }
 }

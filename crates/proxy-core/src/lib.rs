@@ -27,7 +27,7 @@ pub use kernel::{KernelDriver, KernelHandle, LogLine, SingBoxDriver};
 pub use mihomo::MihomoDriver;
 pub use module::ProxyModule;
 pub use rules::{RuleV2, RulesV2};
-pub use service::{Mode, NodeDelayDto, NodeDto, ProxyService, StatusDto, Sub};
+pub use service::{ArtifactStatusDto, Mode, NodeDelayDto, NodeDto, ProxyService, StatusDto, Sub};
 pub use sidecar::Manifest;
 pub use sub::{Node, NodeKind};
 pub use xray::XrayDriver;

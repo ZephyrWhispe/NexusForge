@@ -192,7 +192,7 @@ fn render_rule(rule: &IrRule, egress: &str) -> Value {
         TAG_PROXY | TAG_AUTO => egress,
         other => other,
     };
-    let mut v = match rule.field {
+    let mut v = match &rule.field {
         IrRuleField::IpIsPrivate => json!({ "type": "field", "ip": PRIVATE_CIDRS }),
         IrRuleField::Domain => {
             json!({ "type": "field", "domain": prefixed(&rule.patterns, "full:") })
@@ -207,6 +207,11 @@ fn render_rule(rule: &IrRule, egress: &str) -> Value {
         // 核证 xtls.github.io/config/routing.html：processName 为 Windows/macOS
         // 用户级字段，数组形态与 sing-box process_name 同构
         IrRuleField::Process => json!({ "type": "field", "processName": rule.patterns }),
+        // T-B2-10（09 §5.2 行字面 geo 规则段）：geoip/geosite 官方接受码数组；
+        // 数据面 = bin/geoip.dat+geosite.dat（xray-geoip/xray-geosite 资产，
+        // Binary 通道直存），缺件时 xray 启动即报错——service 层预检先于启动指路安装
+        IrRuleField::GeoSite(code) => json!({ "type": "field", "geosite": [code] }),
+        IrRuleField::GeoIp(code) => json!({ "type": "field", "geoip": [code] }),
     };
     v["outboundTag"] = json!(target);
     v
@@ -372,6 +377,15 @@ impl KernelDriver for XrayDriver {
 
     fn config_render(&self, ir: &IrConfig) -> Result<String> {
         Ok(serde_json::to_string_pretty(&render(ir)?)?)
+    }
+
+    /// xray 从可执行文件同目录解析 geoip.dat/geosite.dat（bin/ 下，Binary 通道资产）
+    fn geo_asset_ids(&self, cat: &str) -> &'static [&'static str] {
+        match cat {
+            "geosite" => &["xray-geosite"],
+            "geoip" => &["xray-geoip"],
+            _ => &[],
+        }
     }
 
     fn build_command(&self, _work_dir: &Path, cfg: &Path) -> Command {
@@ -567,5 +581,41 @@ mod tests {
         // mixed=65535 → socks=65536 越界，必须在渲染层诚实拒而非 panic/回绕
         let err = render(&mixed_ir(u16::MAX));
         assert!(matches!(err, Err(ProxyError::Config(_))), "{err:?}");
+    }
+
+    #[test]
+    fn xrayRender_geoFieldSegments_aux() {
+        // 辅证（非任务书字面名）：geo 规则 → xray field 段 geosite/geoip 数组形态；
+        // 数据面 dat 缺件预检在 service 层（geo_asset_ids=xray-geoip/xray-geosite）
+        let rules = vec![
+            IrRule {
+                field: IrRuleField::GeoSite("cn".into()),
+                patterns: Vec::new(),
+                target: "direct".into(),
+            },
+            IrRule {
+                field: IrRuleField::GeoIp("private".into()),
+                patterns: Vec::new(),
+                target: "proxy".into(),
+            },
+        ];
+        let cfg = ir::build(7890, false, &nodes(), &rules, "proxy", &[]).unwrap();
+        let rendered = render(&cfg).unwrap();
+        let got: Vec<&Value> = rendered["routing"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("geosite").is_some() || r.get("geoip").is_some())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                &json!({ "type": "field", "geosite": ["cn"], "outboundTag": "direct" }),
+                // proxy 目标经 resolve_egress 就地改写为真实出口节点 tag（xray 无策略组，
+                // T-B2-5 remap 纪律对 geo 段同样生效——expected 首节点兜底即出口）
+                &json!({ "type": "field", "geoip": ["private"], "outboundTag": "sub0aaaa:hk-1" }),
+            ],
+            "{rendered}"
+        );
     }
 }

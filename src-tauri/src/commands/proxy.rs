@@ -59,6 +59,21 @@ pub async fn proxy_wintun_install(state: State<'_, HostState>) -> Result<(), App
     svc.wintun_install().await.map_err(proxy_err)
 }
 
+/// 安装 geo 数据资产（T-B2-10，Binary 通道）：未知 id 触网前如实拒；
+/// checksum_url 在场 fail-closed 校验；TOFU pin 漂移未 ack → Integrity 拒
+/// （ack_pin 的 UI 确认通道归 B9，本行保证篡改面不因缺 UI 而静默放行）
+#[tauri::command]
+pub async fn proxy_artifact_install(
+    artifact: String,
+    ack_pin: Option<bool>,
+    state: State<'_, HostState>,
+) -> Result<proxy_core::Manifest, AppError> {
+    let svc = proxy_service(&state)?;
+    svc.artifact_install(&artifact, ack_pin.unwrap_or(false))
+        .await
+        .map_err(proxy_err)
+}
+
 /// 选定/切换代理内核（T-B2-2）：未运行 = 只落选择；运行中 = 新核起、失败自动回滚旧核
 #[tauri::command]
 pub async fn proxy_kernel_select(

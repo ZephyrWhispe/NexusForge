@@ -85,6 +85,23 @@ pub fn render(ir: &IrConfig) -> Result<String> {
     out.push_str(&format!("bind-address: {}\n", yaml_scalar(&bind)));
     out.push_str("mode: rule\n");
     out.push_str("log-level: warning\n");
+    // T-B2-10 原生托管（09 §5.2 行字面）：geo 规则在场才声明自刷键——无 geo 的
+    // golden 配置零漂移；有 geo 时内核自刷 workdir 的 Country.mmdb/geosite.dat
+    //（小时单位=方言官方语义），应用 artifact 通道=轨兜底。
+    // 键名核证⑭（wiki.metacubex.one/config/general，2026-09-21）：官方键为
+    // **geo-update-interval**（任务书写的 geo-auto-update-interval 不存在）；
+    // profile 段官方子键 store-selected/store-fake-ip（无 "store"）——
+    // store-selected=策略组手选值持久化（内核重启不丢选定）。
+    if ir
+        .route
+        .rules
+        .iter()
+        .any(|r| r.field.geo_category().is_some())
+    {
+        out.push_str("geo-auto-update: true\n");
+        out.push_str("geo-update-interval: 48\n");
+        out.push_str("profile:\n  store-selected: true\n");
+    }
     // external-controller 地基：v1 恒禁用 + secret 留位（00-spec 门禁，UI 归 B7）
     out.push_str("external-controller: \"\"\n");
     out.push_str("secret: \"\"\n");
@@ -200,7 +217,7 @@ fn render_rule_lines(r: &IrRule, target: &str) -> Result<Vec<String>> {
         out.push(format!("{kind},{value},{target}"));
         Ok(())
     };
-    match r.field {
+    match &r.field {
         IrRuleField::IpIsPrivate => {
             for cidr in PRIVATE_CIDRS {
                 one(
@@ -245,6 +262,11 @@ fn render_rule_lines(r: &IrRule, target: &str) -> Result<Vec<String>> {
                 one("PROCESS-NAME", p)?;
             }
         }
+        // T-B2-10（09 §5.2 行字面 GEOSITE,xxx,target）：一码一行；数据面
+        // = workdir 的 Country.mmdb（GEOIP）+ geosite.dat（GEOSITE），
+        // artifact 通道安装或 geo-auto-update 内核自刷（缺件预检在 service 层）
+        IrRuleField::GeoSite(code) => one("GEOSITE", code)?,
+        IrRuleField::GeoIp(code) => one("GEOIP", code)?,
     }
     Ok(out)
 }
@@ -449,6 +471,12 @@ impl KernelDriver for MihomoDriver {
         render(ir)
     }
 
+    /// 原生托管（geo-auto-update: true，渲染于 geo 规则在场时）：内核启动后自取
+    /// Country.mmdb/geosite.dat 到 `-d` 工作目录，故本地预检恒空集是诚实形态而非漏网。
+    fn geo_asset_ids(&self, _cat: &str) -> &'static [&'static str] {
+        &[]
+    }
+
     /// `-d <config 所在目录>`（与 sing-box/xray 的 `-c file` 语义分野；
     /// work_dir 参数是 proxy 根，mihomo 的工作目录必须是配置的父目录）
     fn build_command(&self, _work_dir: &Path, cfg: &Path) -> Command {
@@ -492,12 +520,17 @@ mod tests {
         ir::build(7890, false, &nodes(), &[], TAG_PROXY, &[]).unwrap()
     }
 
-    /// 骨架顶层键全集（新键出现=注入开洞或方言面扩张，测试即门）
+    /// 骨架顶层键全集（新键出现=注入开洞或方言面扩张，测试即门）。
+    /// T-B2-10 追加的三枚 geo 键是条件渲染位（geo 规则在场才输出），
+    /// 白名单语义=合法键全集而非单次输出集，纳入不减注入防线。
     const TOP_KEYS: &[&str] = &[
         "mixed-port:",
         "bind-address:",
         "mode:",
         "log-level:",
+        "geo-auto-update:",
+        "geo-update-interval:",
+        "profile:",
         "external-controller:",
         "secret:",
         "tun:",
@@ -712,5 +745,45 @@ mod tests {
         );
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, ["-d", "C:\\appdata\\proxy\\mihomo"]);
+    }
+
+    #[test]
+    fn geoRules_mihomoNativeAutoUpdate() {
+        // T-B2-10 红线：GEOSITE/GEOIP 行式 + 原生托管自刷键（geo 规则在场才声明，
+        // 无 geo 的既有 golden/骨架输出零漂移）
+        let rules = vec![
+            IrRule {
+                field: IrRuleField::GeoSite("cn".into()),
+                patterns: Vec::new(),
+                target: TAG_DIRECT.into(),
+            },
+            IrRule {
+                field: IrRuleField::GeoIp("private".into()),
+                patterns: Vec::new(),
+                target: TAG_PROXY.into(),
+            },
+        ];
+        let cfg = ir::build(7890, false, &nodes(), &rules, TAG_PROXY, &[]).unwrap();
+        let y = render(&cfg).unwrap();
+        assert!(y.contains("GEOSITE,cn,DIRECT"), "一码一行：\n{y}");
+        assert!(
+            y.contains(&format!("GEOIP,private,{GROUP_PROXY}")),
+            "GEOIP 行指组：\n{y}"
+        );
+        assert!(y.contains("geo-auto-update: true"), "原生托管键（行字面）");
+        assert!(
+            y.contains("geo-update-interval: 48"),
+            "官方键名核证⑭：非任务书预测的 geo-auto-update-interval"
+        );
+        assert!(
+            y.contains("profile:\n  store-selected: true"),
+            "策略组手选值持久化（官方子键 store-selected）"
+        );
+        assert_no_unexpected_top_key(&y);
+        // 负对照：无 geo 规则 → 三键全不出现（golden 零漂移的机制面）
+        let plain = render(&mixed_ir()).unwrap();
+        for banned in ["geo-auto-update", "geo-update-interval", "store-selected"] {
+            assert!(!plain.contains(banned), "无 geo 规则不得出现 {banned}");
+        }
     }
 }

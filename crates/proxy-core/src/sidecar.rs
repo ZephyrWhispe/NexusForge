@@ -120,6 +120,212 @@ pub fn asset_for(id: &str) -> Result<&'static AssetSpec> {
         })
 }
 
+// ---------------- T-B2-10：geo 数据面资产（Binary 原始文件通道） ----------------
+
+/// geo 数据资产规格：与内核 zip 通道分野——release 资产本身就是数据文件
+/// （.db/.dat/.mmdb），**非 zip**，恒写 `proxy_dir/sub_dir/file_name`。
+/// 通道核证⑭（2026-09-21，releases/latest + HEAD 实测）：
+/// - SagerNet/sing-geoip(20260912)/sing-geosite(20260920133716) 只发 `.db`（无 srs）；
+/// - XTLS/Xray-core release **不含 geo dat**（任务书预测落空）→ 官方镜像通道改用
+///   **Loyalsoldier/v2ray-rules-dat**（Xray 上游官方规则库镜像，latest=202609202346，
+///   geoip.dat/geosite.dat 直链 200 实测）；
+/// - mihomo geo 文件住 **MetaCubeX/meta-rules-dat**（mihomo 本体 release 无 geo 资产；
+///   其原生自刷默认源即 testingcf.jsdelivr …meta-rules-dat@release/country.mmdb，
+///   本通道取 GitHub 直连同仓库）。
+#[derive(Clone, Debug)]
+pub struct GeoAsset {
+    pub id: &'static str,
+    /// UI 展示名（状态表数据驱动渲染，前端零特例）
+    pub label: &'static str,
+    /// proxy_dir 下子目录："geo"（sing-box 共享）|"bin"（xray 读 exe 同级）|
+    /// "mihomo"（内核 workdir，只认自家目录——geo/ 落点方言不消费，故按消费点落）
+    pub sub_dir: &'static str,
+    pub file_name: &'static str,
+    pub url_for: fn(&str) -> String,
+    /// 官方 sha256sum 伴随件（有则装前强验，拒≠放行；无 = 仅 TOFU pin）
+    pub checksum_url: Option<fn(&str) -> String>,
+    pub default_version: &'static str,
+}
+
+pub fn singbox_geoip_url(v: &str) -> String {
+    format!("https://github.com/SagerNet/sing-geoip/releases/download/{v}/geoip.db")
+}
+pub fn singbox_geoip_sha_url(v: &str) -> String {
+    format!("https://github.com/SagerNet/sing-geoip/releases/download/{v}/geoip.db.sha256sum")
+}
+pub fn singbox_geosite_url(v: &str) -> String {
+    format!("https://github.com/SagerNet/sing-geosite/releases/download/{v}/geosite.db")
+}
+pub fn singbox_geosite_sha_url(v: &str) -> String {
+    format!("https://github.com/SagerNet/sing-geosite/releases/download/{v}/geosite.db.sha256sum")
+}
+pub fn xray_geoip_url(v: &str) -> String {
+    format!("https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/{v}/geoip.dat")
+}
+pub fn xray_geosite_url(v: &str) -> String {
+    format!("https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/{v}/geosite.dat")
+}
+/// meta-rules-dat 为滚动 latest 通道（无稳定版本号可锁）：pin 键恒 "latest"，
+/// 每次内容更新都会触发 TOFU 漂移确认——数据面更新本就是该通道的语义，如实呈现。
+pub fn mihomo_countrymmdb_url(_: &str) -> String {
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb".into()
+}
+pub fn mihomo_geosite_url(_: &str) -> String {
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat".into()
+}
+
+/// geo 资产注册表（新资产=加行；安装/预检/状态全数据驱动）
+pub const GEO_ASSETS: &[GeoAsset] = &[
+    GeoAsset {
+        id: "singbox-geoip",
+        label: "sing-box GeoIP（geoip.db）",
+        sub_dir: "geo",
+        file_name: "geoip.db",
+        url_for: singbox_geoip_url,
+        checksum_url: Some(singbox_geoip_sha_url),
+        default_version: "20260912",
+    },
+    GeoAsset {
+        id: "singbox-geosite",
+        label: "sing-box GeoSite（geosite.db）",
+        sub_dir: "geo",
+        file_name: "geosite.db",
+        url_for: singbox_geosite_url,
+        checksum_url: Some(singbox_geosite_sha_url),
+        default_version: "20260920133716",
+    },
+    GeoAsset {
+        id: "xray-geoip",
+        label: "Xray GeoIP（geoip.dat 镜像）",
+        sub_dir: "bin",
+        file_name: "geoip.dat",
+        url_for: xray_geoip_url,
+        checksum_url: None,
+        default_version: "202609202346",
+    },
+    GeoAsset {
+        id: "xray-geosite",
+        label: "Xray GeoSite（geosite.dat 镜像）",
+        sub_dir: "bin",
+        file_name: "geosite.dat",
+        url_for: xray_geosite_url,
+        checksum_url: None,
+        default_version: "202609202346",
+    },
+    GeoAsset {
+        id: "mihomo-countrymmdb",
+        label: "mihomo Country.mmdb",
+        sub_dir: "mihomo",
+        file_name: "Country.mmdb",
+        url_for: mihomo_countrymmdb_url,
+        checksum_url: None,
+        default_version: "latest",
+    },
+    GeoAsset {
+        id: "mihomo-geosite",
+        label: "mihomo GeoSite（geosite.dat）",
+        sub_dir: "mihomo",
+        file_name: "geosite.dat",
+        url_for: mihomo_geosite_url,
+        checksum_url: None,
+        default_version: "latest",
+    },
+];
+
+pub fn artifact_for(id: &str) -> Result<&'static GeoAsset> {
+    GEO_ASSETS.iter().find(|a| a.id == id).ok_or_else(|| {
+        ProxyError::Download(format!(
+            "geo 资产下载通道未注册: {id}（支持: {}）",
+            GEO_ASSETS
+                .iter()
+                .map(|a| a.id)
+                .collect::<Vec<_>>()
+                .join("/")
+        ))
+    })
+}
+
+/// geo 资产的元数据落点：`{proxy_dir}/geo/`（manifest/pin 与数据文件同根，
+/// B9 接管 §3 表行 3 同路径约定）
+fn artifact_meta_path(proxy_dir: &Path, file: &str) -> PathBuf {
+    proxy_dir.join("geo").join(file)
+}
+
+pub fn artifact_manifest_path(proxy_dir: &Path, id: &str) -> PathBuf {
+    artifact_meta_path(proxy_dir, &format!("manifest-{id}.json"))
+}
+
+fn artifact_pin_path(proxy_dir: &Path, id: &str) -> PathBuf {
+    artifact_meta_path(proxy_dir, &format!("pin-{id}.json"))
+}
+
+/// 资产消费路径（渲染预检与状态表共用，禁各处重拼路径）
+pub fn artifact_dest(spec: &GeoAsset, proxy_dir: &Path) -> PathBuf {
+    proxy_dir.join(spec.sub_dir).join(spec.file_name)
+}
+
+pub fn artifact_installed(spec: &GeoAsset, proxy_dir: &Path) -> bool {
+    artifact_dest(spec, proxy_dir).is_file()
+}
+
+/// 读 geo 资产清单（无 zip 通道版 manifest）
+pub fn read_artifact_manifest(proxy_dir: &Path, id: &str) -> Option<Manifest> {
+    std::fs::read(artifact_manifest_path(proxy_dir, id))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Manifest>(&raw).ok())
+}
+
+/// 原始文件安装通道（Binary 资产唯一写盘入口，与 zip 通道并列收口）：
+/// 字节按原样恒写 `proxy_dir/sub_dir/file_name`（tmp+rename 原子替换），
+/// TOFU pin 按版本键控（同版本字节漂移未 ack → Integrity 拒且坏字节不落盘）。
+pub fn install_raw_asset(
+    spec: &'static GeoAsset,
+    proxy_dir: &Path,
+    bytes: &[u8],
+    version: &str,
+    ack_pin: bool,
+) -> Result<Manifest> {
+    let sha = sha256_hex(bytes);
+    let pin_file = artifact_pin_path(proxy_dir, spec.id);
+    let mut pins = std::fs::read(&pin_file)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<PinStore>(&raw).ok())
+        .unwrap_or_default();
+    if let Some(pinned) = pins.0.get(version) {
+        if pinned != &sha && !ack_pin {
+            return Err(ProxyError::Integrity(format!(
+                "{} v{version} 的 sha256 与首见记录不符（记录 {pinned}，本次 {sha}）：包可能被篡改；确认来源可信后可显式确认继续",
+                spec.id
+            )));
+        }
+    }
+    let dest = artifact_dest(spec, proxy_dir);
+    let parent = dest
+        .parent()
+        .ok_or_else(|| ProxyError::Download("geo 资产落点无父目录".into()))?;
+    std::fs::create_dir_all(parent).map_err(ProxyError::from)?;
+    let tmp = dest.with_file_name(format!("{}.tmp", spec.file_name));
+    std::fs::write(&tmp, bytes).map_err(ProxyError::from)?;
+    std::fs::rename(&tmp, &dest).map_err(ProxyError::from)?;
+    pins.0.insert(version.to_string(), sha.clone());
+    std::fs::create_dir_all(artifact_meta_path(proxy_dir, "")).map_err(ProxyError::from)?;
+    let tmp_pin = pin_file.with_extension("json.tmp");
+    std::fs::write(&tmp_pin, serde_json::to_vec_pretty(&pins)?).map_err(ProxyError::from)?;
+    std::fs::rename(&tmp_pin, &pin_file).map_err(ProxyError::from)?;
+    let manifest = Manifest {
+        kernel_id: spec.id.to_string(),
+        kernel_version: version.to_string(),
+        sha256: sha,
+        installed_at: now_ms(),
+        channel: "release".into(),
+    };
+    let mp = artifact_manifest_path(proxy_dir, spec.id);
+    let tmp_m = mp.with_extension("json.tmp");
+    std::fs::write(&tmp_m, serde_json::to_vec_pretty(&manifest)?).map_err(ProxyError::from)?;
+    std::fs::rename(&tmp_m, &mp).map_err(ProxyError::from)?;
+    Ok(manifest)
+}
+
 /// 已安装内核清单（T-B2-4 起 per-kernel：`{appData}/proxy/bin/manifest-<id>.json`）
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Manifest {
@@ -546,6 +752,73 @@ mod tests {
         for id in ["sing-box", "xray", "mihomo"] {
             assert!(dir.join(format!("pin-{id}.json")).is_file());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- T-B2-10：Binary 原始文件资产通道（09 §5.2 字面回归） ----------------
+
+    #[test]
+    fn geoAsset_xrayDatBinaryChannel() {
+        // 非 zip 资产直存：字节原样落 bin/geoip.dat（xray 从 exe 同目录解析 dat），
+        // manifest/pin 元数据恒栖 geo/ 目录（与数据文件分目录，B9 §3 表行 3 路径约定）
+        let dir = tmp_dir("geoxray");
+        let spec = artifact_for("xray-geoip").unwrap();
+        assert_eq!(
+            artifact_dest(spec, &dir),
+            dir.join("bin").join("geoip.dat"),
+            "xray dat 落点=bin/ 子目录"
+        );
+        let m = install_raw_asset(spec, &dir, b"dat-bytes-1", "202609202346", false).unwrap();
+        assert_eq!(
+            std::fs::read(artifact_dest(spec, &dir)).unwrap(),
+            b"dat-bytes-1"
+        );
+        assert_eq!(m.kernel_id, "xray-geoip");
+        assert_eq!(m.kernel_version, "202609202346");
+        assert_eq!(m.sha256, sha256_hex(b"dat-bytes-1"));
+        assert!(artifact_installed(spec, &dir));
+        assert_eq!(
+            read_artifact_manifest(&dir, "xray-geoip").unwrap().sha256,
+            m.sha256
+        );
+        assert!(artifact_manifest_path(&dir, "xray-geoip").is_file());
+        assert!(artifact_pin_path(&dir, "xray-geoip").is_file());
+        // 未注册 id 在任何触网前如实拒并点名支持集
+        assert!(matches!(
+            artifact_for("geoip-magic"),
+            Err(ProxyError::Download(msg)) if msg.contains("xray-geoip")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn artifactInstall_pinMismatch_rejects() {
+        // 红线：同版本字节漂移 → Integrity 拒且盘上仍是首装字节；显式 ack 才放行。
+        // mihomo-countrymmdb 的 sub_dir="mihomo" ≠ 元数据目录 "geo"——同时钉死
+        // 两目录都按需创建（写盘入口收口在 sub_dir 不同根时不缺目录）
+        let dir = tmp_dir("geopin");
+        let spec = artifact_for("mihomo-countrymmdb").unwrap();
+        install_raw_asset(spec, &dir, b"mmdb-original", "latest", false).unwrap();
+        let err = install_raw_asset(spec, &dir, b"mmdb-tampered", "latest", false).unwrap_err();
+        match err {
+            ProxyError::Integrity(msg) => {
+                assert!(
+                    msg.contains("latest") && msg.contains("sha256"),
+                    "须点名版本与哈希面：{msg}"
+                );
+            }
+            other => panic!("同版本换字节必须 Integrity 拒，得 {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(artifact_dest(spec, &dir)).unwrap(),
+            b"mmdb-original",
+            "被拒字节物理不落盘"
+        );
+        install_raw_asset(spec, &dir, b"mmdb-tampered", "latest", true).unwrap();
+        assert_eq!(
+            std::fs::read(artifact_dest(spec, &dir)).unwrap(),
+            b"mmdb-tampered"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

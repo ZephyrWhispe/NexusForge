@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ProxyError, Result};
 use crate::ir::{IrRule, IrRuleField, TAG_BLOCK, TAG_DIRECT, TAG_PROXY};
 
-/// 规则类型白名单（02§7.1 表行下拉的单一真源）
-pub const RULE_KINDS: [&str; 5] = ["domain", "suffix", "keyword", "ip_cidr", "process"];
+/// 规则类型白名单（02§7.1 表行下拉的单一真源；T-B2-10 扩 geo_site/geo_ip，
+/// pattern=geo 码如 "cn"/"ads"，数据面=artifact 通道的 geo 资产）
+pub const RULE_KINDS: [&str; 7] = [
+    "domain", "suffix", "keyword", "ip_cidr", "process", "geo_site", "geo_ip",
+];
 /// 规则/兜底目标白名单
 pub const RULE_TARGETS: [&str; 3] = ["direct", "proxy", "block"];
 /// 分流模式（global=全部走代理；rule=规则分流；direct_all=透明兜底直连档）
@@ -77,7 +80,7 @@ pub fn sanitize(v2: &RulesV2) -> Result<RulesV2> {
     for r in &v2.rules {
         if !RULE_KINDS.contains(&r.kind.as_str()) {
             return Err(ProxyError::Config(format!(
-                "规则类型非法：{:?}（合法值 domain/suffix/keyword/ip_cidr/process）",
+                "规则类型非法：{:?}（合法值 domain/suffix/keyword/ip_cidr/process/geo_site/geo_ip）",
                 r.kind
             )));
         }
@@ -108,6 +111,11 @@ pub fn sanitize(v2: &RulesV2) -> Result<RulesV2> {
                         "ip_cidr 规则值不是合法 IPv4/IPv6 前缀：{pattern:?}"
                     )));
                 }
+                pattern
+            }
+            // T-B2-10：geo 码（"cn"/"ads"/"category-ads-all"…）与域名同款字符集白名单
+            "geo_site" | "geo_ip" => {
+                check_domain_shape(&pattern, &r.kind)?;
                 pattern
             }
             _ => {
@@ -248,6 +256,10 @@ pub fn to_ir(v2: &RulesV2) -> Result<(Vec<IrRule>, String)> {
             "keyword" => IrRuleField::Keyword,
             "ip_cidr" => IrRuleField::IpCidr,
             "process" => IrRuleField::Process,
+            // geo 码住在字段变体里（sing-box payload 是标量、mihomo 一码一行），
+            // patterns 恒空；同码同目标经桶查重天然去重
+            "geo_site" => IrRuleField::GeoSite(r.pattern.clone()),
+            "geo_ip" => IrRuleField::GeoIp(r.pattern.clone()),
             other => {
                 return Err(ProxyError::Config(format!(
                     "规则类型不可投影为 IR 字段：{other:?}"
@@ -265,12 +277,26 @@ pub fn to_ir(v2: &RulesV2) -> Result<(Vec<IrRule>, String)> {
             }
         }
         .to_string();
+        let is_geo = field.geo_category().is_some();
         match buckets
             .iter_mut()
             .find(|(f, t, _)| *f == field && *t == tag)
         {
-            Some((_, _, patterns)) => patterns.push(r.pattern.clone()),
-            None => buckets.push((field, tag, vec![r.pattern.clone()])),
+            // geo 桶命中=同码同目标重复条目，静默去重（码在字段里，patterns 恒空）
+            Some((_, _, patterns)) => {
+                if !is_geo {
+                    patterns.push(r.pattern.clone());
+                }
+            }
+            None => buckets.push((
+                field,
+                tag,
+                if is_geo {
+                    Vec::new()
+                } else {
+                    vec![r.pattern.clone()]
+                },
+            )),
         }
     }
     Ok((

@@ -23,7 +23,7 @@ import Section from "../../../components/Section";
  * 缺陷⑪a：示例 placeholder 的反斜杠转义修正（`\b` 两字符字面，见 PRESET 区 Input）。
  */
 
-/** 「应用大陆直连预设」清单（与后端 rules.rs MAINLAND_DIRECT_PRESET 同源；geo 资产归 T-B2-10） */
+/** 「应用大陆直连预设」清单（与后端 rules.rs MAINLAND_DIRECT_PRESET 同源；geo 资产通道已随 T-B2-10 落地，本预设保持零资产依赖） */
 export const MAINLAND_DIRECT_PRESET: string[] = [
   "cn",
   "com.cn",
@@ -53,6 +53,8 @@ const KIND_LABELS: Record<ProxyRulesV2Dto["rules"][number]["kind"], string> = {
   keyword: "域名关键字",
   ip_cidr: "IP 网段",
   process: "进程名",
+  geo_site: "GeoSite 码表",
+  geo_ip: "GeoIP 码表",
 };
 
 const TARGET_LABELS: Record<ProxyRulesV2Dto["rules"][number]["target"], string> = {
@@ -130,7 +132,7 @@ export default function RulesSection({
           `已存在的 ${skipped} 条自动跳过（去重合并，不产生重复行）`,
         ],
         detail:
-          "geo 资产未安装前的域名后缀清单模板（geosite 替代归 T-B2-10）；应用即保存，需重新切换模式生效。",
+          "geo 码表规则（GeoSite/GeoIP）需先在「内核」子面板安装对应数据资产；本预设是纯域名后缀清单，无资产依赖。应用即保存，需重新切换模式生效。",
         confirmLabel: "应用",
       }))
     )
@@ -201,7 +203,7 @@ export default function RulesSection({
                   onChange={(_, d) => patch(i, { pattern: d.value })}
                   aria-label={`规则值 ${i + 1}`}
                   /* 缺陷⑪a 修正：示例反斜杠以 `\\b` 字面两字符呈现（旧串 `\b` 是退格控制符） */
-                  placeholder={"cn\\baidu.com · 10.0.0.0/8 · chrome.exe"}
+                  placeholder={"cn\\baidu.com · 10.0.0.0/8 · chrome.exe · cn/category-ads（geo 码）"}
                 />
               </TableCell>
               <TableCell>

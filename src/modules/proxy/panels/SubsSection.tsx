@@ -10,7 +10,9 @@ import type { ProxySubDto } from "../../../ipc/client";
 import Section from "../../../components/Section";
 
 /**
- * 订阅子面板（T-B2-3 迁移自旧「订阅」块；流量/到期头与更新策略归 T-B2-10）。
+ * 订阅子面板（T-B2-3 迁移自旧「订阅」块；流量/到期头 T-B2-10 落地）：
+ * 后端仅在订阅响应携带标准头（upload/download/left/expire、profile-update-interval、
+ * etag）时填充 traffic/interval_min——无头不谎显，负例由 subCard_trafficAbsent_noBadge 钉。
  * 添加成功（onAdd resolve true）才清空输入框——失败保留用户已贴的 URL 免重输。
  */
 const useStyles = makeStyles({
@@ -21,6 +23,13 @@ const useStyles = makeStyles({
 });
 
 const fmtTime = (ms: number) => (ms > 0 ? new Date(ms).toLocaleTimeString() : "未拉取");
+
+/** 字节数人读格式（GiB 优先，保留一位小数） */
+const fmtBytes = (n: number) => {
+  const gib = n / 1024 / 1024 / 1024;
+  if (gib >= 1) return `${gib.toFixed(1)} GB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+};
 
 export default function SubsSection({
   subs,
@@ -85,6 +94,14 @@ export default function SubsSection({
           <span className={styles.mono}>
             {s.node_count} 节点 · {fmtTime(s.updated_ms)}
           </span>
+          {s.traffic && (
+            <span className={styles.muted}>
+              已用 {fmtBytes(s.traffic.upload + s.traffic.download)} · 剩余{" "}
+              {fmtBytes(s.traffic.left)}
+              {s.traffic.expire_ms > 0 &&
+                ` · 到期 ${new Date(s.traffic.expire_ms).toLocaleDateString()}`}
+            </span>
+          )}
           <span className={styles.grow} />
           <Button
             size="small"

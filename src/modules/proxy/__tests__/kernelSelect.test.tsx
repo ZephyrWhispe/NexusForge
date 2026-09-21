@@ -3,7 +3,14 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import ProxyPanel from "../ProxyPanel";
-import { proxyKernelSelect, proxyStatus, type ProxyStatusDto } from "../../../ipc/client";
+import {
+  proxyArtifactInstall,
+  proxyKernelSelect,
+  proxyStatus,
+  type ProxyArtifactInfoDto,
+  type ProxyStatusDto,
+} from "../../../ipc/client";
+import { confirmAction } from "../../../stores/confirm";
 import { useSession } from "../../../stores/session";
 
 // D-29 B2/T-B2-3：T-B2-2 的状态徽章区最小 Dropdown 选择器已被「内核」子面板的
@@ -24,6 +31,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     proxyKernelInstall: vi.fn(async () => ({})),
     proxyKernelRestart: vi.fn(async () => {}),
     proxyWintunInstall: vi.fn(async () => {}),
+    proxyArtifactInstall: vi.fn(async () => ({})),
   };
 });
 
@@ -84,6 +92,7 @@ function statusDto(overrides: Partial<ProxyStatusDto> = {}): ProxyStatusDto {
         supported_kinds: ["shadowsocks", "vmess", "trojan", "vless", "hysteria2"],
       },
     ],
+    artifacts: [],
     ...overrides,
   };
 }
@@ -217,5 +226,34 @@ describe("ProxyPanel 内核卡换核接线（T-B2-3 接管 T-B2-2 四测）", ()
     expect(
       (btnWithText(kernelRow("xray-core"), "切换") as HTMLButtonElement).disabled,
     ).toBe(false);
+  });
+});
+
+describe("ProxyPanel geo 数据资产行（T-B2-10）", () => {
+  const ARTIFACTS: ProxyArtifactInfoDto[] = [
+    { id: "singbox-geosite", label: "sing-box GeoSite 码表", installed: false, version: null },
+    { id: "singbox-geoip", label: "sing-box GeoIP 码表", installed: true, version: "20260912" },
+  ];
+
+  function artifactRow(label: string): Element {
+    const label0 = Array.from(container.querySelectorAll("span")).find(
+      (el) => el.children.length === 0 && el.textContent?.trim() === label,
+    );
+    expect(label0, `资产行标签 ${label} 未渲染`).toBeTruthy();
+    return (label0 as HTMLElement).parentElement as Element;
+  }
+
+  it("geoArtifact_installButton_invokes：确认一次 invoke，取消零 invoke（负例）", async () => {
+    await mount(statusDto({ artifacts: ARTIFACTS }));
+    await gotoKernel();
+    expect(artifactRow("sing-box GeoSite 码表").textContent).toContain("未安装");
+    expect(artifactRow("sing-box GeoIP 码表").textContent).toContain("v20260912");
+    await click(btnWithText(artifactRow("sing-box GeoSite 码表"), "安装") as Element);
+    expect(proxyArtifactInstall).toHaveBeenCalledTimes(1);
+    expect(proxyArtifactInstall).toHaveBeenCalledWith("singbox-geosite");
+    // 取消确认＝零 invoke：重装钮在场但确认后不触后端
+    vi.mocked(confirmAction).mockResolvedValueOnce(false);
+    await click(btnWithText(artifactRow("sing-box GeoIP 码表"), "重新安装") as Element);
+    expect(proxyArtifactInstall).toHaveBeenCalledTimes(1);
   });
 });

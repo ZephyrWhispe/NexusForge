@@ -26,6 +26,11 @@ description = "允许前端调用 proxy_wintun_install 命令（D-28 按窗最�
 commands.allow = ["proxy_wintun_install"]
 
 [[permission]]
+identifier = "allow-proxy-artifact-install"
+description = "允许前端调用 proxy_artifact_install 命令（T-B2-10 geo 资产；D-28 按窗最小授权）"
+commands.allow = ["proxy_artifact_install"]
+
+[[permission]]
 identifier = "allow-proxy-subs"
 description = "允许前端调用 proxy_subs 命令（D-28 按窗最小授权）"
 commands.allow = ["proxy_subs"]

@@ -67,8 +67,8 @@ pub enum IrOutbound {
     },
 }
 
-/// 规则匹配字段（GeoSite/GeoIp 由 T-B2-10 扩：变体新增=编译期强制全渲染臂同步）
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 规则匹配字段（新增变体 = 编译期强制全渲染臂同步）
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IrRuleField {
     IpIsPrivate,
     Domain,
@@ -78,6 +78,24 @@ pub enum IrRuleField {
     /// T-B2-9 分应用代理数据面：进程名（basename，无路径）；
     /// 仅 Tun 入站可归因进程，System 态方言照常渲染但不命中（拾取器 UI 归 B7）
     Process,
+    /// T-B2-10 geo 规则：String = 单枚 geo 码（"cn"/"ads"/"private"…），
+    /// patterns 恒空（一码一规则——sing-box 的 payload 是标量，mihomo 行式同理；
+    /// xray 段本可合并，但保持 IR 语义统一不特例）。
+    /// 消费前提：对应 geo 资产已装（service 层按引用类别预检，缺件诚实报错指路安装）。
+    GeoSite(String),
+    GeoIp(String),
+}
+
+impl IrRuleField {
+    /// 该字段是否引用指定 geo 码表类别（"geoip"|"geosite"）——渲染端与
+    /// service 层资产预检共用判据，禁各处字符串重打。
+    pub fn geo_category(&self) -> Option<&'static str> {
+        match self {
+            Self::GeoSite(_) => Some("geosite"),
+            Self::GeoIp(_) => Some("geoip"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { makeStyles } from "@fluentui/react-components";
 import {
+  proxyArtifactInstall,
   proxyDelayTest,
   proxyKernelInstall,
   proxyKernelRestart,
@@ -17,6 +18,7 @@ import {
   proxySubUpdate,
   proxyWintunInstall,
   parseAppError,
+  type ProxyArtifactInfoDto,
   type ProxyLogLineDto,
   type ProxyNodeDelayDto,
   type ProxyNodeDto,
@@ -255,6 +257,13 @@ export default function ProxyPanel() {
       await refresh();
     });
 
+  // geo 数据资产安装（T-B2-10）：确认流在 KernelSection 内（取消=零 invoke），此处只落 IO
+  const artifactInstall = (a: ProxyArtifactInfoDto) =>
+    run("artifact-install", async () => {
+      await proxyArtifactInstall(a.id);
+      await refresh();
+    });
+
   return (
     <div className={styles.root}>
       {view === "overview" && (
@@ -300,6 +309,7 @@ export default function ProxyPanel() {
           onSelect={selectKernel}
           onRestart={restartKernel}
           onWintun={wintunInstall}
+          onArtifact={artifactInstall}
         />
       )}
       {view === "logs" && (

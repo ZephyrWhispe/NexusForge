@@ -737,6 +737,14 @@ export interface ProxyKernelInfoDto {
   supported_kinds: string[];
 }
 
+/** 单 geo 数据资产条目（T-B2-10；GEO_ASSETS 数据驱动，UI 禁资产特例分支） */
+export interface ProxyArtifactInfoDto {
+  id: string;
+  label: string;
+  installed: boolean;
+  version: string | null;
+}
+
 export interface ProxyStatusDto {
   mode: "off" | "system" | "tun";
   kernel_running: boolean;
@@ -754,6 +762,17 @@ export interface ProxyStatusDto {
   kernel: string;
   /** 全部已注册内核的装机/能力清单 */
   kernels: ProxyKernelInfoDto[];
+  /** geo 数据资产装机清单（内核区安装钮数据源） */
+  artifacts: ProxyArtifactInfoDto[];
+}
+
+/** 订阅标准头流量信息（T-B2-10；面板未发头 = null，UI 不谎显） */
+export interface ProxyTrafficDto {
+  upload: number;
+  download: number;
+  left: number;
+  /** 到期时刻毫秒；0 = 未提供 */
+  expire_ms: number;
 }
 
 export interface ProxySubDto {
@@ -762,6 +781,11 @@ export interface ProxySubDto {
   url: string;
   updated_ms: number;
   node_count: number;
+  traffic: ProxyTrafficDto | null;
+  /** 面板建议刷新间隔（profile-update-interval，分钟） */
+  interval_min: number | null;
+  /** If-None-Match 条件请求指纹（后端透明消费，UI 仅展示"上次更新"） */
+  etag: string | null;
 }
 
 export interface ProxyNodeDto {
@@ -811,6 +835,11 @@ export function proxyKernelRestart(): Promise<void> {
 export function proxyWintunInstall(): Promise<void> {
   return invoke("proxy_wintun_install");
 }
+/** 安装 geo 数据资产（T-B2-10 Binary 通道）：ackPin 为篡改确认位，
+ * UI 确认通道归 B9，本批恒缺省（后端保证缺省不因缺 UI 而静默放行） */
+export function proxyArtifactInstall(artifact: string): Promise<ProxyManifestDto> {
+  return invoke("proxy_artifact_install", { artifact, ackPin: null });
+}
 /** 选定/切换代理内核：未运行只落选择；运行中新核起、失败后端自动回滚旧核并上抛原错 */
 export function proxyKernelSelect(kernel: string): Promise<void> {
   return invoke("proxy_kernel_select", { kernel });
@@ -837,9 +866,9 @@ export function proxySetDirectRules(rules: string[]): Promise<void> {
   return invoke("proxy_set_direct_rules", { rules });
 }
 
-/** 分流规则 v2 单行（T-B2-9；枚举串与后端 rules.rs 白名单单一真源） */
+/** 分流规则 v2 单行（T-B2-9；T-B2-10 扩 geo 档；枚举串与后端 rules.rs 白名单单一真源） */
 export interface ProxyRuleV2Dto {
-  kind: "domain" | "suffix" | "keyword" | "ip_cidr" | "process";
+  kind: "domain" | "suffix" | "keyword" | "ip_cidr" | "process" | "geo_site" | "geo_ip";
   pattern: string;
   target: "direct" | "proxy" | "block";
   enabled: boolean;

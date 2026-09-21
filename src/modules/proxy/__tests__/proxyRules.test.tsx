@@ -46,6 +46,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     proxyKernelInstall: vi.fn(async () => ({})),
     proxyKernelRestart: vi.fn(async () => {}),
     proxyWintunInstall: vi.fn(async () => {}),
+    proxyArtifactInstall: vi.fn(async () => ({})),
     proxySetMode: vi.fn(async () => {}),
     proxyDelayTest: vi.fn(async () => []),
   };
@@ -77,6 +78,7 @@ function statusDto(): ProxyStatusDto {
     restored_last_run: false,
     kernel: "sing-box",
     kernels: [],
+    artifacts: [],
   };
 }
 

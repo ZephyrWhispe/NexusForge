@@ -107,6 +107,7 @@
     "allow-pdf-merge",
     "allow-pdf-split",
     "allow-pdf-watermark",
+    "allow-proxy-artifact-install",
     "allow-proxy-delay-test",
     "allow-proxy-direct-rules",
     "allow-proxy-kernel-install",

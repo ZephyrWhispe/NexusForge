@@ -76,6 +76,13 @@ pub trait KernelDriver: Send + Sync {
         }
     }
 
+    /// geo 类规则（geosite/geoip）所需本地资产的 artifact id 清单（T-B2-10 渲染预检）：
+    /// cat = "geosite" | "geoip"，返回值须在 [`crate::sidecar::GEO_ASSETS`] 可解析。
+    /// 默认空集 = 本方言不消费本地 geo 文件（mihomo 原生托管自取，见其实现注释）。
+    fn geo_asset_ids(&self, _cat: &str) -> &'static [&'static str] {
+        &[]
+    }
+
     /// 启动内核。`on_exit` 在进程非预期退出（非 [`stop`](KernelHandle::stop) 触发）时以退出码回调。
     fn start(&self, work_dir: &Path, cfg: &Path, on_exit: ExitCb) -> Result<KernelHandle> {
         let exe = self.exe_path();
@@ -310,6 +317,15 @@ impl KernelDriver for SingBoxDriver {
 
     fn config_render(&self, ir: &IrConfig) -> Result<String> {
         Ok(serde_json::to_string_pretty(&crate::singbox::render(ir)?)?)
+    }
+
+    /// sing-box rule_set 消费 `{config_dir}/geo/{cat}.db`（渲染 path 相对配置目录）
+    fn geo_asset_ids(&self, cat: &str) -> &'static [&'static str] {
+        match cat {
+            "geosite" => &["singbox-geosite"],
+            "geoip" => &["singbox-geoip"],
+            _ => &[],
+        }
     }
 
     fn build_command(&self, _work_dir: &Path, cfg: &Path) -> Command {

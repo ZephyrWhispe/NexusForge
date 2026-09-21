@@ -10,6 +10,77 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ProxyError, Result};
 
+// ---------------- T-B2-10：订阅标准头解析 + 偏离度门禁（纯函数，零依赖） ----------------
+
+/// 订阅流量信息（`upload/download/left/expire` 标准头，字节数/到期时刻）。
+/// 各字段独立可选：面板常只发其中几枚，全缺时整体为 None（UI 不谎显）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficInfo {
+    #[serde(default)]
+    pub upload: u64,
+    #[serde(default)]
+    pub download: u64,
+    #[serde(default)]
+    pub left: u64,
+    /// 到期时刻（毫秒；订阅头 `expire` 是 Unix 秒，解析处 ×1000）；0=未提供
+    #[serde(default)]
+    pub expire_ms: u64,
+}
+
+/// 一次订阅响应头的解析结果（T-B2-10，02§3-7 地基）
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubHeaders {
+    pub traffic: Option<TrafficInfo>,
+    pub interval_min: Option<u64>,
+    pub etag: Option<String>,
+}
+
+/// 数值头解析：十进制直解优先；`--` 前缀 = base64 变体方言（部分面板把数字
+/// base64 后加 `--` 标记防混淆），解码失败即 None（禁猜值）。
+fn parse_header_u64(v: &str) -> Option<u64> {
+    let v = v.trim();
+    if let Some(b64) = v.strip_prefix("--") {
+        let decoded = host_core::util::b64_decode_lenient(b64)?;
+        return String::from_utf8(decoded).ok()?.trim().parse().ok();
+    }
+    v.parse().ok()
+}
+
+/// 从（已小写化的）响应头解析订阅元数据。`headers` 键一律小写——HTTP/2 与
+/// reqwest 内部表示都是小写，服务层在构造映射时就归一，此处不再大小写试探。
+pub fn parse_sub_headers(headers: &std::collections::BTreeMap<String, String>) -> SubHeaders {
+    let num = |k: &str| headers.get(k).and_then(|v| parse_header_u64(v));
+    let (upload, download, left, expire_s) =
+        (num("upload"), num("download"), num("left"), num("expire"));
+    let traffic = if upload.is_some() || download.is_some() || left.is_some() || expire_s.is_some()
+    {
+        Some(TrafficInfo {
+            upload: upload.unwrap_or(0),
+            download: download.unwrap_or(0),
+            left: left.unwrap_or(0),
+            expire_ms: expire_s.unwrap_or(0) * 1000,
+        })
+    } else {
+        None
+    };
+    SubHeaders {
+        traffic,
+        interval_min: num("profile-update-interval"),
+        etag: headers.get("etag").filter(|e| !e.is_empty()).cloned(),
+    }
+}
+
+/// 订阅偏离度门禁（B9 消费的纯函数，本批只落函数+测）：更新后节点数为 0，
+/// 或相对上次变化率 ≥0.5（含恰半数）时必须人工确认——防面板故障清空订阅。
+pub fn deviation_needs_confirm(old: usize, new: usize) -> bool {
+    if new == 0 {
+        return true;
+    }
+    let diff = old.abs_diff(new);
+    // 整数比对避免浮点边界：diff/max(old,1) ≥ 1/2 ⟺ 2*diff ≥ max(old,1)
+    diff * 2 >= old.max(1)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeKind {
@@ -797,6 +868,51 @@ mod tests {
         let m =
             parse_share_uri("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#s2", SUB).unwrap();
         assert!(m.extra.get("plugin").is_none());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn subHeaders_trafficIntervalEtag_parsed() {
+        let mut h = std::collections::BTreeMap::new();
+        h.insert("upload".into(), "1024".into());
+        // `--` 前缀 base64 变体方言：base64("2048") = MjA0OA==
+        h.insert(
+            "download".into(),
+            format!("--{}", host_core::util::b64_encode(b"2048")),
+        );
+        h.insert("left".into(), " 999999 ".into());
+        h.insert("expire".into(), "1893456000".into()); // 秒 → 毫秒
+        h.insert("profile-update-interval".into(), "1440".into());
+        h.insert("etag".into(), "\"abc123\"".into());
+        let got = parse_sub_headers(&h);
+        assert_eq!(got.interval_min, Some(1440));
+        assert_eq!(got.etag.as_deref(), Some("\"abc123\""));
+        let t = got.traffic.expect("有任一数值头即成块");
+        assert_eq!((t.upload, t.download, t.left), (1024, 2048, 999999));
+        assert_eq!(t.expire_ms, 1893456000 * 1000);
+        // 全空头 = traffic None（UI 负例的数据源）；空 etag 串不落键
+        let empty = parse_sub_headers(&std::collections::BTreeMap::from([
+            ("etag".to_string(), String::new()),
+            ("upload".to_string(), "not-a-number".to_string()),
+        ]));
+        assert!(empty.traffic.is_none());
+        assert!(empty.etag.is_none());
+        assert!(empty.interval_min.is_none());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn deviationGate_halfChangeOrEmpty_confirms() {
+        // 红线边界：清空必确认；恰半数（变化率=0.5）确认；略少于半数放行
+        assert!(deviation_needs_confirm(10, 0));
+        assert!(deviation_needs_confirm(0, 0), "0→0 也是 new==0");
+        assert!(deviation_needs_confirm(10, 5));
+        assert!(!deviation_needs_confirm(10, 6));
+        assert!(deviation_needs_confirm(10, 15));
+        assert!(!deviation_needs_confirm(10, 14));
+        // 首次添加（old=0 有节点）：0→1 视为全量变化必确认（分母钳 1 防除零）
+        assert!(deviation_needs_confirm(0, 1));
+        assert!(!deviation_needs_confirm(100, 100));
     }
 
     #[test]

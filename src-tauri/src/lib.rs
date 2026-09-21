@@ -213,6 +213,7 @@ pub fn run() {
             commands::proxy_kernel_restart,
             commands::proxy_kernel_select,
             commands::proxy_wintun_install,
+            commands::proxy_artifact_install,
             commands::proxy_subs,
             commands::proxy_sub_add,
             commands::proxy_sub_remove,

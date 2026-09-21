@@ -9,8 +9,10 @@ import {
   proxyLogs,
   proxyNodes,
   proxyStatus,
+  proxySubs,
   type ProxyNodeDto,
   type ProxyStatusDto,
+  type ProxySubDto,
 } from "../../../ipc/client";
 import { confirmAction, impactLines, type ConfirmOptions } from "../../../stores/confirm";
 import { useSession } from "../../../stores/session";
@@ -39,6 +41,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     proxyKernelInstall: vi.fn(async () => ({})),
     proxyKernelRestart: vi.fn(async () => {}),
     proxyWintunInstall: vi.fn(async () => {}),
+    proxyArtifactInstall: vi.fn(async () => ({})),
     proxySetMode: vi.fn(async () => {}),
     proxyDelayTest: vi.fn(async () => []),
   };
@@ -117,6 +120,7 @@ function statusDto(): ProxyStatusDto {
         supported_kinds: ["shadowsocks", "vmess", "trojan", "vless", "hysteria2"],
       },
     ],
+    artifacts: [],
   };
 }
 
@@ -330,5 +334,49 @@ describe("ProxyPanel 子面板化骨架（T-B2-3 六字面）", () => {
     });
     expect(useSession.getState().themeMode).toBe("light");
     expect(useSession.getState().proxySubPanel).toBe("overview");
+  });
+});
+
+describe("订阅卡流量/到期头（T-B2-10）", () => {
+  const GiB = 1024 * 1024 * 1024;
+
+  it("subCard_expiryTrafficShown：标准头在场才显示用量/剩余/到期", async () => {
+    const sub: ProxySubDto = {
+      id: "s1",
+      name: "主订阅",
+      url: "https://example.test/sub",
+      updated_ms: 1,
+      node_count: 3,
+      traffic: { upload: 3 * GiB, download: 2 * GiB, left: 15 * GiB, expire_ms: 1780000000000 },
+      interval_min: 1440,
+      etag: '"v7"',
+    };
+    vi.mocked(proxySubs).mockResolvedValue([sub]);
+    await mount();
+    await goto("subs");
+    expect(container.textContent).toContain("已用 5.0 GB");
+    expect(container.textContent).toContain("剩余 15.0 GB");
+    expect(container.textContent).toContain("到期");
+  });
+
+  it("subCard_trafficAbsent_noBadge（负例：无头不谎显）", async () => {
+    const sub: ProxySubDto = {
+      id: "s1",
+      name: "主订阅",
+      url: "https://example.test/sub",
+      updated_ms: 1,
+      node_count: 3,
+      traffic: null,
+      interval_min: null,
+      etag: null,
+    };
+    vi.mocked(proxySubs).mockResolvedValue([sub]);
+    await mount();
+    await goto("subs");
+    // 行本身在场（正对照防空洞），但流量/到期文案零出现
+    expect(container.textContent).toContain("主订阅");
+    expect(container.textContent).not.toContain("已用");
+    expect(container.textContent).not.toContain("剩余");
+    expect(container.textContent).not.toContain("到期");
   });
 });

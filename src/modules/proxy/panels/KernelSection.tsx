@@ -7,7 +7,12 @@ import {
   Input,
   Text,
 } from "@fluentui/react-components";
-import type { ProxyKernelInfoDto, ProxyNodeDto, ProxyStatusDto } from "../../../ipc/client";
+import type {
+  ProxyArtifactInfoDto,
+  ProxyKernelInfoDto,
+  ProxyNodeDto,
+  ProxyStatusDto,
+} from "../../../ipc/client";
 import { confirmAction } from "../../../stores/confirm";
 import Section from "../../../components/Section";
 
@@ -16,6 +21,8 @@ import Section from "../../../components/Section";
  * `[display_name][已安装 Badge+version｜未安装][运行中 filled-primary Badge][安装(version 可选 Input)][切换(danger confirm)][重启]`。
  * 数据源恒为后端注册表 status.kernels（能力表单一真源，禁前端内核特例分支）；
  * 换核确认含协议兼容性预检（02§7.3）：supported_kinds × 现节点交集外计数先行上报。
+ * T-B2-10 追加 geo 数据资产行（status.artifacts 数据驱动）：分流规则引用
+ * geosite/geoip 时内核需本地码表，安装钮带确认流（取消=零 invoke）。
  */
 const useStyles = makeStyles({
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
@@ -32,6 +39,7 @@ export default function KernelSection({
   onSelect,
   onRestart,
   onWintun,
+  onArtifact,
 }: {
   st: ProxyStatusDto | null;
   nodes: ProxyNodeDto[];
@@ -40,6 +48,7 @@ export default function KernelSection({
   onSelect: (kernel: string) => Promise<unknown>;
   onRestart: () => Promise<unknown>;
   onWintun: () => Promise<unknown>;
+  onArtifact: (artifact: ProxyArtifactInfoDto) => Promise<unknown>;
 }) {
   const styles = useStyles();
   const [versions, setVersions] = useState<Record<string, string>>({});
@@ -69,6 +78,28 @@ export default function KernelSection({
     await onSelect(k.id);
   };
 
+  const installArtifact = async (a: ProxyArtifactInfoDto) => {
+    if (
+      !(await confirmAction({
+        title: "安装 geo 数据资产",
+        command: a.id,
+        impact: [
+          `将下载并安装「${a.label}」（${a.id}）`,
+          a.installed
+            ? `已装 v${a.version ?? "?"}，重装为原子替换（tmp+rename，不留半截文件）`
+            : "当前未安装",
+          "官方校验和可用时先比对 sha256，不符即拒不落盘（fail-closed）",
+          "同版本字节与首见记录不符会被 TOFU pin 拒绝，需人工确认后放行",
+        ],
+        detail:
+          "mihomo 内核自带 geo 自动更新（geo-auto-update），通常无需手工安装其码表；此入口供 sing-box/xray 内核的分流规则（geosite/geoip）补齐本地码表。",
+        confirmLabel: "安装",
+      }))
+    )
+      return;
+    await onArtifact(a);
+  };
+
   return (
     <Section
       title="内核"
@@ -77,6 +108,9 @@ export default function KernelSection({
           {st?.wintun_installed && <Badge appearance="outline">wintun 已装</Badge>}
           {busy === "kernel-install" && (
             <span className={styles.muted}>正在从官方 Release 下载…</span>
+          )}
+          {busy === "artifact-install" && (
+            <span className={styles.muted}>正在下载 geo 数据资产…</span>
           )}
         </>
       }
@@ -155,6 +189,28 @@ export default function KernelSection({
           安装 wintun.dll（TUN 前置）
         </Button>
       </div>
+      {st?.artifacts.map((a) => (
+        <div key={a.id} className={styles.row}>
+          <Text size={300} weight="semibold" className={styles.name}>
+            {a.label}
+          </Text>
+          {a.installed ? (
+            <Badge appearance="outline">v{a.version ?? "?"}</Badge>
+          ) : (
+            <Badge appearance="outline" color="warning">
+              未安装
+            </Badge>
+          )}
+          <Button
+            size="small"
+            disabled={busy !== ""}
+            title={a.installed ? "重新下载并原子替换" : "下载并安装该码表"}
+            onClick={() => void installArtifact(a)}
+          >
+            {a.installed ? "重新安装" : "安装"}
+          </Button>
+        </div>
+      ))}
       <span className={styles.muted}>
         内核按需下载，不随软件分发；仅支持本地编排，不内置任何节点/订阅。
       </span>

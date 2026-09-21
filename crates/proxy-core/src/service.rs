@@ -6,6 +6,7 @@
 //! - 所有还原走 `sysproxy::restore*`（备份优先，绝不猜用户原值）
 
 use parking_lot::RwLock;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use crate::ir;
 use crate::kernel::{driver_for, KernelCaps, KernelDriver, KernelHandle, LogLine, KERNEL_IDS};
 use crate::rules::{self, RuleV2, RulesV2};
 use crate::sidecar;
-use crate::sub::Node;
+use crate::sub::{Node, TrafficInfo};
 use crate::sysproxy;
 
 const STATE_FILE: &str = "proxy_state.json";
@@ -66,6 +67,15 @@ pub struct Sub {
     pub url: String,
     pub updated_ms: u64,
     pub node_count: usize,
+    /// T-B2-10 订阅标准头（None = 面板未发/从未解析，UI 不谎显）；
+    /// serde default 零迁移：旧 subs.json 缺键 = None
+    #[serde(default)]
+    pub traffic: Option<TrafficInfo>,
+    #[serde(default)]
+    pub interval_min: Option<u64>,
+    /// If-None-Match 条件请求指纹：304 命中只刷 updated_ms，节点不动
+    #[serde(default)]
+    pub etag: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -90,6 +100,42 @@ pub fn resolve_install_kernel(kernel: Option<&str>) -> Result<&'static sidecar::
     sidecar::asset_for(kernel.unwrap_or(KERNEL_SINGBOX))
 }
 
+/// geo 渲染预检（T-B2-10）：规则引用的每个 geo 类，本内核所需本地资产必须已落盘。
+/// mihomo [`KernelDriver::geo_asset_ids`] 空集 = 原生托管自取是合法形态，天然放行。
+fn check_geo_prereqs(
+    driver: &dyn KernelDriver,
+    proxy_dir: &Path,
+    user_rules: &[ir::IrRule],
+) -> Result<()> {
+    let mut cats: Vec<&'static str> = Vec::new();
+    for r in user_rules {
+        if let Some(c) = r.field.geo_category() {
+            if !cats.contains(&c) {
+                cats.push(c);
+            }
+        }
+    }
+    for cat in cats {
+        for id in driver.geo_asset_ids(cat) {
+            let spec = sidecar::artifact_for(id)?;
+            if !sidecar::artifact_installed(spec, proxy_dir) {
+                return Err(ProxyError::Config(format!(
+                    "分流规则引用 {cat}，但所需 {} 未安装（{id}）：请在代理页·内核区安装",
+                    spec.label
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`ProxyService::http_get_ex`] 的结果形态：304 命中 = not_modified 且无正文/头
+struct FetchOutcome {
+    not_modified: bool,
+    headers: BTreeMap<String, String>,
+    bytes: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusDto {
     pub mode: String,
@@ -109,6 +155,17 @@ pub struct StatusDto {
     pub kernel: String,
     /// 全部已注册内核的装机/能力清单（内核选择卡数据源）
     pub kernels: Vec<KernelInfoDto>,
+    /// geo/数据资产装机清单（T-B2-10，GEO_ASSETS 数据驱动，UI 禁资产特例分支）
+    pub artifacts: Vec<ArtifactStatusDto>,
+}
+
+/// 单资产条目（sidecar::GEO_ASSETS 镜像 + manifest 版本对账）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArtifactStatusDto {
+    pub id: String,
+    pub label: String,
+    pub installed: bool,
+    pub version: Option<String>,
 }
 
 /// 单内核条目（注册表驱动，UI 禁写内核特例分支）
@@ -249,6 +306,16 @@ impl ProxyService {
             })
             .collect();
         let selected = kernels.iter().find(|k| k.id == inner.kernel);
+        let artifacts = sidecar::GEO_ASSETS
+            .iter()
+            .map(|a| ArtifactStatusDto {
+                id: a.id.to_string(),
+                label: a.label.to_string(),
+                installed: sidecar::artifact_installed(a, &self.proxy_dir),
+                version: sidecar::read_artifact_manifest(&self.proxy_dir, a.id)
+                    .map(|m| m.kernel_version),
+            })
+            .collect();
         StatusDto {
             mode: inner.mode.as_str().into(),
             kernel_running: inner.handle.as_ref().map(|h| h.alive()).unwrap_or(false),
@@ -265,6 +332,7 @@ impl ProxyService {
             restored_last_run: *self.restored_last_run.read(),
             kernel: inner.kernel.clone(),
             kernels,
+            artifacts,
         }
     }
 
@@ -304,8 +372,51 @@ impl ProxyService {
         Ok(())
     }
 
+    /// geo 数据资产安装（T-B2-10，Binary 资产唯一写盘入口收口于
+    /// [`sidecar::install_raw_asset`]）：拉取 → checksum_url 在场则 fail-closed 校验
+    /// （官方 .sha256sum 首个空白分词 vs 本地计算，不一致在任何写盘前 Integrity 拒）
+    /// → TOFU pin + tmp/rename。版本恒 spec.default_version（mihomo 滚动 latest
+    /// 的 pin 版本键恒 "latest"，无版本手选面）。
+    pub async fn artifact_install(
+        &self,
+        artifact: &str,
+        ack_pin: bool,
+    ) -> Result<sidecar::Manifest> {
+        let spec = sidecar::artifact_for(artifact)?;
+        let version = spec.default_version;
+        let bytes = self.http_get(&(spec.url_for)(version)).await?;
+        if let Some(sha_url) = spec.checksum_url {
+            let sha_raw = self.http_get(&(sha_url)(version)).await?;
+            let sha_text = String::from_utf8_lossy(&sha_raw);
+            let expected = sha_text
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let actual = sidecar::sha256_hex(&bytes);
+            if expected.is_empty() || expected != actual {
+                return Err(ProxyError::Integrity(format!(
+                    "{} 官方校验和与下载字节不一致（期望 {expected}，实际 {actual}）：包可能被篡改，未安装",
+                    spec.label
+                )));
+            }
+        }
+        let manifest = sidecar::install_raw_asset(spec, &self.proxy_dir, &bytes, version, ack_pin)?;
+        tracing::info!(artifact = %spec.id, version, sha256 = %manifest.sha256, "geo 资产安装完成");
+        self.publish_state();
+        Ok(manifest)
+    }
+
     /// 统一 HTTP 拉取（rustls + 显式 UA；订阅重试上限 3 次）
     async fn http_get(&self, url: &str) -> Result<Vec<u8>> {
+        Ok(self.http_get_ex(url, None).await?.bytes)
+    }
+
+    /// 带条件请求的拉取（T-B2-10 订阅 304 面）：`if_none_match` 附 If-None-Match 头，
+    /// 命中 304 短路返回（零字节、零头）。响应头一律小写键归一（reqwest/HTTP2 内部
+    /// 表示即小写，parse_sub_headers 约定单一真源）。非 2xx 语义沿用旧 http_get
+    /// （不检查状态码——订阅面板方言混杂，正文解析失败自有诚实报错）。
+    async fn http_get_ex(&self, url: &str, if_none_match: Option<&str>) -> Result<FetchOutcome> {
         let client = reqwest::Client::builder()
             .user_agent(APP_UA)
             .timeout(Duration::from_secs(30))
@@ -313,11 +424,39 @@ impl ProxyService {
             .map_err(|e| ProxyError::Download(format!("HTTP 客户端构建失败: {e}")))?;
         let mut last_err = String::new();
         for attempt in 0..FETCH_RETRIES {
-            match client.get(url).send().await {
-                Ok(resp) => match resp.bytes().await {
-                    Ok(b) => return Ok(b.to_vec()),
-                    Err(e) => last_err = format!("读取响应体失败: {e}"),
-                },
+            let mut req = client.get(url);
+            if let Some(etag) = if_none_match {
+                req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+            }
+            match req.send().await {
+                Ok(resp) => {
+                    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+                        return Ok(FetchOutcome {
+                            not_modified: true,
+                            headers: BTreeMap::new(),
+                            bytes: Vec::new(),
+                        });
+                    }
+                    let headers = resp
+                        .headers()
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            v.to_str()
+                                .ok()
+                                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+                        })
+                        .collect();
+                    match resp.bytes().await {
+                        Ok(b) => {
+                            return Ok(FetchOutcome {
+                                not_modified: false,
+                                headers,
+                                bytes: b.to_vec(),
+                            })
+                        }
+                        Err(e) => last_err = format!("读取响应体失败: {e}"),
+                    }
+                }
                 Err(e) => last_err = format!("请求失败: {e}"),
             }
             if attempt + 1 < FETCH_RETRIES {
@@ -349,6 +488,9 @@ impl ProxyService {
             url: url.trim().to_string(),
             updated_ms: 0,
             node_count: 0,
+            traffic: None,
+            interval_min: None,
+            etag: None,
         };
         let mut inner = self.inner.write();
         inner.subs.push(sub.clone());
@@ -369,19 +511,25 @@ impl ProxyService {
         Ok(removed)
     }
 
-    /// 拉取并解析订阅（PR3）；内容持久化到 subs/（敏感，不进日志）
+    /// 拉取并解析订阅（PR3；T-B2-10 条件请求 + 标准头消费）；内容持久化到 subs/（敏感，不进日志）。
+    /// 304 命中 = 只刷 updated_ms（节点与流量头原样）；200 时 traffic 头在场才覆盖，
+    /// interval_min/etag 头缺省保留旧值——面板不发头不算"用户清空"。
     pub async fn sub_update(&self, id: &str) -> Result<Sub> {
-        let url = {
+        let (url, old_etag) = {
             let inner = self.inner.read();
             inner
                 .subs
                 .iter()
                 .find(|s| s.id == id)
-                .map(|s| s.url.clone())
+                .map(|s| (s.url.clone(), s.etag.clone()))
                 .ok_or_else(|| ProxyError::NotFound(format!("订阅 {id} 不存在")))?
         };
-        let raw = self.http_get(&url).await?;
-        let content = String::from_utf8_lossy(&raw[..]);
+        let fetched = self.http_get_ex(&url, old_etag.as_deref()).await?;
+        if fetched.not_modified {
+            return self.apply_sub_not_modified(id);
+        }
+        let headers = crate::sub::parse_sub_headers(&fetched.headers);
+        let content = String::from_utf8_lossy(&fetched.bytes[..]);
         let nodes = crate::sub::parse_subscription(&content, id)?;
         let node_count = nodes.len();
 
@@ -399,10 +547,36 @@ impl ProxyService {
             let sub = &mut inner.subs[idx];
             sub.updated_ms = now_ms();
             sub.node_count = node_count;
+            if headers.traffic.is_some() {
+                sub.traffic = headers.traffic;
+            }
+            if headers.interval_min.is_some() {
+                sub.interval_min = headers.interval_min;
+            }
+            if headers.etag.is_some() {
+                sub.etag = headers.etag;
+            }
             sub.clone()
         };
         self.save_subs(&self.inner.read())?;
         self.publish_nodes(Some(id));
+        Ok(sub)
+    }
+
+    /// 304 命中的落账（红线语义：正文与节点文件一字不动，仅"上次成功更新"时刻刷新；
+    /// 不发 sub_update 事件——节点集未变，UI 无需失效重取）
+    fn apply_sub_not_modified(&self, id: &str) -> Result<Sub> {
+        let sub = {
+            let mut inner = self.inner.write();
+            let idx = inner
+                .subs
+                .iter()
+                .position(|s| s.id == id)
+                .ok_or_else(|| ProxyError::NotFound(format!("订阅 {id} 不存在")))?;
+            inner.subs[idx].updated_ms = now_ms();
+            inner.subs[idx].clone()
+        };
+        self.save_subs(&self.inner.read())?;
         Ok(sub)
     }
 
@@ -718,6 +892,9 @@ impl ProxyService {
         // v2 分流表 → IR 规则组 + 兜底 tag（route_mode=global/direct_all 时规则全跳过；
         // block 出站由 ir::build 仅在被引用时注入——方言渲染零条件跟随）
         let (user_rules, final_target) = rules::to_ir(&rules_v2)?;
+        // T-B2-10 渲染预检：geo 类规则在场且本内核消费本地资产缺失 → 写盘前诚实拒
+        //（内核读缺文件 = 启动失败堆在日志页，不如此处点名资产+指路安装入口）
+        check_geo_prereqs(driver.as_ref(), &self.proxy_dir, &user_rules)?;
         let ir_cfg = ir::build(port, tun, &nodes, &user_rules, &final_target, &[])?;
         let rendered = driver.config_render(&ir_cfg)?;
         let cfg_path = self.proxy_dir.join(driver.cfg_name());
@@ -977,6 +1154,8 @@ mod tests {
         fail_next: AtomicBool,
         /// T-B2-5：能力位 tun=false 的建模（xray 主线门禁红线）
         tun_cap: bool,
+        /// T-B2-10：geo 预检门的建模位（非空 = 该"内核"消费本地 geo 资产）
+        geo_assets: &'static [&'static str],
     }
 
     impl TestKernelDriver {
@@ -991,6 +1170,22 @@ mod tests {
         fn no_tun(id: &'static str, cfg: &'static str) -> StdArc<Self> {
             Self::with(id, cfg, true, false)
         }
+        /// geo 资产预检门驱动（T-B2-10 红线专用：对任意 geo 类点名同一资产集）
+        fn geo_gated(
+            id: &'static str,
+            cfg: &'static str,
+            assets: &'static [&'static str],
+        ) -> StdArc<Self> {
+            StdArc::new(Self {
+                id,
+                cfg,
+                succeeds: true,
+                start_attempts: AtomicUsize::new(0),
+                fail_next: AtomicBool::new(false),
+                tun_cap: true,
+                geo_assets: assets,
+            })
+        }
         fn with(
             id: &'static str,
             cfg: &'static str,
@@ -1004,6 +1199,7 @@ mod tests {
                 start_attempts: AtomicUsize::new(0),
                 fail_next: AtomicBool::new(false),
                 tun_cap,
+                geo_assets: &[],
             })
         }
     }
@@ -1034,6 +1230,9 @@ mod tests {
         }
         fn config_render(&self, _ir: &IrConfig) -> Result<String> {
             Ok("{}\n".to_string())
+        }
+        fn geo_asset_ids(&self, _cat: &str) -> &'static [&'static str] {
+            self.geo_assets
         }
         fn build_command(&self, _work_dir: &Path, _cfg: &Path) -> std::process::Command {
             let mut c = std::process::Command::new(
@@ -1628,6 +1827,133 @@ mod tests {
         svc.publish_nodes(None);
         let ev2 = rx.try_recv().expect("publish_nodes(None) 也须发事件");
         assert!(ev2.payload["sub_id"].is_null(), "{:?}", ev2.payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- T-B2-10：订阅 304 落账 + geo 渲染预检（09 §5.2 字面回归） ----------------
+
+    #[test]
+    fn subEtagNotModified_keepsNodesRefreshStamp() {
+        // 红线：If-None-Match 命中 304 = 只刷"上次成功更新"时刻——节点文件/流量头/
+        // etag 一字不动，且不发 nodes_changed（节点集未变，UI 无需失效重取）
+        let (svc, _sp, dir) = open_service("etag304");
+        let sub = svc.sub_add("带头订阅", "http://127.0.0.1:9/never").unwrap();
+        let nodes_path = svc.sub_nodes_path(&sub.id);
+        std::fs::write(
+            &nodes_path,
+            serde_json::to_vec(&vec![Node {
+                tag: "keep".into(),
+                kind: NodeKind::Shadowsocks,
+                server: "1.2.3.4".into(),
+                port: 8388,
+                sub_id: sub.id.clone(),
+                groups: Vec::new(),
+                extra: serde_json::json!({"method": "aes-256-gcm", "password": "p"}),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+        {
+            let mut inner = svc.inner.write();
+            let i = inner.subs.iter().position(|s| s.id == sub.id).unwrap();
+            inner.subs[i].updated_ms = 111;
+            inner.subs[i].node_count = 1;
+            inner.subs[i].etag = Some("\"v7\"".into());
+            inner.subs[i].traffic = Some(TrafficInfo {
+                upload: 1,
+                download: 2,
+                left: 3,
+                expire_ms: 4,
+            });
+        }
+        let nodes_before = std::fs::read(&nodes_path).unwrap();
+        let mut rx = svc.bus.subscribe("proxy.nodes_changed").unwrap();
+        let after = svc.apply_sub_not_modified(&sub.id).unwrap();
+        assert!(
+            after.updated_ms > 111,
+            "304 必须刷新更新时刻：{}",
+            after.updated_ms
+        );
+        assert_eq!(after.node_count, 1);
+        assert_eq!(after.etag.as_deref(), Some("\"v7\""));
+        assert_eq!(after.traffic.as_ref().unwrap().left, 3);
+        assert!(rx.try_recv().is_err(), "节点集未变不得播 nodes_changed");
+        assert_eq!(
+            std::fs::read(&nodes_path).unwrap(),
+            nodes_before,
+            "节点文件一字不动"
+        );
+        drop(svc);
+        let svc2 = ProxyService::open(
+            &dir,
+            Arc::new(host_core::events::EventBus::new()),
+            StdArc::new(MockSp::new()),
+        )
+        .unwrap();
+        let s2 = &svc2.subs()[0];
+        assert_eq!(s2.updated_ms, after.updated_ms, "落账必须持久化 subs.json");
+        assert_eq!(
+            s2.etag.as_deref(),
+            Some("\"v7\""),
+            "serde default 零迁移+持久往返"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn geoPrecheck_missingAsset_blocksThenPasses() {
+        // 辅证（非任务书字面名）：geo 规则在场 × 内核所需资产缺失 → 起核前 Config 拒
+        //（点名类别+资产+指路），零 start_attempts 零落盘；装上资产后同一调用放行
+        let (svc, _sp, dir) = open_service("geopre");
+        let arc: Arc<ProxyService> = svc;
+        let d =
+            TestKernelDriver::geo_gated("test-core-geo", "config-geo.json", &["singbox-geosite"]);
+        inject(&arc, d.clone());
+        arc.set_kernel("test-core-geo").unwrap();
+        add_demo_node(&arc);
+        arc.set_rules_v2(RulesV2 {
+            rules: vec![RuleV2 {
+                kind: "geo_site".into(),
+                pattern: "cn".into(),
+                target: "direct".into(),
+                enabled: true,
+            }],
+            final_target: "proxy".into(),
+            route_mode: "rule".into(),
+        })
+        .unwrap();
+        let (_listener, _port) = stub_health_port(&arc);
+        let err = arc.restart_with_config(false).unwrap_err();
+        match err {
+            ProxyError::Config(msg) => assert!(
+                msg.contains("geosite")
+                    && msg.contains("singbox-geosite")
+                    && msg.contains("未安装"),
+                "须点名类别+资产 id：{msg}"
+            ),
+            other => panic!("预检必须是 Config 错，得 {other:?}"),
+        }
+        assert_eq!(
+            d.start_attempts.load(Ordering::SeqCst),
+            0,
+            "预检拦在起核之前"
+        );
+        assert!(
+            !dir.join("proxy").join("config-geo.json").exists(),
+            "预检拒时配置不得落盘"
+        );
+        // 正对照：raw 通道装入假字节资产 → 预检判据只看落盘事实，同一调用过闸
+        sidecar::install_raw_asset(
+            sidecar::artifact_for("singbox-geosite").unwrap(),
+            &dir.join("proxy"),
+            b"fake-geosite-db",
+            "20260920133716",
+            false,
+        )
+        .unwrap();
+        arc.restart_with_config(false).unwrap();
+        assert_eq!(d.start_attempts.load(Ordering::SeqCst), 1);
+        arc.set_mode(Mode::Off).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
