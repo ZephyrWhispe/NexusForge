@@ -41,6 +41,10 @@
         "sub0aaaa:tokyo-2",
         "sub1bbbb:lg-vless",
         "sub1bbbb:fr-vmess",
+        "sub0aaaa:hy-seoul",
+        "sub1bbbb:tuic-oslo",
+        "sub2cccc:wg-paris",
+        "sub2cccc:reality-xhttp",
         "auto"
       ],
       "tag": "proxy",
@@ -52,7 +56,11 @@
         "sub0aaaa:hk-1",
         "sub0aaaa:tokyo-2",
         "sub1bbbb:lg-vless",
-        "sub1bbbb:fr-vmess"
+        "sub1bbbb:fr-vmess",
+        "sub0aaaa:hy-seoul",
+        "sub1bbbb:tuic-oslo",
+        "sub2cccc:wg-paris",
+        "sub2cccc:reality-xhttp"
       ],
       "tag": "auto",
       "type": "urltest",
@@ -105,6 +113,74 @@
       },
       "type": "vmess",
       "uuid": "8a4c2b1e-3f60-4a2d-9e5b-7c1d0f2a3b4c"
+    },
+    {
+      "obfs": {
+        "password": "obfspw",
+        "type": "salamander"
+      },
+      "password": "hy-pw",
+      "server": "3.3.3.3",
+      "server_port": 8443,
+      "tag": "sub0aaaa:hy-seoul",
+      "tls": {
+        "enabled": true,
+        "server_name": "hy.example.com"
+      },
+      "type": "hysteria2"
+    },
+    {
+      "alpn": [
+        "h3"
+      ],
+      "password": "tuic-pw",
+      "server": "4.4.4.4",
+      "server_port": 6000,
+      "tag": "sub1bbbb:tuic-oslo",
+      "tls": {
+        "enabled": true,
+        "server_name": "tuic.example.com"
+      },
+      "type": "tuic",
+      "uuid": "9c0dbc5a-1d9f-4f6d-b5e1-0e9b48f2a1cd"
+    },
+    {
+      "local_address": [
+        "10.0.0.2/32",
+        "fd00::2/128"
+      ],
+      "peer_public_keys": [
+        "Iz1N0T9KZ3mM0lL9pP2oO8nN7bB6vV5cC4xX3zZ2yY1="
+      ],
+      "preshared_keys": [
+        "qM7sK1dF0hG2jL5kP9oI8uY7tR6eW3qA1sD2fG3hJ4k="
+      ],
+      "private_key": "YHPe0P3bQxUqUvVXrLp0lP1dT1mT0d0d0d0d0d0d0d0=",
+      "server": "5.5.5.5",
+      "server_port": 51820,
+      "tag": "sub2cccc:wg-paris",
+      "type": "wireguard"
+    },
+    {
+      "server": "6.6.6.6",
+      "server_port": 443,
+      "tag": "sub2cccc:reality-xhttp",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "public_key": "SbFKmQ6VN0zX9lJ3rV7cP0dT5mY2wH8kN4bQ1sD6fG0",
+          "short_id": "0123"
+        },
+        "server_name": "www.microsoft.com"
+      },
+      "transport": {
+        "host": "www.microsoft.com",
+        "mode": "auto",
+        "type": "xhttp"
+      },
+      "type": "vless",
+      "uuid": "b2f2b2c9-1f4d-4d9d-9b6a-3a5c7e8f9a0b"
     },
     {
       "tag": "direct",

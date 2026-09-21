@@ -279,11 +279,31 @@ fn node_to_outbound(node: &Node) -> Result<Value> {
             apply_stream(&mut o, node);
             o
         }
+        // T-B2-7 四新协议：xray 官方支持 hysteria2/tuic/wireguard，但本方言臂
+        // 暂按 supported_kinds（仍 4）如实拒——扩臂属后续批次能力矩阵（⑭）承诺面，
+        // service 层过滤保证这些节点在 xray 下不进渲染；SSR 全内核均不支持（⑭）。
+        NodeKind::Hysteria2 | NodeKind::Tuic5 | NodeKind::WireGuard => {
+            return Err(ProxyError::Config(format!(
+                "xray 方言当前仅支持 v1 四协议，不支持 {}：节点 {}",
+                node.kind.as_str(),
+                tag
+            )))
+        }
+        NodeKind::ShadowsocksR => {
+            return Err(ProxyError::Config(format!(
+                "xray 官方主线不支持 SSR（ShadowsocksR）出口：节点 {}",
+                tag
+            )))
+        }
     };
     Ok(v)
 }
 
-/// streamSettings 通用投影（tls / ws；xray 用 security+network 两段而非 sing-box 的分层）
+/// streamSettings 通用投影（tls / ws；xray 用 security+network 两段而非 sing-box 的分层）。
+/// REALITY/XHTTP 透传键（extra["reality"]/extra["xhttp"]）在本方言**暂不展开**：
+/// xray 的 realitySettings/xhttpSettings 字段形状与 sing-box 白名单不同源，
+/// 按 09 §5.1-⑭ 能力矩阵留待后续批次核证后扩臂；行字面（§5.2 T-B2-7）只承诺
+/// sing-box 官方映射的渲染端。
 fn apply_stream(outbound: &mut Value, node: &Node) {
     let tls = node.extra["tls"] == json!(true);
     let ws = node.extra["network"].as_str() == Some("ws");
@@ -503,6 +523,36 @@ mod tests {
         match render(&tun) {
             Err(ProxyError::Config(msg)) => assert!(msg.contains("TUN"), "{msg}"),
             other => panic!("xray 方言必须拒 TUN 入站，得 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xrayRender_unsupportedKinds_rejected() {
+        // T-B2-7：xray 臂保持 4 协议（supported_kinds 与渲染臂同步，⑭ 能力矩阵）：
+        // hy2/tuic/wg/ssr 混入 IR 时渲染层必须点名拒，禁静默降级成 ss/vmess 冒充
+        let mk = |kind: NodeKind| Node {
+            tag: "x".into(),
+            kind,
+            server: "1.1.1.1".into(),
+            port: 443,
+            sub_id: "sub0aaaabbbbcccc".into(),
+            extra: json!({"password": "p", "uuid": "u"}),
+        };
+        for kind in [
+            NodeKind::Hysteria2,
+            NodeKind::Tuic5,
+            NodeKind::WireGuard,
+            NodeKind::ShadowsocksR,
+        ] {
+            let cfg =
+                ir::build(7890, false, &[mk(kind)], &[] as &[IrRule], TAG_PROXY, &[]).unwrap();
+            match render(&cfg) {
+                Err(ProxyError::Config(msg)) => assert!(
+                    msg.contains(kind.as_str()) || msg.contains("SSR"),
+                    "错误须点名被拒协议：{msg}"
+                ),
+                other => panic!("xray 必须拒 {}，得 {other:?}", kind.as_str()),
+            }
         }
     }
 

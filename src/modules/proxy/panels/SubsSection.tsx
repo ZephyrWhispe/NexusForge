@@ -50,7 +50,7 @@ export default function SubsSection({
     <Section
       title="订阅"
       actions={
-        <span className={styles.muted}>自行添加分享链接或订阅地址（ss/vmess/trojan/vless）</span>
+        <span className={styles.muted}>自行添加分享链接或订阅地址（ss/vmess/trojan/vless/hy2/tuic/wg/ssr）</span>
       }
     >
       <div className={styles.row}>

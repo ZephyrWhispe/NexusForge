@@ -353,7 +353,7 @@ impl ProxyService {
         self.save_subs(&inner)?;
         drop(inner);
         let _ = std::fs::remove_file(self.sub_nodes_path(id));
-        self.publish_nodes();
+        self.publish_nodes(Some(id));
         Ok(removed)
     }
 
@@ -390,7 +390,7 @@ impl ProxyService {
             sub.clone()
         };
         self.save_subs(&self.inner.read())?;
-        self.publish_nodes();
+        self.publish_nodes(Some(id));
         Ok(sub)
     }
 
@@ -630,6 +630,29 @@ impl ProxyService {
             }
         }
         let driver = self.driver(&kernel)?;
+        // T-B2-7 能力过滤（09 §5.1-⑭ 能力表单一真源）：supported_kinds 之外的
+        // 节点不进本内核渲染（如 SSR 全内核不支持）；节点数据保留，仅本代配置剔除。
+        let supported = driver.supported_kinds();
+        let nodes: Vec<_> = nodes
+            .into_iter()
+            .filter(|n| supported.contains(&n.kind))
+            .collect();
+        let excluded = {
+            let inner = self.inner.read();
+            inner.nodes.len() - nodes.len()
+        };
+        if excluded > 0 {
+            tracing::info!(
+                excluded,
+                kernel = kernel.as_str(),
+                "部分节点协议不被当前内核支持，已从本代配置剔除"
+            );
+        }
+        if nodes.is_empty() && excluded > 0 {
+            return Err(ProxyError::Config(format!(
+                "当前内核（{kernel}）不支持任何已添加节点协议：请换内核或更新订阅（{excluded} 个节点被剔除）"
+            )));
+        }
         // v1 路由：私有地址 + 用户直连域名恒直连，其余走代理（ir::build 内实现）
         let ir_cfg = ir::build(
             port,
@@ -793,13 +816,15 @@ impl ProxyService {
             .ok();
     }
 
-    fn publish_nodes(&self) {
+    /// 节点集变更事件（缺陷⑩根治面在 T-B2-7）：`sub_id` 由调用方给出真实来源，
+    /// None 表示跨订阅/启动期的整体重载（前端仍按 total 兜底刷新）。
+    fn publish_nodes(&self, sub_id: Option<&str>) {
         let inner = self.inner.read();
         self.bus
             .publish(Event::new(
                 "proxy.nodes_changed",
                 "proxy",
-                serde_json::json!({ "sub_id": serde_json::Value::Null, "total": inner.nodes.len() }),
+                serde_json::json!({ "sub_id": sub_id, "total": inner.nodes.len() }),
             ))
             .ok();
     }
@@ -1400,6 +1425,34 @@ mod tests {
             "被拒配置不得落盘"
         );
         assert!(!sp.read().unwrap().enable, "系统代理全程未动");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- T-B2-7：节点事件携带真实 sub_id（缺陷⑩面收口） ----------------
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn publishNodes_eventCarriesRealSubId() {
+        let (svc, _sp, dir) = open_service("nodesubid");
+        // 总线订阅必须先于发布就位（broadcast 不回放历史消息）
+        let mut rx = svc.bus.subscribe("proxy.nodes_changed").unwrap();
+        let sub = svc
+            .sub_add("链路A", "http://127.0.0.1:9/never-fetched")
+            .unwrap();
+        // 移除订阅是唯一免网络的真实发布路径（sub_update 需拉取）
+        svc.sub_remove(&sub.id).unwrap();
+        let ev = rx
+            .try_recv()
+            .expect("sub_remove 必须发出 proxy.nodes_changed 事件");
+        assert_eq!(
+            ev.payload["sub_id"], sub.id,
+            "缺陷⑩红线：事件 sub_id 不得再恒 null"
+        );
+        assert_eq!(ev.payload["total"], 0);
+        // 兼容形状：None（启动期整体重载）仍落 JSON null，前端旧消费面不破
+        svc.publish_nodes(None);
+        let ev2 = rx.try_recv().expect("publish_nodes(None) 也须发事件");
+        assert!(ev2.payload["sub_id"].is_null(), "{:?}", ev2.payload);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

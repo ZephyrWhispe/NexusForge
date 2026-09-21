@@ -49,7 +49,7 @@ pub fn generate(opts: &GenOptions) -> Result<serde_json::Value> {
             empty
         },
     )?;
-    Ok(crate::singbox::render(&ir))
+    crate::singbox::render(&ir)
 }
 
 #[cfg(test)]

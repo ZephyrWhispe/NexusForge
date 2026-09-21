@@ -288,7 +288,16 @@ impl KernelDriver for SingBoxDriver {
 
     fn supported_kinds(&self) -> &'static [NodeKind] {
         use NodeKind::*;
-        &[Shadowsocks, Vmess, Trojan, Vless]
+        // T-B2-7：sing-box 官方主线 7 协议；SSR 恒排除（⑭ 核证：官方不支持）
+        &[
+            Shadowsocks,
+            Vmess,
+            Trojan,
+            Vless,
+            Hysteria2,
+            Tuic5,
+            WireGuard,
+        ]
     }
 
     fn caps(&self) -> KernelCaps {
@@ -300,7 +309,7 @@ impl KernelDriver for SingBoxDriver {
     }
 
     fn config_render(&self, ir: &IrConfig) -> Result<String> {
-        Ok(serde_json::to_string_pretty(&crate::singbox::render(ir))?)
+        Ok(serde_json::to_string_pretty(&crate::singbox::render(ir)?)?)
     }
 
     fn build_command(&self, _work_dir: &Path, cfg: &Path) -> Command {
@@ -378,7 +387,8 @@ mod tests {
         let d = driver_for(dir, "sing-box").expect("sing-box 必须可构造");
         assert_eq!(d.id(), "sing-box");
         assert_eq!(d.cfg_name(), "config.json");
-        assert_eq!(d.supported_kinds().len(), 4);
+        // T-B2-7：sing-box 渲染臂已扩至 7 协议（ss/vmess/trojan/vless/hy2/tuic/wg）
+        assert_eq!(d.supported_kinds().len(), 7);
     }
 
     #[test]
@@ -412,6 +422,10 @@ mod tests {
         assert_eq!(d.display_name(), "mihomo (Clash 内核)");
         // 09 ④ 裁定：文件名段=config.yaml，目录段=proxy/mihomo/ 子目录
         assert_eq!(d.cfg_name(), "mihomo/config.yaml");
+        // T-B2-7：三驱动 supported_kinds 表与渲染臂同步（Meta 七协议 / xray 四协议）
+        assert_eq!(d.supported_kinds().len(), 7);
+        let x = driver_for(dir, "xray").expect("xray 必须可构造");
+        assert_eq!(x.supported_kinds().len(), 4);
         let caps = d.caps();
         assert!(
             caps.tun && caps.policy_groups && caps.external_controller,

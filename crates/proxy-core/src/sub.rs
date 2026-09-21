@@ -2,7 +2,8 @@
 //!
 //! 合规红线：**只做解析框架，不内置任何节点/订阅**；订阅 URL 全部由用户添加，
 //! 内容视为敏感（不落明文日志，仅持久化到 `{appData}/proxy/subs/`）。
-//! 支持：ss://（SIP002 + 旧版整体 base64）、vmess://（v2ray JSON）、trojan://、vless://。
+//! 支持：ss://（SIP002 含 `?plugin=` 透传 + 旧版整体 base64）、vmess://（v2ray JSON）、
+//! trojan://、vless://（含 REALITY/XHTTP 透传键）、hy2://、tuic://、wg://、ssr://（T-B2-7）。
 //! 订阅正文：整体 base64 或纯文本多行 URI，自动探测。
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,17 @@ pub enum NodeKind {
     Vmess,
     Trojan,
     Vless,
+    // ↓ T-B2-7 四新变体。**跨版本单向门（09 §5.1-⑬）**：写过新 kind 的
+    // nodes.json 在旧版应用上会整文件反序列化失败（load 的 .ok() 吞掉=静默清空），
+    // 发布后不可回滚过本批；⑬ 降险依赖读侧 serde-default 纪律不外溢到本枚举。
+    Hysteria2,
+    Tuic5,
+    WireGuard,
+    /// SS-R 为 v2rayN/专用分叉方言，sing-box/xray/mihomo **官方主线均不支持**
+    /// （09 §5.1-⑭ 实施核证）→ 三驱动 supported_kinds 恒排除：节点保留可读、
+    /// 换核预检报数，但当前任何内核都无法作为其出口。
+    #[serde(rename = "ssr")]
+    ShadowsocksR,
 }
 
 impl NodeKind {
@@ -25,6 +37,10 @@ impl NodeKind {
             Self::Vmess => "vmess",
             Self::Trojan => "trojan",
             Self::Vless => "vless",
+            Self::Hysteria2 => "hysteria2",
+            Self::Tuic5 => "tuic5",
+            Self::WireGuard => "wireguard",
+            Self::ShadowsocksR => "ssr",
         }
     }
 }
@@ -101,32 +117,49 @@ pub fn parse_share_uri(uri: &str, sub_id: &str) -> Result<Node> {
         parse_authority(rest, sub_id, NodeKind::Trojan)
     } else if let Some(rest) = uri.strip_prefix("vless://") {
         parse_authority(rest, sub_id, NodeKind::Vless)
+    } else if let Some(rest) = uri.strip_prefix("hy2://") {
+        parse_hy2(rest, sub_id)
+    } else if let Some(rest) = uri.strip_prefix("tuic://") {
+        parse_tuic(rest, sub_id)
+    } else if let Some(rest) = uri.strip_prefix("wg://") {
+        parse_wg(rest, sub_id)
+    } else if let Some(rest) = uri.strip_prefix("ssr://") {
+        parse_ssr(rest, sub_id)
     } else {
         Err(ProxyError::Subscription("不支持的协议".into()))
     }
 }
 
-/// ss://（SIP002：base64(method:password)@host:port#tag / plugin 暂不解析）
+/// ss://（SIP002：base64(method:password)@host:port[/?plugin=..]#tag / 旧版整体 base64）
 fn parse_ss(rest: &str, sub_id: &str) -> Result<Node> {
     let (main, frag) = split_fragment(rest);
     let tag = frag.unwrap_or_else(|| "ss".into());
 
     if let Some(at) = main.rfind('@') {
-        // SIP002：userinfo（base64(method:password) 或明文 method:password）@host:port
+        // SIP002：userinfo（base64(method:password) 或明文 method:password）@host:port[/ ?query]
         let userinfo = &main[..at];
-        let hostport = &main[at + 1..];
+        let (hostport, query) = split_sip002_query(&main[at + 1..]);
         let decoded = b64_or_raw(userinfo);
         let (method, password) = decoded
             .split_once(':')
             .ok_or_else(|| ProxyError::Subscription("ss userinfo 缺 method:password".into()))?;
         let (host, port) = split_host_port(hostport)?;
+        let mut extra = serde_json::json!({ "method": method, "password": password });
+        // T-B2-7：`?plugin=obfs-local%3Bk%3Dv…` 解码后原样存 extra["plugin"]
+        //（渲染端 sing-box plugin 字段透传；参数体不做语义解析=白名单外原样保留）
+        if let Some(plugin) = query.get("plugin") {
+            let decoded = url_decode(plugin);
+            if !decoded.is_empty() {
+                extra["plugin"] = serde_json::json!(decoded);
+            }
+        }
         return Ok(Node {
             tag,
             kind: NodeKind::Shadowsocks,
             server: host,
             port,
             sub_id: sub_id.into(),
-            extra: serde_json::json!({ "method": method, "password": password }),
+            extra,
         });
     }
     // 旧版：base64(method:password@host:port)
@@ -203,7 +236,7 @@ fn parse_authority(rest: &str, sub_id: &str, kind: NodeKind) -> Result<Node> {
         .map(|q| q.split('&').filter_map(|kv| kv.split_once('=')).collect())
         .unwrap_or_default();
 
-    let extra = match kind {
+    let mut extra = match kind {
         NodeKind::Trojan => serde_json::json!({
             "password": secret,
             "sni": params.get("sni").copied().unwrap_or_default(),
@@ -223,6 +256,34 @@ fn parse_authority(rest: &str, sub_id: &str, kind: NodeKind) -> Result<Node> {
         }
         _ => serde_json::json!({}),
     };
+    // T-B2-7 REALITY/XHTTP/host 透传（09 §5.2 行字面白名单键）：
+    // 只按 pbk/sid/mode/host 解析，其余未知参数原样丢弃 = 白名单外不进 extra。
+    if let Some(h) = params.get("host").copied() {
+        if !h.is_empty() {
+            extra["host"] = serde_json::json!(h);
+        }
+    }
+    if params.get("security").copied() == Some("reality") {
+        let pbk = params.get("pbk").copied().unwrap_or_default();
+        if pbk.is_empty() {
+            return Err(ProxyError::Subscription(
+                "reality 缺 pbk（public_key）".into(),
+            ));
+        }
+        let sid = params.get("sid").copied().unwrap_or_default();
+        if !sid.is_empty() && !is_even_hex(sid) {
+            return Err(ProxyError::Subscription(format!(
+                "reality short_id 非合法十六进制（须偶数位 hex）: {sid}"
+            )));
+        }
+        extra["tls"] = serde_json::json!(true);
+        extra["reality"] = serde_json::json!({ "public_key": pbk, "short_id": sid });
+    }
+    if params.get("type").copied() == Some("xhttp") {
+        extra["network"] = serde_json::json!("xhttp");
+        extra["xhttp"] =
+            serde_json::json!({ "mode": params.get("mode").copied().unwrap_or_default() });
+    }
     Ok(Node {
         tag,
         kind,
@@ -231,6 +292,179 @@ fn parse_authority(rest: &str, sub_id: &str, kind: NodeKind) -> Result<Node> {
         sub_id: sub_id.into(),
         extra,
     })
+}
+
+/// 分离 SIP002 的 host:port 与 `/?k=v&..` 查询段（旧版无查询则全为主机段）
+fn split_sip002_query(s: &str) -> (&str, std::collections::HashMap<&str, &str>) {
+    match s.split_once('?') {
+        Some((hp, q)) => (
+            hp.trim_end_matches('/'),
+            q.split('&').filter_map(|kv| kv.split_once('=')).collect(),
+        ),
+        None => (s, std::collections::HashMap::new()),
+    }
+}
+
+/// hy2://base64(密码)@host:port?sni=..&obfs=salamander&obfs-password=..&insecure=1#tag
+fn parse_hy2(rest: &str, sub_id: &str) -> Result<Node> {
+    let (main, frag) = split_fragment(rest);
+    let tag = frag.unwrap_or_else(|| "hy2".into());
+    let at = main
+        .rfind('@')
+        .ok_or_else(|| ProxyError::Subscription("hy2 缺 @".into()))?;
+    let password = b64_or_raw(&main[..at]);
+    let (hostport, query) = split_sip002_query(&main[at + 1..]);
+    let (host, port) = split_host_port(hostport)?;
+    let mut extra = serde_json::json!({
+        "password": password,
+        "sni": query.get("sni").copied().unwrap_or_default(),
+        "insecure": query.get("insecure").copied() == Some("1"),
+    });
+    if let Some(obfs) = query.get("obfs").copied() {
+        extra["obfs"] = serde_json::json!(obfs);
+        extra["obfs_password"] =
+            serde_json::json!(query.get("obfs-password").copied().unwrap_or_default());
+    }
+    Ok(Node {
+        tag,
+        kind: NodeKind::Hysteria2,
+        server: host,
+        port,
+        sub_id: sub_id.into(),
+        extra,
+    })
+}
+
+/// tuic://uuid:password@host:port?token=..&sni=..&alpn=h3#tag（密码空时回落 token）
+fn parse_tuic(rest: &str, sub_id: &str) -> Result<Node> {
+    let (main, frag) = split_fragment(rest);
+    let tag = frag.unwrap_or_else(|| "tuic".into());
+    let at = main
+        .rfind('@')
+        .ok_or_else(|| ProxyError::Subscription("tuic 缺 @".into()))?;
+    let secret = &main[..at];
+    let (uuid, password) = secret
+        .split_once(':')
+        .ok_or_else(|| ProxyError::Subscription("tuic 缺 uuid:password".into()))?;
+    if !is_uuid(uuid) {
+        return Err(ProxyError::Subscription(format!("tuic uuid 非法: {uuid}")));
+    }
+    let (hostport, query) = split_sip002_query(&main[at + 1..]);
+    let (host, port) = split_host_port(hostport)?;
+    let password = if password.is_empty() {
+        query.get("token").copied().unwrap_or_default().to_string()
+    } else {
+        password.to_string()
+    };
+    let extra = serde_json::json!({
+        "uuid": uuid,
+        "password": password,
+        "sni": query.get("sni").copied().unwrap_or_default(),
+        "alpn": query.get("alpn").copied().unwrap_or_default(),
+    });
+    Ok(Node {
+        tag,
+        kind: NodeKind::Tuic5,
+        server: host,
+        port,
+        sub_id: sub_id.into(),
+        extra,
+    })
+}
+
+/// wg://url-encode(私钥)?endpoint=host:port&publickey=..&preshared=..&address=..#tag
+fn parse_wg(rest: &str, sub_id: &str) -> Result<Node> {
+    let (main, frag) = split_fragment(rest);
+    let tag = frag.unwrap_or_else(|| "wg".into());
+    let (priv_raw, query_str) = main
+        .split_once('?')
+        .ok_or_else(|| ProxyError::Subscription("wg 缺 ? 查询段（endpoint 等）".into()))?;
+    let query: std::collections::HashMap<&str, &str> = query_str
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .collect();
+    let endpoint = query
+        .get("endpoint")
+        .ok_or_else(|| ProxyError::Subscription("wg 缺 endpoint 参数".into()))?;
+    let (host, port) = split_host_port(endpoint)?;
+    let private_key = url_decode(priv_raw);
+    if private_key.is_empty() {
+        return Err(ProxyError::Subscription("wg 缺私钥".into()));
+    }
+    // wg 链接的参数值普遍 percent 编码（base64 键的 '=' 结尾必须转义），逐值解码
+    let decoded = |k: &str| -> String { query.get(k).copied().map(url_decode).unwrap_or_default() };
+    let extra = serde_json::json!({
+        "private_key": private_key,
+        "public_key": decoded("publickey"),
+        "preshared_key": decoded("preshared"),
+        "address": decoded("address"),
+    });
+    Ok(Node {
+        tag,
+        kind: NodeKind::WireGuard,
+        server: host,
+        port,
+        sub_id: sub_id.into(),
+        extra,
+    })
+}
+
+/// ssr://base64url(host:port:proto:cipher:obfs:url64(params))#tag（v2rayN 方言）。
+/// 注：SSR 链接体不含密码字段（extra["password"] 恒空串）；且三内核官方均不支持
+/// SSR 出口（09 §5.1-⑭），本解析器只保证节点可读保留与预检报数。
+fn parse_ssr(rest: &str, sub_id: &str) -> Result<Node> {
+    let (main, frag) = split_fragment(rest);
+    let tag = frag.unwrap_or_else(|| "ssr".into());
+    let decoded = b64_decode(main)?;
+    let segs: Vec<&str> = decoded.split(':').collect();
+    if segs.len() != 6 {
+        return Err(ProxyError::Subscription(format!(
+            "ssr 段数应为 6（host:port:proto:cipher:obfs:params），实得 {}",
+            segs.len()
+        )));
+    }
+    let port: u16 = segs[1]
+        .parse()
+        .map_err(|_| ProxyError::Subscription(format!("ssr 端口非法: {}", segs[1])))?;
+    if segs[0].is_empty() {
+        return Err(ProxyError::Subscription("ssr 缺主机".into()));
+    }
+    let params = b64_decode(segs[5]).unwrap_or_default();
+    let pp: std::collections::HashMap<&str, &str> = params
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .collect();
+    let extra = serde_json::json!({
+        "method": segs[3],
+        "password": "",
+        "protocol": segs[2],
+        "obfs": segs[4],
+        "protocol_param": pp.get("protoparam").copied().unwrap_or_default(),
+        "obfs_param": pp.get("obfsparam").copied().unwrap_or_default(),
+    });
+    Ok(Node {
+        tag,
+        kind: NodeKind::ShadowsocksR,
+        server: segs[0].to_string(),
+        port,
+        sub_id: sub_id.into(),
+        extra,
+    })
+}
+
+/// 手写 UUID 校验（8-4-4-4-12 hex 段）：tuic 解析红线，零新增依赖
+fn is_uuid(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    let lens = [8usize, 4, 4, 4, 12];
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip(lens)
+            .all(|(g, l)| g.len() == l && g.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn is_even_hex(s: &str) -> bool {
+    !s.is_empty() && s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn split_fragment(rest: &str) -> (&str, Option<String>) {
@@ -393,6 +627,155 @@ mod tests {
         )
         .unwrap();
         assert_eq!(nodes.len(), 1, "未知行跳过不致命");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn subHysteria2_missingPort_rejected() {
+        // 正控：base64(密码) + sni/insecure/obfs 参数全量落 extra
+        let b64 = host_core::util::b64_encode("p@ssw0rd".as_bytes());
+        let ok = parse_share_uri(
+            &format!("hy2://{b64}@1.2.3.4:8443?sni=a.com&insecure=1&obfs=salamander&obfs-password=op#H节点"),
+            SUB,
+        )
+        .unwrap();
+        assert_eq!(ok.kind, NodeKind::Hysteria2);
+        assert_eq!(ok.server, "1.2.3.4");
+        assert_eq!(ok.port, 8443);
+        assert_eq!(ok.tag, "H节点");
+        assert_eq!(ok.extra["password"], "p@ssw0rd");
+        assert_eq!(ok.extra["insecure"], true);
+        assert_eq!(ok.extra["obfs"], "salamander");
+        assert_eq!(ok.extra["obfs_password"], "op");
+        // 红线：缺端口诚实拒（不默认 443 猜端口）
+        assert!(parse_share_uri("hy2://cHcxMjM=@1.2.3.4?sni=a.com#H", SUB).is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn subTuic5_badUuid_rejected() {
+        let good = parse_share_uri(
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pw@1.2.3.4:443?sni=x.com&alpn=h3#T",
+            SUB,
+        )
+        .unwrap();
+        assert_eq!(good.kind, NodeKind::Tuic5);
+        assert_eq!(good.extra["uuid"], "b831381d-6324-4d53-ad4f-8cda48b30811");
+        assert_eq!(good.extra["password"], "pw");
+        // 红线：uuid 段非法（长度/非 hex）即整条拒，禁半解析入 extra
+        assert!(parse_share_uri("tuic://not-a-uuid:pw@1.2.3.4:443#b", SUB).is_err());
+        assert!(parse_share_uri(
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b3081g:pw@1.2.3.4:443",
+            SUB
+        )
+        .is_err());
+        // 密码段为空 → 回落 token 参数（tuic v5 链接两种方言都常见）
+        let tok = parse_share_uri(
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:@1.2.3.4:443?token=sekret",
+            SUB,
+        )
+        .unwrap();
+        assert_eq!(tok.extra["password"], "sekret");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn subWireGuard_missingEndpoint_rejected() {
+        let good = parse_share_uri(
+            "wg://c0Rq0YK3mZ0vV0aX0nQX1mR0d0d0d0d0d0d0d0d0d0f%3D?endpoint=1.2.3.4:51820&publickey=Yx9YI4mZ0vV0aX0nQX1mR0d0d0d0d0d0d0d0d0d0dg%3D%3D&address=10.0.0.2%2F32&wG",
+            SUB,
+        )
+        .unwrap();
+        assert_eq!(good.kind, NodeKind::WireGuard);
+        assert_eq!(good.server, "1.2.3.4");
+        assert_eq!(good.port, 51820);
+        // percent 编码键解码还原（base64 尾 '=' 转义面）
+        assert_eq!(
+            good.extra["private_key"],
+            "c0Rq0YK3mZ0vV0aX0nQX1mR0d0d0d0d0d0d0d0d0d0f="
+        );
+        assert_eq!(good.extra["address"], "10.0.0.2/32");
+        // 红线：无查询段 / 查询缺 endpoint 参数均拒（wg 无 host 段可猜）
+        assert!(parse_share_uri("wg://privkey%3D?publickey=abc#w", SUB).is_err());
+        assert!(parse_share_uri("wg://privkey%3D#w", SUB).is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn subSsr_badBase64Url_rejected() {
+        // 红线：非法 base64 主体拒（禁半解析）
+        assert!(parse_share_uri("ssr://!!!not-base64!!!#x", SUB).is_err());
+        // 段数不足 6 也拒（host:port:proto:cipher:obfs:params 缺一不可）
+        let short = host_core::util::b64_encode(b"1.2.3.4:8080:origin");
+        assert!(parse_share_uri(&format!("ssr://{short}#x"), SUB).is_err());
+        // 正控：v2rayN 六段方言完整解析 + serde 名恒 "ssr"（nodes.json 落盘形状）
+        let params = host_core::util::b64_encode(b"protoparam=pp1&obfsparam=ob1");
+        let inner = format!("1.2.3.4:8080:origin:aes-256-cfb:plain:{params}");
+        let b64 = host_core::util::b64_encode(inner.as_bytes());
+        let n = parse_share_uri(&format!("ssr://{b64}#SSR节点"), SUB).unwrap();
+        assert_eq!(n.kind, NodeKind::ShadowsocksR);
+        assert_eq!(n.port, 8080);
+        assert_eq!(n.extra["method"], "aes-256-cfb");
+        assert_eq!(n.extra["obfs_param"], "ob1");
+        assert_eq!(n.extra["protocol_param"], "pp1");
+        assert_eq!(n.extra["password"], "");
+        assert_eq!(serde_json::to_string(&n.kind).unwrap(), "\"ssr\"");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn subReality_badHexShortId_rejected() {
+        // 红线：sid 非空且（奇数位 or 非 hex）→ 整条拒，禁把坏 hex 透传进渲染端
+        assert!(parse_share_uri(
+            "vless://abc@1.1.1.1:443?security=reality&pbk=KEY&sid=abc12#x",
+            SUB
+        )
+        .is_err());
+        assert!(parse_share_uri(
+            "vless://abc@1.1.1.1:443?security=reality&pbk=KEY&sid=zz1234#x",
+            SUB
+        )
+        .is_err());
+        // 缺 pbk 同样拒（REALITY 无公钥必连不上）
+        assert!(parse_share_uri("vless://abc@1.1.1.1:443?security=reality#x", SUB).is_err());
+        // 正控：合法偶 hex sid + 空 sid 放行；REALITY/XHTTP/host 透传键形状
+        let n = parse_share_uri(
+            "vless://c0ee752e-de1a-4fde-a6bf-0f04b1c9d6e3@1.1.1.1:443?security=reality&pbk=REALPUBKEY&sid=0123&host=cdn.example.com&type=xhttp&mode=auto#R",
+            SUB,
+        )
+        .unwrap();
+        assert_eq!(n.extra["reality"]["public_key"], "REALPUBKEY");
+        assert_eq!(n.extra["reality"]["short_id"], "0123");
+        assert_eq!(n.extra["network"], "xhttp");
+        assert_eq!(n.extra["xhttp"]["mode"], "auto");
+        assert_eq!(n.extra["host"], "cdn.example.com");
+        assert_eq!(n.extra["tls"], true);
+        let empty_sid = parse_share_uri(
+            "vless://abc@1.1.1.1:443?security=reality&pbk=KEY&sid=#x",
+            SUB,
+        )
+        .unwrap();
+        assert_eq!(empty_sid.extra["reality"]["short_id"], "");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn ssPluginParam_parsedIntoExtra() {
+        // 正控：SIP002 `/?plugin=` percent 编码参数解码后原样入 extra["plugin"]
+        let n = parse_share_uri(
+            "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388/?plugin=obfs-local%3Bobfs%3Dtls%3Bobfs-host%3Dwww.bing.com#s",
+            SUB,
+        )
+        .unwrap();
+        assert_eq!(
+            n.extra["plugin"],
+            "obfs-local;obfs=tls;obfs-host=www.bing.com"
+        );
+        assert_eq!(n.extra["method"], "aes-256-gcm");
+        // 无 plugin 查询段的旧链接不落该键（extra 零污染，golden 输入形状不变）
+        let m =
+            parse_share_uri("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM=@1.2.3.4:8388#s2", SUB).unwrap();
+        assert!(m.extra.get("plugin").is_none());
     }
 
     #[test]

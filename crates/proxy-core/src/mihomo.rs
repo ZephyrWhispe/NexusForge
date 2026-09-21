@@ -21,8 +21,9 @@
 //! - bind-address 消费 IR listen（默认回环），不把 mixed 端口暴露到局域网。
 //! - geo：`geodata-mode/geo-auto-update` 渲染位随 T-B2-10；v1 私有地址走显式
 //!   CIDR 规则展开（与 xray 方言同款零资产策略）。
-//! - supported_kinds：本行 NodeKind 仅四变体可列；七协议全集（+hy2/tuic/wg）
-//!   随 T-B2-7 枚举扩臂，ssr 支持集按 ⑭ 届时核证。
+//! - supported_kinds：T-B2-7 已扩至七协议（+hy2/tuic/wireguard，Meta 官方支持）；
+//!   ssr 恒排除（⑭ 核证：mihomo 官方主线不支持 SSR 出站）。REALITY/XHTTP 透传键
+//!   的 mihomo 方言展开暂留位不渲染（行字面渲染端承诺仅 sing-box 官方映射）。
 
 use crate::error::{ProxyError, Result};
 use crate::ir::{
@@ -107,7 +108,7 @@ pub fn render(ir: &IrConfig) -> Result<String> {
         if let IrOutbound::Node(n) = ob {
             node_names.push(n.outbound_tag());
             out.push_str("  - ");
-            out.push_str(&render_proxy(n));
+            out.push_str(&render_proxy(n)?);
             out.push('\n');
         }
     }
@@ -253,8 +254,9 @@ fn check_pattern(p: &str) -> Result<()> {
     Ok(())
 }
 
-/// 单节点 → mihomo proxy 流式映射（"key: value, key: value"，值全 yaml_scalar）
-fn render_proxy(n: &Node) -> String {
+/// 单节点 → mihomo proxy 流式映射（"key: value, key: value"，值全 yaml_scalar）。
+/// T-B2-7 起可失败：SSR 官方不支持（⑭）如实 Err；hy2/tuic/wg 按 Meta 扁平字段渲染。
+fn render_proxy(n: &Node) -> Result<String> {
     let mut kv: Vec<String> = vec![
         format!("name: {}", yaml_scalar(&n.outbound_tag())),
         format!("server: {}", yaml_scalar(&n.server)),
@@ -299,8 +301,71 @@ fn render_proxy(n: &Node) -> String {
                 }
             }
         }
+        NodeKind::Hysteria2 => {
+            // Meta 的 hysteria2 自带 TLS，无需 tls: true；sni 用顶层 sni 字段
+            kv.push("type: hysteria2".into());
+            kv.push(format!(
+                "password: {}",
+                yaml_scalar_str(&n.extra["password"])
+            ));
+            let sni = n.extra["sni"].as_str().unwrap_or_default();
+            if !sni.is_empty() {
+                kv.push(format!("sni: {}", yaml_scalar(sni)));
+            }
+        }
+        NodeKind::Tuic5 => {
+            kv.push("type: tuic".into());
+            kv.push(format!("uuid: {}", yaml_scalar_str(&n.extra["uuid"])));
+            kv.push(format!(
+                "password: {}",
+                yaml_scalar_str(&n.extra["password"])
+            ));
+            let sni = n.extra["sni"].as_str().unwrap_or_default();
+            if !sni.is_empty() {
+                kv.push(format!("sni: {}", yaml_scalar(sni)));
+            }
+            let alpn = n.extra["alpn"].as_str().unwrap_or_default();
+            if !alpn.is_empty() {
+                // alpn 是 YAML 序列：流式映射内只能内联 [a, b] 形态
+                let items: Vec<String> = alpn
+                    .split(',')
+                    .filter(|a| !a.is_empty())
+                    .map(|a| format!("[{a}]"))
+                    .collect();
+                if !items.is_empty() {
+                    kv.push(format!("alpn: {}", items.join(", ")));
+                }
+            }
+        }
+        NodeKind::WireGuard => {
+            kv.push("type: wireguard".into());
+            kv.push(format!(
+                "private-key: {}",
+                yaml_scalar_str(&n.extra["private_key"])
+            ));
+            kv.push(format!(
+                "public-key: {}",
+                yaml_scalar_str(&n.extra["public_key"])
+            ));
+            let psk = n.extra["preshared_key"].as_str().unwrap_or_default();
+            if !psk.is_empty() {
+                kv.push(format!("preshared-key: {}", yaml_scalar(psk)));
+            }
+            let addr = n.extra["address"].as_str().unwrap_or_default();
+            let first = addr.split(',').find(|a| !a.is_empty()).unwrap_or("");
+            if !first.is_empty() {
+                kv.push(format!("ip: {}", yaml_scalar(first)));
+            }
+        }
+        NodeKind::ShadowsocksR => {
+            return Err(ProxyError::Config(format!(
+                "mihomo 官方主线不支持 SSR（ShadowsocksR）出口：节点 {}",
+                n.outbound_tag()
+            )))
+        }
     }
-    // tls/sni/ws 通用位（Meta 支持 sni+servername 双写、ws-opts 用扁平 ws-path）
+    // tls/sni/ws 通用位（Meta 支持 sni+servername 双写、ws-opts 用扁平 ws-path）。
+    // REALITY/XHTTP 透传键暂不展开（行字面渲染端承诺仅 sing-box，见模块头）。
     if n.extra["tls"] == serde_json::json!(true) {
         kv.push("tls: true".into());
         let sni = n.extra["sni"].as_str().unwrap_or_default();
@@ -315,7 +380,7 @@ fn render_proxy(n: &Node) -> String {
             yaml_scalar(n.extra["path"].as_str().unwrap_or("/"))
         ));
     }
-    kv.join(", ")
+    Ok(kv.join(", "))
 }
 
 /// JSON Value → 标量文本（缺键/Null → 空串，与 sing-box 方言的 json![] 投影同型兜底）
@@ -355,7 +420,16 @@ impl KernelDriver for MihomoDriver {
 
     fn supported_kinds(&self) -> &'static [NodeKind] {
         use NodeKind::*;
-        &[Shadowsocks, Vmess, Trojan, Vless]
+        // T-B2-7：Meta 官方支持七协议；SSR 恒排除（⑭）
+        &[
+            Shadowsocks,
+            Vmess,
+            Trojan,
+            Vless,
+            Hysteria2,
+            Tuic5,
+            WireGuard,
+        ]
     }
 
     fn caps(&self) -> KernelCaps {
@@ -533,6 +607,84 @@ mod tests {
         assert!(y.contains("\"IP-CIDR,10.0.0.0/8,DIRECT\""));
         assert!(y.contains("\"IP-CIDR6,fc00::/7,DIRECT\""));
         assert!(!y.contains("GEO-"), "v1 不引用 geo 资产（T-B2-10 承诺面）");
+    }
+
+    #[test]
+    fn mihomoRender_newKindsAndSsr() {
+        // T-B2-7：Meta 七协议渲染臂就位（hy2/tuic/wg 扁平键形态，⑭ 核证）；
+        // SSR 红线：官方不支持 → 渲染层恒 Config 拒，禁降级成 ss 冒充
+        let mk = |kind: NodeKind, extra: serde_json::Value| Node {
+            tag: "x".into(),
+            kind,
+            server: "1.1.1.1".into(),
+            port: 443,
+            sub_id: "sub0aaaabbbbcccc".into(),
+            extra,
+        };
+        let cases = [
+            (
+                mk(
+                    NodeKind::Hysteria2,
+                    json!({"password": "hp", "sni": "h.example.com"}),
+                ),
+                "type: hysteria2",
+            ),
+            (
+                mk(
+                    NodeKind::Tuic5,
+                    json!({"uuid": "b831381d-6324-4d53-ad4f-8cda48b30811", "password": "tp", "alpn": "h3"}),
+                ),
+                "type: tuic",
+            ),
+            (
+                mk(
+                    NodeKind::WireGuard,
+                    json!({"private_key": "pk", "public_key": "pub", "address": "10.0.0.2/32"}),
+                ),
+                "type: wireguard",
+            ),
+        ];
+        for (node, want) in cases {
+            let cfg = ir::build(7890, false, &[node], &[] as &[IrRule], TAG_PROXY, &[]).unwrap();
+            let y = render(&cfg).unwrap_or_else(|e| panic!("{} 臂必须渲染：{e:?}", want));
+            if !y.contains(want) {
+                panic!("输出缺 {want}：\n{y}");
+            }
+            assert_no_unexpected_top_key(&y);
+        }
+        // wireguard 扁平键细节 + tuic 内联 alpn 序列
+        let wg = ir::build(
+            7890,
+            false,
+            &[mk(
+                NodeKind::WireGuard,
+                json!({"private_key": "p k", "public_key": "u/p=", "address": "10.0.0.2/32"}),
+            )],
+            &[] as &[IrRule],
+            TAG_PROXY,
+            &[],
+        )
+        .unwrap();
+        let wy = render(&wg).unwrap();
+        assert!(wy.contains("private-key: \"p k\""), "kebab 键 + 标量引号");
+        assert!(wy.contains("public-key: \"u/p=\""));
+        // SSR：整文档拒
+        let ssr = ir::build(
+            7890,
+            false,
+            &[mk(
+                NodeKind::ShadowsocksR,
+                json!({"method": "aes-256-cfb", "password": ""}),
+            )],
+            &[] as &[IrRule],
+            TAG_PROXY,
+            &[],
+        )
+        .unwrap();
+        match render(&ssr) {
+            Err(ProxyError::Config(msg)) => assert!(msg.contains("SSR"), "{msg}"),
+            other => panic!("mihomo 必须拒 SSR，得 {other:?}"),
+        }
     }
 
     #[test]
