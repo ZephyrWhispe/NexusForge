@@ -63,6 +63,50 @@ fn migrations() -> Migrations<'static> {
     )])
 }
 
+/// 行 → ClipEntry 的唯一映射：列序契约 id, content_type, content, blob_path, origin,
+/// source_app, pinned, group_name, secret, created_at, usage_count
+/// （search 的两条 SELECT 与 stack 的 entries_in_order 共用，改列序须同时改三处）。
+fn entry_from_row(r: &rusqlite::Row) -> rusqlite::Result<ClipEntry> {
+    let content: Option<String> = r.get(2)?;
+    let content_type: String = r.get(1)?;
+    let secret: i64 = r.get(8)?;
+    let group: Option<String> = r.get(7)?;
+    let blob_path: Option<String> = r.get(3)?;
+    let preview = match content_type.as_str() {
+        "image" => match content.as_deref() {
+            Some(dims) => format!("[图片 {dims}]"),
+            None => "[图片]".into(),
+        },
+        "files" => {
+            let n = content.as_deref().map(|c| c.lines().count()).unwrap_or(0);
+            let first = content
+                .as_deref()
+                .and_then(|c| c.lines().next())
+                .unwrap_or("");
+            format!("[文件 ×{n}] {}", first.chars().take(60).collect::<String>())
+        }
+        _ => build_preview(&content.unwrap_or_default(), secret == 1),
+    };
+    Ok(ClipEntry {
+        id: r.get(0)?,
+        content_type: content_type.leak() as &'static str,
+        preview,
+        blob_path,
+        // D-25：真读 origin 列；'remote' 之外一律兜底 local（兼容旧库/脏值）
+        origin: if r.get::<_, String>(4)? == "remote" {
+            "remote"
+        } else {
+            "local"
+        },
+        source_app: r.get(5)?,
+        pinned: r.get::<_, i64>(6)? != 0,
+        group: group.map(|g| leak_group(&g)),
+        secret: secret == 1,
+        created_at: r.get(9)?,
+        usage_count: r.get::<_, i64>(10)? as u32,
+    })
+}
+
 impl ClipStore {
     pub fn open(db_path: &Path, blob_dir: PathBuf) -> Result<Self, AppError> {
         if let Some(parent) = db_path.parent() {
@@ -238,46 +282,7 @@ impl ClipStore {
             )
         };
 
-        let mapper = |r: &rusqlite::Row| -> rusqlite::Result<ClipEntry> {
-            let content: Option<String> = r.get(2)?;
-            let content_type: String = r.get(1)?;
-            let secret: i64 = r.get(8)?;
-            let group: Option<String> = r.get(7)?;
-            let blob_path: Option<String> = r.get(3)?;
-            let preview = match content_type.as_str() {
-                "image" => match content.as_deref() {
-                    Some(dims) => format!("[图片 {dims}]"),
-                    None => "[图片]".into(),
-                },
-                "files" => {
-                    let n = content.as_deref().map(|c| c.lines().count()).unwrap_or(0);
-                    let first = content
-                        .as_deref()
-                        .and_then(|c| c.lines().next())
-                        .unwrap_or("");
-                    format!("[文件 ×{n}] {}", first.chars().take(60).collect::<String>())
-                }
-                _ => build_preview(&content.unwrap_or_default(), secret == 1),
-            };
-            Ok(ClipEntry {
-                id: r.get(0)?,
-                content_type: content_type.leak() as &'static str,
-                preview,
-                blob_path,
-                // D-25：真读 origin 列；'remote' 之外一律兜底 local（兼容旧库/脏值）
-                origin: if r.get::<_, String>(4)? == "remote" {
-                    "remote"
-                } else {
-                    "local"
-                },
-                source_app: r.get(5)?,
-                pinned: r.get::<_, i64>(6)? != 0,
-                group: group.map(|g| leak_group(&g)),
-                secret: secret == 1,
-                created_at: r.get(9)?,
-                usage_count: r.get::<_, i64>(10)? as u32,
-            })
-        };
+        let mapper = entry_from_row;
 
         let items: Vec<ClipEntry> = if use_fts {
             let mut stmt = conn
@@ -376,41 +381,140 @@ impl ClipStore {
         Ok(n as u32)
     }
 
-    pub fn push_stack(&self, id: &str) -> Result<(), AppError> {
+    /// 入栈（幂等：同一条目重复入栈不加深）；返回入栈后的栈深。
+    /// 条目不存在 → 点名 CLIPBOARD_STACK_001（FK 兜底前先看一眼，错误消息才有指路价值）。
+    pub fn stack_push(&self, id: &str) -> Result<u32, AppError> {
         let conn = self.conn.lock();
-        let pos: i64 = conn
+        let exists: i64 = conn
             .query_row(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM paste_stack",
-                [],
+                "SELECT COUNT(*) FROM clip_entries WHERE id = ?1",
+                params![id],
                 |r| r.get(0),
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        if exists == 0 {
+            return Err(AppError::module(
+                "CLIPBOARD_STACK_001",
+                "条目不存在，未入栈",
+                Some("请先在历史列表刷新后确认该记录仍在库中"),
+            ));
+        }
         conn.execute(
-            "INSERT INTO paste_stack (entry_id, position) VALUES (?1, ?2)",
-            params![id, pos],
+            "INSERT INTO paste_stack (entry_id, position)
+             SELECT ?1, (SELECT COALESCE(MAX(position), 0) + 1 FROM paste_stack)
+             WHERE NOT EXISTS (SELECT 1 FROM paste_stack WHERE entry_id = ?2)",
+            params![id, id],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-        Ok(())
+        let depth: i64 = conn
+            .query_row("SELECT COUNT(*) FROM paste_stack", [], |r| r.get(0))
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(depth as u32)
     }
 
-    pub fn pop_stack(&self) -> Result<Option<String>, AppError> {
+    /// 队列入栈顺序（position ASC）
+    pub fn stack_list(&self) -> Result<Vec<String>, AppError> {
         let conn = self.conn.lock();
-        let id: Option<String> = conn
+        self.stack_ids(&conn)
+    }
+
+    /// 已持锁时的顺序读取（entries_in_order 复用，避免对非重入 Mutex<Connection> 二次加锁）
+    fn stack_ids(&self, conn: &Connection) -> Result<Vec<String>, AppError> {
+        let mut stmt = conn
+            .prepare("SELECT entry_id FROM paste_stack ORDER BY position ASC")
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))
+    }
+
+    /// 弹出队首（FIFO：按入栈顺序逐条投递，Ditto/CopyQ 同语义；旧 pop_stack 的
+    /// `position DESC` 是 LIFO，与堆栈粘贴语义相反，本行起替换）
+    pub fn stack_take_next(&self) -> Result<Option<String>, AppError> {
+        let conn = self.conn.lock();
+        let row: Option<(i64, String)> = conn
             .query_row(
-                "SELECT entry_id FROM paste_stack ORDER BY position DESC LIMIT 1",
+                "SELECT id, entry_id FROM paste_stack ORDER BY position ASC LIMIT 1",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-        if let Some(_id) = &id {
-            conn.execute(
-                "DELETE FROM paste_stack WHERE id = (SELECT id FROM paste_stack ORDER BY position DESC LIMIT 1)",
-                [],
+        let Some((row_id, entry_id)) = row else {
+            return Ok(None);
+        };
+        conn.execute("DELETE FROM paste_stack WHERE id = ?1", params![row_id])
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(Some(entry_id))
+    }
+
+    /// 把 id 移到目标下标（0 基，越界钳到队尾）：读全序 → 本地 splice → 事务内重写 position
+    pub fn stack_move(&self, id: &str, to: usize) -> Result<(), AppError> {
+        let mut order = self.stack_list()?;
+        let from = order
+            .iter()
+            .position(|e| e == id)
+            .ok_or_else(|| AppError::module("CLIPBOARD_STACK_001", "条目不在堆栈中", None))?;
+        let item = order.remove(from);
+        let to = to.min(order.len());
+        order.insert(to, item);
+        let conn = self.conn.lock();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        for (i, entry_id) in order.iter().enumerate() {
+            tx.execute(
+                "UPDATE paste_stack SET position = ?2 WHERE entry_id = ?1",
+                params![entry_id, i as i64],
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         }
-        Ok(id)
+        tx.commit().map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(())
+    }
+
+    /// 移出堆栈（不删历史记录）；返回是否确有其项
+    pub fn stack_remove(&self, id: &str) -> Result<bool, AppError> {
+        let conn = self.conn.lock();
+        let n = conn
+            .execute("DELETE FROM paste_stack WHERE entry_id = ?1", params![id])
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(n > 0)
+    }
+
+    pub fn stack_clear(&self) -> Result<u32, AppError> {
+        let conn = self.conn.lock();
+        let n = conn
+            .execute("DELETE FROM paste_stack", [])
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(n as u32)
+    }
+
+    /// 按给定顺序回填条目：已删条目静默跳过（FK CASCADE 已把它的堆栈行带走），
+    /// 调用方在 DTO 侧如实少一行，不占位也不报错。
+    pub fn entries_in_order(&self, ids: &[String]) -> Result<Vec<ClipEntry>, AppError> {
+        let conn = self.conn.lock();
+        let mut out = Vec::with_capacity(ids.len());
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content_type, content, blob_path, origin, source_app,
+                        pinned, group_name, secret, created_at, usage_count
+                 FROM clip_entries WHERE id = ?1",
+            )
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        for id in ids {
+            if let Some(entry) = stmt
+                .query_map(params![id], entry_from_row)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+                .flatten()
+                .next()
+            {
+                out.push(entry);
+            }
+        }
+        Ok(out)
     }
 
     /// 图片入库：字节写 blob（{hash}.dib），主表存引用
@@ -541,7 +645,9 @@ impl ClipStore {
                     .collect(),
             ))),
             _ => {
-                let content = content_opt.unwrap_or_default();
+                let Some(content) = content_opt else {
+                    return Ok(None);
+                };
                 if secret == 1 {
                     Ok(Some(Payload::SecretB64(content)))
                 } else {
@@ -1128,5 +1234,92 @@ mod tests {
             row.origin, "local",
             "非法 origin 值必须兜底 local 而非 panic"
         );
+    }
+
+    /// 红线方向钉：粘贴堆栈按入栈顺序逐条投递（FIFO）。反 LIFO 回归当场判红。
+    #[test]
+    #[allow(non_snake_case)]
+    fn stack_takeNext_isFifoInPushOrder() {
+        let s = open_temp("stack_fifo");
+        let a = s.insert("stk-a", None, false, None, "local").unwrap();
+        let b = s.insert("stk-b", None, false, None, "local").unwrap();
+        let c = s.insert("stk-c", None, false, None, "local").unwrap();
+        for id in [&a, &b, &c] {
+            s.stack_push(id).unwrap();
+        }
+        assert_eq!(
+            s.stack_list().unwrap(),
+            vec![a.clone(), b.clone(), c.clone()],
+            "position ASC 即入栈序"
+        );
+        assert_eq!(s.stack_take_next().unwrap().as_deref(), Some(a.as_str()));
+        assert_eq!(s.stack_take_next().unwrap().as_deref(), Some(b.as_str()));
+        assert_eq!(s.stack_take_next().unwrap().as_deref(), Some(c.as_str()));
+        assert_eq!(s.stack_take_next().unwrap(), None, "空栈不得假成功");
+    }
+
+    /// 五写面往返：入栈幂等 + 列读 + 重排 + 移出 + 清空
+    #[test]
+    #[allow(non_snake_case)]
+    fn stack_pushListMoveRemoveClear_roundtrip() {
+        let s = open_temp("stack_rt");
+        let a = s.insert("mv-a", None, false, None, "local").unwrap();
+        let b = s.insert("mv-b", None, false, None, "local").unwrap();
+        let c = s.insert("mv-c", None, false, None, "local").unwrap();
+        assert_eq!(s.stack_push(&a).unwrap(), 1);
+        assert_eq!(s.stack_push(&b).unwrap(), 2);
+        assert_eq!(s.stack_push(&c).unwrap(), 3);
+        // 重复入栈幂等：深度不变、顺序不变
+        assert_eq!(s.stack_push(&a).unwrap(), 3);
+        assert_eq!(
+            s.stack_list().unwrap(),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
+
+        s.stack_move(&c, 0).unwrap();
+        assert_eq!(
+            s.stack_list().unwrap(),
+            vec![c.clone(), a.clone(), b.clone()]
+        );
+        // 越界目标钳到队尾（不报错也不丢项）
+        s.stack_move(&c, 99).unwrap();
+        assert_eq!(
+            s.stack_list().unwrap(),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
+
+        assert!(s.stack_remove(&b).unwrap());
+        assert!(!s.stack_remove(&b).unwrap(), "二次移出不谎报成功");
+        assert_eq!(s.stack_list().unwrap(), vec![a.clone(), c.clone()]);
+        // 不存在的条目点名拒绝，且不改变栈
+        let e = s.stack_push("no-such-id").unwrap_err();
+        assert_eq!(e.code(), "CLIPBOARD_STACK_001");
+        assert_eq!(s.stack_list().unwrap().len(), 2);
+        assert_eq!(s.stack_clear().unwrap(), 2);
+        assert!(s.stack_list().unwrap().is_empty());
+    }
+
+    /// 条目被删（FK CASCADE 带走堆栈行）后队列仍可读、顺序不丢、少一行如实
+    #[test]
+    #[allow(non_snake_case)]
+    fn stack_list_skipsDeletedEntryWithoutLosingOrder() {
+        let s = open_temp("stack_cascade");
+        let a = s.insert("cas-a", None, false, None, "local").unwrap();
+        let b = s.insert("cas-b", None, false, None, "local").unwrap();
+        let c = s.insert("cas-c", None, false, None, "local").unwrap();
+        for id in [&a, &b, &c] {
+            s.stack_push(id).unwrap();
+        }
+        s.delete(&b).unwrap();
+        let ids = s.stack_list().unwrap();
+        assert_eq!(ids, vec![a.clone(), c.clone()], "CASCADE 后队列须自净");
+        let entries = s.entries_in_order(&ids).unwrap();
+        assert_eq!(
+            entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec![a.as_str(), c.as_str()],
+            "回填顺序 = 入栈顺序"
+        );
+        // 已删 id 直接进 entries_in_order：静默少一行，不报错不占位
+        assert_eq!(s.entries_in_order(&[a, b, c]).unwrap().len(), 2);
     }
 }

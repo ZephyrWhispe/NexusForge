@@ -147,6 +147,55 @@ export function clipboardCaptureGet(): Promise<ClipCaptureState> {
 export function clipboardCaptureSet(paused: boolean): Promise<ClipCaptureState> {
   return invoke<ClipCaptureState>("clipboard_capture_set", { paused });
 }
+
+// ---------------- 粘贴堆栈（docs/impl/09 §8.2 T-B3-3）----------------
+
+/** 队首投递回执：敏感项 delivered=false 且仍留在栈上（error 点名原因） */
+export interface ClipStackPaste {
+  id: string;
+  delivered: boolean;
+  error: string | null;
+}
+
+/** 全部粘贴汇总：remaining 为结束后仍在栈上的条数 */
+export interface ClipStackReport {
+  delivered: number;
+  failed: number;
+  remaining: number;
+}
+
+/** 入栈（幂等），返回入栈后的栈深 */
+export function clipboardStackPush(id: string): Promise<number> {
+  return invoke<number>("clipboard_stack_push", { id });
+}
+
+/** 队列视图（入栈序，已删条目静默少一行） */
+export function clipboardStackList(): Promise<ClipEntry[]> {
+  return invoke<ClipEntry[]>("clipboard_stack_list");
+}
+
+/** 移到目标下标（0 基，越界钳到队尾） */
+export function clipboardStackMove(id: string, to: number): Promise<void> {
+  return invoke("clipboard_stack_move", { id, to });
+}
+
+/** 移出堆栈（历史记录保留）；返回栈上确有其项 */
+export function clipboardStackRemove(id: string): Promise<boolean> {
+  return invoke<boolean>("clipboard_stack_remove", { id });
+}
+
+export function clipboardStackClear(): Promise<number> {
+  return invoke<number>("clipboard_stack_clear");
+}
+
+/** 粘贴下一条：写剪贴板 + 注入 Ctrl+V；空栈返回 null（不假成功） */
+export function clipboardStackPasteNext(): Promise<ClipStackPaste | null> {
+  return invoke<ClipStackPaste | null>("clipboard_stack_paste_next");
+}
+
+export function clipboardStackPasteAll(intervalMs: number): Promise<ClipStackReport> {
+  return invoke<ClipStackReport>("clipboard_stack_paste_all", { intervalMs });
+}
 /** 读模块配置 schema（设置中心自动渲染） */
 export function hostConfigSchema(module: string): Promise<Record<string, unknown>> {
   return invoke("host_config_schema", { module });

@@ -408,7 +408,7 @@ fn futures_now(cfg: &AsyncMutex<ClipboardConfig>) -> ClipboardConfig {
 // ---- 测试替身（crate 内共享：pipeline 单测与 module 消费协程测试都用）----
 
 #[cfg(test)]
-use host_core::ports::ClipContent;
+use host_core::ports::{ClipContent, InputInjectPort, RawInput};
 
 #[cfg(test)]
 pub(crate) type FakeCb =
@@ -417,12 +417,59 @@ pub(crate) type FakeCb =
 /// 替身端口：start_listener 仅捕获回调（stop_listener 沿用默认 no-op，
 /// 因此回调及其持有的 Sender 全程存活——正是旧实现 worker 永不退出的根因场景）；
 /// write 记录文本载荷，fail_write = true 时一律返回 Err（D-25 写失败负例）。
+/// log 是与注入替身共享的**有序**调用轨迹（只记成功到达剪贴板的写，
+/// 故"写先于注入"可字面断言而非依赖时序巧合）。
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct FakeClipboard {
     pub(crate) cb: FakeCb,
     pub(crate) writes: Arc<parking_lot::Mutex<Vec<String>>>,
     pub(crate) fail_write: bool,
+    pub(crate) log: CallLog,
+}
+
+/// 跨替身共享的有序调用日志
+#[cfg(test)]
+pub(crate) type CallLog = Arc<parking_lot::Mutex<Vec<String>>>;
+
+/// 注入替身：按 `inject:vk,scan;vk,scan...` 形状记入同一日志；
+/// fail_at = Some(n) 时第 n 次起返回 Err（粘贴堆栈"首个失败即停"负例）。
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct FakeInjector {
+    pub(crate) log: CallLog,
+    pub(crate) fail_at: Option<usize>,
+    pub(crate) calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl InputInjectPort for FakeInjector {
+    fn inject(&self, events: &[RawInput]) -> Result<(), AppError> {
+        let n = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.log
+            .lock()
+            .push(format!("inject:{}", render_keys(events)));
+        if self.fail_at.is_some_and(|k| n >= k) {
+            return Err(AppError::module("FAKE_INJECT_001", "inject disabled", None));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn render_keys(events: &[RawInput]) -> String {
+    events
+        .iter()
+        .map(|e| match e {
+            RawInput::KeyDown { vk, scan } => format!("{vk},{scan}"),
+            RawInput::KeyUp { vk, scan } => format!("{vk},{scan},up"),
+            other => format!("{other:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 #[cfg(test)]
@@ -441,6 +488,7 @@ impl ClipboardPort for FakeClipboard {
         if let ClipContent::Text { text, .. } = content {
             self.writes.lock().push(text.clone());
         }
+        self.log.lock().push("write".into());
         Ok(())
     }
 }
@@ -505,6 +553,7 @@ mod tests {
             cb: Arc::new(Mutex::new(None)),
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: false,
+            log: Arc::new(Mutex::new(Vec::new())),
         });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
@@ -594,6 +643,7 @@ mod tests {
             cb: Arc::new(Mutex::new(None)),
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: false,
+            log: Arc::new(Mutex::new(Vec::new())),
         });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
@@ -855,6 +905,7 @@ mod tests {
             cb: Arc::new(Mutex::new(None)),
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: true,
+            log: Arc::new(Mutex::new(Vec::new())),
         });
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
         let write_back = Arc::new(Mutex::new(None));

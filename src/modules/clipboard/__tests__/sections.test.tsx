@@ -10,6 +10,7 @@ import {
   clipboardGet,
   clipboardGroupCounts,
   clipboardSearch,
+  clipboardStackList,
   hostConfigGet,
   hostConfigSchema,
   type ClipEntry,
@@ -33,6 +34,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     clipboardGroupCounts: vi.fn(),
     clipboardCaptureGet: vi.fn(),
     clipboardCaptureSet: vi.fn(),
+    clipboardStackList: vi.fn(),
     hostConfigSchema: vi.fn(),
     hostConfigGet: vi.fn(),
     hostConfigSet: vi.fn(),
@@ -102,6 +104,7 @@ beforeEach(() => {
   vi.mocked(hostConfigGet).mockResolvedValue({});
   vi.mocked(clipboardCaptureGet).mockResolvedValue({ paused: false, skipped: 0 });
   vi.mocked(clipboardCaptureSet).mockResolvedValue({ paused: false, skipped: 0 });
+  vi.mocked(clipboardStackList).mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -165,20 +168,24 @@ describe("剪切板五子面板挂载（T-B3-1）", () => {
     root = null;
     vi.clearAllMocks();
 
-    // 堆栈/敏感：命令面在 T-B3-3/T-B3-5，挂载期一个 invoke 都不发（诚实空态）
-    for (const view of ["stack", "secret"] as const) {
-      await mountView(view);
-      expect(clipboardSearch, `${view} 不应查历史`).not.toHaveBeenCalled();
-      expect(clipboardGroupCounts, `${view} 不应读分组计数`).not.toHaveBeenCalled();
-      expect(hostConfigSchema, `${view} 不应读设置`).not.toHaveBeenCalled();
-      expect(clipboardGet).not.toHaveBeenCalled();
-      expect(container.textContent).toContain("T-B3");
-      act(() => {
-        root?.unmount();
-      });
-      root = null;
-      vi.clearAllMocks();
-    }
+    // T-B3-3 起堆栈区有真命令面（clipboard_stack_list），故此处只剩敏感区仍是零调用的诚实空态
+    await mountView("stack");
+    expect(clipboardStackList).toHaveBeenCalledTimes(1);
+    expect(clipboardSearch, "stack 不应查历史").not.toHaveBeenCalled();
+    expect(clipboardGroupCounts, "stack 不应读分组计数").not.toHaveBeenCalled();
+    expect(hostConfigSchema, "stack 不应读设置").not.toHaveBeenCalled();
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    vi.clearAllMocks();
+
+    await mountView("secret");
+    expect(clipboardSearch, "secret 不应查历史").not.toHaveBeenCalled();
+    expect(clipboardGroupCounts, "secret 不应读分组计数").not.toHaveBeenCalled();
+    expect(hostConfigSchema, "secret 不应读设置").not.toHaveBeenCalled();
+    expect(clipboardGet).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("T-B3");
   });
 });
 

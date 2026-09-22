@@ -34,6 +34,13 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase100,
     color: tokens.colorNeutralForeground3,
   },
+  depth: {
+    fontSize: tokens.fontSizeBase100,
+    padding: "1px 7px",
+    borderRadius: tokens.borderRadiusCircular,
+    border: `1px solid ${tokens.colorBrandForeground1}`,
+    color: tokens.colorBrandForeground1,
+  },
   list: { padding: "4px 8px 10px", overflowY: "auto" },
   item: {
     display: "flex",
@@ -76,6 +83,9 @@ export default function QuickPanel() {
   const [items, setItems] = useState<ClipEntry[]>([]);
   // 首轮加载是否落定（成功或失败）：未落定前渲染加载态而非"暂无历史"（D-18 假空态修正）
   const [loaded, setLoaded] = useState(false);
+  // T-B3-3 堆栈深度徽标：本窗 ACL 冻结在 8 条（§8.1-⑫），故只吃 stack_changed 事件，
+  // 冷启动无事件即不显徽标（宁可没有，不拿 0 冒充空栈）
+  const [stackDepth, setStackDepth] = useState<number | null>(null);
 
   useEffect(() => {
     const load = () =>
@@ -93,7 +103,14 @@ export default function QuickPanel() {
     import("@tauri-apps/api/event")
       .then(({ listen }) =>
         listen("nf:event", (e) => {
-          const topic = (e.payload as { topic?: string }).topic;
+          const { topic, payload } = (e.payload ?? {}) as {
+            topic?: string;
+            payload?: { depth?: number };
+          };
+          if (topic === "clipboard.stack_changed") {
+            if (typeof payload?.depth === "number") setStackDepth(payload.depth);
+            return;
+          }
           if (topic !== "clipboard.captured" && topic !== "clipboard.deleted" && topic !== "clipboard.cleared") return;
           clipboardSearch({ size: 9 })
             .then((p) => setItems(p.items))
@@ -134,6 +151,7 @@ export default function QuickPanel() {
     <div className={styles.root} data-tauri-drag-region>
       <div className={styles.head}>
         剪切板
+        {stackDepth !== null && <Text className={styles.depth}>堆栈 {stackDepth}</Text>}
         <Text className={styles.hint}>数字键直选 · Esc 关闭</Text>
       </div>
       <div className={styles.list}>

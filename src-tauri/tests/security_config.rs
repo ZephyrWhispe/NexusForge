@@ -557,6 +557,45 @@ fn auxWindows_neverGrantClipboardCapture() {
     }
 }
 
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §8.2）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantClipboardStack() {
+    // T-B3-3 红线负例：堆栈投递会写系统剪贴板并向焦点应用注入 Ctrl+V（等同代打），
+    // 七命令全为 main-only；quickpanel 只留既有 search/paste/get-image 三面
+    let caps = load_capabilities();
+    for ident in [
+        "allow-clipboard-stack-push",
+        "allow-clipboard-stack-list",
+        "allow-clipboard-stack-move",
+        "allow-clipboard-stack-remove",
+        "allow-clipboard-stack-clear",
+        "allow-clipboard-stack-paste-next",
+        "allow-clipboard-stack-paste-all",
+    ] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（堆栈投递面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

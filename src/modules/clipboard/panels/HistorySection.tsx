@@ -23,6 +23,7 @@ import {
   clipboardGet,
   clipboardGroupCounts,
   clipboardCaptureGet,
+  clipboardStackPush,
   parseAppError,
   type ClipEntry,
   type ClipCaptureState,
@@ -272,6 +273,14 @@ export default function HistorySection({ search, group, onCounts }: Props) {
       .then(() => load(page, false))
       .catch(() => notify("error", "置顶失败"));
 
+  // T-B3-3 入栈：栈深由返回值如实报出；重复入栈幂等（后端 WHERE NOT EXISTS 兜底）
+  const doPushStack = (e: ClipEntry) =>
+    clipboardStackPush(e.id)
+      .then((depth) => notify("success", "已加入粘贴堆栈", `当前队列 ${depth} 条`))
+      .catch((err) =>
+        notify("error", "入栈失败", parseAppError(err)?.data.message ?? String(err)),
+      );
+
   // 行内删除（D-18）：单击即删改为经全局 ConfirmDialog，影响面点名到条目
   const doDelete = async (e: ClipEntry) => {
     const raw = e.preview.trim();
@@ -407,6 +416,18 @@ export default function HistorySection({ search, group, onCounts }: Props) {
                       aria-label="粘贴"
                     >
                       ⏎
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="加入粘贴堆栈" relationship="label">
+                    <button
+                      className={styles.opBtn}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        void doPushStack(e);
+                      }}
+                      aria-label="入栈"
+                    >
+                      ⛶
                     </button>
                   </Tooltip>
                   <Tooltip content="置顶" relationship="label">

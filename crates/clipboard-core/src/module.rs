@@ -13,7 +13,7 @@ use host_core::events::{Event, EventBus};
 use host_core::module::{
     priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
 };
-use host_core::ports::{ClipContent, ClipboardPort, CryptoPort};
+use host_core::ports::{ClipContent, ClipboardPort, CryptoPort, InputInjectPort, RawInput};
 use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -21,12 +21,28 @@ use crate::pipeline::{CapturePipeline, PipelineHandle};
 use crate::store::ClipStore;
 use crate::types::{ClipboardConfig, SearchQuery};
 
+/// 队首投递结果（命令层据此映射 wire DTO，core 不持有序列化形状）
+pub struct StackDelivery {
+    pub id: String,
+    pub delivered: bool,
+    pub error: Option<String>,
+}
+
+/// 全部粘贴汇总
+pub struct StackPasteReport {
+    pub delivered: u32,
+    pub failed: u32,
+    pub remaining: u32,
+}
+
 pub struct ClipboardModule {
     db_dir: RwLock<Option<std::path::PathBuf>>,
     store: RwLock<Option<Arc<ClipStore>>>,
     /// 回写标志：clipboard_paste 先置位，管线回调据此丢弃自回写事件（防循环）
     write_back: Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
     port: RwLock<Option<Arc<dyn ClipboardPort>>>,
+    /// 堆栈投递的第二段：写完后注入 Ctrl+V（可选端口，缺失只在投递时点名，不阻断 init）
+    injector: RwLock<Option<Arc<dyn InputInjectPort>>>,
     crypto: RwLock<Option<Arc<dyn CryptoPort>>>,
     bus: RwLock<Option<Arc<EventBus>>>,
     config: Arc<AsyncMutex<ClipboardConfig>>,
@@ -50,6 +66,7 @@ impl ClipboardModule {
             store: RwLock::new(None),
             write_back: Arc::new(parking_lot::Mutex::new(None)),
             port: RwLock::new(None),
+            injector: RwLock::new(None),
             crypto: RwLock::new(None),
             bus: RwLock::new(None),
             config: Arc::new(AsyncMutex::new(ClipboardConfig::default())),
@@ -237,6 +254,7 @@ impl Module for ClipboardModule {
         *self.db_dir.write() = Some(ctx.app_data_dir.clone());
         *self.store.write() = Some(store);
         *self.port.write() = Some(port);
+        *self.injector.write() = ctx.ports.get::<dyn InputInjectPort>();
         *self.crypto.write() = Some(crypto);
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.state.set(ModuleState::Stopped);
@@ -493,23 +511,138 @@ impl ClipboardModule {
             .clear(keep_pinned)
     }
 
-    pub fn push_stack(&self, id: &str) -> Result<(), AppError> {
-        self.store()
-            .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?
-            .push_stack(id)
+    /// 入栈（返栈深；同 id 重复入栈幂等）
+    pub fn stack_push(&self, id: &str) -> Result<u32, AppError> {
+        self.require_store()?.stack_push(id)
     }
 
-    pub fn pop_stack(&self) -> Result<Option<String>, AppError> {
+    pub fn stack_list(&self) -> Result<Vec<String>, AppError> {
+        self.require_store()?.stack_list()
+    }
+
+    /// 队列视图（按入栈序回填条目；已删条目静默少一行，DTO 侧如实呈现）
+    pub fn stack_entries(&self) -> Result<Vec<crate::types::ClipEntry>, AppError> {
+        let store = self.require_store()?;
+        let ids = store.stack_list()?;
+        store.entries_in_order(&ids)
+    }
+
+    pub fn stack_move(&self, id: &str, to: usize) -> Result<(), AppError> {
+        self.require_store()?.stack_move(id, to)
+    }
+
+    pub fn stack_remove(&self, id: &str) -> Result<bool, AppError> {
+        self.require_store()?.stack_remove(id)
+    }
+
+    pub fn stack_clear(&self) -> Result<u32, AppError> {
+        self.require_store()?.stack_clear()
+    }
+
+    /// 队首（不弹出）：投递成功后才 stack_take_next 真出栈，失败项不得凭空消失
+    pub fn stack_peek(&self) -> Result<Option<String>, AppError> {
+        Ok(self.stack_list()?.into_iter().next())
+    }
+
+    pub fn stack_take_next(&self) -> Result<Option<String>, AppError> {
+        self.require_store()?.stack_take_next()
+    }
+
+    /// 投递第二段：向焦点应用注入组合键序列。
+    /// 端口缺失/注入失败都是真失败，调用方须把该项记为未投递。
+    pub fn inject(&self, seq: &[RawInput]) -> Result<(), AppError> {
+        let port = self.injector.read().clone().ok_or_else(|| {
+            AppError::module(
+                "CLIPBOARD_STACK_002",
+                "InputInjectPort 未注册，无法注入粘贴按键",
+                Some("内容已写入剪贴板，请手动按 Ctrl+V"),
+            )
+        })?;
+        port.inject(seq)
+    }
+
+    /// 队首投递一次（两段式：先写系统剪贴板，再注入组合键）。`None` = 空栈。
+    /// 红线：敏感条目既不写也不出栈；写失败同样不出栈（内容根本没进剪贴板）；
+    /// 注入失败则已出栈——明文确实进了剪贴板，项不能凭空留栈。
+    pub fn stack_deliver_head(&self, seq: &[RawInput]) -> Result<Option<StackDelivery>, AppError> {
+        use crate::store::Payload;
+        let Some(id) = self.stack_peek()? else {
+            return Ok(None);
+        };
+        let payload = self
+            .raw_payload(&id)?
+            .ok_or_else(|| AppError::module("CLIPBOARD_PASTE_002", "条目不存在", None))?;
+        let content = match payload {
+            Payload::Text(text) => ClipContent::Text { text, html: None },
+            Payload::Files(paths) => ClipContent::Files { paths },
+            Payload::Image { format, bytes } => ClipContent::Image {
+                format,
+                width: 0,
+                height: 0,
+                bytes: Arc::from(bytes.into_boxed_slice()),
+            },
+            Payload::SecretB64(_) => {
+                return Ok(Some(StackDelivery {
+                    id,
+                    delivered: false,
+                    error: Some("敏感条目需先揭示后粘贴".into()),
+                }))
+            }
+        };
+        if let Err(e) = self.write_back(&content) {
+            return Ok(Some(StackDelivery {
+                id,
+                delivered: false,
+                error: Some(e.to_string()),
+            }));
+        }
+        let injected = self.inject(seq);
+        self.stack_take_next()?;
+        Ok(Some(StackDelivery {
+            id,
+            delivered: injected.is_ok(),
+            error: injected.err().map(|e| e.to_string()),
+        }))
+    }
+
+    /// 全部粘贴：逐条投递，两条之间间隔 `gap`；首个失败即停，剩余如实留栈。
+    pub fn stack_paste_all(
+        &self,
+        gap: std::time::Duration,
+        seq: &[RawInput],
+    ) -> Result<StackPasteReport, AppError> {
+        let (mut delivered, mut failed) = (0u32, 0u32);
+        while let Some(head) = self.stack_deliver_head(seq)? {
+            if !head.delivered {
+                failed += 1;
+                break;
+            }
+            delivered += 1;
+            if self.stack_peek()?.is_some() {
+                std::thread::sleep(gap);
+            }
+        }
+        Ok(StackPasteReport {
+            delivered,
+            failed,
+            remaining: self.stack_list()?.len() as u32,
+        })
+    }
+
+    fn require_store(&self) -> Result<Arc<ClipStore>, AppError> {
         self.store()
-            .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?
-            .pop_stack()
+            .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))
+    }
+
+    /// 原始载荷（**不经**信封解密）：堆栈投递须区分敏感行并当场拒投，
+    /// 而 get_payload 的自动解密臂会把敏感行还原成明文——两个语义必须分开。
+    pub fn raw_payload(&self, id: &str) -> Result<Option<crate::store::Payload>, AppError> {
+        self.require_store()?.get_payload(id)
     }
 
     /// 解密读取（clipboard_get；信封解密经 CryptoPort）
     pub fn get_content(&self, id: &str) -> Result<Option<String>, AppError> {
-        let store =
-            self.store()
-                .ok_or(AppError::module("CLIPBOARD_QUERY_001", "模块未就绪", None))?;
+        let store = self.require_store()?;
         let crypto = self.crypto.read().clone().ok_or(AppError::module(
             "CLIPBOARD_QUERY_001",
             "CryptoPort 未就绪",
@@ -608,7 +741,7 @@ impl TrayProvider for ClipboardModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{FakeClipboard, FakeCrypto};
+    use crate::pipeline::{CallLog, FakeClipboard, FakeCrypto, FakeInjector};
     use host_core::ports::Ports;
     use host_core::registry::ModuleRegistry;
     use parking_lot::Mutex;
@@ -665,6 +798,7 @@ mod tests {
             cb: Arc::new(Mutex::new(None)),
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: false,
+            log: Arc::new(Mutex::new(Vec::new())),
         });
         ports.register::<dyn ClipboardPort>(fake.clone());
         ports.register::<dyn CryptoPort>(Arc::new(FakeCrypto));
@@ -738,6 +872,8 @@ mod tests {
         registry: Arc<ModuleRegistry>,
         module: Arc<ClipboardModule>,
         port: Arc<FakeClipboard>,
+        /// 两个假端口共写的有序轨迹（写 vs 注入的先后即由它判定）
+        log: CallLog,
     }
 
     impl Drop for Harness {
@@ -747,14 +883,29 @@ mod tests {
     }
 
     async fn harness(tag: &str) -> Harness {
+        harness_injecting(tag, None).await
+    }
+
+    /// `fail_at = Some(n)`：第 n 次起的注入返回 Err（paste_all 首个失败即停负例）
+    async fn harness_injecting(tag: &str, fail_at: Option<usize>) -> Harness {
         let dir = std::env::temp_dir().join(format!("nf_clip_mod_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let bus = Arc::new(EventBus::new());
         let store_cfg = test_config_store(&dir, &bus);
         let ports = Arc::new(Ports::new());
-        let port = Arc::new(FakeClipboard::default());
+        let log: CallLog = Arc::default();
+        let port = Arc::new(FakeClipboard {
+            log: log.clone(),
+            ..Default::default()
+        });
+        let injector = Arc::new(FakeInjector {
+            log: log.clone(),
+            fail_at,
+            ..Default::default()
+        });
         ports.register::<dyn ClipboardPort>(port.clone());
         ports.register::<dyn CryptoPort>(Arc::new(FakeCrypto));
+        ports.register::<dyn InputInjectPort>(injector.clone());
         let module = Arc::new(ClipboardModule::new_with_config(store_cfg.clone()));
         store_cfg.register_schema("clipboard", module.config_schema());
         let registry = Arc::new(ModuleRegistry::new(bus.clone()));
@@ -777,6 +928,7 @@ mod tests {
             registry,
             module,
             port,
+            log,
         }
     }
 
@@ -988,5 +1140,151 @@ mod tests {
         assert_eq!(ev.source, "clipboard");
         assert_eq!(m.tray_menu_items()[0].label, "打开剪切板面板");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 与 src-tauri `PASTE_KEY_SEQ` 同形的注入序列（常量形状由命令层单测钉，
+    /// 此处只需同形序列以便日志字面断言）
+    const PASTE_SEQ: &[RawInput] = &[
+        RawInput::KeyDown {
+            vk: 0x11,
+            scan: 0x1D,
+        },
+        RawInput::KeyDown {
+            vk: 0x56,
+            scan: 0x2F,
+        },
+        RawInput::KeyUp {
+            vk: 0x56,
+            scan: 0x2F,
+        },
+        RawInput::KeyUp {
+            vk: 0x11,
+            scan: 0x1D,
+        },
+    ];
+
+    fn stacked_ids(h: &Harness) -> Vec<String> {
+        h.module.stack_list().unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-3）字面测试名优先于 rustc 命名惯例
+    async fn stack_pasteNext_writesThenInjectsCtrlV() {
+        let h = harness("stk_deliver").await;
+        let store = h.module.store().unwrap();
+        let id = store
+            .insert("stack-first", None, false, None, "local")
+            .unwrap();
+        assert_eq!(h.module.stack_push(&id).unwrap(), 1);
+
+        let dto = h
+            .module
+            .stack_deliver_head(PASTE_SEQ)
+            .unwrap()
+            .expect("非空栈须有投递结果");
+        assert_eq!(dto.id, id);
+        assert!(dto.delivered, "注入成功即投递：{:?}", dto.error);
+        assert_eq!(
+            std::mem::take(&mut *h.log.lock()),
+            vec![
+                "write".to_string(),
+                "inject:17,29;86,47;86,47,up;17,29,up".to_string()
+            ],
+            "写剪贴板必须先于按键注入，且四元素组合键完整"
+        );
+        assert_eq!(*h.port.writes.lock(), vec!["stack-first".to_string()]);
+        assert!(stacked_ids(&h).is_empty(), "投递成功后队首出栈");
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    async fn stack_pasteNext_secretEntry_refusedAndStaysOnStack() {
+        let h = harness("stk_secret").await;
+        let store = h.module.store().unwrap();
+        let id = store
+            .insert_encrypted("aGVsbG8tY2lwaGVy", None, None, "local")
+            .unwrap();
+        h.module.stack_push(&id).unwrap();
+
+        let dto = h
+            .module
+            .stack_deliver_head(PASTE_SEQ)
+            .unwrap()
+            .expect("敏感项须有如实回执，不是静默丢弃");
+        assert!(!dto.delivered);
+        assert_eq!(dto.error.as_deref(), Some("敏感条目需先揭示后粘贴"));
+        assert!(
+            h.log.lock().is_empty(),
+            "敏感条目不得写剪贴板也不得注入：{:?}",
+            h.log.lock()
+        );
+        assert_eq!(stacked_ids(&h), vec![id.clone()], "未投递的项必须仍在栈上");
+
+        // 对照臂：明文项走同一路径正常投递，证明上一条拒的是内容语义而非端口没通
+        let plain = store
+            .insert("stack-not-secret", None, false, None, "local")
+            .unwrap();
+        h.module.stack_push(&plain).unwrap();
+        assert!(
+            !h.module
+                .stack_deliver_head(PASTE_SEQ)
+                .unwrap()
+                .expect("队首仍是敏感项")
+                .delivered,
+            "敏感项在队首即挡住队列——它不出栈，直到用户揭示或移出（T-B3-5 揭示门）"
+        );
+        assert!(h.module.stack_remove(&id).unwrap(), "移出敏感项须报成功");
+        let ok = h
+            .module
+            .stack_deliver_head(PASTE_SEQ)
+            .unwrap()
+            .expect("明文项须投递");
+        assert!(ok.delivered, "明文项投递失败：{:?}", ok.error);
+        assert_eq!(ok.id, plain);
+        assert!(stacked_ids(&h).is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    async fn stack_pasteAll_stopsAtFirstInjectFailure() {
+        let h = harness_injecting("stk_all", Some(2)).await;
+        let store = h.module.store().unwrap();
+        let ids: Vec<String> = ["stk-1", "stk-2", "stk-3"]
+            .iter()
+            .map(|t| store.insert(t, None, false, None, "local").unwrap())
+            .collect();
+        for id in &ids {
+            h.module.stack_push(id).unwrap();
+        }
+
+        let report = h.module.stack_paste_all(Duration::ZERO, PASTE_SEQ).unwrap();
+        assert_eq!(report.delivered, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.remaining, 1);
+        assert_eq!(
+            stacked_ids(&h),
+            vec![ids[2].clone()],
+            "首个失败之后的条目留在栈上，顺序不变"
+        );
+        assert_eq!(h.log.lock().len(), 4, "两条尝试各 write+inject");
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    async fn stack_pasteEmpty_returnsNone() {
+        let h = harness("stk_empty").await;
+        assert!(
+            h.module.stack_deliver_head(PASTE_SEQ).unwrap().is_none(),
+            "空栈不得假成功"
+        );
+        assert!(
+            h.module
+                .stack_paste_all(Duration::ZERO, PASTE_SEQ)
+                .unwrap()
+                .delivered
+                == 0,
+            "空栈全部粘贴返回 0"
+        );
+        assert!(h.log.lock().is_empty(), "空栈不得触碰任何端口");
     }
 }

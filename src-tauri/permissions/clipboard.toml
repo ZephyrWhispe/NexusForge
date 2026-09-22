@@ -49,3 +49,38 @@ commands.allow = ["clipboard_capture_get"]
 identifier = "allow-clipboard-capture-set"
 description = "允许前端调用 clipboard_capture_set 命令（D-28 按窗最小授权）"
 commands.allow = ["clipboard_capture_set"]
+
+[[permission]]
+identifier = "allow-clipboard-stack-push"
+description = "允许前端调用 clipboard_stack_push 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_stack_push"]
+
+[[permission]]
+identifier = "allow-clipboard-stack-list"
+description = "允许前端调用 clipboard_stack_list 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_stack_list"]
+
+[[permission]]
+identifier = "allow-clipboard-stack-move"
+description = "允许前端调用 clipboard_stack_move 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_stack_move"]
+
+[[permission]]
+identifier = "allow-clipboard-stack-remove"
+description = "允许前端调用 clipboard_stack_remove 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_stack_remove"]
+
+[[permission]]
+identifier = "allow-clipboard-stack-clear"
+description = "允许前端调用 clipboard_stack_clear 命令（D-28 按窗最小授权）"
+commands.allow = ["clipboard_stack_clear"]
+
+[[permission]]
+identifier = "allow-clipboard-stack-paste-next"
+description = "允许前端调用 clipboard_stack_paste_next 命令（写系统剪贴板并注入 Ctrl+V，main-only）"
+commands.allow = ["clipboard_stack_paste_next"]
+
+[[permission]]
+identifier = "allow-clipboard-stack-paste-all"
+description = "允许前端调用 clipboard_stack_paste_all 命令（逐条写剪贴板并连续注入，main-only）"
+commands.allow = ["clipboard_stack_paste_all"]
