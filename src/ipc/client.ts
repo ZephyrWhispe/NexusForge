@@ -88,6 +88,8 @@ export interface ClipEntry {
   pinned: boolean;
   group: string | null;
   secret: boolean;
+  /** 该行另有 HTML 正文（T-B3-8）：正文不经列表下发，须走 clipboard_html_get 显式取 */
+  has_html: boolean;
   created_at: number;
   usage_count: number;
 }
@@ -113,8 +115,18 @@ export function clipboardSearch(query: ClipSearchQuery): Promise<ClipPage> {
 export function clipboardGet(id: string): Promise<string> {
   return invoke<string>("clipboard_get", { id });
 }
-export function clipboardPaste(id: string): Promise<void> {
-  return invoke("clipboard_paste", { id });
+/** 格式粘贴回执（T-B3-8）：degraded=true 表示要的是 HTML、实际只投出去了纯文本 */
+export interface ClipPasteResult {
+  format_used: "plain" | "html";
+  degraded: boolean;
+}
+
+export function clipboardPaste(id: string, format?: "plain" | "html"): Promise<ClipPasteResult> {
+  return invoke<ClipPasteResult>("clipboard_paste", { id, format });
+}
+/** HTML 源文按需读取（列表只带 has_html 布尔）；无正文即 CLIPBOARD_HTML_001 反错 */
+export function clipboardHtmlGet(id: string): Promise<string> {
+  return invoke<string>("clipboard_html_get", { id });
 }
 export function clipboardPin(id: string, pinned: boolean): Promise<void> {
   return invoke("clipboard_pin", { id, pinned });

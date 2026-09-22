@@ -35,6 +35,15 @@ pub struct StackPasteReport {
     pub remaining: u32,
 }
 
+/// 格式粘贴解析结果（core 侧形状；命令层映射成 wire 的 `PasteResultDto`）
+pub struct PastePayload {
+    pub content: ClipContent,
+    /// 实际投出去的格式："plain" | "html"
+    pub format_used: String,
+    /// 请求了 html 而只投成 plain —— 降级须让用户看见
+    pub degraded: bool,
+}
+
 pub struct ClipboardModule {
     db_dir: RwLock<Option<std::path::PathBuf>>,
     store: RwLock<Option<Arc<ClipStore>>>,
@@ -750,6 +759,57 @@ impl ClipboardModule {
                     Some("请在敏感库点「揭示」确认后再复制，或改用堆栈投递明文条目"),
                 ))
             }
+        })
+    }
+
+    /// HTML 正文读取（clipboard_html_get）：详情框的 HTML 源视图是唯一取正文的口，
+    /// 列表与堆栈查询只带 `has_html` 布尔（最多 512KB 的源文不随分页拖出）。
+    ///
+    /// 敏感行一律拒（与 `get_content` 的 CLIPBOARD_GET_001 同律）：管线从不为敏感行
+    /// 存 HTML，但手改库/备份还原能把那份明文塞回来——读口比写口宽就是自我绕过。
+    pub fn get_html(&self, id: &str) -> Result<Option<String>, AppError> {
+        if let Some(crate::store::Payload::SecretB64(_)) = self.raw_payload(id)? {
+            return Err(AppError::module(
+                "CLIPBOARD_HTML_002",
+                "敏感条目不随 HTML 读口返回正文",
+                Some("请到「敏感库」视图逐行揭示；HTML 源是同一份明文的第二副本"),
+            ));
+        }
+        self.require_store()?.get_html(id)
+    }
+
+    /// clipboard_paste(id, format) 的载荷解析（T-B3-8）。
+    /// 请求 html 而行无 html → 回落纯文本并 `degraded = true`：投出去的是纯文本，
+    /// 就不谎称带了格式（前端据此出「已降级」提示，而不是静默成功）。
+    /// 图片/文件行本就没有"带格式"一说：want_html 时同样 plain + degraded，
+    /// 该组合 UI 不产生（无 html 的行不渲染带格式钮），留在数据面如实成一格。
+    pub fn paste_content_format(
+        &self,
+        id: &str,
+        want_html: bool,
+    ) -> Result<PastePayload, AppError> {
+        let mut content = self.paste_content(id)?;
+        if want_html {
+            if let ClipContent::Text { text: _, html } = &mut content {
+                if let Some(body) = self.get_html(id)? {
+                    *html = Some(body);
+                    return Ok(PastePayload {
+                        content,
+                        format_used: "html".to_string(),
+                        degraded: false,
+                    });
+                }
+            }
+            return Ok(PastePayload {
+                content,
+                format_used: "plain".to_string(),
+                degraded: true,
+            });
+        }
+        Ok(PastePayload {
+            content,
+            format_used: "plain".to_string(),
+            degraded: false,
         })
     }
 
@@ -1571,5 +1631,106 @@ mod tests {
             after[..end].contains(r#"target: "audit""#),
             "明文出口必须落宿主审计日志"
         );
+    }
+
+    // ---------------- T-B3-8 HTML 捕获与格式粘贴 ----------------
+
+    /// 写侧载荷字面：`paste_content_format` 返回的 `content` 就是命令层交给
+    /// `write_back` 的那个值（假端口刻意不扩成"记录载荷"，断言打在唯一的真源上）。
+    fn html_row(h: &Harness, text: &str, html: &str) -> String {
+        h.module
+            .store()
+            .unwrap()
+            .insert_row(&NewClip::new(text).html(html))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+    async fn pasteFormat_plain_writesTextWithoutHtml() {
+        let h = harness("fmt_plain").await;
+        let id = html_row(&h, "富文本纯粘贴", "<p><b>富文本纯粘贴</b></p>");
+
+        // 前置：这一行确实带 HTML，否则"不带格式"只是什么都没存
+        assert!(
+            h.module.get_html(&id).unwrap().is_some(),
+            "夹具须真的有 HTML 正文"
+        );
+
+        let out = h.module.paste_content_format(&id, false).unwrap();
+        assert_eq!(out.format_used, "plain");
+        assert!(!out.degraded, "没要格式就谈不上降级");
+        assert!(
+            matches!(&out.content, ClipContent::Text { text, html } if text == "富文本纯粘贴" && html.is_none()),
+            "plain 分支投出的 Text 必须 html: None，实际: {:?}",
+            out.content
+        );
+
+        // 正对照：同一行改口要格式即带出 HTML——证明上一臂拒的是格式参数而非这一行
+        let rich = h.module.paste_content_format(&id, true).unwrap();
+        assert_eq!(rich.format_used, "html");
+        assert!(matches!(
+            &rich.content,
+            ClipContent::Text { html: Some(_), .. }
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+    async fn pasteFormat_html_degradesToPlainWhenAbsent_andReports() {
+        let h = harness("fmt_degrade").await;
+        let id = plain_row(&h, "只有纯文本的一行");
+
+        let out = h.module.paste_content_format(&id, true).unwrap();
+        assert_eq!(
+            out.format_used, "plain",
+            "投出去的是纯文本就不许自称 html（写进系统剪贴板的即断言的那个值）"
+        );
+        assert!(out.degraded, "缺格式而回落必须如实上报，不得静默成功");
+        assert!(matches!(
+            &out.content,
+            ClipContent::Text { text, html } if text == "只有纯文本的一行" && html.is_none()
+        ));
+
+        // 正对照：同一函数在有 HTML 的行上 degraded=false（见 pasteFormat_html_carriesHtmlWhenPresent），
+        // 这里另钉一条边界——敏感行不适用"降级"：它的纯文本本身就是明文，
+        // 静默回落成 plain 等于给带格式粘贴开第二明文出口，故须整口拒。
+        let secret = secret_row(&h, "sk-degrade-must-not-00112233445566");
+        let err = match h.module.paste_content_format(&secret, true) {
+            Ok(_) => panic!("敏感行不得因「带格式」参数而放行"),
+            Err(e) => e,
+        };
+        assert_eq!(err_parts(err).0, "CLIPBOARD_PASTE_004");
+        assert!(h.port.writes.lock().is_empty(), "拒粘贴不得写系统剪贴板");
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+    async fn pasteFormat_html_carriesHtmlWhenPresent() {
+        let h = harness("fmt_html").await;
+        let id = html_row(
+            &h,
+            "带格式的正文",
+            "<h1>带格式的正文</h1><ul><li>一</li></ul>",
+        );
+
+        let out = h.module.paste_content_format(&id, true).unwrap();
+        assert_eq!(out.format_used, "html");
+        assert!(!out.degraded);
+        assert!(
+            matches!(
+                &out.content,
+                ClipContent::Text { text, html: Some(src) }
+                    if text == "带格式的正文" && src == "<h1>带格式的正文</h1><ul><li>一</li></ul>"
+            ),
+            "HTML 须逐字节带出，实际: {:?}",
+            out.content
+        );
+
+        // 对立面：同一条目走 plain 不带 HTML（两分支同源不同投，互不污染）
+        assert!(matches!(
+            h.module.paste_content_format(&id, false).unwrap().content,
+            ClipContent::Text { html: None, .. }
+        ));
     }
 }

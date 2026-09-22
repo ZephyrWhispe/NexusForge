@@ -19,6 +19,9 @@ pub struct ClipEntry {
     pub group: Option<String>,
     /// 命中敏感规则（内容加密存储）
     pub secret: bool,
+    /// 该条是否另有 HTML 正文（T-B3-8：列表只带布尔，正文经 clipboard_html_get 显式取，
+    /// 免得每页把最多 512KB 的源文拖进 IPC）
+    pub has_html: bool,
     pub created_at: i64,
     pub usage_count: u32,
 }

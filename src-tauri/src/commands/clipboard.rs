@@ -30,15 +30,69 @@ pub async fn clipboard_get(id: String, state: State<'_, HostState>) -> Result<St
 }
 
 /// 写回系统剪贴板（先置回写窗口，防自捕获循环；文本/图片/文件多格式）
+///
+/// `format`（T-B3-8）：None | "plain" = 纯文本；"html" = 连同 HTML Format 一起投。
+/// 请求 html 而行无 html 时不报错也不谎称成功——投 plain 并回 `degraded: true`。
+#[derive(Serialize)]
+pub struct PasteResultDto {
+    pub format_used: String,
+    pub degraded: bool,
+}
+
+/// 粘贴格式参数解析（纯函数，单测覆盖）：未知值点名拒并交出可用集合。
+/// 把 "rtf" 静默当成 plain 投出去是最坏的一种"宽容"——用户选了带格式，
+/// 得到的却是无痕迹的降级，下一次才发现粘贴物不对。
+fn parse_paste_format(format: Option<&str>) -> Result<bool, AppError> {
+    match format {
+        None | Some("plain") => Ok(false),
+        Some("html") => Ok(true),
+        Some(other) => Err(AppError::module(
+            "CLIPBOARD_PASTE_005",
+            format!("未知粘贴格式「{other}」"),
+            Some("本版本可用 plain | html；RTF 保格式粘贴已登记收窄（D-29 B3）"),
+        )),
+    }
+}
+
 #[tauri::command]
-pub async fn clipboard_paste(id: String, state: State<'_, HostState>) -> Result<(), AppError> {
+pub async fn clipboard_paste(
+    id: String,
+    format: Option<String>,
+    state: State<'_, HostState>,
+) -> Result<PasteResultDto, AppError> {
+    let want_html = parse_paste_format(format.as_deref())?;
     let clipboard = state.clipboard.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let content = clipboard.paste_content(&id)?;
-        clipboard.write_back(&content)
+        let payload = clipboard.paste_content_format(&id, want_html)?;
+        clipboard.write_back(&payload.content)?;
+        Ok::<PasteResultDto, AppError>(PasteResultDto {
+            format_used: payload.format_used,
+            degraded: payload.degraded,
+        })
     })
     .await
     .map_err(|e| AppError::module("CLIPBOARD_PASTE_003", e.to_string(), None))?
+}
+
+/// HTML 正文显式读取（T-B3-8）：列表只带 has_html 布尔，源文须经此口按需取
+#[tauri::command]
+pub async fn clipboard_html_get(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
+    let clipboard = state.clipboard.clone();
+    tauri::async_runtime::spawn_blocking(move || clipboard.get_html(&id))
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
+        .map(|h| {
+            h.ok_or_else(|| {
+                AppError::module(
+                    "CLIPBOARD_HTML_001",
+                    "该条目没有 HTML 正文",
+                    Some("只有浏览器/办公套件等富文本复制才带 HTML Format"),
+                )
+            })
+        })?
 }
 
 /// 敏感条目按需揭示（唯一明文出口；成功由 clipboard-core 落 audit 日志）
@@ -471,5 +525,25 @@ mod tests {
             ],
             "Ctrl 按住 → V 按下 → V 抬起 → Ctrl 抬起：vk/scan 任一错位都会注入成别的键",
         );
+    }
+
+    /// T-B3-8：三档参数语义 —— 缺键/ plain 同义（旧调用面零改动），html 开格式，
+    /// 其余一律点名拒（拒的一臂同时是前两臂的正对照：解析确实分得开值）。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）随行辅测
+    fn pasteFormatParam_unknown_rejects005() {
+        assert!(
+            !parse_paste_format(None).unwrap(),
+            "缺键即 plain（旧调用面零改动）"
+        );
+        assert!(!parse_paste_format(Some("plain")).unwrap());
+        assert!(parse_paste_format(Some("html")).unwrap());
+        let err = parse_paste_format(Some("rtf")).unwrap_err();
+        assert_eq!(err.code(), "CLIPBOARD_PASTE_005");
+        let AppError::Module { message, hint, .. } = err else {
+            panic!("未知格式须以模块错误返回");
+        };
+        assert_eq!(message, "未知粘贴格式「rtf」", "消息须点名用户填的那个值");
+        assert!(hint.unwrap().contains("plain | html"));
     }
 }

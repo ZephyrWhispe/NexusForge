@@ -18,6 +18,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   clipboardSearch,
   clipboardPaste,
+  clipboardHtmlGet,
   clipboardPin,
   clipboardDelete,
   clipboardClear,
@@ -35,6 +36,8 @@ import { IN_TAURI } from "../../../ipc/env";
 import { notify, reportError } from "../../../stores/notifications";
 import { confirmAction } from "../../../stores/confirm";
 import EmptyState from "../../../components/EmptyState";
+import Tabs from "../../../components/Tabs";
+import DeferredBadge from "../../../components/DeferredBadge";
 import DibThumb from "../DibThumb";
 import { keyActivate } from "../../../a11y";
 import { GROUP_LABEL, fmtTime } from "../display";
@@ -43,7 +46,10 @@ import { GROUP_LABEL, fmtTime } from "../display";
  * 历史子面板（T-B3-1 自 ClipboardPanel 原样搬入，逻辑一行不删）：
  * 数据 clipboard_search FTS/分页 + group:/type: 语法芯片（T-B3-6）；
  * 实时 nf:event clipboard.captured/deleted/cleared → 刷新；
- * 行操作（详情/粘贴/置顶/删除）+ 工具栏清空 + 两个 Dialog 形态均沿用 B1 判据。
+ * 行操作（详情/粘贴/置顶/删除）+ 工具栏清空 + 两个 Dialog 形态均沿用 B1 判据；
+ * T-B3-8：详情框「纯文本 / HTML 源」两 Tab（源文经 clipboard_html_get 显式取、
+ * 以 `<pre>` 文本渲染），行操作把 [粘贴] 拆成 [粘贴为纯文本][粘贴带格式]
+ * （后者仅 has_html 行渲染），RTF 保格式粘贴按 D-29 B3 收窄挂延后徽标。
  */
 const useStyles = makeStyles({
   root: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 },
@@ -315,6 +321,12 @@ interface Props {
   onCounts: (counts: Record<string, number>) => void;
 }
 
+/** 详情正文两视图（T-B3-8）：常量显式定型，免得 Tabs 泛型把 id 推成 string */
+const DETAIL_TABS: { id: "plain" | "html"; label: string }[] = [
+  { id: "plain", label: "纯文本" },
+  { id: "html", label: "HTML 源" },
+];
+
 /** 图片条目缩略图：见 DibThumb.tsx（与 QuickPanel 共用） */
 
 export default function HistorySection({ search, group, onCounts }: Props) {
@@ -329,9 +341,14 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   const [keepPinned, setKeepPinned] = useState(true);
   const [clearing, setClearing] = useState(false);
   // T-B1-2 详情：text/files 走 clipboard_get 全文；image 走大图 DibThumb（字节不做 lossy 展示）
-  const [detail, setDetail] = useState<{ entry: ClipEntry; text: string | null; failed: string | null } | null>(
-    null,
-  );
+  // T-B3-8：html 首次切到 HTML 源 Tab 才拉（列表只带布尔，正文按显式口取）
+  const [detailTab, setDetailTab] = useState<"plain" | "html">("plain");
+  const [detail, setDetail] = useState<{
+    entry: ClipEntry;
+    text: string | null;
+    failed: string | null;
+    html: { text: string | null; failed: string | null } | null;
+  } | null>(null);
   // T-B3-4 详情内的手工分组草稿（打开详情时以条目现值播种）
   const [groupDraft, setGroupDraft] = useState("");
   // T-B3-2 暂停捕获横幅：读运行态（与设置卡/托盘同源），只在真跳过过内容时出现
@@ -421,9 +438,22 @@ export default function HistorySection({ search, group, onCounts }: Props) {
     overscan: 10,
   });
 
-  const doPaste = (e: ClipEntry) =>
-    clipboardPaste(e.id)
-      .then(() => notify("success", "已写入剪贴板", "回写窗口 500ms 内不重复记录"))
+  // T-B3-8：默认纯文本；带格式粘贴只在有 HTML 的行上出现（后端缺席即降级，前端不放空钮）
+  const doPaste = (e: ClipEntry, format: "plain" | "html" = "plain") =>
+    clipboardPaste(e.id, format)
+      .then((r) =>
+        r.degraded
+          ? notify(
+              "warn",
+              "已按纯文本粘贴",
+              "该条目没有 HTML 正文：写进剪贴板的是纯文本那份，不带格式",
+            )
+          : notify(
+              "success",
+              r.format_used === "html" ? "已写入剪贴板（含 HTML）" : "已写入剪贴板",
+              "回写窗口 500ms 内不重复记录",
+            ),
+      )
       .catch(() => notify("error", "粘贴失败"));
   const doPin = (e: ClipEntry) =>
     clipboardPin(e.id, !e.pinned)
@@ -485,7 +515,8 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   };
 
   const openDetail = (e: ClipEntry) => {
-    setDetail({ entry: e, text: null, failed: null });
+    setDetail({ entry: e, text: null, failed: null, html: null });
+    setDetailTab("plain");
     setGroupDraft(e.group ?? "");
     // 图片走 DibThumb；敏感条目走通用读口必被 CLIPBOARD_GET_001 拒（T-B3-5 揭示门），
     // 详情框只显掩码并指路敏感库——把拒答当"读取失败"摆给用户看是第二种噪声。
@@ -496,6 +527,29 @@ export default function HistorySection({ search, group, onCounts }: Props) {
         setDetail((d) =>
           d && d.entry.id === e.id
             ? { ...d, failed: parseAppError(err)?.data.message ?? String(err) }
+            : d,
+        ),
+      );
+  };
+
+  /**
+   * T-B3-8 切详情 Tab：HTML 源首次点开才经显式读口拉一次（列表不带正文），
+   * 拉过就 cached——同一条源文重复来回看不重复打 IPC。
+   */
+  const switchDetailTab = (tab: "plain" | "html") => {
+    setDetailTab(tab);
+    if (tab !== "html") return;
+    const entry = detail?.entry;
+    if (!entry || detail?.html) return;
+    setDetail((d) => (d ? { ...d, html: { text: null, failed: null } } : d));
+    clipboardHtmlGet(entry.id)
+      .then((t) =>
+        setDetail((d) => (d && d.entry.id === entry.id ? { ...d, html: { text: t, failed: null } } : d)),
+      )
+      .catch((err) =>
+        setDetail((d) =>
+          d && d.entry.id === entry.id
+            ? { ...d, html: { text: null, failed: parseAppError(err)?.data.message ?? String(err) } }
             : d,
         ),
       );
@@ -610,18 +664,34 @@ export default function HistorySection({ search, group, onCounts }: Props) {
                       ⓘ
                     </button>
                   </Tooltip>
-                  <Tooltip content="粘贴" relationship="label">
+                  <Tooltip content="粘贴为纯文本" relationship="label">
                     <button
                       className={styles.opBtn}
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        doPaste(e);
+                        doPaste(e, "plain");
                       }}
-                      aria-label="粘贴"
+                      aria-label="粘贴为纯文本"
                     >
                       ⏎
                     </button>
                   </Tooltip>
+                  {/* T-B3-8：只有真带 HTML 正文的行才给带格式钮——点了才降级是诚实，
+                      预先摆一个注定降级的钮是噪声 */}
+                  {e.has_html && (
+                    <Tooltip content="粘贴带格式（HTML）" relationship="label">
+                      <button
+                        className={styles.opBtn}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          doPaste(e, "html");
+                        }}
+                        aria-label="粘贴带格式"
+                      >
+                        ◈
+                      </button>
+                    </Tooltip>
+                  )}
                   <Tooltip content="加入粘贴堆栈" relationship="label">
                     <button
                       className={styles.opBtn}
@@ -734,7 +804,37 @@ export default function HistorySection({ search, group, onCounts }: Props) {
                       .filter(Boolean)
                       .join(" · ")}
                   </Text>
-                  {detail.entry.content_type === "image" ? (
+                  {detail.entry.has_html && detail.entry.content_type === "text" && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        flexWrap: "wrap",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      <Tabs
+                        items={DETAIL_TABS}
+                        value={detailTab}
+                        onChange={switchDetailTab}
+                        ariaLabel="详情正文格式"
+                      />
+                      {/* RTF 轨按 09 §8.2 T-B3-8 收窄：本版只做 HTML Format，保格式粘贴的
+                          RTF 侧留徽标指路，不摆注定失败的禁用钮 */}
+                      <DeferredBadge label="RTF 保格式粘贴" decisionRef="D-29 B3 收窄登记" />
+                    </div>
+                  )}
+                  {detailTab === "html" && detail.entry.has_html ? (
+                    detail.html && detail.html.failed ? (
+                      <span className={styles.detailHint}>读取失败：{detail.html.failed}</span>
+                    ) : detail.html && detail.html.text !== null ? (
+                      /* 源文按文本渲染（pre + 文本子节点）：HTML 片段进 innerHTML 就是自造 XSS 面 */
+                      <pre className={styles.fullText}>{detail.html.text}</pre>
+                    ) : (
+                      <span className={styles.detailHint}>加载中…</span>
+                    )
+                  ) : detail.entry.content_type === "image" ? (
                     <DibThumb id={detail.entry.id} width={420} height={280} />
                   ) : detail.entry.secret ? (
                     <>

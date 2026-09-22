@@ -312,8 +312,8 @@ impl CapturePipeline {
 
         // ② 按类型分流（图片/文件受开关控制）
         match content {
-            host_core::ports::ClipContent::Text { text, .. } => {
-                self.process_text(text, source_app, origin, &config)
+            host_core::ports::ClipContent::Text { text, html } => {
+                self.process_text(text, html, source_app, origin, &config)
             }
             host_core::ports::ClipContent::Image {
                 format,
@@ -338,6 +338,7 @@ impl CapturePipeline {
     fn process_text(
         &self,
         text: String,
+        html: Option<String>,
         source_app: Option<String>,
         origin: &'static str,
         config: &ClipboardConfig,
@@ -357,6 +358,7 @@ impl CapturePipeline {
         let group = config.auto_group.then(|| sugg.map(|(g, _)| g)).flatten();
 
         // ⑤ 入库
+        // 敏感臂刻意不接 html：那是同一份明文的第二副本，正文化存着就把信封加密的意义清零。
         let result = match kind {
             Some(_k) => {
                 let cipher = match self.crypto.protect(text.as_bytes()) {
@@ -376,6 +378,7 @@ impl CapturePipeline {
                 suggested: sugg,
                 source_app: source_app.as_deref(),
                 origin,
+                html: html.as_deref(),
                 ..NewClip::new(&text)
             }),
         };
@@ -1327,6 +1330,127 @@ mod tests {
             wait_until(|| row_count(&store) == 1, Duration::from_secs(2)),
             "标记为假时不得有任何丢弃"
         );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    /// T-B3-8：一次富文本复制 = 正文 + HTML 两份同源入库。列表行只带 `has_html` 布尔，
+    /// 正文须经 `get_html` 显式口取（分页不拖 512KB 源文）。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+    fn clipHtml_cfHtmlFormat_storedAlongsideText() {
+        let (handle, store, port, _bus) = start_with_fake("html_along");
+        fire_content(
+            &port,
+            ClipContent::Text {
+                text: "富文本一行".into(),
+                html: Some("<p><b>富文本一行</b></p>".into()),
+            },
+        );
+        assert!(
+            wait_until(|| row_count(&store) == 1, Duration::from_secs(2)),
+            "带 HTML 的文本捕获须照常入库"
+        );
+        let page = store.search(&crate::types::SearchQuery::default()).unwrap();
+        let item = &page.items[0];
+        assert!(item.has_html, "有 HTML 的行须在列表上如实标注");
+        assert_eq!(
+            store.get_html(&item.id).unwrap().as_deref(),
+            Some("<p><b>富文本一行</b></p>"),
+            "HTML 原样存，不剥标签也不转义"
+        );
+        assert!(item.preview.contains("富文本一行"), "预览仍取自纯文本那份");
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    /// 负例（"无该格式不假有"）：纯文本复制的 html 恒 NULL、has_html 恒 false。
+    /// 同库第二条带 HTML 作正对照——否则 false 可能只是"列没读对/守卫没补列"。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+    fn clipHtml_plainTextOnly_staysNull() {
+        let (handle, store, port, _bus) = start_with_fake("html_null");
+        fire_content(
+            &port,
+            ClipContent::Text {
+                text: "记事本里的一行".into(),
+                html: None,
+            },
+        );
+        assert!(wait_until(
+            || row_count(&store) == 1,
+            Duration::from_secs(2)
+        ));
+        let plain = store
+            .search(&crate::types::SearchQuery::default())
+            .unwrap()
+            .items[0]
+            .clone();
+        assert!(!plain.has_html);
+        assert_eq!(store.get_html(&plain.id).unwrap(), None);
+
+        fire_content(
+            &port,
+            ClipContent::Text {
+                text: "浏览器里的一行".into(),
+                html: Some("<i>浏览器里的一行</i>".into()),
+            },
+        );
+        assert!(
+            wait_until(|| row_count(&store) == 2, Duration::from_secs(2)),
+            "正对照：同一条管线要能真把 HTML 写进去"
+        );
+        let items = store
+            .search(&crate::types::SearchQuery::default())
+            .unwrap()
+            .items;
+        let rich = items
+            .iter()
+            .find(|e| e.has_html)
+            .expect("正对照行须带 has_html");
+        assert_eq!(
+            store.get_html(&rich.id).unwrap().as_deref(),
+            Some("<i>浏览器里的一行</i>")
+        );
+        assert_eq!(
+            store.get_html(&plain.id).unwrap(),
+            None,
+            "补写的 HTML 不得串到先前那条纯文本行上"
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    /// 红线：敏感行永不带 HTML 入库 —— 那是同一份明文的第二副本，
+    /// 存了它，信封加密就只剩存储成本（写侧收口在 insert_encrypted 根本没有 html 参）。
+    #[test]
+    #[allow(non_snake_case)] // 命名随相邻任务书测试风格
+    fn clipHtml_secretRow_neverStoresHtml() {
+        let cfg = ClipboardConfig {
+            sensitive_filter: true,
+            ..Default::default()
+        };
+        let (handle, store, port, _bus) =
+            start_with_fake_cfg("html_secret", Arc::new(AtomicBool::new(false)), cfg);
+        fire_content(
+            &port,
+            ClipContent::Text {
+                text: "sk-abcdefghijklmnopqrstuvwx".into(),
+                html: Some("<code>sk-abcdefghijklmnopqrstuvwx</code>".into()),
+            },
+        );
+        assert!(wait_until(
+            || row_count(&store) == 1,
+            Duration::from_secs(2)
+        ));
+        let items = store
+            .search(&crate::types::SearchQuery::default())
+            .unwrap()
+            .items;
+        let row = &items[0];
+        assert!(row.secret, "该行须被判为敏感");
+        assert!(!row.has_html, "敏感行不得标注带 HTML");
+        assert_eq!(store.get_html(&row.id).unwrap(), None);
         handle.shutdown();
         assert!(handle.wait_idle(Duration::from_secs(3)));
     }

@@ -91,6 +91,7 @@ function clip(id: string, over: Partial<ClipEntry> = {}): ClipEntry {
     pinned: false,
     group: null,
     secret: true,
+    has_html: false,
     created_at: Date.parse("2026-09-22T09:10:00"),
     usage_count: 0,
     ...over,

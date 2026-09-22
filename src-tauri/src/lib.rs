@@ -138,6 +138,7 @@ pub fn run() {
             commands::clipboard_get,
             commands::clipboard_get_image,
             commands::clipboard_paste,
+            commands::clipboard_html_get,
             commands::clipboard_pin,
             commands::clipboard_delete,
             commands::clipboard_clear,

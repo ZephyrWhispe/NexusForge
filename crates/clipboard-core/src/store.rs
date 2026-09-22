@@ -69,18 +69,22 @@ fn migrations() -> Migrations<'static> {
            ALTER TABLE clip_entries ADD COLUMN suggested_confidence REAL;
            ALTER TABLE clip_entries ADD COLUMN suggestion_dismissed INTEGER NOT NULL DEFAULT 0;"#,
         ),
+        // T-B3-8 HTML 正文（01§8-6 HTML 轨）：旧行 NULL = "没有 HTML"，与"没捕获到"同义，零回填。
+        M::up("ALTER TABLE clip_entries ADD COLUMN html TEXT;"),
     ])
 }
 
-const SUGGESTED_COLUMNS: [(&str, &str); 3] = [
+/// `M::up` 之后仍需幂等补齐的列（备份还原/手工修表/跨版本文件复制的库）
+const ADDED_COLUMNS: [(&str, &str); 4] = [
     ("suggested_group", "TEXT"),
     ("suggested_confidence", "REAL"),
     ("suggestion_dismissed", "INTEGER NOT NULL DEFAULT 0"),
+    ("html", "TEXT"),
 ];
 
 /// 幂等补列守卫：schema_version 已记账而列缺失的库（备份还原、手工修表、跨版本文件复制）
 /// 单靠 `M::up` 不会再跑 ALTER，`open()` 必须在返回前补齐，否则后续每条 SELECT 都炸。
-fn ensure_suggested_columns(conn: &Connection) -> Result<(), AppError> {
+fn ensure_added_columns(conn: &Connection) -> Result<(), AppError> {
     let mut stmt = conn
         .prepare("PRAGMA table_info(clip_entries)")
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
@@ -90,7 +94,7 @@ fn ensure_suggested_columns(conn: &Connection) -> Result<(), AppError> {
         .filter_map(|r| r.ok())
         .collect();
     drop(stmt);
-    for (name, decl) in SUGGESTED_COLUMNS {
+    for (name, decl) in ADDED_COLUMNS {
         if have.iter().any(|c| c == name) {
             continue;
         }
@@ -104,7 +108,8 @@ fn ensure_suggested_columns(conn: &Connection) -> Result<(), AppError> {
 }
 
 /// 行 → ClipEntry 的唯一映射：列序契约 id, content_type, content, blob_path, origin,
-/// source_app, pinned, group_name, secret, created_at, usage_count
+/// source_app, pinned, group_name, secret, created_at, usage_count，外加具名列 `has_html`
+/// （`html IS NOT NULL`，正文本身不进列表查询）。
 /// （search 的两条 SELECT 与 stack 的 entries_in_order 共用，改列序须同时改三处）。
 fn entry_from_row(r: &rusqlite::Row) -> rusqlite::Result<ClipEntry> {
     let content: Option<String> = r.get(2)?;
@@ -144,6 +149,7 @@ fn entry_from_row(r: &rusqlite::Row) -> rusqlite::Result<ClipEntry> {
         secret: secret == 1,
         created_at: r.get(9)?,
         usage_count: r.get::<_, i64>(10)? as u32,
+        has_html: r.get::<_, i64>("has_html")? != 0,
     })
 }
 
@@ -158,6 +164,9 @@ pub struct NewClip<'a> {
     pub secret: bool,
     pub source_app: Option<&'a str>,
     pub origin: &'a str,
+    /// `HTML Format` 正文（T-B3-8）：None = 这次复制没有富文本。敏感行恒 None——
+    /// HTML 那份是明文副本，加密了正文却顺手存 HTML 等于自己绕开自己的门。
+    pub html: Option<&'a str>,
 }
 
 impl<'a> NewClip<'a> {
@@ -169,6 +178,7 @@ impl<'a> NewClip<'a> {
             secret: false,
             source_app: None,
             origin: "local",
+            html: None,
         }
     }
 
@@ -196,6 +206,11 @@ impl<'a> NewClip<'a> {
         self.origin = origin;
         self
     }
+
+    pub fn html(mut self, html: &'a str) -> Self {
+        self.html = Some(html);
+        self
+    }
 }
 
 impl ClipStore {
@@ -213,7 +228,7 @@ impl ClipStore {
         migrations()
             .to_latest(&mut conn)
             .map_err(|e| err("CLIPBOARD_STORAGE_003", e))?;
-        ensure_suggested_columns(&conn)?;
+        ensure_added_columns(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             blob_dir,
@@ -241,10 +256,13 @@ impl ClipStore {
         if let Some(id) = existing {
             // 缺陷⑧（09 §8.1）：去重命中只刷新鲜度与计数，pinned 保持不变——
             // 重复复制一个已置顶条目不得静默取消置顶（与图片/文件去重路径同语义）
+            // html 走 COALESCE：只补空缺、不覆写既有正文（先复制纯文本再复制富文本时，
+            // 那份 HTML 是新增信息而非新意图，用户没要求把旧的换掉）。
             conn.execute(
                 "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1,
-                 origin = CASE WHEN ?3 = 'local' THEN 'local' ELSE origin END WHERE id = ?1",
-                params![id, now, c.origin],
+                 origin = CASE WHEN ?3 = 'local' THEN 'local' ELSE origin END,
+                 html = COALESCE(html, ?4) WHERE id = ?1",
+                params![id, now, c.origin, c.html],
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             return Ok(id);
@@ -264,8 +282,8 @@ impl ClipStore {
         let (sugg_group, sugg_conf) = split_suggestion(c.suggested);
         conn.execute(
             r#"INSERT INTO clip_entries
-               (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at, suggested_group, suggested_confidence)
-               VALUES (?1, 'text', ?2, ?3, ?4, ?9, ?5, 0, ?6, ?7, ?8, ?10, ?11)"#,
+               (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at, suggested_group, suggested_confidence, html)
+               VALUES (?1, 'text', ?2, ?3, ?4, ?9, ?5, 0, ?6, ?7, ?8, ?10, ?11, ?12)"#,
             params![
                 id,
                 content_col,
@@ -277,7 +295,8 @@ impl ClipStore {
                 now,
                 c.origin,
                 sugg_group,
-                sugg_conf
+                sugg_conf,
+                c.html
             ],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
@@ -351,6 +370,22 @@ impl ClipStore {
         Ok(Some(content))
     }
 
+    /// HTML 正文单点读（T-B3-8）：列表/堆栈查询只带 `has_html` 布尔，正文须经此口显式取。
+    /// 无该列值 → Ok(None)（"这次复制没有富文本"），不报错也不给空串冒充。
+    pub fn get_html(&self, id: &str) -> Result<Option<String>, AppError> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT html FROM clip_entries WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        // 两层 Option 语义不同：外层 None = 没有这一行，内层 None = 有行但无 HTML 正文；
+        // 对读口两者都是"这里没有富文本"，故 flatten 成一层。
+        .map(|row| row.flatten())
+        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))
+    }
+
     pub fn search(&self, q: &SearchQuery) -> Result<Page<ClipEntry>, AppError> {
         let size = q.size.unwrap_or(50).min(200) as i64;
         let page = q.page.unwrap_or(0) as i64;
@@ -396,7 +431,8 @@ impl ClipStore {
         let sql = if use_fts {
             format!(
                 r#"SELECT e.id, e.content_type, e.content, e.blob_path, e.origin, e.source_app,
-                          e.pinned, e.group_name, e.secret, e.created_at, e.usage_count
+                          e.pinned, e.group_name, e.secret, e.created_at, e.usage_count,
+                          e.html IS NOT NULL AS has_html
                    FROM clip_fts f JOIN clip_entries e ON e.rowid = f.rowid
                    {where_sql}
                    ORDER BY rank, e.created_at DESC LIMIT {size} OFFSET {}"#,
@@ -405,7 +441,8 @@ impl ClipStore {
         } else {
             format!(
                 r#"SELECT e.id, e.content_type, e.content, e.blob_path, e.origin, e.source_app,
-                          e.pinned, e.group_name, e.secret, e.created_at, e.usage_count
+                          e.pinned, e.group_name, e.secret, e.created_at, e.usage_count,
+                          e.html IS NOT NULL AS has_html
                    FROM clip_entries AS e {where_sql}
                    ORDER BY e.pinned DESC, e.created_at DESC LIMIT {size} OFFSET {}"#,
                 page * size
@@ -615,7 +652,8 @@ impl ClipStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, content_type, content, blob_path, origin, source_app,
-                        pinned, group_name, secret, created_at, usage_count
+                        pinned, group_name, secret, created_at, usage_count,
+                        html IS NOT NULL AS has_html
                  FROM clip_entries WHERE id = ?1",
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
@@ -2057,6 +2095,94 @@ mod tests {
             1,
             "二次重开不得因重复 ALTER 报错"
         );
+    }
+
+    /// T-B3-8 同族守卫：`html` 列缺失但 schema_version 已记满三版的库（备份还原/手工修表）
+    /// 重开时必须补齐，且旧行落 NULL = "没有 HTML"（不是报错、也不是空串冒充）。
+    /// 二次重开只证明幂等：若守卫不查 `PRAGMA table_info` 就 ALTER，这里会以
+    /// "duplicate column name" 直接炸开，比缺列更早暴露问题。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+    fn migration_reopen_legacyDb_addsHtmlColumnIdempotent() {
+        let dir = std::env::temp_dir().join(format!("nf_clip_legacy_html_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("clipboard.db");
+        let blobs = dir.join("blobs");
+
+        let legacy_id = {
+            let s = ClipStore::open(&db, blobs.clone()).unwrap();
+            s.insert_row(&NewClip::new("旧库正文")).unwrap()
+        };
+        {
+            let raw = Connection::open(&db).unwrap();
+            raw.execute("ALTER TABLE clip_entries DROP COLUMN html", [])
+                .unwrap();
+            let have = html_column(&raw);
+            assert!(
+                !have.iter().any(|c| c == "html"),
+                "前置条件不成立：html 列没删掉，本测就是空转"
+            );
+        }
+
+        let s = ClipStore::open(&db, blobs.clone()).unwrap();
+        assert!(
+            html_column(&Connection::open(&db).unwrap())
+                .iter()
+                .any(|c| c == "html"),
+            "重开后 html 列应由 PRAGMA 守卫补齐"
+        );
+        let page = s.search(&SearchQuery::default()).unwrap();
+        let legacy = page.items.iter().find(|e| e.id == legacy_id).unwrap();
+        assert!(!legacy.has_html, "旧行 NULL 语义是「没有 HTML」");
+        assert_eq!(
+            s.get_html(&legacy_id).unwrap(),
+            None,
+            "缺列补齐后的旧行经读口应得 None，不得报错也不得给空串"
+        );
+
+        // 补齐后写口可用
+        let rich = s
+            .insert_row(&NewClip::new("新库富文本").html("<p><b>新库富文本</b></p>"))
+            .unwrap();
+        assert!(
+            s.search(&SearchQuery::default())
+                .unwrap()
+                .items
+                .iter()
+                .find(|e| e.id == rich)
+                .unwrap()
+                .has_html
+        );
+        assert_eq!(
+            s.get_html(&rich).unwrap().as_deref(),
+            Some("<p><b>新库富文本</b></p>")
+        );
+        drop(s);
+
+        // 再重开一次：守卫不得重复 ALTER（duplicate column name 即红）
+        let s = ClipStore::open(&db, blobs).unwrap();
+        assert_eq!(
+            s.get_html(&rich).unwrap().as_deref(),
+            Some("<p><b>新库富文本</b></p>"),
+            "二次重开不得丢已入库的 HTML"
+        );
+        assert_eq!(
+            html_column(&Connection::open(&db).unwrap())
+                .iter()
+                .filter(|c| c.as_str() == "html")
+                .count(),
+            1,
+            "html 列只应有一枚"
+        );
+    }
+
+    fn html_column(conn: &Connection) -> Vec<String> {
+        conn.prepare("PRAGMA table_info(clip_entries)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
     }
 
     // ---- T-B3-6 搜索语法（09 §8.2 行字面回归）----

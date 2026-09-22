@@ -65,7 +65,13 @@ mod tests {
         let b = now_ms_u64();
         // 2024-01-01 之后的毫秒时间戳（本项目启动于 2026）
         assert!(a > 1_700_000_000_000, "now_ms 应为 epoch 毫秒: {a}");
-        assert_eq!(b, a.max(0) as u64);
+        // 判据是"同一条时间线"而非"同一毫秒"：now_ms_u64 内部再调一次 now_ms()，
+        // 两次独立读墙钟恰好跨毫秒边界就会让严格相等判红（本仓首轮 workspace 跑实测相差 1ms）。
+        assert!(
+            b.abs_diff(a.max(0) as u64) <= 5,
+            "两枚读时钟入口须相近（相差 {}ms）",
+            b.abs_diff(a.max(0) as u64)
+        );
         assert!(now_ms() >= a, "毫秒时间戳不应回退");
     }
 

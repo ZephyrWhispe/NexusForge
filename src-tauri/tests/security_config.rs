@@ -668,6 +668,48 @@ fn auxWindows_neverGrantClipboardSecretReveal() {
     }
 }
 
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantClipboardHtmlGet() {
+    // T-B3-8 红线负例：HTML 源文读口把最多 512KB 的正文原样交给调用方，
+    // 辅助窗（热键可在任意上下文呼出）永不得持有——列表侧只有 has_html 布尔，
+    // 正文口是 main-only。clipboard_paste 虽在 quickpanel 在册（八条冻结未破），
+    // 它只把内容投进系统剪贴板、不把 HTML 回给 webview，两回事。
+    let caps = load_capabilities();
+    let ident = "allow-clipboard-html-get";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（HTML 正文读口是 main-only）"
+        );
+    }
+    assert!(main_granted, "正对照：main 必须持有 {ident}");
+    for window in ["quickpanel", "launcher", "notebar", "overlay", "pin"] {
+        assert!(
+            caps.iter().any(|(name, _)| name == window),
+            "负例须覆盖的辅助窗 {window} 不在册，本断言会空洞"
+        );
+    }
+    // quickpanel 权限面冻结在 8 条（D-28 判据）：本枚新命令不得把它撑大
+    let qp = caps
+        .iter()
+        .find(|(name, _)| name == "quickpanel")
+        .map(|(_, cap)| cap["permissions"].as_array().unwrap().len())
+        .expect("quickpanel capability 在册");
+    assert_eq!(qp, 8, "quickpanel 权限面须停在 8 条，多一条即破 D-28 冻结");
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

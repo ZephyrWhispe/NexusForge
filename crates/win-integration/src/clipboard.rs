@@ -105,15 +105,15 @@ unsafe fn with_global<T>(h: HGLOBAL, f: impl FnOnce(&[u8]) -> Option<T>) -> Opti
     out
 }
 
-/// 读取当前剪贴板内容：文本 → DIB 图片 → HDROP 文件
+/// 读取当前剪贴板内容：文本（附带 HTML Format）→ DIB 图片 → HDROP 文件
 unsafe fn read_clipboard_content() -> Option<ClipContent> {
     if OpenClipboard(HWND::default()).is_err() {
         return None; // 被其它进程占用，本帧放弃
     }
     let out = (|| {
-        // ① 文本
+        // ① 文本（附带 HTML Format：富文本复制时两者同屏，无该格式则为 None，不假有）
         if let Ok(h) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
-            if let Some(c) = with_global(HGLOBAL(h.0), |bytes| {
+            if let Some(text) = with_global(HGLOBAL(h.0), |bytes| {
                 let wide: Vec<u16> = bytes
                     .as_chunks::<2>()
                     .0
@@ -128,10 +128,12 @@ unsafe fn read_clipboard_content() -> Option<ClipContent> {
                 if text.trim().is_empty() {
                     None
                 } else {
-                    Some(ClipContent::Text { text, html: None })
+                    Some(text)
                 }
             }) {
-                return Some(c);
+                // 剪贴板会话仍开着，直接同场取 HTML；超限整段丢弃（见 clip_html_from_raw）
+                let html = read_clipboard_html();
+                return Some(ClipContent::Text { text, html });
             }
         }
         // ② 图片（DIB：BITMAPINFOHEADER + 像素；v1 存原始 DIB，前端 canvas 解码预览）
@@ -179,6 +181,37 @@ unsafe fn read_clipboard_content() -> Option<ClipContent> {
     })();
     let _ = CloseClipboard();
     out
+}
+
+/// `HTML Format` 剪贴板格式名（Windows 注册格式，浏览器/Office 复制富文本时随文本同屏）
+const CF_HTML_FORMAT: &str = "HTML Format";
+
+/// HTML 正文上限：超限整段丢弃而非截断——半截 HTML 比没有更坏（标签不闭合，
+/// 粘进目标程序是坏掉的富文本，用户还得自己删）。
+const HTML_MAX: usize = 512 * 1024;
+
+/// 原始字节 → 可入库 HTML 正文的纯函数门（长度门 + UTF-8 判定，与 Win32 无关故可单测）。
+/// `HTML Format` 以 NUL 结尾，GlobalSize 把终止符算在内，故先剥尾部 NUL 再判空。
+pub fn clip_html_from_raw(raw: Vec<u8>) -> Option<String> {
+    if raw.len() > HTML_MAX {
+        tracing::warn!(
+            len = raw.len(),
+            max = HTML_MAX,
+            "HTML 正文超出上限，整段丢弃（不截断）"
+        );
+        return None;
+    }
+    let text = String::from_utf8_lossy(&raw)
+        .trim_end_matches('\0')
+        .to_string();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// 读取 `HTML Format`（须在已 OpenClipboard 的会话内调用）；无该格式/注册失败/超限一律 None
+unsafe fn read_clipboard_html() -> Option<String> {
+    let fmt = register_custom_format(CF_HTML_FORMAT)?;
+    let h = GetClipboardData(fmt).ok()?;
+    with_global(HGLOBAL(h.0), |bytes| clip_html_from_raw(bytes.to_vec()))
 }
 
 /// 来源应用进程名（如 "chrome"）；失败返回 None
@@ -348,7 +381,7 @@ impl ClipboardPort for WindowsClipboard {
                 )
             })?;
             let r = match content {
-                ClipContent::Text { text, .. } => write_text(text),
+                ClipContent::Text { text, html } => write_text(text, html.as_deref()),
                 ClipContent::Files { paths } => write_files(paths),
                 ClipContent::Image { format, bytes, .. } if format == "dib" => write_dib(bytes),
                 ClipContent::Image {
@@ -419,7 +452,7 @@ fn png_to_dib(png: &[u8]) -> Result<Vec<u8>, AppError> {
     Ok(out)
 }
 
-unsafe fn write_text(text: &str) -> Result<(), AppError> {
+unsafe fn write_text(text: &str, html: Option<&str>) -> Result<(), AppError> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(|e| {
         AppError::module(
@@ -452,7 +485,52 @@ unsafe fn write_text(text: &str) -> Result<(), AppError> {
             None,
         )
     })?;
+    // HTML Format 与文本同会话追加：失败只 warn 不否决——纯文本那份已经写成功了，
+    // 因格式附加失败而报"粘贴失败"会让用户以为剪贴板是空的。
+    if let Some(html) = html {
+        if let Err(e) = write_html(html) {
+            tracing::warn!(error = %e, "HTML Format 写入失败（已降级为纯文本粘贴）");
+        }
+    }
     Ok(())
+}
+
+/// 写 `HTML Format`（须在已 OpenClipboard 且未 CloseClipboard 的会话内调用，
+/// 且 EmptyClipboard 已由文本分支做过——同会话多格式各 SetClipboardData 一次）
+unsafe fn write_html(html: &str) -> Result<(), AppError> {
+    let fmt = register_custom_format(CF_HTML_FORMAT).ok_or_else(|| {
+        AppError::module(
+            "CLIPBOARD_WRITE_008",
+            "RegisterClipboardFormatW(HTML Format) 返回 0",
+            None,
+        )
+    })?;
+    let bytes = html.as_bytes();
+    let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len() + 1).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_004",
+            format!("GlobalAlloc 失败: {e}"),
+            None,
+        )
+    })?;
+    let ptr = GlobalLock(h) as *mut u8;
+    if ptr.is_null() {
+        return Err(AppError::module(
+            "CLIPBOARD_WRITE_005",
+            "GlobalLock 失败",
+            None,
+        ));
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+    *ptr.add(bytes.len()) = 0; // HTML Format 约定 NUL 结尾
+    let _ = GlobalUnlock(h);
+    SetClipboardData(fmt, HANDLE(h.0)).map(|_| ()).map_err(|e| {
+        AppError::module(
+            "CLIPBOARD_WRITE_006",
+            format!("SetClipboardData(HTML Format) 失败: {e}"),
+            None,
+        )
+    })
 }
 
 unsafe fn write_files(paths: &[std::path::PathBuf]) -> Result<(), AppError> {
@@ -615,5 +693,31 @@ mod tests {
         // 唯一一行像素：BGR + alpha 255（GDI 无有效 alpha）
         assert_eq!(&dib[40..44], &[3, 2, 1, 255]);
         assert_eq!(&dib[44..48], &[6, 5, 4, 255]);
+    }
+
+    /// 上限语义红线：超界是**整段丢弃**，不是截断留存。截断会产出语法残缺的 HTML
+    /// （未闭合标签），粘贴进目标程序后是"看起来成功了的坏数据"，比明确没有格式更难排查。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-8）字面测试名优先于 rustc 命名惯例
+    fn clipHtml_rawOverCap_droppedNotTruncated() {
+        // 边界正对照：恰好上限的正文留下，逐字节原样（不是"只差一点就被丢"的近似值）
+        let at_cap = vec![b'a'; HTML_MAX];
+        assert_eq!(
+            clip_html_from_raw(at_cap).as_deref(),
+            Some("a".repeat(HTML_MAX).as_str()),
+            "等于上限应放行，越界判定不得写成 >= 而提前吞掉合法正文"
+        );
+
+        let over = vec![b'a'; HTML_MAX + 1];
+        assert_eq!(clip_html_from_raw(over), None, "超界须整段丢弃");
+
+        // 丢弃的是"这一份"，不是"此后所有"：紧随其后的正常正文照常可用
+        assert_eq!(
+            clip_html_from_raw(b"<p>ok</p>".to_vec()).as_deref(),
+            Some("<p>ok</p>")
+        );
+
+        // 空白/全 NUL 不算 HTML：留 None 免得详情框渲染一枚空的"HTML 源"标签页
+        assert_eq!(clip_html_from_raw(b"   \0\0".to_vec()), None);
     }
 }

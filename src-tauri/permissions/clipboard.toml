@@ -17,8 +17,13 @@ commands.allow = ["clipboard_get_image"]
 
 [[permission]]
 identifier = "allow-clipboard-paste"
-description = "允许前端调用 clipboard_paste 命令（D-28 按窗最小授权）"
+description = "允许前端调用 clipboard_paste 命令（D-28 按窗最小授权；T-B3-8 起带可选 format 参数，plain | html）"
 commands.allow = ["clipboard_paste"]
+
+[[permission]]
+identifier = "allow-clipboard-html-get"
+description = "允许前端调用 clipboard_html_get 命令（T-B3-8 HTML 源文按需读取，main-only：辅助窗不持正文读口）"
+commands.allow = ["clipboard_html_get"]
 
 [[permission]]
 identifier = "allow-clipboard-pin"
