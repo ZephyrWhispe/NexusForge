@@ -1,4 +1,5 @@
 use host_core::error::AppError;
+use serde::Serialize;
 use tauri::State;
 
 use crate::state::HostState;
@@ -143,4 +144,41 @@ pub async fn clipboard_group_counts(
     tauri::async_runtime::spawn_blocking(move || clipboard.group_counts())
         .await
         .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
+}
+
+/// 捕获暂停态（§8-④）：读运行期原子值与跳过计数，不读盘——盘上是它的持久化投影
+#[derive(Serialize)]
+pub struct CaptureStateDto {
+    pub paused: bool,
+    pub skipped: u32,
+}
+
+#[tauri::command]
+pub async fn clipboard_capture_get(
+    state: State<'_, HostState>,
+) -> Result<CaptureStateDto, AppError> {
+    let clipboard = state.clipboard.clone();
+    tauri::async_runtime::spawn_blocking(move || CaptureStateDto {
+        paused: clipboard.capture_paused(),
+        skipped: clipboard.capture_skipped(),
+    })
+    .await
+    .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))
+}
+
+#[tauri::command]
+pub async fn clipboard_capture_set(
+    paused: bool,
+    state: State<'_, HostState>,
+) -> Result<CaptureStateDto, AppError> {
+    let clipboard = state.clipboard.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        clipboard.set_capture_paused(paused)?;
+        Ok::<CaptureStateDto, AppError>(CaptureStateDto {
+            paused: clipboard.capture_paused(),
+            skipped: clipboard.capture_skipped(),
+        })
+    })
+    .await
+    .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
 }

@@ -131,6 +131,22 @@ export function clipboardGroupCounts(): Promise<Record<string, number>> {
 export function clipboardGetImage(id: string): Promise<string> {
   return invoke<string>("clipboard_get_image", { id });
 }
+
+/** 捕获暂停态（§8-④）：paused 读运行期原子位，skipped 为暂停期间累计跳过次数 */
+export interface ClipCaptureState {
+  paused: boolean;
+  skipped: number;
+}
+
+/** 读捕获暂停态（运行期真值，非盘上投影） */
+export function clipboardCaptureGet(): Promise<ClipCaptureState> {
+  return invoke<ClipCaptureState>("clipboard_capture_get");
+}
+
+/** 写捕获暂停态：返回切换后的运行期真值 */
+export function clipboardCaptureSet(paused: boolean): Promise<ClipCaptureState> {
+  return invoke<ClipCaptureState>("clipboard_capture_set", { paused });
+}
 /** 读模块配置 schema（设置中心自动渲染） */
 export function hostConfigSchema(module: string): Promise<Record<string, unknown>> {
   return invoke("host_config_schema", { module });

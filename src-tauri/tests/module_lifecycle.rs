@@ -40,7 +40,12 @@ fn empty_ports_init_names_missing_port() {
     let cases: Vec<(&str, Arc<dyn Module>, &str)> = vec![
         (
             "clipboard",
-            Arc::new(clipboard_core::module::ClipboardModule::new()),
+            Arc::new(clipboard_core::module::ClipboardModule::new_with_config(
+                Arc::new(host_core::config::ConfigStore::new(
+                    tmp.path().join("config"),
+                    Arc::new(EventBus::new()),
+                )),
+            )),
             "ClipboardPort",
         ),
         (

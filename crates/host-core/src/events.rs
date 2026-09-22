@@ -50,6 +50,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)] = &[
     ("clipboard.deleted", "剪贴板条目删除。payload: {id}", BackpressurePolicy::None),
     ("clipboard.cleared", "剪贴板清空。payload: {removed}", BackpressurePolicy::None),
     ("clipboard.quick_panel_toggled", "快速面板呼出/隐藏请求（全局快捷键触发）。payload: {}", BackpressurePolicy::None),
+    ("clipboard.capture_state", "捕获暂停态迁移（托盘/命令切换后重建标签与横幅）。payload: {paused}", BackpressurePolicy::None),
     ("screenshot.overlay_requested", "请求呼出截图选区覆盖层（快捷键/OCR 触发）。payload: {mode: shot|ocr}", BackpressurePolicy::None),
     ("screenshot.taken", "截图任务完成。payload: {task_id, file?}", BackpressurePolicy::None),
     ("screenshot.ocr_requested", "截图模块请求 OCR。payload: {task_id, frame_ref}", BackpressurePolicy::None),

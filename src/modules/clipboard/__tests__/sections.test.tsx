@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import ClipboardPanel from "../ClipboardPanel";
 import {
   clipboardClear,
+  clipboardCaptureGet,
+  clipboardCaptureSet,
   clipboardGet,
   clipboardGroupCounts,
   clipboardSearch,
@@ -29,6 +31,8 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     clipboardPin: vi.fn(),
     clipboardDelete: vi.fn(),
     clipboardGroupCounts: vi.fn(),
+    clipboardCaptureGet: vi.fn(),
+    clipboardCaptureSet: vi.fn(),
     hostConfigSchema: vi.fn(),
     hostConfigGet: vi.fn(),
     hostConfigSet: vi.fn(),
@@ -89,9 +93,15 @@ beforeEach(() => {
   vi.mocked(clipboardGet).mockResolvedValue("");
   vi.mocked(clipboardClear).mockResolvedValue(0);
   vi.mocked(hostConfigSchema).mockResolvedValue({
-    properties: { max_entries: { type: "integer", title: "保留条数", minimum: 1, maximum: 9999 } },
+    properties: {
+      max_entries: { type: "integer", title: "保留条数", minimum: 1, maximum: 9999 },
+      // T-B3-2：schema 里带 readOnly 的键由专用卡承载，通用表单不得再出一个写口
+      capture_paused: { type: "boolean", title: "暂停捕获", default: false, readOnly: true },
+    },
   });
   vi.mocked(hostConfigGet).mockResolvedValue({});
+  vi.mocked(clipboardCaptureGet).mockResolvedValue({ paused: false, skipped: 0 });
+  vi.mocked(clipboardCaptureSet).mockResolvedValue({ paused: false, skipped: 0 });
 });
 
 afterEach(() => {
@@ -169,5 +179,50 @@ describe("剪切板五子面板挂载（T-B3-1）", () => {
       root = null;
       vi.clearAllMocks();
     }
+  });
+});
+
+async function click(el: Element) {
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {});
+}
+
+async function remount(view: ClipView) {
+  act(() => root?.unmount());
+  root = null;
+  vi.clearAllMocks();
+  await mountView(view);
+}
+
+describe("暂停捕获（T-B3-2）", () => {
+  it("captureSwitch_settingsSectionToggle_invokesAndReflectsPaused：开关即 clipboard_capture_set，显示返回的运行期真值", async () => {
+    await mountView("settings");
+    expect(clipboardCaptureGet).toHaveBeenCalledTimes(1);
+    // 单一写口：schema 里的 readOnly capture_paused 不得再被通用表单渲染成第二个开关
+    const boxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0].checked).toBe(false);
+    expect(container.textContent).toContain("运行中");
+    // 正对照：通用表单照常渲染非 readOnly 键
+    expect(container.textContent).toContain("保留条数");
+
+    vi.mocked(clipboardCaptureSet).mockResolvedValue({ paused: true, skipped: 2 });
+    await click(boxes[0]);
+    expect(clipboardCaptureSet).toHaveBeenCalledWith(true);
+    expect(container.textContent).toContain("已暂停");
+    expect(container.textContent).toContain("暂停期间已跳过 2 次复制");
+  });
+
+  it("captureBanner_historySection_showsSkippedCountHonest：skipped>0 才出横幅，0 时零文案", async () => {
+    vi.mocked(clipboardCaptureGet).mockResolvedValue({ paused: true, skipped: 5 });
+    await mountView("history");
+    expect(clipboardCaptureGet).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("暂停期间已跳过 5 次复制");
+
+    vi.mocked(clipboardCaptureGet).mockResolvedValue({ paused: true, skipped: 0 });
+    await remount("history");
+    expect(container.textContent).not.toContain("暂停期间已跳过");
   });
 });

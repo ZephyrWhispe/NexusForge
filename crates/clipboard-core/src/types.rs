@@ -40,7 +40,11 @@ pub struct Page<T> {
 }
 
 /// 模块配置（与 config_schema 一一对应）
+///
+/// `serde(default)` 是配置真源接线（09 §8.1-①）的前提：schema 无 `required`，
+/// 盘上允许只写了部分键的合法文件，缺键须回落默认值而不是整份配置反序列化失败。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClipboardConfig {
     pub max_entries: u32,
     pub retention_days: u32,
@@ -49,6 +53,8 @@ pub struct ClipboardConfig {
     pub sensitive_filter: bool,
     pub auto_group: bool,
     pub excluded_apps: Vec<String>,
+    /// 暂停捕获：新复制不入库，已有历史与设置不受影响（§8-④）
+    pub capture_paused: bool,
 }
 
 impl Default for ClipboardConfig {
@@ -61,6 +67,7 @@ impl Default for ClipboardConfig {
             sensitive_filter: true,
             auto_group: true,
             excluded_apps: vec![],
+            capture_paused: false,
         }
     }
 }

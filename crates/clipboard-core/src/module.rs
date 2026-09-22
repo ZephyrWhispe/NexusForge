@@ -1,12 +1,13 @@
 //! ClipboardModule：Module trait 实现 + start 时挂接捕获管线（docs/impl/02 C3/C7）
 
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use host_core::capability::{
     HotkeyAction, HotkeyBinding, HotkeyProvider, TrayAction, TrayMenuItem, TrayProvider,
 };
+use host_core::config::ConfigStore;
 use host_core::error::{AppError, ModuleError};
 use host_core::events::{Event, EventBus};
 use host_core::module::{
@@ -29,6 +30,10 @@ pub struct ClipboardModule {
     crypto: RwLock<Option<Arc<dyn CryptoPort>>>,
     bus: RwLock<Option<Arc<EventBus>>>,
     config: Arc<AsyncMutex<ClipboardConfig>>,
+    /// 配置写侧真源（缺陷① 纪律：内存态是唯一运行期真源，盘上是它的持久化投影）
+    config_store: Arc<ConfigStore>,
+    /// 暂停捕获运行态：与 CapturePipeline 共享同一原子位，`apply_config` 是唯一写点
+    paused: Arc<AtomicBool>,
     /// C9 清理线程取消标志
     cleanup_cancel: RwLock<Option<Arc<AtomicU8>>>,
     /// S3：捕获管线运行句柄（start 建立、stop 拆除；None 表示未运行）
@@ -39,7 +44,7 @@ pub struct ClipboardModule {
 }
 
 impl ClipboardModule {
-    pub fn new() -> Self {
+    pub fn new_with_config(config_store: Arc<ConfigStore>) -> Self {
         Self {
             db_dir: RwLock::new(None),
             store: RwLock::new(None),
@@ -48,11 +53,38 @@ impl ClipboardModule {
             crypto: RwLock::new(None),
             bus: RwLock::new(None),
             config: Arc::new(AsyncMutex::new(ClipboardConfig::default())),
+            config_store,
+            paused: Arc::new(AtomicBool::new(false)),
             cleanup_cancel: RwLock::new(None),
             pipeline: RwLock::new(None),
             remote_shutdown: RwLock::new(None),
             state: ModuleStateCell::new(),
         }
+    }
+
+    /// 当前是否暂停捕获（读运行期原子位，非读盘）
+    pub fn capture_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// 暂停期间已跳过的捕获次数；管线未运行时为 0
+    pub fn capture_skipped(&self) -> u32 {
+        self.pipeline
+            .read()
+            .as_ref()
+            .map(|h| h.pipeline().skipped_while_paused())
+            .unwrap_or(0)
+    }
+
+    /// 暂停开关的写入口：先落运行态原子位，再读-改-写持久值（缺文件按 `{}` 起）。
+    /// 唯一实现点 [`write_capture_paused`] 与托盘动作共用，防两入口漂移。
+    pub fn set_capture_paused(&self, paused: bool) -> Result<(), AppError> {
+        let bus = self
+            .bus
+            .read()
+            .clone()
+            .ok_or_else(|| AppError::module("CLIPBOARD_INIT_001", "模块未就绪", None))?;
+        write_capture_paused(&self.paused, &self.config_store, &bus, paused)
     }
 
     pub fn store(&self) -> Option<Arc<ClipStore>> {
@@ -82,14 +114,35 @@ impl ClipboardModule {
     }
 }
 
-impl Default for ClipboardModule {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn err(code: &str, m: impl Into<String>) -> ModuleError {
     ModuleError::Init(format!("[{code}] {}", m.into()))
+}
+
+/// 暂停捕获的单一实现点：刷运行态原子位 → 读-改-写 ConfigStore → 广播运行态。
+/// IPC 命令与托盘动作共用此函数，两条入口不得各自演化。
+fn write_capture_paused(
+    flag: &AtomicBool,
+    store: &ConfigStore,
+    bus: &EventBus,
+    paused: bool,
+) -> Result<(), AppError> {
+    flag.store(paused, Ordering::Relaxed);
+    let mut values = store
+        .get_module("clipboard")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let obj = values.as_object_mut().ok_or_else(|| {
+        AppError::module("CLIPBOARD_CONFIG_001", "clipboard 配置不是 JSON 对象", None)
+    })?;
+    obj.insert("capture_paused".into(), serde_json::json!(paused));
+    // set_module 发 host.config_changed → 订阅臂再 apply 一次（幂等，同一原子位）
+    store.set_module("clipboard", values)?;
+    bus.publish(Event::new(
+        "clipboard.capture_state",
+        "clipboard",
+        serde_json::json!({ "paused": paused }),
+    ))
+    .ok();
+    Ok(())
 }
 
 /// 解析 kvm.clip_received 载荷（纯函数，回归入口）：
@@ -218,6 +271,7 @@ impl Module for ClipboardModule {
                 crypto,
                 self.config.clone(),
                 self.write_back.clone(),
+                self.paused.clone(),
             )
             .map_err(|e| ModuleError::Start(e.to_string()))?;
             *self.pipeline.write() = Some(handle);
@@ -304,6 +358,11 @@ impl Module for ClipboardModule {
                     "type": "array", "title": "永不记录黑名单",
                     "description": "进程名，逗号分隔（如 1password,keepass）",
                     "items": { "type": "string" }
+                },
+                "capture_paused": {
+                    "type": "boolean", "title": "暂停捕获",
+                    "description": "开启后新复制内容不入库（已有历史与设置不受影响）",
+                    "default": false, "readOnly": true
                 }
             }
         })
@@ -312,6 +371,8 @@ impl Module for ClipboardModule {
     fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError> {
         let cfg: ClipboardConfig =
             serde_json::from_value(values).map_err(|e| ModuleError::Config(e.to_string()))?;
+        // 运行期唯一写点：暂停原子位与配置内存态同批落，二者不得分叉
+        self.paused.store(cfg.capture_paused, Ordering::Relaxed);
         if let Ok(mut g) = self.config.try_lock() {
             *g = cfg;
         }
@@ -485,13 +546,28 @@ impl ClipboardModule {
 }
 
 impl TrayProvider for ClipboardModule {
-    /// D-26：托盘段「剪切板中枢」——与全局热键同一事件通路（quick_panel_toggled）
+    /// D-26：托盘段「剪切板中枢」——与全局热键同一事件通路（quick_panel_toggled）。
+    /// §8-④：capture 项标签读运行态暂停原子位；tray.rs 订阅 clipboard.capture_state
+    /// 重建菜单，故切换后托盘文案真的翻转（不是常驻静默项）。
     fn tray_menu_items(&self) -> Vec<TrayMenuItem> {
-        vec![TrayMenuItem {
-            id: "quick_panel".into(),
-            label: "打开剪切板面板".into(),
-            enabled: true,
-        }]
+        let paused = self.capture_paused();
+        vec![
+            TrayMenuItem {
+                id: "quick_panel".into(),
+                label: "打开剪切板面板".into(),
+                enabled: true,
+            },
+            TrayMenuItem {
+                id: "capture".into(),
+                label: if paused {
+                    "恢复捕获"
+                } else {
+                    "暂停捕获"
+                }
+                .into(),
+                enabled: true,
+            },
+        ]
     }
 
     fn tray_actions(&self) -> Vec<TrayAction> {
@@ -499,17 +575,33 @@ impl TrayProvider for ClipboardModule {
         let Some(bus) = bus else {
             return vec![]; // init 前不提供动作
         };
-        vec![TrayAction {
-            item_id: "quick_panel".into(),
-            action: Arc::new(move || {
-                bus.publish(Event::new(
-                    "clipboard.quick_panel_toggled",
-                    "clipboard",
-                    serde_json::json!({}),
-                ))
-                .ok();
-            }),
-        }]
+        let panel_bus = bus.clone();
+        let cap_bus = bus.clone();
+        let cap_flag = self.paused.clone();
+        let cap_store = self.config_store.clone();
+        vec![
+            TrayAction {
+                item_id: "quick_panel".into(),
+                action: Arc::new(move || {
+                    panel_bus
+                        .publish(Event::new(
+                            "clipboard.quick_panel_toggled",
+                            "clipboard",
+                            serde_json::json!({}),
+                        ))
+                        .ok();
+                }),
+            },
+            TrayAction {
+                item_id: "capture".into(),
+                action: Arc::new(move || {
+                    let next = !cap_flag.load(Ordering::Relaxed);
+                    if let Err(e) = write_capture_paused(&cap_flag, &cap_store, &cap_bus, next) {
+                        tracing::warn!(error = %e, "托盘切换捕获开关失败");
+                    }
+                }),
+            },
+        ]
     }
 }
 
@@ -518,6 +610,7 @@ mod tests {
     use super::*;
     use crate::pipeline::{FakeClipboard, FakeCrypto};
     use host_core::ports::Ports;
+    use host_core::registry::ModuleRegistry;
     use parking_lot::Mutex;
     use std::time::Duration;
 
@@ -581,7 +674,7 @@ mod tests {
             ports,
             event_bus: bus.clone(),
         });
-        let module = ClipboardModule::new();
+        let module = ClipboardModule::new_with_config(test_config_store(&dir, &bus));
         module.init(ctx).unwrap();
         module.start().unwrap();
 
@@ -620,23 +713,280 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 测试共用 ConfigStore（与模块同一 bus，host.config_changed 才可观测）
+    fn test_config_store(dir: &std::path::Path, bus: &Arc<EventBus>) -> Arc<ConfigStore> {
+        Arc::new(ConfigStore::new(dir.join("config"), bus.clone()))
+    }
+
+    fn fire_text(fake: &FakeClipboard, text: &str) {
+        let cb = fake.cb.lock();
+        let Some(f) = cb.as_ref() else { return };
+        f(
+            ClipContent::Text {
+                text: text.into(),
+                html: None,
+            },
+            Some("tester".into()),
+        );
+    }
+
+    /// 起一套「真 ConfigStore + 真模块 + 假端口」的运行期装配（缺陷① 回归共用体）
+    struct Harness {
+        dir: std::path::PathBuf,
+        bus: Arc<EventBus>,
+        store_cfg: Arc<ConfigStore>,
+        registry: Arc<ModuleRegistry>,
+        module: Arc<ClipboardModule>,
+        port: Arc<FakeClipboard>,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    async fn harness(tag: &str) -> Harness {
+        let dir = std::env::temp_dir().join(format!("nf_clip_mod_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bus = Arc::new(EventBus::new());
+        let store_cfg = test_config_store(&dir, &bus);
+        let ports = Arc::new(Ports::new());
+        let port = Arc::new(FakeClipboard::default());
+        ports.register::<dyn ClipboardPort>(port.clone());
+        ports.register::<dyn CryptoPort>(Arc::new(FakeCrypto));
+        let module = Arc::new(ClipboardModule::new_with_config(store_cfg.clone()));
+        store_cfg.register_schema("clipboard", module.config_schema());
+        let registry = Arc::new(ModuleRegistry::new(bus.clone()));
+        registry.register(module.clone()).unwrap();
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: dir.clone(),
+            ports,
+            event_bus: bus.clone(),
+        });
+        for (_, r) in registry.init_all(ctx).await {
+            r.expect("init 应成功");
+        }
+        for (_, r) in registry.start_all().await {
+            r.expect("start 应成功");
+        }
+        Harness {
+            dir,
+            bus,
+            store_cfg,
+            registry,
+            module,
+            port,
+        }
+    }
+
+    async fn wait_for_row(store: &ClipStore, preview: &str) -> bool {
+        for _ in 0..100 {
+            if find_row(store, preview).is_some() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// 缺陷① 核心红线：运行期改配置经订阅派发真正抵达运行中模块。
+    /// 对照臂（绕过 set_module 直接改盘文件必须**不**生效）证明兑现的是
+    /// host.config_changed 订阅通路，而不是轮询或巧合。
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn hostConfig_changeAtRuntime_reachesRunningModule() {
+        let h = harness("cfg_runtime").await;
+        let store = h.module.store().unwrap();
+
+        // 对照臂：手改盘文件（无事件）→ 运行态与捕获行为均不变
+        std::fs::create_dir_all(h.dir.join("config")).unwrap();
+        std::fs::write(
+            h.dir.join("config").join("clipboard.json"),
+            r#"{"capture_paused": true}"#,
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !h.module.capture_paused(),
+            "直接改盘文件不得影响运行态：真源接线只认 set_module 事件"
+        );
+        fire_text(&h.port, "control-arm-lands");
+        assert!(
+            wait_for_row(&store, "control-arm-lands").await,
+            "对照臂期间捕获须照常入库"
+        );
+
+        // 正臂：set_module → host.config_changed → run_config_feed → apply_one
+        let rx = h.bus.subscribe("host.config_changed").unwrap();
+        tokio::spawn(host_core::registry::run_config_feed(
+            rx,
+            h.registry.clone(),
+            h.store_cfg.clone(),
+        ));
+        h.store_cfg
+            .set_module("clipboard", serde_json::json!({ "capture_paused": true }))
+            .unwrap();
+        for _ in 0..100 {
+            if h.module.capture_paused() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(h.module.capture_paused(), "配置变更须在运行期派发到位");
+
+        fire_text(&h.port, "must-not-land-while-paused");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            find_row(&store, "must-not-land-while-paused").is_none(),
+            "派发到位后新捕获须被丢弃"
+        );
+        assert!(h.module.capture_skipped() >= 1);
+    }
+
+    /// 缺陷① 启动半边：bootstrap 的 apply_configs 派发持久值 → 首条复制即不入库
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn hostConfig_bootstrap_appliesPersistedValues() {
+        let h = harness("cfg_bootstrap").await;
+        h.store_cfg
+            .set_module("clipboard", serde_json::json!({ "capture_paused": true }))
+            .unwrap();
+        // 未派发前仍是运行默认（暂停值不会自己长出来）
+        assert!(!h.module.capture_paused());
+        let results = h.registry.apply_configs(&h.store_cfg).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_ok(), "派发须成功： {:?}", results[0].1);
+        assert!(h.module.capture_paused());
+
+        let store = h.module.store().unwrap();
+        fire_text(&h.port, "first-copy-after-bootstrap");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            find_row(&store, "first-copy-after-bootstrap").is_none(),
+            "重启后盘上 paused=true 须让首条复制即不入库"
+        );
+    }
+
+    /// 负例：盘上缺文件 / 空对象不得把运行态打回模块默认值
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn applyConfigs_emptyStoredFile_doesNotOverwriteRuntime() {
+        let h = harness("cfg_empty").await;
+        h.module
+            .apply_config(serde_json::json!({ "max_entries": 1234, "capture_paused": true }))
+            .unwrap();
+
+        // 缺文件
+        assert!(
+            h.registry.apply_configs(&h.store_cfg).await.is_empty(),
+            "缺文件不派发"
+        );
+        assert!(h.module.capture_paused(), "缺文件不得覆写运行态");
+        assert_eq!(h.module.config().try_lock().unwrap().max_entries, 1234);
+
+        // 空对象文件
+        std::fs::create_dir_all(h.dir.join("config")).unwrap();
+        std::fs::write(h.dir.join("config").join("clipboard.json"), "{}").unwrap();
+        assert!(
+            h.registry.apply_configs(&h.store_cfg).await.is_empty(),
+            "空对象不派发"
+        );
+        assert!(
+            h.module.capture_paused(),
+            "空对象不得把 paused 打回默认 false"
+        );
+
+        // 正对照：真值文件必须派发（否则上面两臂是空洞）
+        h.store_cfg
+            .set_module("clipboard", serde_json::json!({ "max_entries": 777 }))
+            .unwrap();
+        let results = h.registry.apply_configs(&h.store_cfg).await;
+        assert_eq!(results.len(), 1, "有值才进派发结果");
+        assert!(results[0].1.is_ok());
+        assert_eq!(h.module.config().try_lock().unwrap().max_entries, 777);
+        assert!(
+            !h.module.config().try_lock().unwrap().capture_paused,
+            "缺省键经 serde(default) 回落默认值"
+        );
+    }
+
+    /// §8-④ 托盘项：capture 项存在、可用，且标签随运行态真实翻转
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn trayMenu_hasCaptureItem_withDynamicLabel() {
+        let h = harness("tray_capture").await;
+        // 单一写口红线：该键在 schema 中标 readOnly，通用设置表单据此跳过它（SchemaForm 消费此注解）
+        assert_eq!(
+            h.module.config_schema()["properties"]["capture_paused"]["readOnly"],
+            serde_json::json!(true)
+        );
+        let cap_label = |m: &ClipboardModule| {
+            m.tray_menu_items()
+                .into_iter()
+                .find(|i| i.id == "capture")
+                .map(|i| (i.label, i.enabled))
+        };
+        let (label, enabled) = cap_label(&h.module).expect("托盘须有 capture 项");
+        assert_eq!(label, "暂停捕获");
+        assert!(enabled, "暂停项须可点，不是常驻灰静默项");
+
+        let mut rx = h.bus.subscribe("clipboard.capture_state").unwrap();
+        let action = h
+            .module
+            .tray_actions()
+            .into_iter()
+            .find(|a| a.item_id == "capture")
+            .expect("capture 动作须注册");
+        (action.action)();
+        let ev = rx.recv().await.expect("动作须广播运行态");
+        assert_eq!(ev.payload["paused"], serde_json::json!(true));
+        assert!(h.module.capture_paused(), "托盘动作须真的翻转运行态");
+        let (label, _) = cap_label(&h.module).unwrap();
+        assert_eq!(
+            label, "恢复捕获",
+            "标签随暂停态翻转（tray.rs 重建菜单消费此值）"
+        );
+        assert_eq!(
+            h.store_cfg.get_module("clipboard").unwrap()["capture_paused"],
+            serde_json::json!(true),
+            "托盘切换同样落持久值（重启后仍是暂停态）"
+        );
+
+        // 再点一次回到恢复态
+        let again = h
+            .module
+            .tray_actions()
+            .into_iter()
+            .find(|a| a.item_id == "capture")
+            .expect("暂停态下托盘仍须给出 capture 动作项");
+        (again.action)();
+        assert!(!h.module.capture_paused());
+        assert_eq!(cap_label(&h.module).unwrap().0, "暂停捕获");
+    }
+
     /// D-26 验收⑤：托盘 quick_panel 动作经 bus 发布与热键同通路事件；init 前动作表为空
     #[tokio::test]
     async fn tray_action_publishes_quick_panel_toggle_observable_on_bus() {
-        let m = ClipboardModule::new();
+        let bus = Arc::new(EventBus::new());
+        let dir = std::env::temp_dir().join(format!("nf_clip_mod_tray_{}", std::process::id()));
+        let m = ClipboardModule::new_with_config(test_config_store(&dir, &bus));
         assert!(m.tray_actions().is_empty(), "init 前不得提供动作");
 
-        let bus = Arc::new(EventBus::new());
         let mut rx = bus
             .subscribe("clipboard.quick_panel_toggled")
             .expect("订阅 tray 事件");
         *m.bus.write() = Some(bus);
         let actions = m.tray_actions();
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].item_id, "quick_panel");
-        (actions[0].action)();
+        assert_eq!(actions.len(), 2, "quick_panel + capture 两项");
+        let panel = actions
+            .iter()
+            .find(|a| a.item_id == "quick_panel")
+            .expect("quick_panel 动作须注册");
+        (panel.action)();
         let ev = rx.recv().await.expect("动作闭包应发布事件");
         assert_eq!(ev.source, "clipboard");
         assert_eq!(m.tray_menu_items()[0].label, "打开剪切板面板");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

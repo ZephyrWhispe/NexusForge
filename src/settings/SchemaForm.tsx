@@ -49,9 +49,16 @@ interface JsonSchemaProp {
   minimum?: number;
   maximum?: number;
   items?: { type: string };
+  /** JSON Schema 2020-12 注解：Rust 侧仍校验该键，但通用表单不渲染，留给专用写口（如捕获暂停开关卡） */
+  readOnly?: boolean;
 }
 
 type Values = Record<string, unknown>;
+
+/** 通用表单可见的 schema 键：readOnly 键仍随值一起持久化，但不在此处渲染（一个语义只留一个写口） */
+export function visibleProps(props: Record<string, JsonSchemaProp>): [string, JsonSchemaProp][] {
+  return Object.entries(props).filter(([, p]) => !p.readOnly);
+}
 
 /** 默认值合并（纯函数，Vitest 覆盖）：存量配置优先，缺失键回填 schema 默认值 */
 export function mergeDefaults(
@@ -113,7 +120,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
   return (
     <div className={styles.root}>
       {error && <Text className={styles.err}>{error}</Text>}
-      {Object.entries(schema).map(([key, prop]) => (
+      {visibleProps(schema).map(([key, prop]) => (
         <div className={styles.row} key={key}>
           <div className={styles.info}>
             <span className={styles.name}>{prop.title ?? key}</span>

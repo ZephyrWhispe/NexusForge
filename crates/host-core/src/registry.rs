@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::codes;
+use crate::config::ConfigStore;
 use crate::error::{AppError, ModuleError};
 use crate::events::Event;
 use crate::events::EventBus;
@@ -147,6 +148,37 @@ impl ModuleRegistry {
                 let _ = self.stop_one(&id, m).await;
             }
         }
+    }
+
+    /// 缺陷① 收口（09 §8.1-①）：把 ConfigStore 里的持久值派发给各模块。
+    /// 盘上缺文件 / 空对象一律不派发——否则一次 `{}` 就能把运行态打回模块默认值。
+    pub async fn apply_configs(
+        &self,
+        config: &ConfigStore,
+    ) -> Vec<(String, Result<(), ModuleError>)> {
+        let mut results = Vec::new();
+        for (id, module) in self.ordered() {
+            let Some(values) = stored_config(config, &id) else {
+                continue;
+            };
+            let r = module.apply_config(values);
+            if let Err(e) = &r {
+                self.report_failure(&id, e).await;
+            }
+            results.push((id, r));
+        }
+        results
+    }
+
+    /// 单模块派发（运行期 `host.config_changed` 消费端）；模块未注册 → None
+    pub async fn apply_one(
+        &self,
+        id: &str,
+        config: &ConfigStore,
+    ) -> Option<Result<(), ModuleError>> {
+        let module = self.get(id)?;
+        let values = stored_config(config, id)?;
+        Some(module.apply_config(values))
     }
 
     /// 重启单个模块：stop → init → start
@@ -313,6 +345,39 @@ impl ModuleRegistry {
             },
         );
         r
+    }
+}
+
+/// 盘上是否存有可派发的模块配置（缺文件 / 读失败 / 非对象 / 空对象 → None）
+fn stored_config(config: &ConfigStore, id: &str) -> Option<serde_json::Value> {
+    config
+        .get_module(id)
+        .ok()
+        .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+}
+
+/// 缺陷① 运行期半边：`host.config_changed` 消费循环（宿主负责 spawn）。
+/// 事件只带模块名，值一律现读 ConfigStore（D-03 消费端纪律：收事件后拉最新状态）。
+pub async fn run_config_feed(
+    mut rx: tokio::sync::broadcast::Receiver<Event>,
+    registry: Arc<ModuleRegistry>,
+    config: Arc<ConfigStore>,
+) {
+    loop {
+        let ev = match rx.recv().await {
+            Ok(ev) => ev,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        };
+        let Some(module) = ev.payload.get("module").and_then(|m| m.as_str()) else {
+            tracing::warn!("host.config_changed 载荷缺 module，丢弃");
+            continue;
+        };
+        match registry.apply_one(module, &config).await {
+            None => tracing::debug!(module, "模块未注册或盘上无可派发配置，跳过本次派发"),
+            Some(Err(e)) => tracing::error!(module, error = %e, "配置派发到运行期模块失败"),
+            Some(Ok(())) => tracing::info!(module, "配置已派发到运行期模块"),
+        }
     }
 }
 

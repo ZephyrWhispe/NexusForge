@@ -193,7 +193,7 @@ impl HostState {
         // ---- P0 功能模块 ----
         // register_ability：把模块的 HotkeyProvider/TrayProvider 能力登记进注册表
         // （修复：此前从未调用，abilities() 恒为空，全部全局快捷键静默未注册）
-        let clipboard = Arc::new(ClipboardModule::new());
+        let clipboard = Arc::new(ClipboardModule::new_with_config(config.clone()));
         config.register_schema("clipboard", clipboard.config_schema());
         registry.register(clipboard.clone())?;
         registry.register_ability::<dyn HotkeyProvider>(clipboard.clone());
@@ -317,6 +317,13 @@ impl HostState {
                 tracing::error!(module = %id, error = %e, "模块 start 失败");
             }
         }
+        // 缺陷① 启动半边：start_all 之后把盘上持久值派发给运行期模块。
+        // 失败仅记日志不阻断——单个模块配置坏掉不得带走其余模块（S5 启动不互相阻断）
+        for (id, r) in self.registry.apply_configs(&self.config).await {
+            if let Err(e) = r {
+                tracing::error!(module = %id, error = %e, "启动配置派发失败");
+            }
+        }
         // 模块全局快捷键批量注册：binding × action 按 binding_id 配对（失败不阻断，UI 冲突面板可查）
         let mut registered = 0usize;
         for provider in self.registry.abilities().get_all::<dyn HotkeyProvider>() {
@@ -348,6 +355,21 @@ impl HostState {
         let sections = host_core::capability::aggregate_tray(self.registry.abilities());
         tracing::info!(sections = ?sections, "托盘菜单聚合完成");
     }
+}
+
+/// 缺陷① 运行期半边：订阅 `host.config_changed` 并把新值派发给对应模块。
+/// 与 [`forward_events`] 同段 setup 调用；派发循环在 host-core（可在无 Tauri
+/// 上下文下直测），此处只负责通道与 spawn。
+pub fn spawn_config_feed(
+    registry: Arc<ModuleRegistry>,
+    bus: Arc<EventBus>,
+    config: Arc<ConfigStore>,
+) {
+    let Ok(rx) = bus.subscribe("host.config_changed") else {
+        tracing::warn!("host.config_changed 订阅失败，运行期配置变更不会送达模块");
+        return;
+    };
+    tauri::async_runtime::spawn(host_core::registry::run_config_feed(rx, registry, config));
 }
 
 /// 把事件总线全部主题转发到前端窗口（事件名 `nf:event`）

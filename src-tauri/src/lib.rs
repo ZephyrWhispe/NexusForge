@@ -142,6 +142,8 @@ pub fn run() {
             commands::clipboard_delete,
             commands::clipboard_clear,
             commands::clipboard_group_counts,
+            commands::clipboard_capture_get,
+            commands::clipboard_capture_set,
             commands::screenshot_start,
             commands::screenshot_task,
             commands::screenshot_confirm,
@@ -347,6 +349,8 @@ pub fn run() {
 
             app.manage(host.clone());
             state::forward_events(app.handle().clone(), host.bus.clone());
+            // 缺陷①：运行期配置变更派发给模块（与事件转发同段 setup）
+            state::spawn_config_feed(host.registry.clone(), host.bus.clone(), host.config.clone());
 
             // D-26：原生托盘（聚合 + 重建 + 预警气泡在 tray.rs；构建失败仅降级不阻断启动）
             if let Err(e) = tray::build(app.handle(), &host) {

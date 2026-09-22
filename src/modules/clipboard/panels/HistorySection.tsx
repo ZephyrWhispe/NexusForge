@@ -22,8 +22,10 @@ import {
   clipboardClear,
   clipboardGet,
   clipboardGroupCounts,
+  clipboardCaptureGet,
   parseAppError,
   type ClipEntry,
+  type ClipCaptureState,
   type ClipSearchQuery,
 } from "../../../ipc/client";
 import { IN_TAURI } from "../../../ipc/env";
@@ -81,6 +83,16 @@ const useStyles = makeStyles({
     wordBreak: "break-all",
   },
   meta: { display: "block", marginBottom: "6px", fontSize: tokens.fontSizeBase200, color: tokens.colorNeutralForeground2 },
+  banner: {
+    display: "block",
+    margin: "0 20px 6px",
+    padding: "7px 12px",
+    borderRadius: tokens.borderRadiusMedium,
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorPaletteDarkOrangeForeground1,
+    backgroundColor: tokens.colorPaletteDarkOrangeBackground1,
+    flexShrink: 0,
+  },
   list: { flex: 1, overflowY: "auto", padding: "4px 20px 20px" },
   entry: {
     display: "flex",
@@ -174,6 +186,8 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   const [detail, setDetail] = useState<{ entry: ClipEntry; text: string | null; failed: string | null } | null>(
     null,
   );
+  // T-B3-2 暂停捕获横幅：读运行态（与设置卡/托盘同源），只在真跳过过内容时出现
+  const [capture, setCapture] = useState<ClipCaptureState | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(
@@ -204,6 +218,15 @@ export default function HistorySection({ search, group, onCounts }: Props) {
     refreshCounts();
   }, [load, refreshCounts]);
 
+  const refreshCapture = useCallback(() => {
+    if (!IN_TAURI) return;
+    clipboardCaptureGet()
+      .then(setCapture)
+      .catch((e) => reportError(e, { context: "捕获状态刷新失败", dedupeKey: "clip-capture-state", toast: false }));
+  }, []);
+
+  useEffect(refreshCapture, [refreshCapture]);
+
   // U3-6 实时更新：clipboard.captured → 刷新首页
   useEffect(() => {
     if (!IN_TAURI) return;
@@ -221,6 +244,7 @@ export default function HistorySection({ search, group, onCounts }: Props) {
           topic === "clipboard.captured"
         )
           refreshCounts();
+        if (topic === "clipboard.capture_state") refreshCapture();
       }),
     ).then((u) => {
       unlisten = u;
@@ -228,7 +252,7 @@ export default function HistorySection({ search, group, onCounts }: Props) {
     return () => {
       unlisten?.();
     };
-  }, [load, refreshCounts]);
+  }, [load, refreshCounts, refreshCapture]);
 
   // U3-1 虚拟列表：64px 仅作初估，实际行高由 measureElement 动态测量
   //（图片行含 52px 缩略图 + 上下 padding ≈75px，固定行高会重叠）
@@ -315,6 +339,9 @@ export default function HistorySection({ search, group, onCounts }: Props) {
           清空
         </Button>
       </div>
+      {capture && capture.skipped > 0 && (
+        <span className={styles.banner}>暂停期间已跳过 {capture.skipped} 次复制</span>
+      )}
       <div className={styles.list} ref={listRef}>
       {entries.length === 0 ? (
         <EmptyState

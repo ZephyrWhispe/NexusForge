@@ -4,7 +4,7 @@
 //! 过滤(黑名单) → secret 检测 → 分类 → 加密/入库 → 发事件。
 //! 回写窗口（500ms）内到达的读取事件直接丢弃（防剪贴板循环）。
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +38,10 @@ pub struct CapturePipeline {
     config: Arc<AsyncMutex<ClipboardConfig>>,
     write_back_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     insert_counter: std::sync::atomic::AtomicU32,
+    /// 暂停捕获开关（§8-④）：置位后 ingest 直接丢弃，与配置内存态同源同一原子位
+    paused: Arc<AtomicBool>,
+    /// 暂停期间累计跳过次数（恢复后仍保留，UI 如实显示）
+    skipped: AtomicU32,
 }
 
 /// 管线运行句柄（S3）：`shutdown` 置取消位使 worker 线程退出并释放 store，
@@ -89,6 +93,7 @@ impl CapturePipeline {
         crypto: Arc<dyn CryptoPort>,
         config: Arc<AsyncMutex<ClipboardConfig>>,
         write_back: Arc<parking_lot::Mutex<Option<Instant>>>,
+        paused: Arc<AtomicBool>,
     ) -> Result<PipelineHandle, AppError> {
         let (tx, rx) = mpsc::channel::<(host_core::ports::ClipContent, Option<String>)>();
         let pipeline = Arc::new(Self {
@@ -99,6 +104,8 @@ impl CapturePipeline {
             config,
             write_back_at: write_back,
             insert_counter: std::sync::atomic::AtomicU32::new(0),
+            paused,
+            skipped: AtomicU32::new(0),
         });
         let cancel = Arc::new(AtomicBool::new(false));
         let live = Arc::new(AtomicUsize::new(0));
@@ -205,6 +212,11 @@ impl CapturePipeline {
         self.ingest(content, Some(source), "remote", false);
     }
 
+    /// 暂停期间已跳过的捕获次数
+    pub fn skipped_while_paused(&self) -> u32 {
+        self.skipped.load(Ordering::Relaxed)
+    }
+
     fn ingest(
         &self,
         content: host_core::ports::ClipContent,
@@ -212,6 +224,12 @@ impl CapturePipeline {
         origin: &'static str,
         apply_blacklist: bool,
     ) {
+        // ⓪ 暂停开关（早于黑名单：暂停是用户显式意图，计数口径须覆盖全部到达内容）
+        if self.paused.load(Ordering::Relaxed) {
+            self.skipped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
         let config = futures_now(&self.config);
 
         // ① 黑名单过滤（excluded_apps：进程名小写比对）
@@ -469,6 +487,18 @@ mod tests {
         Arc<FakeClipboard>,
         Arc<EventBus>,
     ) {
+        start_with_fake_paused(tag, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn start_with_fake_paused(
+        tag: &str,
+        paused: Arc<AtomicBool>,
+    ) -> (
+        PipelineHandle,
+        Arc<ClipStore>,
+        Arc<FakeClipboard>,
+        Arc<EventBus>,
+    ) {
         let store = temp_store(tag);
         let bus = Arc::new(EventBus::new());
         let port = Arc::new(FakeClipboard {
@@ -486,6 +516,7 @@ mod tests {
             crypto,
             config,
             write_back,
+            paused,
         )
         .unwrap();
         (handle, store, port, bus)
@@ -574,6 +605,7 @@ mod tests {
             crypto,
             config,
             write_back.clone(),
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
 
@@ -644,6 +676,62 @@ mod tests {
             "300ms 合并窗口内 8 条捕获应至多 2 条通知，实际 {}",
             events.len()
         );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    // ---- §8-④ 暂停捕获 ----
+
+    fn row_count(store: &Arc<ClipStore>) -> usize {
+        store
+            .search(&crate::types::SearchQuery::default())
+            .unwrap()
+            .items
+            .len()
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn capturePause_skipsIngestAndCountsSkipped() {
+        let paused = Arc::new(AtomicBool::new(true));
+        let (handle, store, port, _bus) = start_with_fake_paused("pause_skip", paused);
+        for i in 0..3 {
+            fire(&port, &format!("paused-copy-{i}"));
+        }
+        std::thread::sleep(DB_BATCH_WINDOW + WORKER_TICK * 3);
+        assert_eq!(row_count(&store), 0, "暂停期间到达的内容不得入库");
+        assert_eq!(
+            handle.pipeline().skipped_while_paused(),
+            3,
+            "跳过次数须与到达条数一致（UI 横幅如实显示）"
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn capturePause_resumeDeliversAgain() {
+        // 正对照：同一管线实例恢复后照常入库，且跳过计数不清零（历史事实持久）
+        let paused = Arc::new(AtomicBool::new(true));
+        let (handle, store, port, _bus) = start_with_fake_paused("pause_resume", paused.clone());
+        fire(&port, "skipped-while-paused");
+        std::thread::sleep(DB_BATCH_WINDOW + WORKER_TICK * 3);
+        assert_eq!(row_count(&store), 0);
+        assert_eq!(handle.pipeline().skipped_while_paused(), 1);
+
+        paused.store(false, Ordering::Relaxed);
+        fire(&port, "after-resume-lands");
+        assert!(
+            wait_until(|| row_count(&store) == 1, Duration::from_secs(2)),
+            "恢复后捕获必须重新入库（否则本批两枚断言同为空洞）"
+        );
+        assert_eq!(
+            first_row(&store).unwrap().preview,
+            "after-resume-lands",
+            "暂停期间跳过的内容不得补录"
+        );
+        assert_eq!(handle.pipeline().skipped_while_paused(), 1);
         handle.shutdown();
         assert!(handle.wait_idle(Duration::from_secs(3)));
     }
@@ -777,6 +865,7 @@ mod tests {
             Arc::new(FakeCrypto),
             config,
             write_back,
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
         handle

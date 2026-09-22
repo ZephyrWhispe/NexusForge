@@ -179,14 +179,28 @@ pub fn build(app: &AppHandle, host: &HostState) -> Result<(), String> {
     Ok(())
 }
 
-/// host.module_state → 整建重建菜单并刷新动作表（重建代价 ≤10 项，忽略增量同步）
+/// host.module_state / clipboard.capture_state → 整建重建菜单并刷新动作表
+/// （重建代价 ≤10 项，忽略增量同步）。后者是 §8-④ 暂停项的动态标签所需：
+/// 标签在 `tray_menu_items()` 读运行态原子位，不重建则托盘停留在旧文案。
 fn spawn_rebuild(app: AppHandle, bus: Arc<EventBus>, actions: ActionTable, tray: Tray) {
     let Ok(mut rx) = bus.subscribe("host.module_state") else {
         tracing::warn!("host.module_state 订阅失败，托盘菜单不会随模块状态刷新");
         return;
     };
+    let Ok(mut rx_capture) = bus.subscribe("clipboard.capture_state") else {
+        tracing::warn!("clipboard.capture_state 订阅失败，托盘暂停项标签将不翻转");
+        return;
+    };
     tauri::async_runtime::spawn(async move {
-        while rx.recv().await.is_ok() {
+        loop {
+            match tokio::select! {
+                r = rx.recv() => r,
+                r = rx_capture.recv() => r,
+            } {
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
             let app2 = app.clone();
             let actions2 = actions.clone();
             let tray2 = tray.clone();

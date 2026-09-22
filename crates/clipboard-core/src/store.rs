@@ -2,7 +2,7 @@
 //!
 //! - 专属库 `{appData}/db/clipboard.db`（DESIGN O3：每模块独立库）
 //! - WAL + FTS5 外部内容表 + 触发器同步
-//! - 去重插入：命中 content_hash → 置顶 + usage_count+1
+//! - 去重插入：命中 content_hash → 刷新鲜度 + usage_count+1（pinned 不动）
 //! - >64KB 内容写 blob 文件（DESIGN O4），主表存引用
 
 use parking_lot::Mutex;
@@ -108,8 +108,10 @@ impl ClipStore {
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
 
         if let Some(id) = existing {
+            // 缺陷⑧（09 §8.1）：去重命中只刷新鲜度与计数，pinned 保持不变——
+            // 重复复制一个已置顶条目不得静默取消置顶（与图片/文件去重路径同语义）
             conn.execute(
-                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1, pinned = 0,
+                "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1,
                  origin = CASE WHEN ?3 = 'local' THEN 'local' ELSE origin END WHERE id = ?1",
                 params![id, now, origin],
             )
@@ -820,6 +822,44 @@ mod tests {
         let page = s.search(&SearchQuery::default()).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].usage_count, 1);
+    }
+
+    /// 缺陷⑧（09 §8.1）红线：重复复制已置顶条目只刷新鲜度与计数，置顶态必须保留
+    #[test]
+    #[allow(non_snake_case)]
+    fn dedup_hit_keepsPinnedAndRefreshesRecency() {
+        let s = open_temp("dedup_pin");
+        let id = s
+            .insert("置顶后又被复制", None, false, Some("app"), "local")
+            .unwrap();
+        s.pin(&id, true).unwrap();
+        let before = s
+            .search(&SearchQuery::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|e| e.id == id)
+            .expect("插入后应可查到");
+        assert!(before.pinned);
+        assert_eq!(before.usage_count, 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let again = s
+            .insert("置顶后又被复制", None, false, Some("app"), "local")
+            .unwrap();
+        assert_eq!(again, id, "去重命中不得新增行");
+
+        let page = s.search(&SearchQuery::default()).unwrap();
+        assert_eq!(page.items.len(), 1, "去重只更新既有行");
+        let after = page.items.into_iter().find(|e| e.id == id).unwrap();
+        assert!(after.pinned, "重复复制不得静默取消置顶");
+        assert_eq!(after.usage_count, 1);
+        assert!(
+            after.created_at > before.created_at,
+            "created_at 应刷新鲜度（旧 {} 新 {}）",
+            before.created_at,
+            after.created_at
+        );
     }
 
     #[test]
