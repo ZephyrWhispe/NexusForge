@@ -61,3 +61,20 @@ pub async fn ocr_copy_text(text: String, state: State<'_, HostState>) -> Result<
     .ok();
     Ok(())
 }
+
+/// 批量识别的合并文本导出（T-B4-12）：格式白名单 `txt | md`，落 `{app_data}/export/`。
+/// 命令**不收目录入参**——路径由宿主自己拼，所以"只能写导出目录"是结构性的而非约定性的
+/// （同 B3 `clipboard_export`；导入侧才有路径 Input，且只走读侧）。
+#[tauri::command]
+pub async fn ocr_export(
+    text: String,
+    format: String,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ocr_core::export::write_export(&app_data, &text, &format).map(|p| p.display().to_string())
+    })
+    .await
+    .map_err(|e| AppError::module("OCR_EXPORT_004", e.to_string(), None))?
+}

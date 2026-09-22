@@ -782,6 +782,38 @@ fn auxWindows_neverGrantOcrConfigGet() {
     assert!(main_granted, "正对照：main 必须持有 {ident}");
 }
 
+/// T-B4-12 红线负例：`ocr_export` 是批量识别文本的**出盘面**（落 `{app_data}/export/`）。
+/// 覆盖层虽可识别（allow-ocr-recognize 在册），但不持有把整批文字写进磁盘的口子；
+/// 六辅助窗永不，main 正对照防空洞。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-12）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantOcrExport() {
+    let caps = load_capabilities();
+    let ident = "allow-ocr-export";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（批量文本出盘是 main-only）"
+        );
+    }
+    assert!(
+        caps.iter().any(|(name, _)| name == "overlay"),
+        "负例须覆盖 overlay（它有识别权，看出识别≠出盘），否则本断言空洞"
+    );
+    assert!(main_granted, "正对照：main 必须持有 {ident}");
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

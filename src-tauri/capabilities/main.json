@@ -121,6 +121,7 @@
     "allow-ocr-config-get",
     "allow-ocr-copy-text",
     "allow-ocr-engine-status",
+    "allow-ocr-export",
     "allow-ocr-recognize",
     "allow-pdf-compress",
     "allow-pdf-info",

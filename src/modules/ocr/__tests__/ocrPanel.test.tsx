@@ -6,12 +6,17 @@ import OcrPanel, {
   confidence_reported,
   engineBadge,
   fmtConfidence,
+  mergeOcrTexts,
+  queueStatusBadge,
   stripDataPrefix,
+  type OcrQueueItem,
 } from "../OcrPanel";
+import panelSrc from "../OcrPanel.tsx?raw";
 import {
   ocrConfigGet,
   ocrCopyText,
   ocrEngineStatus,
+  ocrExport,
   ocrRecognize,
   type EngineStatusDto,
   type OcrResultDto,
@@ -20,6 +25,7 @@ import {
 // D-29 B0/T-B0-3 回归：引擎卡字段逐一来自 ocr_engine_status；
 // 引擎缺失时识别失败要"说明原因 + 给出首动作"，不得伪装成普通空态（00§4-4 / D-18）。
 // T-B4-13 追加：置信度诚实位（不报就显"未提供"）+ 逐块复制 + 译文区只在真有值时出现。
+// T-B4-12 追加：多选成批 + 串行识别（一张在途）+ 失败行保留 + 合并导出 txt/md + 清空即停。
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -29,6 +35,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     ocrRecognize: vi.fn(),
     ocrCopyText: vi.fn(),
     ocrConfigGet: vi.fn(),
+    ocrExport: vi.fn(),
   };
 });
 
@@ -273,5 +280,188 @@ describe("结果诚实化与翻译槽（T-B4-13）", () => {
     // 识别主体照常在场（附加功能失败 ≠ 整次失败）
     expect(container.textContent).toContain("第一行");
     expect(buttonsWith("复制全部")).toHaveLength(1);
+  });
+});
+
+// ---------------- T-B4-12（09 §9.2）：批量识别 + 合并导出（§9.1-⑮ 收窄的机器面） ----------------
+
+/** 放行闸：每张图的识别 promise 由测试手动了结，用来证明"同一时刻只有一张在途" */
+function gated(res: OcrResultDto, failB64?: string) {
+  const gates: { release: () => void }[] = [];
+  vi.mocked(ocrRecognize).mockImplementation((req) => {
+    let settle: (v: OcrResultDto) => void = () => {};
+    let reject: (e: unknown) => void = () => {};
+    const p = new Promise<OcrResultDto>((res2, rej2) => {
+      settle = res2;
+      reject = rej2;
+    });
+    gates.push({
+      release: () => {
+        if (failB64 && req.image_b64 === failB64) {
+          reject(appError("OCR_INPUT_002", "这张图的 Base64 解码失败"));
+        } else {
+          settle({ ...res, text: `${res.text}#${req.image_b64}` });
+        }
+      },
+    });
+    return p;
+  });
+  return gates;
+}
+
+async function flush(rounds = 6) {
+  for (let i = 0; i < rounds; i += 1) {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+    });
+  }
+}
+
+/** 一次交多张图（内容各异 → base64 各异，于是"调用序"是可观测的） */
+async function pickFiles(files: [name: string, content: string][]) {
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+  expect(input, "隐藏的 file input 应在册").not.toBeNull();
+  expect(input!.multiple, "v1 批量走原生 multiple，而非原生窗口级拖放").toBe(true);
+  await act(async () => {
+    Object.defineProperty(input, "files", {
+      value: files.map(([name, content]) => new File([content], name, { type: "image/png" })),
+      configurable: true,
+    });
+    input!.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+const OK_RESULT: OcrResultDto = { ...THREE_LINES, text: "正文" };
+
+describe("批量识别与合并导出（T-B4-12）", () => {
+  it("ocrBatch_multipleFiles_recognizesSequentially_keepsFailedRows", async () => {
+    // b.png 的内容 "B" → base64 "Qg=="：中间那张必败
+    const gates = gated(OK_RESULT, "Qg==");
+    await mount();
+    await pickFiles([
+      ["a.png", "A"],
+      ["b.png", "B"],
+      ["c.png", "C"],
+    ]);
+    await flush();
+    // 串行证明（不是"三张一起发"）：三张在队，在途只有第一张
+    expect(ocrRecognize).toHaveBeenCalledTimes(1);
+    expect(gates).toHaveLength(1);
+    for (let guard = 0; guard < 5; guard += 1) {
+      const g = gates.shift();
+      if (!g) break;
+      g.release();
+      await flush(3);
+    }
+    await flush();
+    expect(ocrRecognize).toHaveBeenCalledTimes(3);
+    // 调用序 = 文件名序（每张图的 base64 不同，故序可观测）
+    expect(vi.mocked(ocrRecognize).mock.calls.map(([r]) => r.image_b64)).toEqual([
+      "QQ==",
+      "Qg==",
+      "Qw==",
+    ]);
+    expect(container.textContent).toContain("a.png");
+    expect(container.textContent).toContain("c.png");
+    expect(container.textContent).toContain("已识别");
+    // 红线：整批不中断 + 失败行保留原因（不是静默丢文件）
+    expect(container.textContent).toContain("失败");
+    expect(container.textContent).toContain("这张图的 Base64 解码失败");
+    expect(container.textContent).toContain("3/3 已完成");
+  });
+
+  it("ocrBatch_exportInvokesMergedText", async () => {
+    vi.mocked(ocrRecognize)
+      .mockResolvedValueOnce({ ...OK_RESULT, text: "甲文" })
+      .mockRejectedValueOnce(appError("OCR_INPUT_002", "坏图"))
+      .mockResolvedValueOnce({ ...OK_RESULT, text: "丙文" });
+    vi.mocked(ocrExport).mockResolvedValue("C:/appdata/export/ocr-1.txt");
+    await mount();
+    await pickFiles([
+      ["a.png", "A"],
+      ["b.png", "B"],
+      ["c.png", "C"],
+    ]);
+    await flush();
+    await click(buttonsWith("导出合并 txt")[0]);
+    await flush(2);
+    // 字面判据：失败行同样进节（写"识别失败：原因"），格式钮交 "txt"
+    expect(ocrExport).toHaveBeenCalledWith(
+      expect.stringContaining("===== b.png ====="),
+      "txt",
+    );
+    const merged = vi.mocked(ocrExport).mock.calls[0][0];
+    expect(merged).toContain("甲文");
+    expect(merged).toContain("识别失败：坏图");
+    expect(merged).toContain("丙文");
+  });
+
+  it("ocrBatch_mergeTxtAndMd_pinned", () => {
+    const items: OcrQueueItem[] = [
+      { name: "a.png", size: 10, status: "ok", chars: 2, result: { ...OK_RESULT, text: "甲" } },
+      { name: "b.png", size: 10, status: "fail", chars: 0, reason: "引擎不可用" },
+      { name: "c.png", size: 10, status: "pending", chars: 0 },
+    ];
+    expect(mergeOcrTexts(items, "txt")).toBe(
+      "===== a.png =====\n甲\n\n===== b.png =====\n识别失败：引擎不可用",
+    );
+    expect(mergeOcrTexts(items, "md")).toBe(
+      "## a.png\n\n```\n甲\n```\n\n## b.png\n\n```\n识别失败：引擎不可用\n```",
+    );
+    // pending 不进导出（钮在跑批时禁用）；已落定的两行一节不少
+    expect(mergeOcrTexts(items, "txt")).not.toContain("c.png");
+    expect(queueStatusBadge("pending")).toBe("排队中");
+    expect(queueStatusBadge("ok")).toBe("已识别");
+    expect(queueStatusBadge("fail")).toBe("失败");
+  });
+
+  it("ocrBatch_usesMultipleInput_notNativeDrag", async () => {
+    await mount();
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input).not.toBeNull();
+    expect(input!.multiple).toBe(true);
+    expect(input!.accept).toBe("image/*");
+    // 收窄的机器面（§9.1-⑮）：面板源码不接原生拖放三件套
+    expect(String(panelSrc)).not.toMatch(/onDrop\b|dataTransfer|onDragDropEvent/);
+    const sources = import.meta.glob("../../../**/*.{ts,tsx}", {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+    // 测试源码自带这些字面量（就是本枚断言写的），扫描范围取生产源码
+    const isProd = (path: string) => !path.includes("__tests__") && !/\.test\.tsx?$/.test(path);
+    const allProd = Object.entries(sources).filter(([path]) => isProd(path));
+    // 防空洞：扫描确实读到了真源码（本仓生产模块数远大于 10，且能扫到既有命令字面量）
+    expect(allProd.length, "全仓 raw 扫描不得是空表").toBeGreaterThan(10);
+    expect(
+      allProd.filter(([, src]) => src.includes("ocr_recognize")).length,
+      "正对照：全仓扫描须命中含 ocr_recognize 的生产源码",
+    ).toBeGreaterThan(0);
+    const withDrag = allProd.filter(([, src]) => src.includes("onDragDropEvent"));
+    expect(withDrag.map(([path]) => path), "原生窗口级拖放仍是收窄项，生产源码零命中").toEqual([]);
+  });
+
+  it("ocrBatch_cancelMidway_stopsInvoking", async () => {
+    const gates = gated(OK_RESULT);
+    await mount();
+    await pickFiles([
+      ["a.png", "A"],
+      ["b.png", "B"],
+      ["c.png", "C"],
+    ]);
+    await flush();
+    expect(ocrRecognize).toHaveBeenCalledTimes(1);
+    await click(buttonsWith("清空队列")[0]);
+    gates.shift()?.release(); // 在途那张照常了结
+    await flush();
+    // 清空 = 作废批次：剩余两张一次都不再送识别
+    expect(ocrRecognize).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain("批量队列");
+    // 正对照：重新选一张即另起批次（队列不是永久死掉）
+    vi.mocked(ocrRecognize).mockImplementation(async () => OK_RESULT);
+    await pickFiles([["d.png", "D"]]);
+    await flush();
+    expect(ocrRecognize).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("d.png");
   });
 });

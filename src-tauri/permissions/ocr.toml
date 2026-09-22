@@ -19,3 +19,8 @@ commands.allow = ["ocr_copy_text"]
 identifier = "allow-ocr-config-get"
 description = "允许前端调用 ocr_config_get 命令（T-B4-10 运行态配置快照，main-only）"
 commands.allow = ["ocr_config_get"]
+
+[[permission]]
+identifier = "allow-ocr-export"
+description = "允许前端调用 ocr_export 命令（T-B4-12 合并文本导出到 {app_data}/export/，main-only）"
+commands.allow = ["ocr_export"]

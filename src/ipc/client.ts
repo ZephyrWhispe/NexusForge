@@ -513,6 +513,13 @@ export function ocrCopyText(text: string): Promise<void> {
 export function ocrConfigGet(): Promise<OcrConfigDto> {
   return invoke("ocr_config_get");
 }
+/** 导出格式白名单（与 Rust `ocr_core::export::EXPORT_FORMATS` 同集：白名单外后端点名拒写） */
+export type OcrExportFormat = "txt" | "md";
+
+/** 合并文本导出（T-B4-12）：只交文本与格式，目录由宿主拼（返回落盘路径） */
+export function ocrExport(text: string, format: OcrExportFormat): Promise<string> {
+  return invoke("ocr_export", { text, format });
+}
 
 // ---------------- KVM 键鼠共享 IPC（docs/impl/05 K8）----------------
 
