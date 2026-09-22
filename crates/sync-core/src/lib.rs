@@ -19,9 +19,9 @@ pub use engine::{ApplyOutcome, ChangeApplier, SyncEngine};
 pub use error::{Result, SyncError};
 pub use module::{
     is_sync_entity, record_change_event, record_change_with, restore_conflict_with, EntitySpec,
-    PeerStatus, SyncConfig, SyncCtx, SyncModule, SyncStatus, SyncSummary, CHANGE_ACTIONS,
-    DEFAULT_CONFLICT_KEEP_DAYS, DEFAULT_QUIET_PERIOD_MS, DEFAULT_SYNC_PORT, ENTITY_NOTE,
-    QUIET_PERIOD_MIN_MS, SYNC_ENTITIES,
+    PeerAddrResolver, PeerStatus, SyncConfig, SyncCtx, SyncModule, SyncStatus, SyncSummary,
+    CHANGE_ACTIONS, DEFAULT_CONFLICT_KEEP_DAYS, DEFAULT_QUIET_PERIOD_MS, DEFAULT_SYNC_PORT,
+    ENTITY_NOTE, QUIET_PERIOD_MIN_MS, SYNC_ENTITIES,
 };
 pub use oplog::{ConflictEntry, OpEntry, OpLog, SyncRun};
 pub use transport::{SyncMsg, SyncSession};

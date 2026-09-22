@@ -89,6 +89,8 @@ function statusDto(over: Partial<SyncStatusDto> = {}): SyncStatusDto {
     self_name: "台式机-A",
     paused: false,
     auto_sync: false,
+    // 本文件测的是两枚出账开关：地址事实源接没接线与它们无关，取"没接"这个保守形态
+    addr_source: false,
     peers: [peerStatus()],
     ...over,
   };

@@ -84,6 +84,10 @@ pub struct KvmModule {
     tcp_port: AtomicU16,
     /// UDP 组播发现端口（默认 discovery::DEFAULT_PORT；同上）
     discovery_port: AtomicU16,
+    /// 本机 SYNC 监听端口（随心跳宣告；**0 = 本端不供同步**，由宿主在 init 前注入真值）
+    /// ——默认 0 而不是 sync-core 的默认端口：kvm 不知道 sync 是否真的听了、听了哪个口，
+    /// 填个"看起来对"的默认值就是让邻居拨一个本机可能不存在的端口（09 §10.2 T-B5-7）
+    sync_port: AtomicU16,
 }
 
 impl Default for KvmModule {
@@ -117,6 +121,7 @@ impl KvmModule {
             cmd_tx: RwLock::new(None),
             tcp_port: AtomicU16::new(crate::session::SESSION_PORT),
             discovery_port: AtomicU16::new(crate::discovery::DEFAULT_PORT),
+            sync_port: AtomicU16::new(0),
         }
     }
 
@@ -127,6 +132,14 @@ impl KvmModule {
 
     pub fn set_discovery_port(&self, port: u16) {
         self.discovery_port.store(port, Ordering::SeqCst);
+    }
+
+    /// 注入本机 SYNC 监听端口供心跳宣告（09 §10.2 T-B5-7）。
+    /// **方向：sync 端口的事实源在 sync-core，kvm 只是搬运**——本模块不认识 sync-core，
+    /// 端口值由 `src-tauri/src/state.rs` 装配时读 `SyncModule::port()` 注入。
+    /// 须在 init（发现服务装配）之前调用；发现服务在 init 时取一次快照，后改不重播。
+    pub fn set_sync_port(&self, port: u16) {
+        self.sync_port.store(port, Ordering::SeqCst);
     }
 
     fn tcp_port_now(&self) -> u16 {
@@ -391,6 +404,7 @@ impl Module for KvmModule {
                 tcp_port: self.tcp_port_now(),
                 caps: vec!["input".into(), "clip".into(), "file".into()],
                 screen: own_screen,
+                sync_port: self.sync_port.load(Ordering::SeqCst),
             },
             DiscoveryConfig {
                 port: self.discovery_port.load(Ordering::SeqCst),

@@ -14,6 +14,9 @@
 //! - 自动同步（T-B5-6）：`SyncConfig` 三键经 `apply_config` 活派发即改即生效（不重启）；
 //!   变更入流后排静默窗，到期一轮只往"本机成功同步过"的地址出账；`auto_sync` **默认关**
 //!   （不擅自开始往外发用户的笔记），暂停位与面板徽章读同一内存
+//! - 免手输地址（T-B5-7）：`PeerAddrResolver` 由宿主桥到发现层（本 crate 不 import kvm-core），
+//!   `sync_device` 解析顺序＝手输 → 发现层 → 最近成功地址 → 如实失败；**绝不猜地址**，
+//!   也绝不回退 127.0.0.1（把同步流量发给邻居比失败更坏）
 //! - 红线：密码库条目**永不**自动同步（白名单硬编码，`attach_applier("vault", …)` 运行期亦拒，
 //!   见 `syncEntity_vaultNeverAdmitted` 三层可否例）
 //!
@@ -185,11 +188,33 @@ impl SyncConfig {
 /// 静默窗闹钟槽：`(排程序号, 任务句柄)`。号让醒来后发现已被后来者取代的旧闹钟自己退场。
 type AlarmSlot = Option<(u64, tokio::task::JoinHandle<()>)>;
 
+/// 发现层地址解析器（T-B5-7 免手输的地基）：把 `device_id` 翻成 `"host:port"`。
+///
+/// **为什么是 trait 而不是直接调 kvm-core**：依赖方向上 sync 不认识 kvm（kvm 也不认识
+/// sync），端口/IP 这些运行态事实住在发现层，sync 只需要"给我一个地址"。宿主在装配时
+/// 桥一次（`src-tauri/src/state.rs`），两边因此都能单独测。
+///
+/// 约定：`None` = 当前不知道（离线、未宣告、发现层未就绪）。实现方**不得**返回
+/// `127.0.0.1` 之类的占位地址来"让它工作"——那会把同步流量发给邻居，比失败更坏。
+pub trait PeerAddrResolver: Send + Sync {
+    fn resolve(&self, device_id: &str) -> Option<String>;
+}
+
+/// 无可用地址时的统一说辞（`run_due` 的失败流水与 `sync_now` 的弹回同一句）：
+/// 点名设备、说明为什么没有、指出唯一出路是手输——不含任何猜测地址。
+fn no_address_error(display: &str) -> SyncError {
+    SyncError::Peer(format!(
+        "设备 {display} 当前无可用地址（离线或未宣告同步端口，本机也没有与之成功同步过的记录）；\
+         可在「高级」中手输 host:port 后点「立即同步」"
+    ))
+}
+
 /// 自动同步运行态（T-B5-6：静默窗的**唯一实现点**）
 ///
 /// 五枚状态必须住在一起，分开写就会出现"用户按了暂停、闹钟还在等"这类分叉：
 /// - `config` / `paused`：与 `SyncModule` 同一份（不是副本），面板读的状态与排程判定读的是同一位；
-/// - `last_addr`：自动出账的地址事实源＝**最近一次成功会话**用过的地址（T-B5-7 换心跳宣告后接管）；
+/// - `resolver`：发现层地址解析器（T-B5-7，`None` = 宿主没桥＝本机没有在线/地址的事实源）；
+/// - `last_addr`：地址的**回落**位（T-B5-7 起退居第二）＝**最近一次成功会话**用过的地址；
 /// - `gen` + `slot`：取消-重排。每次排程领一个号，闹钟醒来发现号已被后来者取代就退场；
 /// - `running`：一轮 due-peers 的互斥口——会话进行到一半又来变更时，不并发开第二条
 ///   到同一对端的会话（游标交错的代价是重复推送与假 Ack），排队等下一轮即可。
@@ -197,6 +222,7 @@ type AlarmSlot = Option<(u64, tokio::task::JoinHandle<()>)>;
 struct AutoSync {
     config: Arc<RwLock<SyncConfig>>,
     paused: Arc<AtomicBool>,
+    resolver: Arc<RwLock<Option<Arc<dyn PeerAddrResolver>>>>,
     last_addr: Arc<RwLock<HashMap<String, String>>>,
     gen: Arc<AtomicU64>,
     slot: Arc<parking_lot::Mutex<AlarmSlot>>,
@@ -208,11 +234,44 @@ impl AutoSync {
         Self {
             config: Arc::new(RwLock::new(SyncConfig::default())),
             paused: Arc::new(AtomicBool::new(false)),
+            resolver: Arc::new(RwLock::new(None)),
             last_addr: Arc::new(RwLock::new(HashMap::new())),
             gen: Arc::new(AtomicU64::new(0)),
             slot: Arc::new(parking_lot::Mutex::new(None)),
             running: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// 地址解析的**唯一分派口**（`sync_now` 与自动到期都走这里，两条路共用一套优先级）
+    ///
+    /// 1. `manual`（面板「高级」手输）有值 ⇒ 原样直连，能力零退化；
+    /// 2. 发现层命中 ⇒ 用运行态地址（心跳来源 IP + 宣告端口）；
+    /// 3. 最近一次**成功**会话的地址回落（T-B5-6 的过渡事实源，此后退为第二顺位）；
+    /// 4. 三者皆无 ⇒ `SyncError::Peer` 点名设备并指路手输。
+    ///
+    /// 第 4 步是本行的红线：过去这里可以"顺手填个默认地址试试"，而试错的代价是
+    /// 把用户的笔记发给同网段的另一台机器。**绝不猜、绝不回退 `127.0.0.1`**。
+    fn addr_for(&self, device_id: &str, display: &str, manual: Option<&str>) -> R<String> {
+        if let Some(addr) = manual.map(str::trim).filter(|a| !a.is_empty()) {
+            return Ok(addr.to_string());
+        }
+        if let Some(addr) = self.discovered(device_id) {
+            return Ok(addr);
+        }
+        if let Some(addr) = self.last_addr.read().get(device_id) {
+            return Ok(addr.clone());
+        }
+        Err(no_address_error(display))
+    }
+
+    /// 发现层给出的地址（`None` = 解析器未接线或对端当前不在线）
+    fn discovered(&self, device_id: &str) -> Option<String> {
+        self.resolver.read().clone()?.resolve(device_id)
+    }
+
+    /// 本机是否接了发现层解析器（`SyncStatus.addr_source`：面板敢不敢说"在线/离线"）
+    fn has_resolver(&self) -> bool {
+        self.resolver.read().is_some()
     }
 
     /// 变更已入流 ⇒ 重排静默窗（连投只留最后一颗闹钟）
@@ -270,16 +329,14 @@ impl AutoSync {
                 tracing::info!(peer = %p.device_id, "本轮自动同步就此收手（已暂停）");
                 return;
             }
-            let Some(addr) = self.last_addr.read().get(&p.device_id).cloned() else {
-                // 没有地址事实源就是没有：记一行失败流水点名原因，绝不拿 127.0.0.1 凑数
-                let err = SyncError::Peer(format!(
-                    "设备 {} 当前无可用地址（本机还没有与它成功同步过的记录，发现层亦未宣告同步端口）；\
-                     可在面板「高级」手输 host:port 后点「立即同步」",
-                    p.device_name
-                ));
-                tracing::warn!(peer = %p.device_id, error = %err, "自动同步跳过该设备（已入账）");
-                record_skipped_run(&ctx, &p.device_id, &err);
-                continue;
+            let addr = match self.addr_for(&p.device_id, &p.device_name, None) {
+                Ok(addr) => addr,
+                Err(err) => {
+                    // 没有地址事实源就是没有：记一行失败流水点名原因，绝不拿 127.0.0.1 凑数
+                    tracing::warn!(peer = %p.device_id, error = %err, "自动同步跳过该设备（已入账）");
+                    record_skipped_run(&ctx, &p.device_id, &err);
+                    continue;
+                }
             };
             match sync_attempt(&ctx, &p.device_id, &addr).await {
                 Ok(s) => tracing::info!(
@@ -313,9 +370,9 @@ pub struct SyncSummary {
 ///
 /// 两半制：三个数字全部现读自 op_log 三表（`cursors` / `push_cursors` / `sync_run`），
 /// 本结构不另立事实源、不缓存 ⇒ 协议跑的与面板看的同一份数。
-/// `sync_addr` / `online` 随形状先落位而**恒为 None/false**：其真值分属 T-B5-7（心跳宣告
-/// sync 端口 + 地址解析），今天没有任何事实源，前端因此也不据这两列渲染任何东西——
-/// 无事实源就无文案，宁可空着也不写"离线"（那同样是断言）。
+/// `sync_addr` / `online` 自 T-B5-7 起有源（发现层心跳宣告 sync 端口 + 宿主注入解析器）；
+/// **但读侧必须先验 `SyncStatus::addr_source`**：解析器没接线时这两列是"没查过"不是
+/// "查了说离线"，面板据此整列不渲染（09 §10.2 T-B5-4 补记⑧ 的无事实源零文案纪律）。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct PeerStatus {
     pub device_id: String,
@@ -331,9 +388,9 @@ pub struct PeerStatus {
     pub last_sync_ms: i64,
     /// 最近一轮的失败原因（None = 那轮成功；与 `sync_run.error` 逐字相同）
     pub last_error: Option<String>,
-    /// 对端 sync 地址（T-B5-7 前恒 None）
+    /// 对端 sync 地址（发现层给出；解析器未接线或该设备当前不在发现表 ⇒ None）
     pub sync_addr: Option<String>,
-    /// 发现层在线（T-B5-7 前恒 false，且不进任何 UI 文案）
+    /// 发现层在线（等价于 `sync_addr.is_some()`；单列出来是为了让面板不必反推语义）
     pub online: bool,
 }
 
@@ -357,6 +414,10 @@ pub struct SyncStatus {
     /// 面板拿它当开关的初值与回读面——设置写成功但运行态没变（值被派发口拒了）时，
     /// 这里读回来的仍是旧值，谎报就此无处藏身。
     pub auto_sync: bool,
+    /// 本机是否接了发现层地址解析器（T-B5-7 **第十键**）：`peers[].sync_addr/online`
+    /// 的可信位。false 时那两列全是"没查过"，面板因此整列不渲染、也不说"离线"——
+    /// 一列空值可以被读成"都没地址"，一个缺席的列不会被读成任何东西。
+    pub addr_source: bool,
     pub peers: Vec<PeerStatus>,
 }
 
@@ -901,6 +962,22 @@ impl SyncModule {
         self.port.store(port, Ordering::SeqCst);
     }
 
+    /// 本机 sync 监听端口现值（T-B5-7：宿主装配时读，注入 KVM 心跳宣告）
+    ///
+    /// 读现值而不是用常量 `DEFAULT_SYNC_PORT`：端口一旦经 `set_port`/配置改过，
+    /// 心跳里继续宣告 49820 就是让邻居拨一个本机没在听的端口——宣告必须是**真在听的那个**。
+    pub fn port(&self) -> u16 {
+        self.port.load(Ordering::SeqCst)
+    }
+
+    /// 注入发现层地址解析器（T-B5-7；宿主装配点调一次，**sync-core 不 import kvm-core**）
+    ///
+    /// 装配失败/未装配 ⇒ 本位保持 `None` ⇒ `status().addr_source=false`，面板整列不渲染
+    /// 在线/离线，同步退回"手输地址"的旧形态。也就是说这一颗螺丝松了不会撒谎，只会退化。
+    pub fn set_addr_resolver(&self, resolver: Arc<dyn PeerAddrResolver>) {
+        *self.auto.resolver.write() = Some(resolver);
+    }
+
     /// D-12：本模块 SQLite 库路径（宿主 O3 归位断言用）
     pub fn db_path(&self) -> &std::path::Path {
         &self.db_path
@@ -972,12 +1049,17 @@ impl SyncModule {
         let outbound: HashMap<String, i64> = log.all_push_cursors()?.into_iter().collect();
         let last_runs = log.last_run_per_peer()?;
         let self_device = identity.device_id.clone();
+        let addr_source = self.auto.has_resolver();
         let mut peers = Vec::new();
         for p in self.store.all() {
             let push_ts = outbound.get(&p.device_id).copied().unwrap_or(0);
             // 一次查询失败就整面失败：游标读不到时"pending=0"会被面板读成"都同步过了"
             let pending_ops = log.count_ops_after(&self_device, push_ts)?;
             let last = last_runs.get(&p.device_id);
+            // 发现层每设备问一次：它读的是 kvm 的内存表，不在本结构里缓存
+            // （缓一份就是多一处会漂移的副本——面板看到的"在线"必须与点「立即同步」
+            // 那一刻解析到的是同一家，否则会出现"显示在线但拨不到"的谎）
+            let sync_addr = self.auto.discovered(&p.device_id);
             peers.push(PeerStatus {
                 fingerprint: p.fingerprint,
                 device_id: p.device_id.clone(),
@@ -987,15 +1069,13 @@ impl SyncModule {
                 pending_ops,
                 last_sync_ms: last.map(|r| r.ts_ms).unwrap_or(0),
                 last_error: last.and_then(|r| r.error.clone()),
-                // T-B5-7 前无事实源：发现层尚未宣告对端 sync 端口。
-                // 留 None/false 且不进任何 UI 文案——"没查过"与"查了说离线"是两件事。
-                sync_addr: None,
-                online: false,
+                sync_addr: sync_addr.clone(),
+                online: sync_addr.is_some(),
             });
         }
         Ok(SyncStatus {
             op_count: log.count(),
-            port: self.port.load(Ordering::SeqCst),
+            port: self.port(),
             listening: self.listening.load(Ordering::SeqCst),
             last_bind_error: self.bind_error.read().clone(),
             self_device_id: identity.device_id.clone(),
@@ -1004,6 +1084,7 @@ impl SyncModule {
             // 这里回读的是"此刻真在跑的那套"，面板因此不可能显示一个内核没在执行的开关
             paused: self.auto.paused.load(Ordering::SeqCst),
             auto_sync: self.auto.config.read().auto_sync,
+            addr_source,
             peers,
         })
     }
@@ -1061,8 +1142,8 @@ impl SyncModule {
     /// peer 列如实记用户点的那台设备 id）。只有 `ctx` 未就绪时不记——那时连库都没有，
     /// 谈不上静默：错误本身已如实上抛。
     ///
-    /// 成功一次就记下这个地址：它是"自动出账该往哪台发"目前唯一的事实源（失败过或
-    /// 压根没试过的地址不算数——把猜的地址用于自动出账，等于把用户的笔记发给邻居）。
+    /// 成功一次就记下这个地址：T-B5-7 起它是自动出账的**回落**位（发现层命中优先于它），
+    /// 但仍是"手输过且真通了"这一事实的唯一记录——失败过或压根没试过的地址不算数。
     pub async fn sync_with(&self, device_id: &str, addr: &str) -> R<SyncSummary> {
         let ctx = self.ctx()?;
         let summary = sync_attempt(&ctx, device_id, addr).await?;
@@ -1071,6 +1152,24 @@ impl SyncModule {
             .write()
             .insert(device_id.to_string(), addr.to_string());
         Ok(summary)
+    }
+
+    /// 与指定设备同步（IPC `sync_now` 的真入口）：**先解析地址，再开会话**
+    ///
+    /// 与 `sync_with` 的分工要留着：`sync_with(device_id, addr)` 是"地址已定"的裸入口
+    /// （回环测试与将来的显式拨号用它），本方法才是命令面走的那条——命令面拿到的
+    /// `addr` 是 `Option`，"用户没填"与"用户填了"是两种意图，必须在这一层分开处理。
+    /// 解析失败（三级全空）时错误原样上抛，**不会**降级成"拿个默认地址试一把"。
+    pub async fn sync_device(&self, device_id: &str, addr: Option<String>) -> R<SyncSummary> {
+        let display = self
+            .store
+            .all()
+            .into_iter()
+            .find(|p| p.device_id == device_id)
+            .map(|p| p.device_name)
+            .unwrap_or_else(|| device_id.to_string());
+        let addr = self.auto.addr_for(device_id, &display, addr.as_deref())?;
+        self.sync_with(device_id, &addr).await
     }
 
     /// 暂停/恢复同步（**唯一写口**：面板与以后托盘两处入口共用，`status().paused` 读同一位）
@@ -1111,7 +1210,8 @@ impl SyncModule {
         Ok(())
     }
 
-    /// 本机为某设备记着的可用地址（最近一次**成功**会话用过的那个；无则 None）
+    /// 本机为某设备记着的**回落**地址（最近一次**成功**会话用过的那个；无则 None）。
+    /// 发现层命中时地址解析走的是它前面一级（T-B5-7），本方法读的是兜底那一级。
     pub fn peer_addr(&self, device_id: &str) -> Option<String> {
         self.auto.last_addr.read().get(device_id).cloned()
     }

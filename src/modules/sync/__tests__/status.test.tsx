@@ -5,8 +5,9 @@
  * ① 监听徽标跟的是 `listening`（bind 真结果），**端口号在场不构成绿灯**——修前
  *    `监听 :{status.port}` 直读端口，端口被占用时这一行照样绿，是本模块最显眼的假绿；
  * ② 每台配对设备的"还欠几条"来自现读游标（pending>0 才出警示行，0 就一个字都不多写）；
- * ③ `sync_addr` / `online` 在 T-B5-7 前恒 None/false 且**无事实源** ⇒ 视图不得据此写
- *    "离线"之类的断言（写"离线"和写"在线"同样是撒谎）。
+ * ③ `addr_source=false`（本机没接发现层地址解析器）⇒ `sync_addr`/`online` 全是"没查过"，
+ *    视图不得据此写"离线"之类的断言（写"离线"和写"在线"同样是撒谎）；接线后的两臂
+ *    见 `deviceAddr.test.tsx`。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
@@ -74,6 +75,8 @@ function status(over: Partial<SyncStatusDto> = {}): SyncStatusDto {
     self_name: "台式机-A",
     paused: false,
     auto_sync: false,
+    // 本文件的三判据都发生在"没接解析器"的形态下：在线/离线整列因此不得出现一个字
+    addr_source: false,
     peers: [peerStatus()],
     ...over,
   };
@@ -149,7 +152,7 @@ describe("同步 · 状态读面（T-B5-4）", () => {
     expect(syncStatus).toHaveBeenCalledTimes(1);
     expect(listenBadge()).toBe("未监听 :49820");
     expect(alertBar()).toContain("端口 49820 监听失败：仅允许一种访问权限");
-    // 无事实源的两列不进文案（"离线"同样是断言）
+    // 解析器未接线（addr_source=false）⇒ 这两列一个字都不许有（"离线"同样是断言）
     expect(bodyText()).not.toContain("离线");
     expect(bodyText()).not.toContain("在线");
 

@@ -1,7 +1,7 @@
 //! K1 设备发现：UDP 组播心跳（docs/impl/05 K1）。
 //!
 //! 协议：组播 239.255.42.98:49800，每 1s 发送 JSON 心跳
-//! `{device_id, device_name, pubkey_fingerprint, tcp_port, caps, seq}`；
+//! `{device_id, device_name, pubkey_fingerprint, tcp_port, sync_port, caps, seq}`；
 //! 5s 未收到 → 判离线；同 device_id 以 seq（unix_ms）最新为准。
 //! seq 用 unix 毫秒：服务重启后单调不减，天然防重放误拒。
 //!
@@ -26,6 +26,14 @@ use host_core::ports::ScreenRect;
 pub const MULTICAST_V4: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 98);
 /// 默认心跳/监听端口
 pub const DEFAULT_PORT: u16 = 49800;
+/// 对端**未宣告** sync 端口时按此端口组合地址（09 §10.2 T-B5-7）。
+///
+/// 值与 `sync_core::DEFAULT_SYNC_PORT` 同：这是"两端同默认端口"的既有运维约定，
+/// 不是从谁那里读来的。为什么不读：依赖方向上 kvm-core 与 sync-core 互不相识
+/// （sync 不 import kvm，kvm 也不 import sync），为一枚常量开一条依赖边是把耦合
+/// 写进 Cargo.toml。猜错的后果是可恢复的：拨不通会记 `last_error`，不静默、不假成功。
+/// 等值由 `src-tauri/src/state.rs` 的装配测试钉住（那一层同时看得见两枚常量）。
+pub const DEFAULT_SYNC_PORT: u16 = 49820;
 
 /// 心跳载荷（线格式）
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +49,11 @@ pub struct Heartbeat {
     /// `default` 兼容旧端：不参与边缘切换时保持 0
     #[serde(default)]
     pub screen: ScreenRect,
+    /// 本机 SYNC 监听端口（09 §10.2 T-B5-7：免手输地址的事实源）；
+    /// **0 = 旧端未宣告**（`serde(default)` ⇒ 旧包读成新端得 0、新包读进旧端忽略该键，
+    /// 双向兼容，无版本协商面）
+    #[serde(default)]
+    pub sync_port: u16,
 }
 
 /// 已发现的邻居设备
@@ -55,6 +68,25 @@ pub struct PeerInfo {
     pub addr: SocketAddr,
     /// 对端虚拟桌面矩形（K7 边缘回移换算用；旧端心跳无此字段则为 0）
     pub screen: ScreenRect,
+    /// 对端宣告的 SYNC 端口（0 = 未宣告；见 `sync_addr`）
+    pub sync_port: u16,
+}
+
+impl PeerInfo {
+    /// 该设备的 sync 拨号地址：IP 取心跳来源（**运行态，永不写进 pairs.json**），
+    /// 端口优先用宣告值，未宣告时回落 [`DEFAULT_SYNC_PORT`]。
+    pub fn sync_addr(&self) -> String {
+        let port = if self.sync_port > 0 {
+            self.sync_port
+        } else {
+            DEFAULT_SYNC_PORT
+        };
+        // IPv6 来源必须带方括号，否则 "fe80::1:49820" 这种串没法反解
+        match self.addr.ip() {
+            std::net::IpAddr::V6(v6) => format!("[{v6}]:{port}"),
+            other => format!("{other}:{port}"),
+        }
+    }
 }
 
 /// 发现层事件（模块层转 EventBus / UI）
@@ -90,6 +122,8 @@ pub struct OwnIdentity {
     pub caps: Vec<String>,
     /// 本机虚拟桌面矩形（随心跳广播；K7 边缘切换用）
     pub screen: ScreenRect,
+    /// 本机 SYNC 监听端口（随心跳广播；0 = 本端不供同步 ⇒ 对端按未宣告处理）
+    pub sync_port: u16,
 }
 
 struct PeerEntry {
@@ -181,6 +215,7 @@ impl DiscoveryService {
                     caps: sender_self.own.caps.clone(),
                     seq: seq.wrapping_add(1),
                     screen: sender_self.own.screen,
+                    sync_port: sender_self.own.sync_port,
                 };
                 seq = hb.seq;
                 let payload = serde_json::to_vec(&hb).unwrap_or_default();
@@ -257,6 +292,7 @@ impl DiscoveryService {
                 caps: hb.caps,
                 addr: src,
                 screen: hb.screen,
+                sync_port: hb.sync_port,
             };
             peers.insert(
                 hb.device_id,
@@ -345,6 +381,7 @@ mod tests {
                 w: 1920,
                 h: 1080,
             },
+            sync_port: DEFAULT_SYNC_PORT,
         }
     }
 
@@ -401,6 +438,7 @@ mod tests {
             caps: vec![],
             addr: format!("127.0.0.1:{port}").parse().unwrap(),
             screen: ScreenRect::default(),
+            sync_port: 0,
         };
         svc_a2.on_datagram(
             &serde_json::to_vec(&Heartbeat {
@@ -411,6 +449,7 @@ mod tests {
                 caps: vec![],
                 seq: unix_ms(),
                 screen: ScreenRect::default(),
+                sync_port: 0,
             })
             .unwrap(),
             fake.addr,
@@ -440,6 +479,7 @@ mod tests {
             caps: vec![],
             seq: 200,
             screen: ScreenRect::default(),
+            sync_port: 0,
         };
         let src: SocketAddr = "127.0.0.1:1000".parse().unwrap();
         svc.on_datagram(&serde_json::to_vec(&hb).unwrap(), src);
@@ -449,5 +489,81 @@ mod tests {
         stale.device_name = "old".into();
         svc.on_datagram(&serde_json::to_vec(&stale).unwrap(), src);
         assert_eq!(svc.peer("device-x").unwrap().device_name, "x");
+    }
+
+    /// 心跳线格式向后兼容：旧端样本（无 sync_port 键）解码为 0，新包照常读出。
+    /// 断言用**手写 JSON 字面量**而非"序列化后再删键"——后者测的是 serde 的
+    /// skip 能力，测不到"线上真的见过没有这个键的字节"这件事。
+    #[test]
+    #[allow(non_snake_case)]
+    fn heartbeat_absentSyncPort_decodesAsZero() {
+        let old_wire = br#"{"device_id":"a","device_name":"a","pubkey_fingerprint":"f",
+            "tcp_port":49600,"caps":["input"],"seq":7,"screen":{"x":0,"y":0,"w":0,"h":0}}"#;
+        let old: Heartbeat = serde_json::from_slice(old_wire).expect("旧端心跳样本必须可解");
+        assert_eq!(
+            old.sync_port, 0,
+            "缺键必须解码为 0（=未宣告），不能是随机值"
+        );
+
+        let new_wire = serde_json::to_vec(&Heartbeat {
+            device_id: "b".into(),
+            device_name: "b".into(),
+            pubkey_fingerprint: "f".into(),
+            tcp_port: 49600,
+            caps: vec![],
+            seq: 8,
+            screen: ScreenRect::default(),
+            sync_port: 49821,
+        })
+        .unwrap();
+        let new: Heartbeat = serde_json::from_slice(&new_wire).expect("新端心跳可解");
+        assert_eq!(new.sync_port, 49821);
+        // 反向兼容：旧端读新包＝键在但没人看，serde 默认忽略未知字段 ⇒ 不炸
+        #[derive(Deserialize)]
+        struct OldPeerView {
+            #[allow(dead_code)]
+            device_id: String,
+        }
+        let viewed: OldPeerView =
+            serde_json::from_slice(&new_wire).expect("旧端视图读新包必须不失败");
+        assert_eq!(viewed.device_id, "b");
+    }
+
+    /// 地址组合：优先用宣告端口；宣告 0 时回落默认端口（正反两臂）
+    #[test]
+    #[allow(non_snake_case)]
+    fn peerInfo_syncAddr_prefersAdvertisedPort() {
+        let peer = |addr: &str, sync_port: u16| PeerInfo {
+            device_id: "d".into(),
+            device_name: "d".into(),
+            pubkey_fingerprint: String::new(),
+            tcp_port: 1,
+            caps: vec![],
+            addr: addr.parse().unwrap(),
+            screen: ScreenRect::default(),
+            sync_port,
+        };
+        assert_eq!(
+            peer("192.168.1.10:49911", 49821).sync_addr(),
+            "192.168.1.10:49821"
+        );
+        assert_eq!(
+            peer("192.168.1.10:49911", 0).sync_addr(),
+            format!("192.168.1.10:{DEFAULT_SYNC_PORT}")
+        );
+        // IPv6 链路本地必须带方括号，否则端口与地址无法反解
+        assert_eq!(
+            peer("[fe80::1]:49911", 0).sync_addr(),
+            format!("[fe80::1]:{DEFAULT_SYNC_PORT}")
+        );
+        assert_eq!(
+            peer("[fe80::1]:49911", 49822).sync_addr(),
+            "[fe80::1]:49822"
+        );
+        // 宣告端口是从心跳里读的对端事实，不是本机配置：IP 随来源而变
+        assert_ne!(
+            peer("10.0.0.5:1", 49821).sync_addr(),
+            peer("10.0.0.6:1", 49821).sync_addr()
+        );
     }
 }

@@ -39,7 +39,12 @@ pub async fn sync_status(state: State<'_, HostState>) -> Result<SyncStatusDto, A
         .map_err(sync_err)
 }
 
-/// 立即与指定设备同步（addr 如 "192.168.1.10:49820"；端口默认 DEFAULT_SYNC_PORT）
+/// 立即与指定设备同步（`addr` 省略＝问发现层要地址；09 §10.2 T-B5-7 免手输）
+///
+/// `Option` 的两臂语义不同，不是"可选参数"的语法糖：
+/// `Some` 原样直连（「高级」手输，旧能力零退化，且**优先于**解析器），
+/// `None` 走三级解析（发现层 → 最近成功地址 → 如实失败）。
+/// 解析不到时错误弹回，绝不退化成"拿默认地址试一把"。
 ///
 /// 本命令保持 `async`：会话本体是 await 网络 I/O，整段塞进 `spawn_blocking` 不可表达。
 /// ⑬ 的适用面在这里只剩"会话内的 op_log 读写"，其量级按批封顶（`BATCH_LIMIT`），
@@ -48,12 +53,12 @@ pub async fn sync_status(state: State<'_, HostState>) -> Result<SyncStatusDto, A
 #[tauri::command]
 pub async fn sync_now(
     device_id: String,
-    addr: String,
+    addr: Option<String>,
     state: State<'_, HostState>,
 ) -> Result<sync_core::SyncSummary, AppError> {
     state
         .sync
-        .sync_with(&device_id, &addr)
+        .sync_device(&device_id, addr)
         .await
         .map_err(sync_err)
 }

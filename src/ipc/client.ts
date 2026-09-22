@@ -1923,9 +1923,13 @@ export interface SyncPeerStatusDto {
   last_sync_ms: number;
   /** 最近一轮的失败原因（与流水行 `error` 逐字相同） */
   last_error: string | null;
-  /** 对端 sync 地址：T-B5-7（心跳宣告）落地前恒 null ⇒ 面板不渲染此列 */
+  /**
+   * 对端 sync 地址（T-B5-7）：发现层心跳给出的拨号地址；null = 当前不在邻居表里。
+   * **读之前先看 `SyncStatusDto.addr_source`**——解析器没接线时它同样是 null，那是
+   * "没查过"而不是"查了说没有"，面板据此整列不渲染。
+   */
   sync_addr: string | null;
-  /** 发现层在线：同上无事实源，面板不得据此写"离线" */
+  /** 发现层在线（等价于 `sync_addr !== null`；单列出来是为了让面板不必反推语义） */
   online: boolean;
 }
 
@@ -1945,6 +1949,12 @@ export interface SyncStatusDto {
   paused: boolean;
   /** 自动同步开关现值（T-B5-6）：内核运行态，不是盘上的值——被拒的坏值进不了这里 */
   auto_sync: boolean;
+  /**
+   * 本机是否接了发现层地址解析器（T-B5-7 **第十键**）：`peers[].sync_addr/online` 的可信位。
+   * false 时那两列全是"没查过" ⇒ 在线/离线整列不渲染（一个缺席的列不会被读成任何东西，
+   * 一列空值却会被读成"都没地址"）。
+   */
+  addr_source: boolean;
   peers: SyncPeerStatusDto[];
 }
 
@@ -1982,8 +1992,13 @@ export function syncPeers(): Promise<PairedPeerDto[]> {
 export function syncStatus(): Promise<SyncStatusDto> {
   return invoke("sync_status");
 }
-export function syncNow(deviceId: string, addr: string): Promise<SyncSummaryDto> {
-  return invoke("sync_now", { deviceId, addr });
+/**
+ * 立即与指定设备同步（T-B5-7 起地址可省）：
+ * - 省略/`null` ⇒ 内核按"发现层 → 最近一次成功地址"解析，解析不到就如实报错（绝不猜地址）；
+ * - 传值 ⇒ 原样直连（面板「高级」手输，旧能力零退化，且优先于解析器）。
+ */
+export function syncNow(deviceId: string, addr?: string | null): Promise<SyncSummaryDto> {
+  return invoke("sync_now", { deviceId, addr: addr ?? null });
 }
 export function syncConflictsGet(limit: number, offset: number): Promise<SyncConflictDto[]> {
   return invoke("sync_conflicts_get", { limit, offset });

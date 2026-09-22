@@ -277,6 +277,15 @@ impl HostState {
         config.register_schema("sync", sync.config_schema());
         registry.register(sync.clone())?;
 
+        // ---- T-B5-7 免手输地址：两颗方向相反的螺丝（都必须在模块 init 之前）----
+        // ① 宣告：sync 端口的事实源在 sync-core，kvm 只是搬运工。读 `port()` 现值而不是
+        //    用常量——常量会过期，现值不会；宣告一个本机没在听的口，等于让邻居白拨。
+        kvm.set_sync_port(sync.port());
+        // ② 解析：sync 需要地址时问发现层。sync-core 不 import kvm-core，桥就搭在这层。
+        //    没搭桥的后果不是崩溃而是退化（addr_source=false ⇒ 面板整列不显在线/离线），
+        //    所以这里不需要"装配失败即启动失败"的粗门。
+        sync.set_addr_resolver(Arc::new(KvmPeerAddrResolver { kvm: kvm.clone() }));
+
         Ok(Self {
             bus,
             ports,
@@ -499,5 +508,113 @@ impl sync_core::ChangeApplier for NotesApplier {
         // 已不存在视为成功（幂等）
         let _ = lib.delete(entity_id);
         Ok(())
+    }
+}
+
+/// SYNC ← 发现层的地址桥（09 §10.2 T-B5-7）。
+///
+/// 方向：sync 只问"这台设备的拨号地址是什么"，不认识 kvm；kvm 只回答"发现表里有没有
+/// 它"，不认识 sync。两边因此可以各测各的，桥本身薄到只值一次查表。
+/// 答不出来（发现层未就绪 / 设备离线 / 未配对）一律 `None`＝"不知道"，
+/// 由 sync-core 的分派口决定下一步是回落还是如实失败——这里绝不塞占位地址。
+struct KvmPeerAddrResolver {
+    kvm: Arc<KvmModule>,
+}
+
+impl sync_core::PeerAddrResolver for KvmPeerAddrResolver {
+    fn resolve(&self, device_id: &str) -> Option<String> {
+        let Ok(peers) = self.kvm.discovered_peers() else {
+            // 发现服务还没装配（KVM 未 init / 已 stop）：答"不知道"，让上层回落或如实失败
+            return None;
+        };
+        sync_addr_of(&peers, device_id)
+    }
+}
+
+/// 从邻居快照里取某设备的 sync 地址（纯函数：桥的形状可以脱离装配单测）
+fn sync_addr_of(peers: &[kvm_core::PeerInfo], device_id: &str) -> Option<String> {
+    peers
+        .iter()
+        .find(|p| p.device_id == device_id)
+        .map(|p| p.sync_addr())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use host_core::ports::ScreenRect;
+    use sync_core::PeerAddrResolver;
+
+    fn peer(device_id: &str, ip: &str, sync_port: u16) -> kvm_core::PeerInfo {
+        kvm_core::PeerInfo {
+            device_id: device_id.into(),
+            device_name: device_id.into(),
+            pubkey_fingerprint: String::new(),
+            tcp_port: 49600,
+            caps: vec![],
+            addr: format!("{ip}:49601").parse().unwrap(),
+            screen: ScreenRect::default(),
+            sync_port,
+        }
+    }
+
+    /// 两枚同名常量必须相等（09 §10.2 T-B5-7）：kvm-core 不 import sync-core，
+    /// 所以"对端未宣告端口时按哪个口试"这件事在两边各写了一份。写死两次是没办法的
+    /// 架构代价，等值漂移则是没人报警的 bug——故在**同时看得见两枚常量**的这一层钉住。
+    #[test]
+    #[allow(non_snake_case)]
+    fn syncDefaultPort_agreesBetweenKvmAndSync() {
+        assert_eq!(
+            kvm_core::discovery::DEFAULT_SYNC_PORT,
+            sync_core::DEFAULT_SYNC_PORT,
+            "发现层的回落端口与 sync 的默认监听端口飘了：邻居表里未宣告端口的设备会被拨向错误的口"
+        );
+    }
+
+    /// 桥的查表形状：命中给 sync_addr、未命中给 None（未宣告端口时按默认口组合）
+    #[test]
+    #[allow(non_snake_case)]
+    fn kvmAddrBridge_hitMissFromDiscoveryTable() {
+        let table = vec![
+            peer("laptop-b", "192.168.1.12", 49821),
+            peer("pc-c", "192.168.1.13", 0),
+        ];
+        assert_eq!(
+            sync_addr_of(&table, "laptop-b").as_deref(),
+            Some("192.168.1.12:49821")
+        );
+        assert_eq!(
+            sync_addr_of(&table, "pc-c").as_deref(),
+            Some("192.168.1.13:49820"),
+            "旧端未宣告端口 ⇒ 按两端同默认口的运维约定组合，猜错会连接失败并记 last_error（不静默）"
+        );
+        assert_eq!(
+            sync_addr_of(&table, "phone-d"),
+            None,
+            "不在表里＝不知道，不是 127.0.0.1"
+        );
+        assert_eq!(sync_addr_of(&[], "laptop-b"), None, "空表同样如实");
+    }
+
+    /// 发现层未就绪（KVM 模块 init 之前）：桥必须答 None 而不是 panic／占位地址
+    #[test]
+    #[allow(non_snake_case)]
+    fn kvmAddrBridge_notReadyYieldsNone() {
+        let kvm = Arc::new(KvmModule::new());
+        let bridge = KvmPeerAddrResolver { kvm: kvm.clone() };
+        assert_eq!(bridge.resolve("whatever"), None);
+        // 同一方向的另一颗螺丝：端口注入读的是 sync-core 现值，不是 kvm 自己的猜测
+        let sync = Arc::new(sync_core::SyncModule::new(
+            &std::env::temp_dir().join(format!("nf_state_port_{}", std::process::id())),
+        ));
+        assert_eq!(sync.port(), sync_core::DEFAULT_SYNC_PORT);
+        sync.set_port(49860);
+        assert_eq!(
+            sync.port(),
+            49860,
+            "端口注入后宣告必须跟着现值走（常量会过期，现值不会）"
+        );
+        kvm.set_sync_port(sync.port());
+        // 注入口本身可调用即合规（宣告真值走 kvm-core 的单测），这里只锁装配方向
     }
 }

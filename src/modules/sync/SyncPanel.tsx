@@ -33,8 +33,10 @@ import ConflictsSection from "./ConflictsSection";
  * - 冲突：LWW 自动解 + sync.conflict 事件通知
  * - 监听真态来自 `status.listening`（T-B5-4）：**不是**端口号在场的同义词。修前
  *   `start()` 无条件置 Running、面板直读 `status.port` ⇒ 端口被占时照样显示"监听 :49820"。
- *   `sync_addr` / `online` 两字段随形状先落位而恒 None/false（真值归 T-B5-7），
- *   因此这里刻意不据它们渲染任何文案——没有事实源就没有字。
+ * - 地址不再手输（T-B5-7）：对端 sync 端口由心跳宣告，内核按"发现层 → 最近一次成功地址"
+ *   解析；面板每行显示在线态与拨号地址，手输降级为行内「高级」。
+ *   但 `addr_source=false`（本机没接发现层解析器）时这两列**整列不渲染**——那时
+ *   `online:false` 的含义是"没查过"，把它显示成"离线"就是撒谎（与 T-B5-4 同一纪律）。
  * - 两枚出账开关（T-B5-6）：`auto_sync` 是配置（走 `host_config_*` 真源，静默窗到期自动
  *   出账），`paused` 是运行态位（走 `sync_set_paused`）。两者都**写完回读内核**再显示，
  *   面板不按"我刚写了什么"下结论——被拒的配置值进得了盘也进不了运行态。
@@ -78,7 +80,10 @@ export default function SyncPanel() {
   const styles = useStyles();
   const [peers, setPeers] = useState<PairedPeerDto[]>([]);
   const [status, setStatus] = useState<SyncStatusDto | null>(null);
-  const [addr, setAddr] = useState("127.0.0.1:49820");
+  /** 行内「高级」手输的地址（按设备分桶：一台填错不该污染另一台） */
+  const [manualAddr, setManualAddr] = useState<Record<string, string>>({});
+  /** 哪一行的手输框展开着（null = 全收起；默认收起＝手输是例外不是常规路径） */
+  const [advancedId, setAdvancedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [autoBusy, setAutoBusy] = useState(false);
   const [error, setError] = useState("");
@@ -117,12 +122,20 @@ export default function SyncPanel() {
     return s;
   };
 
+  /**
+   * 立即同步（T-B5-7）：地址交给内核解析，面板只在用户**显式**填了「高级」时才带地址。
+   *
+   * 空串一律折成 `null`——把空串传下去会被当成"手输了一个地址"，解析分支就此绕空。
+   * 成功文案只报这次会话的账，不报"发到了哪个地址"：`SyncSummary` 里没有这一项，
+   * 面板要显示就得自己再解析一遍，那就是把内核的决定在前端重做（两处会漂移）。
+   */
   const sync = async (deviceId: string) => {
     setBusy(true);
     setError("");
     setNotice("");
     try {
-      const s = await syncNow(deviceId, addr.trim());
+      const manual = manualAddr[deviceId]?.trim();
+      const s = await syncNow(deviceId, manual ? manual : null);
       setNotice(
         `同步完成：推送 ${s.pushed} · 拉取应用 ${s.pulled_applied} · 丢弃 ${s.pulled_lost} · 冲突 ${s.conflicts}`,
       );
@@ -131,6 +144,23 @@ export default function SyncPanel() {
       setError(parseAppError(e)?.data.message ?? String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * 行内「高级」开关：收起时**一并撤销**该行手输的地址。
+   * 一个看不见却仍在生效的地址比没有地址更难查——收起后就该回到"由内核解析"那个状态。
+   */
+  const toggleAdvanced = (deviceId: string) => {
+    if (advancedId === deviceId) {
+      setAdvancedId(null);
+      setManualAddr((m) => {
+        const next = { ...m };
+        delete next[deviceId];
+        return next;
+      });
+    } else {
+      setAdvancedId(deviceId);
     }
   };
 
@@ -252,16 +282,10 @@ export default function SyncPanel() {
             {status?.paused ? "恢复自动出账" : "暂停自动出账"}
           </Button>
         </div>
-        <div className={styles.row}>
-          <Input
-            size="small"
-            value={addr}
-            onChange={(_, d) => setAddr(d.value)}
-            placeholder="对端地址 host:port"
-            style={{ minWidth: "220px" }}
-          />
-          <Text className={styles.muted}>对端地址（局域网 IP + 端口）；两端须已通过「键鼠共享」配对。</Text>
-        </div>
+        <Text className={styles.muted}>
+          对端地址由局域网发现层给出（心跳宣告各自的同步端口），无需手输；两端须已通过
+          「键鼠共享」配对。个别设备不在同一网段时，在该设备行展开「高级」手输 host:port。
+        </Text>
       </Section>
 
       <Section
@@ -293,7 +317,22 @@ export default function SyncPanel() {
                       {p.device_name}
                     </Text>
                     <Text className={styles.mono}>{p.fingerprint}</Text>
+                    {/* `addr_source` 是这一列的总闸：解析器没接线时 online=false 的意思是
+                        "本机没查过"，渲染成"离线"就是无中生有——整列直接不出现。 */}
+                    {status?.addr_source &&
+                      (prog?.sync_addr ? (
+                        <Badge appearance="tint" color="success">
+                          在线
+                        </Badge>
+                      ) : (
+                        <Badge appearance="outline" color="subtle">
+                          离线
+                        </Badge>
+                      ))}
                   </div>
+                  {status?.addr_source && !!prog?.sync_addr && (
+                    <Text className={styles.mono}>拨号地址 {prog.sync_addr}</Text>
+                  )}
                   <Text className={styles.muted}>
                     配对于 {new Date(p.paired_at).toLocaleString()}
                     {prog &&
@@ -307,15 +346,41 @@ export default function SyncPanel() {
                   {prog?.last_error && (
                     <InlineError text={`上次同步失败：${prog.last_error}`} />
                   )}
+                  {advancedId === p.device_id && (
+                    <div className={styles.row}>
+                      <Input
+                        size="small"
+                        value={manualAddr[p.device_id] ?? ""}
+                        onChange={(_, d) =>
+                          setManualAddr((m) => ({ ...m, [p.device_id]: d.value }))
+                        }
+                        placeholder={prog?.sync_addr ?? "host:port"}
+                        style={{ minWidth: "220px" }}
+                      />
+                      <Text className={styles.muted}>
+                        手输仅在跨网段/发现层看不到对端时才需要；填了就以这里为准，
+                        留空则仍由内核解析。
+                      </Text>
+                    </div>
+                  )}
                 </div>
-                <Button
-                  size="small"
-                  appearance="primary"
-                  disabled={busy}
-                  onClick={() => void sync(p.device_id)}
-                >
-                  立即同步
-                </Button>
+                <div className={styles.row}>
+                  <Button
+                    size="small"
+                    appearance="primary"
+                    disabled={busy}
+                    onClick={() => void sync(p.device_id)}
+                  >
+                    立即同步
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    onClick={() => toggleAdvanced(p.device_id)}
+                  >
+                    {advancedId === p.device_id ? "收起高级" : "高级"}
+                  </Button>
+                </div>
               </div>
             );
           })

@@ -17,8 +17,8 @@ use host_core::ports::Ports;
 use sync_core::engine::ChangeApplier;
 use sync_core::oplog::{ROLE_INITIATOR, ROLE_RESPONDER};
 use sync_core::{
-    is_sync_entity, OpEntry, OpLog, SyncEngine, SyncError, SyncModule, SyncRun, ENTITY_NOTE,
-    SYNC_ENTITIES,
+    is_sync_entity, OpEntry, OpLog, PeerAddrResolver, SyncEngine, SyncError, SyncModule, SyncRun,
+    ENTITY_NOTE, SYNC_ENTITIES,
 };
 
 /// 回环端口（与 KVM 49800/49801、K9 测试 49810–49812 错开；固定端口进程内单用）
@@ -37,6 +37,10 @@ const VAULT_NEVER_PORT: u16 = 49842;
 /// T-B5-6 自动同步两枚（与上方各段错开）
 const NOADDR_PORT: u16 = 49843;
 const PAUSE_PORT: u16 = 49844;
+/// T-B5-7 免手输地址三枚
+const RESOLVE_PORT: u16 = 49845;
+const MANUAL_PORT: u16 = 49846;
+const GHOST_PORT: u16 = 49847;
 /// 无人监听的端口（connect 立刻被拒，用来造"注定失败的一轮"）
 const DEAD_PORT: u16 = 49899;
 
@@ -85,6 +89,46 @@ fn temp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nf_sync_loop_{tag}_{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// 假发现层（T-B5-7）：一台"邻居表"，问得到就有地址，问不到就是 None。
+///
+/// 生产里这张表是 kvm 的 `discovered_peers()`；测试替身刻意只做一件事——按 device_id
+/// 回答地址，因为本行的红线正是"回答不出时必须失败"，任何"顺带兜个底"的实现
+/// 在这里都会让测试变成测兜底。
+#[derive(Default)]
+struct FixedResolver {
+    table: Mutex<std::collections::HashMap<String, String>>,
+}
+impl FixedResolver {
+    fn add(&self, device_id: &str, addr: &str) {
+        self.table
+            .lock()
+            .insert(device_id.to_string(), addr.to_string());
+    }
+}
+impl PeerAddrResolver for FixedResolver {
+    fn resolve(&self, device_id: &str) -> Option<String> {
+        self.table.lock().get(device_id).cloned()
+    }
+}
+
+/// 造一条"没配过对也没同步过"的邻居记录：设备名可控，用于断错误文案的形状
+fn ghost_peer(device_id: &str, device_name: &str) -> PairedPeer {
+    PairedPeer {
+        device_id: device_id.to_string(),
+        device_name: device_name.to_string(),
+        fingerprint: "00".repeat(16),
+        pubkey_b64: String::new(),
+        paired_at: 0,
+    }
+}
+
+/// 串起来看是否含 IPv4 样式的地址字面量（`数字.数字` 片段即算）——红线断言用
+fn contains_ip_like(s: &str) -> bool {
+    s.as_bytes()
+        .windows(3)
+        .any(|w| w[0].is_ascii_digit() && w[1] == b'.' && w[2].is_ascii_digit())
 }
 
 /// 装配一台可同步的实例：预置身份 + 互配记录 → init + start；返回真实身份供配对
@@ -726,6 +770,7 @@ async fn status_shapeIsTyped_notRawJson() {
         .collect();
     keys.sort();
     let expected = [
+        "addr_source",
         "auto_sync",
         "last_bind_error",
         "listening",
@@ -767,6 +812,11 @@ async fn status_shapeIsTyped_notRawJson() {
         peer_keys, expected_peer,
         "peer 键集合恰等于 PeerStatus 字段集"
     );
+    // T-B5-7 之后这两枚**有事实源了**，但本测的 `setup` 不接解析器 ⇒ 它们仍是 null/false，
+    // 含义从"无从得知"变成"这一台没查过"——所以必须连带断 `addr_source==false`，
+    // 否则这两个空值读起来像是在断言"对端不在线"（那才是撒谎）。
+    // 接了解析器时的真值面由 `syncNow_resolverHit_syncsWithoutAddr` 钉。
+    assert_eq!(value["addr_source"], json!(false));
     assert_eq!(value["peers"][0]["sync_addr"], serde_json::Value::Null);
     assert_eq!(value["peers"][0]["online"], json!(false));
     assert_eq!(
@@ -976,4 +1026,136 @@ async fn syncAuto_pausedSkipsAndReports() {
         log_a.runs(50).unwrap().len() > rows0,
         "这一轮必须在流水里留痕（不是悄悄同步完了）"
     );
+}
+
+/// 任务书（09 §10.2 T-B5-7）字面测试名：发现层命中即可**一个地址都不填**同步成功
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncNow_resolverHit_syncsWithoutAddr() {
+    let c = paired("resolve_hit", RESOLVE_PORT);
+    wait_port(RESOLVE_PORT).await;
+    let resolver = Arc::new(FixedResolver::default());
+    resolver.add(&c.b_id, &addr(RESOLVE_PORT));
+    c.a.set_addr_resolver(resolver);
+
+    // 接线这件事本身在状态读面上看得见：面板据此决定敢不敢说"在线"
+    let st = c.a.status().unwrap();
+    assert!(st.addr_source, "解析器已装配 ⇒ addr_source 必须翻真");
+    let row = st
+        .peers
+        .iter()
+        .find(|x| x.device_id == c.b_id)
+        .expect("配对设备在状态读面上");
+    assert_eq!(
+        row.sync_addr.as_deref(),
+        Some(addr(RESOLVE_PORT).as_str()),
+        "行上的地址就是解析器给的那个（面板不再需要用户心算 IP）"
+    );
+    assert!(row.online, "命中＝在线");
+    assert!(
+        c.a.peer_addr(&c.b_id).is_none(),
+        "回落位此刻仍为空 ⇒ 下面的命中只可能来自发现层，不是走了旧地址"
+    );
+
+    c.a_store.put("r.md", "via discovery");
+    c.a.record_change(ENTITY_NOTE, "r.md", "write").unwrap();
+    let s =
+        c.a.sync_device(&c.b_id, None)
+            .await
+            .expect("免手输：addr 传 None 也要走得通");
+    assert!(s.pushed >= 1, "推出去的条数不为零才算真会话，实际 {s:?}");
+    assert_eq!(c.b_store.get("r.md").unwrap()["content"], "via discovery");
+
+    // 自动到期走的是同一个分派口：命中 ⇒ 出账（T-B5-6 那会儿这里只能记一行跳过）
+    c.a_store.put("r.md", "second");
+    c.a.record_change(ENTITY_NOTE, "r.md", "write").unwrap();
+    c.a.sync_due_peers().await.unwrap();
+    assert_eq!(
+        c.b_store.get("r.md").unwrap()["content"],
+        "second",
+        "发现层命中后自动轮也该走得动——两处必须同一套优先级"
+    );
+}
+
+/// 任务书（09 §10.2 T-B5-7）字面测试名 · **红线**：三级皆空时如实失败，
+/// 错误里既没有 127.0.0.1 也没有任何地址字面量（猜一个地址发给邻居，比失败更坏）
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncNow_noCandidate_honestErrNoGuess() {
+    let c = paired("no_candidate", GHOST_PORT);
+    c.a.set_addr_resolver(Arc::new(FixedResolver::default())); // 空表：谁都不在线
+    c.a.register_peer(ghost_peer("phone-x", "客厅手机"));
+
+    let err =
+        c.a.sync_device("phone-x", None)
+            .await
+            .expect_err("无地址事实源必须弹回，不许'试一把'");
+    let msg = err.to_string();
+    assert!(msg.contains("无可用地址"), "要说清拒的是什么，实际：{msg}");
+    assert!(msg.contains("手输"), "要指路下一步，实际：{msg}");
+    assert!(
+        msg.contains("客厅手机"),
+        "要点名是哪台设备（复数邻居时'没地址'三个字不够定位），实际：{msg}"
+    );
+    assert!(!msg.contains("127.0.0.1"), "绝不回退本机回环：{msg}");
+    assert!(
+        !contains_ip_like(&msg),
+        "错误消息里不该出现任何地址形状：{msg}"
+    );
+
+    // 没开会话就不许留下任何"看起来同步过"的痕迹
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    assert_eq!(log_a.push_cursor("phone-x"), 0, "拒了就不推进游标");
+    assert!(
+        log_a.runs(10).unwrap().is_empty(),
+        "手动路径的失败直接弹回调用方，不另记一行'会话'——那行里既没推也没拉，\
+         活动页见了它只会以为真跑过一轮"
+    );
+    assert_eq!(c.b_store.len(), 0, "B 侧零改动");
+    // 同一读面上 addr_source 为真但设备不在表里：在线=false 是**查了**的结果
+    let st = c.a.status().unwrap();
+    assert!(st.addr_source);
+    let row = st.peers.iter().find(|x| x.device_id == "phone-x").unwrap();
+    assert!(
+        !row.online && row.sync_addr.is_none(),
+        "查了说没有＝可展示的诚实态"
+    );
+}
+
+/// 任务书（09 §10.2 T-B5-7）字面测试名：手输降级为「高级」，能力零退化，
+/// 且**优先级高于解析器**（用户显式填的那个说了算）
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncNow_manualAddr_stillWorks() {
+    let c = paired("manual_addr", MANUAL_PORT);
+    wait_port(MANUAL_PORT).await;
+    // 发现层说"这台不在"：手输仍须走通
+    let resolver = Arc::new(FixedResolver::default());
+    c.a.set_addr_resolver(resolver.clone());
+
+    c.a_store.put("m.md", "manual");
+    c.a.record_change(ENTITY_NOTE, "m.md", "write").unwrap();
+    let s =
+        c.a.sync_device(&c.b_id, Some(addr(MANUAL_PORT)))
+            .await
+            .expect("手输地址这条路是既有能力，本行只加不减");
+    assert!(s.pushed >= 1);
+    assert_eq!(c.b_store.get("m.md").unwrap()["content"], "manual");
+    assert!(
+        c.a.peer_addr(&c.b_id).is_some(),
+        "手输且真通了 ⇒ 记为回落位（下次发现层抽风时还有它兜着）"
+    );
+
+    // 优先级的正面证据：解析器给对地址，手输给一个必然拨不通的 ⇒ 必须失败
+    // （若手输被忽略，这一把会走解析器命中而"成功"，断言就此失去意义）
+    resolver.add(&c.b_id, &addr(MANUAL_PORT));
+    let err =
+        c.a.sync_device(&c.b_id, Some(addr(DEAD_PORT)))
+            .await
+            .expect_err("用户填的地址优先于发现层，被忽略就是替用户做了他没做的决定");
+    assert!(
+        !err.to_string().contains("无可用地址"),
+        "错的应当是'拨不通'，而不是'没地址'——后者说明手输的值根本没被用上：{err}"
+    );
+    assert!(c.b_store.get("m.md").unwrap()["content"] == "manual");
 }
