@@ -165,6 +165,12 @@ pub trait ClipboardPort: Port {
     fn read_text(&self) -> Option<String> {
         None
     }
+    /// 系统剪贴板上是否有**本应用**刚写入的来源标记（01§8-1 防循环第一道，
+    /// win 侧以自定义空格式 NexusForgeSelf 占位实现）。
+    /// 默认 false = 该端口无标记能力，调用方须回落回写时间窗这道保险。
+    fn has_self_write_marker(&self) -> bool {
+        false
+    }
 }
 
 /// 屏幕捕获（win-integration：Windows.Graphics.Capture，回退 PrintWindow）

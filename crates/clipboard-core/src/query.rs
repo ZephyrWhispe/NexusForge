@@ -94,9 +94,49 @@ fn strip_quotes(value: &str) -> &str {
         .trim()
 }
 
+/// 需要转义的正则元字符（与前端 `toLiteralRegex` 逐字符同表，见 queryEscapes 两侧对照测试）。
+const REGEX_META: [char; 14] = [
+    '\\', '^', '$', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|',
+];
+
+/// 字面量转正则（09 §8.2 T-B3-7「永不入库」）：把用户看到的原文变成只匹配它自身的模式。
+///
+/// 本函数与前端同名实现是**跨语言契约的两端**：设置卡里显示的那条规则必须就是实际生效的
+/// 那条，所以两侧各自实现、由两侧测试断言同一份期望字面串（任何一侧改动都会让另一侧的测试变红）。
+/// 刻意不加 `^…$` 锚：命中子串即算屏蔽——锚定会让"同一段内容换了个前后缀再来一次"静默漏过。
+pub fn to_literal_regex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if REGEX_META.contains(&ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
+
+    /// 「永不入库」生成的定串规则（09 §8.2 T-B3-7）：期望字面串与前端 `toLiteralRegex`
+    /// 的同名测试逐字符一致——两侧各持一份实现，靠同一份期望串钉住跨语言契约。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-7）字面测试名优先于 rustc 命名惯例
+    fn secretRow_neverStore_patternEscapesLiterals() {
+        let raw = "sk-abc.1(key)|x";
+        let pat = to_literal_regex(raw);
+        assert_eq!(pat, r"sk-abc\.1\(key\)\|x");
+        let re = Regex::new(&pat).expect("转义结果必须是合法正则");
+        assert!(re.is_match(raw), "转义后仍须命中原文自身（正对照）");
+        // 不误伤：元字符位换成任意其它字符都不得命中
+        assert!(!re.is_match("sk-abcX1keyxx|x"));
+        assert!(!re.is_match("sk-abc.1keyxx"));
+        assert!(!re.is_match("sk-abc.1(key)x"));
+        // 空串与纯中文原样通过（无元字符即不插反斜杠）
+        assert_eq!(to_literal_regex("验证码 123456"), "验证码 123456");
+    }
 
     #[test]
     #[allow(non_snake_case)] // 本模块命名随任务书（09 §8.2 T-B3-6）风格

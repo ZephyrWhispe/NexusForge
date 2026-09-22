@@ -1,8 +1,9 @@
 //! C3 捕获管线（docs/impl/02 C3）
 //!
 //! Port 回调线程只入队；worker（spawn_blocking 常驻）执行：
-//! 过滤(黑名单) → secret 检测 → 分类 → 加密/入库 → 发事件。
-//! 回写窗口（500ms）内到达的读取事件直接丢弃（防剪贴板循环）。
+//! 过滤(黑名单/内容屏蔽) → secret 检测 → 分类 → 加密/入库 → 发事件。
+//! 回写窗口（500ms）内到达的读取事件直接丢弃（防剪贴板循环），
+//! 窗口之外另有自写来源标记作第一道（01§8-1，见 should_skip_capture）。
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -13,6 +14,7 @@ use base64::Engine;
 use host_core::error::AppError;
 use host_core::events::{merged_window, Event, EventBus};
 use host_core::ports::{ClipboardPort, CryptoPort};
+use regex::Regex;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::classifier::Classifier;
@@ -22,6 +24,42 @@ use crate::types::ClipboardConfig;
 
 /// 回写防循环窗口（docs/impl/02 C3 ③）
 pub const WRITE_BACK_WINDOW: Duration = Duration::from_millis(500);
+
+/// 回调侧丢弃判定（01§8-1 两道防循环合一，便于四格真值表测试）：
+/// 自写来源标记是**第一道**（跨进程可读、不受时钟抖动影响），500ms 回写窗口是**第二道**——
+/// 标记活到下一次写入为止，中途可能被外部程序覆盖，故时间窗不能删。
+pub fn should_skip_capture(marker_present: bool, within_window: bool) -> bool {
+    marker_present || within_window
+}
+
+/// 内容屏蔽判定（01§7.2-①）：命中返回该 pattern 原文（UI 与日志据此指真因），未命中 None。
+///
+/// 逐条现编不缓存：规则以十计、捕获以秒计，缓存要引入失效时机而收益为零。
+/// 编译失败的正则**只作废自己**并 warn 点名序号——一条手打坏的规则不得吞掉整个捕获面，
+/// 那会让用户以为"屏蔽生效"而内容照旧入库（真值表见 tests）。
+pub fn block_reason(cfg: &ClipboardConfig, text: &str) -> Option<String> {
+    cfg.block_patterns
+        .iter()
+        .enumerate()
+        .find_map(|(idx, pat)| match Regex::new(pat) {
+            Ok(re) => {
+                if re.is_match(text) {
+                    Some(pat.clone())
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    index = idx,
+                    pattern = %pat,
+                    error = %e,
+                    "内容屏蔽规则正则编译失败，本条跳过（其余规则照常生效）"
+                );
+                None
+            }
+        })
+}
 
 /// worker 停机检查节拍：无事件时每 100ms 复查取消标志
 const WORKER_TICK: Duration = Duration::from_millis(100);
@@ -42,6 +80,8 @@ pub struct CapturePipeline {
     paused: Arc<AtomicBool>,
     /// 暂停期间累计跳过次数（恢复后仍保留，UI 如实显示）
     skipped: AtomicU32,
+    /// 命中内容屏蔽而丢弃的次数（与 skipped 分账：暂停与屏蔽是两回事）
+    blocked: AtomicU32,
 }
 
 /// 管线运行句柄（S3）：`shutdown` 置取消位使 worker 线程退出并释放 store，
@@ -106,6 +146,7 @@ impl CapturePipeline {
             insert_counter: std::sync::atomic::AtomicU32::new(0),
             paused,
             skipped: AtomicU32::new(0),
+            blocked: AtomicU32::new(0),
         });
         let cancel = Arc::new(AtomicBool::new(false));
         let live = Arc::new(AtomicUsize::new(0));
@@ -114,16 +155,21 @@ impl CapturePipeline {
         let tx_cb = tx.clone();
         let wb = pipeline.write_back_at.clone();
         let cancel_cb = cancel.clone();
+        // Weak：回调由端口持有，强引用会与本 Arc 成环（端口永不释放 → 回调 Sender 永不释放）。
+        let port_weak = Arc::downgrade(&port);
         port.start_listener(Box::new(move |content, source_app| {
             // 停机后到达的事件直接丢弃（端口收尾会释放回调，此为在途兜底）
             if cancel_cb.load(Ordering::SeqCst) {
                 return;
             }
-            // 回写窗口内的事件丢弃（自回写会再次触发 WM_CLIPBOARDUPDATE）
+            // 自写来源标记（第一道）+ 回写窗口（第二道）：任一成立即本次不入库
+            let marker = port_weak
+                .upgrade()
+                .is_some_and(|p| p.has_self_write_marker());
             let in_window = (*wb.lock())
                 .map(|t| t.elapsed() < WRITE_BACK_WINDOW)
                 .unwrap_or(false);
-            if in_window {
+            if should_skip_capture(marker, in_window) {
                 return;
             }
             let _ = tx_cb.send((content, source_app));
@@ -217,6 +263,14 @@ impl CapturePipeline {
         self.skipped.load(Ordering::Relaxed)
     }
 
+    /// 命中内容屏蔽而丢弃的次数
+    pub fn blocked_count(&self) -> u32 {
+        self.blocked.load(Ordering::Relaxed)
+    }
+
+    /// 判定序钉死（09 §8.2 T-B3-7）：**paused → 自写标记 → excluded_apps → block_patterns → 分派**。
+    /// 自写标记与回写窗口在 Port 回调侧先行（should_skip_capture，够不到本函数），故此处从 paused 起算；
+    /// paused 排最前是计数口径问题：暂停期间到达的内容一律算"跳过"，不得再进屏蔽计数。
     fn ingest(
         &self,
         content: host_core::ports::ClipContent,
@@ -243,6 +297,16 @@ impl CapturePipeline {
                     tracing::debug!(app = %app, "来源应用在永不记录黑名单，丢弃");
                     return;
                 }
+            }
+        }
+
+        // ①b 内容屏蔽：命中即整条丢弃——不入库因而也不发事件（红线）。
+        // 仅文本面：图片/文件没有可正则比对的"内容"文本，v1 诚实收窄（文案与测试同证）。
+        if let host_core::ports::ClipContent::Text { text, .. } = &content {
+            if let Some(pattern) = block_reason(&config, text) {
+                self.blocked.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(pattern = %pattern, "命中内容屏蔽规则，整条丢弃");
+                return;
             }
         }
 
@@ -429,6 +493,9 @@ pub(crate) struct FakeClipboard {
     pub(crate) writes: Arc<parking_lot::Mutex<Vec<String>>>,
     pub(crate) fail_write: bool,
     pub(crate) log: CallLog,
+    /// 自写来源标记位（01§8-1）：置真后回调侧应在入队前就丢弃本次捕获。
+    /// 用 Arc 而非 bool：替身与管线持有的必须是同一个开关。
+    pub(crate) self_write: Arc<AtomicBool>,
 }
 
 /// 跨替身共享的有序调用日志
@@ -493,6 +560,9 @@ impl ClipboardPort for FakeClipboard {
         }
         self.log.lock().push("write".into());
         Ok(())
+    }
+    fn has_self_write_marker(&self) -> bool {
+        self.self_write.load(Ordering::Relaxed)
     }
 }
 
@@ -570,6 +640,7 @@ mod tests {
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: false,
             log: Arc::new(Mutex::new(Vec::new())),
+            self_write: Arc::new(AtomicBool::new(false)),
         });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(cfg));
@@ -660,6 +731,7 @@ mod tests {
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: false,
             log: Arc::new(Mutex::new(Vec::new())),
+            self_write: Arc::new(AtomicBool::new(false)),
         });
         let crypto = Arc::new(FakeCrypto);
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
@@ -922,6 +994,7 @@ mod tests {
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: true,
             log: Arc::new(Mutex::new(Vec::new())),
+            self_write: Arc::new(AtomicBool::new(false)),
         });
         let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
         let write_back = Arc::new(Mutex::new(None));
@@ -1014,5 +1087,247 @@ mod tests {
             "已自动落组的条目不重复出现在建议队列（谓词含 group_name IS NULL）"
         );
         on.shutdown();
+    }
+
+    // ---- T-B3-7 内容屏蔽 + 自写来源标记（01§7.2-① / §8-1） ----
+
+    fn fire_content(port: &FakeClipboard, content: ClipContent) {
+        let cb = port.cb.lock();
+        let Some(f) = cb.as_ref() else { return };
+        f(content, Some("tester".into()));
+    }
+
+    fn drain_events(rx: &mut tokio::sync::broadcast::Receiver<Event>, dur: Duration) -> usize {
+        let deadline = Instant::now() + dur;
+        let mut n = 0;
+        while Instant::now() < deadline {
+            while let Ok(_ev) = rx.try_recv() {
+                n += 1;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        n
+    }
+
+    fn search_hits(store: &Arc<ClipStore>, text: &str) -> usize {
+        store
+            .search(&crate::types::SearchQuery {
+                text: Some(text.into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .len()
+    }
+
+    fn block_cfg(patterns: &[&str]) -> ClipboardConfig {
+        ClipboardConfig {
+            block_patterns: patterns.iter().map(|p| (*p).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 红线主件：命中屏蔽规则的六位验证码既不入库、搜不到，也不进事件通道。
+    /// 正对照（不匹配规则的五位数）在同一张库上入库且可搜——否则本测试的三条
+    /// 零断言全都可以由"管线压根没跑"这个假象满足。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-7）字面测试名优先于 rustc 命名惯例
+    fn blockPattern_otpLikeText_neverStoredOrSearchable() {
+        let (handle, store, port, bus) = start_with_fake_cfg(
+            "blk_otp",
+            Arc::new(AtomicBool::new(false)),
+            block_cfg(&[r"\d{6}$"]),
+        );
+        let mut rx = bus.subscribe("clipboard.captured").unwrap();
+
+        fire(&port, "123456");
+        std::thread::sleep(DB_BATCH_WINDOW + WORKER_TICK * 3);
+        assert_eq!(row_count(&store), 0, "命中屏蔽规则的验证码不得入库");
+        assert_eq!(
+            handle.pipeline().blocked_count(),
+            1,
+            "屏蔽计数须与丢弃条数一致（与暂停跳过数分账）"
+        );
+        assert_eq!(
+            drain_events(&mut rx, Duration::from_millis(700)),
+            0,
+            "被屏蔽内容不得发布 clipboard.captured（合并窗口 300ms，700ms 足以暴露漏发）"
+        );
+
+        fire(&port, "12345");
+        assert!(
+            wait_until(|| row_count(&store) == 1, Duration::from_secs(2)),
+            "不匹配规则的内容应照常入库（正对照）"
+        );
+        assert_eq!(
+            drain_events(&mut rx, Duration::from_millis(700)),
+            1,
+            "正对照须真的发出事件（否则上面的零事件断言是空洞）"
+        );
+        assert_eq!(
+            search_hits(&store, "12345"),
+            1,
+            "正对照须可搜（FTS 面活着）"
+        );
+        assert_eq!(
+            search_hits(&store, "123456"),
+            0,
+            "被屏蔽的验证码不得出现在搜索结果里"
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-7）字面测试名优先于 rustc 命名惯例
+    fn blockPattern_badRegex_warnsAndDoesNotBlockOthers() {
+        // 一条坏正则（未闭合分组）只作废自己：同表的好规则继续拦截，正常内容继续入库。
+        assert_eq!(
+            block_reason(&block_cfg(&["("]), "任何内容"),
+            None,
+            "坏规则单独成表时不得屏蔽任何内容"
+        );
+        let (handle, store, port, _bus) = start_with_fake_cfg(
+            "blk_bad",
+            Arc::new(AtomicBool::new(false)),
+            block_cfg(&["(", r"\d{6}$"]),
+        );
+        fire(&port, "带 ( 号与 ) 号的正常内容");
+        assert!(
+            wait_until(|| row_count(&store) == 1, Duration::from_secs(2)),
+            "坏正则不得吞掉正常捕获"
+        );
+        assert_eq!(handle.pipeline().blocked_count(), 0);
+        fire(&port, "999999");
+        assert!(
+            wait_until(
+                || handle.pipeline().blocked_count() == 1,
+                Duration::from_secs(2)
+            ),
+            "同一张表里的好规则须仍然生效"
+        );
+        assert_eq!(row_count(&store), 1, "被拦的是命中好规则的那条，不是全部");
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    /// 诚实边界：v1 屏蔽只作用于文本面。`.*` 能命中任何文本，却管不到图片/文件条目。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-7）字面测试名优先于 rustc 命名惯例
+    fn blockPattern_appliesToTextOnly_filesAndImagePassThrough() {
+        let (handle, store, port, _bus) = start_with_fake_cfg(
+            "blk_scope",
+            Arc::new(AtomicBool::new(false)),
+            block_cfg(&[".*"]),
+        );
+        fire_content(
+            &port,
+            ClipContent::Files {
+                paths: vec![std::path::PathBuf::from("d:/secret.txt")],
+            },
+        );
+        fire_content(
+            &port,
+            ClipContent::Image {
+                format: "dib".into(),
+                width: 2,
+                height: 2,
+                bytes: Arc::from(vec![7u8; 48]),
+            },
+        );
+        assert!(
+            wait_until(|| row_count(&store) == 2, Duration::from_secs(2)),
+            "文件与图片条目不得被文本屏蔽规则拦下"
+        );
+        assert_eq!(handle.pipeline().blocked_count(), 0);
+        fire(&port, "任意一行文本都会被 .* 命中");
+        assert!(
+            wait_until(
+                || handle.pipeline().blocked_count() == 1,
+                Duration::from_secs(2)
+            ),
+            "同一条规则对文本面须真的生效（正对照）"
+        );
+        assert_eq!(row_count(&store), 2, "文本被拦，非文本两条原样保留");
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-7）字面测试名优先于 rustc 命名惯例
+    fn captureSkip_precedenceMatrix_allFourCombinations() {
+        assert!(should_skip_capture(true, true));
+        assert!(
+            should_skip_capture(true, false),
+            "标记成立即弃用，不必等时间窗"
+        );
+        assert!(
+            should_skip_capture(false, true),
+            "时间窗仍是第二道（标记可能被外部写入提前抹掉）"
+        );
+        assert!(
+            !should_skip_capture(false, false),
+            "两道都不成立时不得误弃正常捕获（负格；前三格的断言力全来自这一格）"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-7）字面测试名优先于 rustc 命名惯例
+    fn capturePause_precedesBlockRules_orderingPinned() {
+        let paused = Arc::new(AtomicBool::new(true));
+        let (handle, store, port, _bus) =
+            start_with_fake_cfg("blk_order", paused.clone(), block_cfg(&[r"\d{6}$"]));
+        fire(&port, "123456");
+        std::thread::sleep(DB_BATCH_WINDOW + WORKER_TICK * 3);
+        assert_eq!(
+            handle.pipeline().blocked_count(),
+            0,
+            "暂停须排在屏蔽之前：暂停期间到达的内容计为跳过，不得计为屏蔽"
+        );
+        assert_eq!(handle.pipeline().skipped_while_paused(), 1);
+        assert_eq!(row_count(&store), 0);
+
+        // 正对照：解除暂停后同一条规则才走屏蔽臂（否则上面两格可能同为空洞）
+        paused.store(false, Ordering::Relaxed);
+        fire(&port, "123456");
+        assert!(
+            wait_until(
+                || handle.pipeline().blocked_count() == 1,
+                Duration::from_secs(2)
+            ),
+            "解除暂停后同一规则应命中屏蔽臂"
+        );
+        assert_eq!(
+            handle.pipeline().skipped_while_paused(),
+            1,
+            "暂停计数不重复累加"
+        );
+        assert_eq!(row_count(&store), 0);
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    /// 标记位的接线证明：真值表只证明纯函数对，这一枚证明回调**确实**去问了端口。
+    #[test]
+    #[allow(non_snake_case)] // 命名随相邻任务书测试风格
+    fn selfWriteMarker_portReportsTrue_dropsCaptureBeforeEnqueue() {
+        let (handle, store, port, _bus) = start_with_fake("marker_wire");
+        port.self_write.store(true, Ordering::Relaxed);
+        fire(&port, "外部程序不该看见的自写正文");
+        std::thread::sleep(DB_BATCH_WINDOW + WORKER_TICK * 3);
+        assert_eq!(
+            row_count(&store),
+            0,
+            "自写标记为真时不得入库（时间窗此刻是关的）"
+        );
+        // 正对照：清掉标记后同一管线的正常捕获照旧入库
+        port.self_write.store(false, Ordering::Relaxed);
+        fire(&port, "标记清除后的正常捕获");
+        assert!(
+            wait_until(|| row_count(&store) == 1, Duration::from_secs(2)),
+            "标记为假时不得有任何丢弃"
+        );
+        handle.shutdown();
+        assert!(handle.wait_idle(Duration::from_secs(3)));
     }
 }

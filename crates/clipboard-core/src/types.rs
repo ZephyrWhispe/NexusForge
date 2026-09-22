@@ -85,6 +85,9 @@ pub struct ClipboardConfig {
     pub excluded_apps: Vec<String>,
     /// 暂停捕获：新复制不入库，已有历史与设置不受影响（§8-④）
     pub capture_paused: bool,
+    /// 内容屏蔽正则（01§7.2-①）：命中即整条不入库也不发事件，仅作用文本捕获。
+    /// 坏规则只作废自己（见 pipeline::block_reason），不拖垮整表也不吞正常内容。
+    pub block_patterns: Vec<String>,
 }
 
 impl Default for ClipboardConfig {
@@ -98,6 +101,7 @@ impl Default for ClipboardConfig {
             auto_group: true,
             excluded_apps: vec![],
             capture_paused: false,
+            block_patterns: vec![],
         }
     }
 }

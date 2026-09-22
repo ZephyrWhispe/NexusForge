@@ -9,6 +9,8 @@ import {
 import {
   clipboardSearch,
   clipboardSecretReveal,
+  hostConfigGet,
+  hostConfigSet,
   parseAppError,
   type ClipEntry,
 } from "../../../ipc/client";
@@ -28,6 +30,19 @@ import { fmtTime } from "../display";
 
 /** 类目标签与 clipboard-core `SECRET_CATEGORY_LABEL` 同字面（v1 不报具体密钥类型） */
 const SECRET_CATEGORY = "敏感内容";
+
+/**
+ * 字面量转正则（T-B3-7「永不入库」）：把用户看到的原文变成只匹配它自身的模式。
+ * 元字符表与 clipboard-core `query::to_literal_regex` 逐字符一致，两侧各有一枚测试
+ * 断言同一份期望字面串——设置卡里显示的那条规则必须就是实际生效的那条。
+ * 刻意不锚定：命中子串即算屏蔽，锚定会让"同一段内容换个前后缀再来一次"静默漏过。
+ */
+const REGEX_META = "\\^$.*+?()[]{}|";
+export function toLiteralRegex(s: string): string {
+  let out = "";
+  for (const ch of s) out += REGEX_META.includes(ch) ? `\\${ch}` : ch;
+  return out;
+}
 
 const useStyles = makeStyles({
   root: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 },
@@ -169,6 +184,47 @@ export default function SecretSection() {
     }
   };
 
+  /**
+   * 「永不入库」（T-B3-7）：以**当前显示的那一行文本**生成字面屏蔽规则。
+   * 本面板恒为掩码清单，显示的是 `[敏感内容] 已加密存储` 而不是明文——所以生成的规则
+   * 屏蔽的是这段掩码文案，不是那条密钥本身。确认弹窗把这件事说白并指路设置卡手写正则：
+   * 悄悄把明文写进 clipboard.json 才是真正要防的事，这里结构上就走不到那一步。
+   */
+  const doNeverStore = async (e: ClipEntry) => {
+    const pattern = toLiteralRegex(e.preview);
+    const ok = await confirmAction({
+      danger: true,
+      title: "永不入库：追加屏蔽规则",
+      impact: [
+        `将向「内容屏蔽规则」追加一条：${pattern}`,
+        "此后命中该规则的复制内容不入库、也不发通知（仅文本捕获面）",
+      ],
+      detail:
+        "本行显示的是掩码预览而非明文，故这条规则匹配的是掩码文案本身。要屏蔽原始内容，请到「统计与设置 → 内容屏蔽规则」手写正则（例：\\d{6}$）。",
+      confirmLabel: "添加规则",
+      command: e.id,
+    });
+    if (!ok) return;
+    setBusyId(e.id);
+    try {
+      const cfg = await hostConfigGet("clipboard");
+      const prev = Array.isArray(cfg.block_patterns)
+        ? cfg.block_patterns.filter((x): x is string => typeof x === "string")
+        : [];
+      if (prev.includes(pattern)) {
+        notify("info", "该规则已在屏蔽表中", pattern);
+        return;
+      }
+      // host_config_set 是整份替换语义：先展开盘上全量再覆写单键，其余键不得丢
+      await hostConfigSet("clipboard", { ...cfg, block_patterns: [...prev, pattern] });
+      notify("success", "已加入内容屏蔽", `${pattern} 即时生效`);
+    } catch (err) {
+      notify("error", "保存屏蔽规则失败", parseAppError(err)?.data.message ?? String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div className={styles.root}>
       <div className={styles.toolbar}>
@@ -218,6 +274,18 @@ export default function SecretSection() {
                     复制
                   </Button>
                 )}
+                <Tooltip
+                  content="以本行显示的文本生成字面屏蔽规则，需二次确认"
+                  relationship="description"
+                >
+                  <Button
+                    size="small"
+                    disabled={busyId === e.id}
+                    onClick={() => void doNeverStore(e)}
+                  >
+                    永不入库
+                  </Button>
+                </Tooltip>
               </div>
             </div>
           );

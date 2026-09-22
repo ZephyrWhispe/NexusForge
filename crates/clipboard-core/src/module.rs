@@ -377,6 +377,11 @@ impl Module for ClipboardModule {
                     "description": "进程名，逗号分隔（如 1password,keepass）",
                     "items": { "type": "string" }
                 },
+                "block_patterns": {
+                    "type": "array", "title": "内容屏蔽正则",
+                    "description": "命中即整条不入库（例：验证码 \\d{6}$、卡号）；仅作用文本捕获",
+                    "items": { "type": "string" }, "default": []
+                },
                 "capture_paused": {
                     "type": "boolean", "title": "暂停捕获",
                     "description": "开启后新复制内容不入库（已有历史与设置不受影响）",
@@ -908,6 +913,7 @@ mod tests {
             writes: Arc::new(Mutex::new(Vec::new())),
             fail_write: false,
             log: Arc::new(Mutex::new(Vec::new())),
+            self_write: Default::default(),
         });
         ports.register::<dyn ClipboardPort>(fake.clone());
         ports.register::<dyn CryptoPort>(Arc::new(FakeCrypto));

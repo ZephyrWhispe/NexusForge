@@ -10,8 +10,8 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
-    GetClipboardOwner, OpenClipboard, RegisterClipboardFormatW, RemoveClipboardFormatListener,
-    SetClipboardData,
+    GetClipboardOwner, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
+    RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
@@ -73,6 +73,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
     if msg == WM_CLIPBOARDUPDATE {
         if let Some(cb) = cb_of(hwnd) {
+            // 自写来源标记（01§8-1 第一道）：真则本次直接不回调——不读内容、不入库、不发事件。
+            // 标记不主动清（清空要 EmptyClipboard，那会连带抹掉刚写入的正文），
+            // 交由下一次任意程序的写入覆盖，故回写时间窗仍作第二道兜底。
+            if has_self_write_marker() {
+                return LRESULT(0);
+            }
             let content = read_clipboard_content();
             let app = read_source_app();
             if let Some(content) = content {
@@ -355,6 +361,13 @@ impl ClipboardPort for WindowsClipboard {
                     }
                 }
             };
+            // 同一打开会话内追加自写标记；失败只 warn 不否决写——标记丢了还有回写时间窗兜底，
+            // 而把一次已成功的写入报成失败，用户什么也修不好。
+            if r.is_ok() {
+                if let Err(e) = mark_self_write() {
+                    tracing::warn!(error = %e, "剪贴板自写来源标记登记失败（防循环回落时间窗）");
+                }
+            }
             let _ = CloseClipboard();
             r
         }
@@ -367,6 +380,10 @@ impl ClipboardPort for WindowsClipboard {
             ClipContent::Text { text, .. } => (!text.is_empty()).then_some(text),
             _ => None,
         }
+    }
+
+    fn has_self_write_marker(&self) -> bool {
+        has_self_write_marker()
     }
 }
 
@@ -525,10 +542,46 @@ unsafe fn write_dib(bytes: &[u8]) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 注册剪贴板自定义格式（预留：origin 标记用）
+/// 注册剪贴板自定义格式（0 是"注册失败"而非合法格式号，故过滤成 None）
 pub fn register_custom_format(name: &str) -> Option<u32> {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) }.into()
+    let fmt = unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) };
+    (fmt != 0).then_some(fmt)
+}
+
+/// 自写来源标记格式名（01§8-1）：本应用每次写剪贴板都附带登记该自定义格式，
+/// 监听侧见到即知这次变更源于自己——比 500ms 回写窗口更早，也不受时钟抖动影响。
+const SELF_WRITE_FORMAT: &str = "NexusForgeSelf";
+
+/// 登记自写标记：以 NULL 数据占位该格式（不覆盖正文，正文由 write 各分支已置好），
+/// 格式可用性问题在下一次任意程序写入（必然 EmptyClipboard）前恒为真。
+/// 须在 write() 的同一 OpenClipboard 会话内、CloseClipboard 之前调用。
+pub fn mark_self_write() -> Result<(), AppError> {
+    let fmt = register_custom_format(SELF_WRITE_FORMAT).ok_or_else(|| {
+        AppError::module(
+            "CLIPBOARD_WRITE_007",
+            "RegisterClipboardFormatW(NexusForgeSelf) 返回 0",
+            None,
+        )
+    })?;
+    unsafe {
+        SetClipboardData(fmt, HANDLE::default()).map_err(|e| {
+            AppError::module(
+                "CLIPBOARD_WRITE_007",
+                format!("自写来源标记登记失败: {e}"),
+                None,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// 系统剪贴板当前是否带本应用自写标记（查格式可用性，无需 OpenClipboard）。
+pub fn has_self_write_marker() -> bool {
+    let Some(fmt) = register_custom_format(SELF_WRITE_FORMAT) else {
+        return false;
+    };
+    unsafe { IsClipboardFormatAvailable(fmt).is_ok() }
 }
 
 #[cfg(test)]
