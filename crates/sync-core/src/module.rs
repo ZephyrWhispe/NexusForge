@@ -5,6 +5,8 @@
 //! - SYNC3 冲突：LWW（engine.rs）；败方快照落 `conflict_log` 可查可恢复（T-B5-2），
 //!   sync.conflict 事件只作提示（事件即焚不是数据源）
 //! - SYNC4 加密：复用 K2 配对信任根的端到端加密通道（transport.rs）
+//! - 会话流水：每轮同步（含失败）落一行 `sync_run`（T-B5-3：摘要过去只活在 tracing 里，
+//!   阅后即焚 ⇒ 面板答不出"上次到底同步了没"）
 //! - 数据集 v1 = note（订阅 notes.changed 记录本地变更；applier 由宿主注入写穿 NoteLibrary）
 //! - 红线：密码库条目**永不**自动同步（数据集白名单硬编码，无 vault 通路）
 //!
@@ -25,7 +27,7 @@ use host_core::module::{
 
 use crate::engine::{ApplyOutcome, ChangeApplier, PushBatch, SyncEngine};
 use crate::error::SyncError;
-use crate::oplog::{ConflictEntry, OpLog, DELETED_KEY};
+use crate::oplog::{ConflictEntry, OpLog, SyncRun, DELETED_KEY, ROLE_INITIATOR, ROLE_RESPONDER};
 use crate::transport::{
     handshake_client, handshake_server, read_hello_frame, read_msg, write_msg, SyncMsg,
     SyncSession, BATCH_LIMIT,
@@ -139,12 +141,18 @@ impl SyncCtx {
     }
 }
 
-/// 发起方会话：按出站游标分批 Push（逐批等 Ack 对账）→ Pull 对端 → 应用
-async fn run_initiator(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummary> {
-    let applier = ctx.applier()?;
+/// 发起方会话：按出站游标分批 Push（逐批等 Ack 对账）→ Pull 对端 → 应用 → 回执
+///
+/// 计数累加进调用方给的 `summary`（失败前已完成的部分也在里面），落流水由
+/// `sync_with` 单点负责——会话函数本身不记账，才不会出现"两条错误路径只记了一条"。
+async fn run_initiator(
+    ctx: &SyncCtx,
+    session: &mut SyncSession,
+    summary: &mut SyncSummary,
+) -> R<()> {
+    ctx.applier()?; // 应用器不在位就别开会话（apply_ops 内的零计数是运行期降级，不是配置期）
     let self_device = ctx.identity.device_id.clone();
     let peer_key = session.peer.device_id.clone();
-    let mut summary = SyncSummary::default();
 
     // ---- Push 自产变更（出站游标驱动批循环；对端回执 until_ts 供对账）----
     let mut cursor = ctx.log.push_cursor(&peer_key);
@@ -172,23 +180,38 @@ async fn run_initiator(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummar
     match read_msg(session).await? {
         SyncMsg::Push { ops, .. } => {
             let (applied, lost, conflicts) = ctx.apply_ops(&ops, &peer_key);
-            summary.pulled_applied = applied;
-            summary.pulled_lost = lost;
-            summary.conflicts = conflicts;
+            summary.pulled_applied += applied;
+            summary.pulled_lost += lost;
+            summary.conflicts += conflicts;
+            // 回执对称（T-B5-1 落地补记④ 的修正处）：Push→Ack 是全协议唯一的回执形状，
+            // 发起方过去只收不回 ⇒ 响应方那句"等 Ack"恒以 EOF 报错，入站会话在流水里
+            // 永远记成失败。两向都发回执，会话才能双向干净收口。
+            // Pull 的应答侧 `more` 恒 false（单批应答，余量下一轮续），故此处无批循环。
+            let until_ts = ops.iter().map(|o| o.ts).max().unwrap_or(0);
+            write_msg(
+                session,
+                &SyncMsg::Ack {
+                    until_ts,
+                    applied,
+                    lost,
+                },
+            )
+            .await?;
         }
         SyncMsg::Err { msg } => return Err(SyncError::Proto(msg)),
         m => return Err(SyncError::Proto(format!("Pull 后非 Push: {m:?}"))),
     }
-    let _ = applier; // apply_ops 内部再取（保持借用简单）
-    ctx.publish_state(&summary);
-    Ok(summary)
+    Ok(())
 }
 
 /// 响应方会话：收 Push（按 more 分批）→ 应用 → 逐批回 Ack（真 until_ts）；收 Pull → 回自产 Push → 等 Ack
-async fn run_responder(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummary> {
+async fn run_responder(
+    ctx: &SyncCtx,
+    session: &mut SyncSession,
+    summary: &mut SyncSummary,
+) -> R<()> {
     let self_device = ctx.identity.device_id.clone();
     let peer_key = session.peer.device_id.clone();
-    let mut summary = SyncSummary::default();
 
     // 收 Push 批循环（与发起方分批对称：more=false 才进入 Pull 阶段）
     loop {
@@ -222,8 +245,16 @@ async fn run_responder(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummar
         SyncMsg::Pull { since_ts } => {
             // 响应方回自产变更（initiator 的游标键 = initiator 自己，即本侧视角的 peer_key）
             let ops = ctx.log.ops_of_device(&self_device, since_ts, BATCH_LIMIT)?;
+            // 这一向同样是推送：不记进 pushed 的话，被动侧流水会写出"推了 0 条"的假话
+            summary.pushed += ops.len() as u32;
             write_msg(session, &SyncMsg::Push { ops, more: false }).await?;
-            let _ = read_msg(session).await?; // Ack（initiator 负责其游标）
+            // 等发起方回执，并据此记"我给这台推到哪"（每 peer 进度事实源的另一半：
+            // 被动供数也要推进出站游标，否则本机视角的 pending 会永久虚高）
+            match read_msg(session).await? {
+                SyncMsg::Ack { until_ts, .. } => ctx.log.set_push_cursor(&peer_key, until_ts)?,
+                SyncMsg::Err { msg } => return Err(SyncError::Proto(msg)),
+                m => return Err(SyncError::Proto(format!("Pull 应答后非 Ack: {m:?}"))),
+            }
         }
         m => {
             return Err(SyncError::Proto(format!(
@@ -231,8 +262,83 @@ async fn run_responder(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummar
             )))
         }
     }
-    ctx.publish_state(&summary);
-    Ok(summary)
+    Ok(())
+}
+
+/// 一轮同步尝试落一行流水（**失败也记**：红线"失败不静默"，`error` 列存展示文本）。
+///
+/// 两角色共用这一个记账口；会话函数只往 `summary` 里累加计数，于是半途失败时
+/// "已经推出去多少条"仍是真事实，不会被抹成 0 也不会虚报成整轮。
+/// 落盘本身失败只 warn：流水缺行是可观测性问题，不该把一次成功的同步改判成失败。
+fn finish_run(
+    ctx: &SyncCtx,
+    peer: &str,
+    role: &str,
+    started_ms: i64,
+    summary: &SyncSummary,
+    error: Option<&SyncError>,
+) {
+    let run = SyncRun {
+        id: 0, // 自增主键由 SQLite 分配
+        ts_ms: started_ms,
+        peer: peer.to_string(),
+        role: role.to_string(),
+        pushed: summary.pushed,
+        pulled_applied: summary.pulled_applied,
+        pulled_lost: summary.pulled_lost,
+        conflicts: summary.conflicts,
+        // 时钟回跳（NTP 校正）不写负数：宁可报 0，也不给面板一个不可能的耗时
+        duration_ms: (now_ms() - started_ms).max(0),
+        error: error.map(|e| e.to_string()),
+    };
+    if let Err(e) = ctx.log.record_run(&run) {
+        tracing::warn!(peer = %peer, error = %e, "同步流水落盘失败（本轮结果仍如实返回）");
+    }
+}
+
+/// 发起一侧：配对校验 → 连接 → 握手 → 身份核对 → 跑协议（计时与记账在 `sync_with`）
+async fn initiate(ctx: &SyncCtx, device_id: &str, addr: &str, summary: &mut SyncSummary) -> R<()> {
+    if !ctx.store.is_paired(device_id) {
+        return Err(SyncError::Peer(format!("设备 {device_id} 未配对")));
+    }
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| SyncError::Net("连接超时".into()))?
+    .map_err(|e| SyncError::Net(e.to_string()))?;
+    let mut session = handshake_client(stream, &ctx.identity, &ctx.store).await?;
+    if session.peer.device_id != device_id {
+        return Err(SyncError::Peer(format!(
+            "对端身份不符（期望 {device_id} 实得 {}）",
+            session.peer.device_id
+        )));
+    }
+    run_initiator(ctx, &mut session, summary).await
+}
+
+/// 被动一侧：读 Hello → 握手 → 跑协议。交回 `(流水里的 peer 标签, 会话结果)`。
+///
+/// peer 标签：握手成功后是对端 device_id，之前失败只能如实记 socket 地址——
+/// 身份还没验证，拿它当 device_id 写进流水就是把猜测记成事实。
+async fn respond(
+    ctx: &SyncCtx,
+    stream: tokio::net::TcpStream,
+    peer_addr: &str,
+    summary: &mut SyncSummary,
+) -> (String, R<()>) {
+    let mut stream = stream;
+    let hello = match read_hello_frame(&mut stream).await {
+        Ok(h) => h,
+        Err(e) => return (peer_addr.to_string(), Err(e)),
+    };
+    let mut session = match handshake_server(stream, &ctx.identity, &ctx.store, hello).await {
+        Ok(s) => s,
+        Err(e) => return (peer_addr.to_string(), Err(e)),
+    };
+    let label = session.peer.device_id.clone();
+    (label, run_responder(ctx, &mut session, summary).await)
 }
 
 /// 当前毫秒（op ts 与冲突落盘时刻共用一个时钟口）
@@ -408,6 +514,11 @@ impl SyncModule {
         self.log_arc()?.prune_conflicts_before(cutoff_ms)
     }
 
+    /// 同步流水分页（IPC sync_runs_get；新行在前，limit 由读侧收口）
+    pub fn runs(&self, limit: i64) -> R<Vec<SyncRun>> {
+        self.log_arc()?.runs(limit)
+    }
+
     /// 以本地留存的败方快照重新生效（IPC sync_conflict_restore）
     pub fn restore_conflict(&self, conflict_id: &str) -> R<crate::oplog::OpEntry> {
         let ctx = self.ctx()?;
@@ -434,26 +545,26 @@ impl SyncModule {
     }
 
     /// 主动与指定设备同步（IPC sync_now；addr 来自发现层/KVM 面板）
+    ///
+    /// 无论走到哪一步失败都落一行 `sync_run`（含"未配对/连不上"这类还没开会话的失败，
+    /// peer 列如实记用户点的那台设备 id）。只有 `ctx` 未就绪时不记——那时连库都没有，
+    /// 谈不上静默：错误本身已如实上抛。
     pub async fn sync_with(&self, device_id: &str, addr: &str) -> R<SyncSummary> {
         let ctx = self.ctx()?;
-        if !ctx.store.is_paired(device_id) {
-            return Err(SyncError::Peer(format!("设备 {device_id} 未配对")));
-        }
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::net::TcpStream::connect(addr),
-        )
-        .await
-        .map_err(|_| SyncError::Net("连接超时".into()))?
-        .map_err(|e| SyncError::Net(e.to_string()))?;
-        let mut session = handshake_client(stream, &ctx.identity, &ctx.store).await?;
-        if session.peer.device_id != device_id {
-            return Err(SyncError::Peer(format!(
-                "对端身份不符（期望 {device_id} 实得 {}）",
-                session.peer.device_id
-            )));
-        }
-        run_initiator(&ctx, &mut session).await
+        let started = now_ms();
+        let mut summary = SyncSummary::default();
+        let outcome = initiate(&ctx, device_id, addr, &mut summary).await;
+        finish_run(
+            &ctx,
+            device_id,
+            ROLE_INITIATOR,
+            started,
+            &summary,
+            outcome.as_ref().err(),
+        );
+        outcome?;
+        ctx.publish_state(&summary);
+        Ok(summary)
     }
 
     /// 本地变更记录入口（notes.changed 订阅回调 / IPC）
@@ -476,24 +587,29 @@ impl SyncModule {
             if cancel.load(Ordering::SeqCst) {
                 break;
             }
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok((stream, peer_addr)) = listener.accept().await else {
                 continue;
             };
             let ctx = ctx.clone();
+            let peer_addr = peer_addr.to_string();
             tokio::spawn(async move {
-                let mut stream = stream;
-                let Ok(hello) = read_hello_frame(&mut stream).await else {
-                    return;
-                };
-                let Ok(mut session) =
-                    handshake_server(stream, &ctx.identity, &ctx.store, hello).await
-                else {
-                    return;
-                };
-                let peer_id = session.peer.device_id.clone();
-                match run_responder(&ctx, &mut session).await {
-                    Ok(s) => tracing::info!(peer = %peer_id, ?s, "SYNC 入站会话完成"),
-                    Err(e) => tracing::warn!(peer = %peer_id, error = %e, "SYNC 入站会话失败"),
+                let started = now_ms();
+                let mut summary = SyncSummary::default();
+                let (peer_label, outcome) = respond(&ctx, stream, &peer_addr, &mut summary).await;
+                finish_run(
+                    &ctx,
+                    &peer_label,
+                    ROLE_RESPONDER,
+                    started,
+                    &summary,
+                    outcome.as_ref().err(),
+                );
+                match &outcome {
+                    Ok(()) => {
+                        tracing::info!(peer = %peer_label, ?summary, "SYNC 入站会话完成");
+                        ctx.publish_state(&summary);
+                    }
+                    Err(e) => tracing::warn!(peer = %peer_label, error = %e, "SYNC 入站会话失败"),
                 }
             });
         }

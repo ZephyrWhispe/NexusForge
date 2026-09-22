@@ -19,6 +19,7 @@ import {
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import ActivitySection from "./ActivitySection";
 import ConflictsSection from "./ConflictsSection";
 
 /**
@@ -167,6 +168,8 @@ export default function SyncPanel() {
           ))
         )}
       </Section>
+
+      <ActivitySection />
 
       <ConflictsSection />
 

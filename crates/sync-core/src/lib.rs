@@ -5,6 +5,7 @@
 //! - SYNC3 冲突：LWW(ts, device_id 字典序破平)；败方快照落 conflict_log（可查 ·可以本地副本重新生效），
 //!   sync.conflict 事件仅作提示
 //! - SYNC4 加密：复用 K2 配对信任根（同 identity/paired.json）双 DH → HKDF → ChaCha20-Poly1305
+//! - 会话流水：每轮同步（含失败）落一行 sync_run（T-B5-3：摘要不再只是 tracing 里的一行字）
 //! - 数据集 v1 = note；密码库条目**永不**自动同步（白名单硬编码）
 
 pub mod engine;
@@ -18,5 +19,5 @@ pub use error::{Result, SyncError};
 pub use module::{
     record_change_with, restore_conflict_with, SyncCtx, SyncModule, SyncSummary, DEFAULT_SYNC_PORT,
 };
-pub use oplog::{ConflictEntry, OpEntry, OpLog};
+pub use oplog::{ConflictEntry, OpEntry, OpLog, SyncRun};
 pub use transport::{SyncMsg, SyncSession};

@@ -2,6 +2,7 @@
 //!
 //! 两台 SyncModule（独立临时 appData + 互配信任根 + 假数据集 applier）：
 //! A 记录变更 → sync_with(B) → B 数据集收敛 → B 记录变更 → A 反向拉取收敛。
+//! T-B5-3 起还验收话流水：每轮同步（含失败）在两侧库里都留得下行与计数。
 
 use parking_lot::Mutex;
 use serde_json::json;
@@ -13,13 +14,19 @@ use host_core::events::EventBus;
 use host_core::module::{Module, ModuleContext};
 use host_core::ports::Ports;
 use sync_core::engine::ChangeApplier;
-use sync_core::{OpEntry, OpLog, SyncEngine, SyncModule};
+use sync_core::oplog::{ROLE_INITIATOR, ROLE_RESPONDER};
+use sync_core::{OpEntry, OpLog, SyncEngine, SyncModule, SyncRun};
 
 /// 回环端口（与 KVM 49800/49801、K9 测试 49810–49812 错开；固定端口进程内单用）
 const LOOPBACK_PORT: u16 = 49831;
 const CURSOR_PORT: u16 = 49832;
 const SECOND_ROUND_PORT: u16 = 49833;
 const REPLAY_PORT: u16 = 49834;
+const RUN_ROW_PORT: u16 = 49835;
+const RUN_PEER_PORT: u16 = 49836;
+const RUN_PENDING_PORT: u16 = 49837;
+/// 无人监听的端口（connect 立刻被拒，用来造"注定失败的一轮"）
+const DEAD_PORT: u16 = 49899;
 
 fn addr(port: u16) -> String {
     format!("127.0.0.1:{port}")
@@ -328,4 +335,192 @@ async fn loopback_replayFromEmptyPushCursor_isIdempotent() {
     // 重放后游标已对齐 ⇒ 第二轮不再重推
     let s2 = c.a.sync_with(&c.b_id, &addr(REPLAY_PORT)).await.unwrap();
     assert_eq!(s2.pushed, 0);
+}
+
+/// 当前最新流水行 id（等"比它更新的一行"用；空表记 0）
+fn newest_id(log: &OpLog) -> i64 {
+    log.runs(1).unwrap().first().map(|r| r.id).unwrap_or(0)
+}
+
+/// 被动一侧的会话在发起方返回后可能还差最后一笔落盘，按 (role, peer) 等它出现。
+/// 只等"这一轮的 responder 行"，不把 sleep 当断言（超时即红，不假绿）。
+async fn wait_run_row(log: &OpLog, peer: &str, after_id: i64) -> SyncRun {
+    for _ in 0..100 {
+        if let Some(r) = log
+            .runs(50)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.role == ROLE_RESPONDER && r.peer == peer && r.id > after_id)
+        {
+            return r;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("被动侧流水没落盘（peer={peer}）");
+}
+
+/// 任务书（09 §10.2 T-B5-3）字面测试名优先于 rustc 命名惯例
+/// 红线"失败不静默"：连不上/没配对的尝试也要在流水里留得下行，且 error 存展示原文
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncRun_errorPath_stillRecorded() {
+    let c = paired("errpath", RUN_ROW_PORT);
+    wait_port(RUN_ROW_PORT).await;
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    assert!(
+        log_a.runs(10).unwrap().is_empty(),
+        "还没同步过 ⇒ 不该有凭空出现的流水行"
+    );
+
+    // ① 还没开会话就失败（未配对）：过去这种失败只有一行 warn 就上抛了
+    let e1 = c.a.sync_with("ghost", &addr(DEAD_PORT)).await.unwrap_err();
+    // ② 连不上对端（无监听）
+    let e2 = c.a.sync_with(&c.b_id, &addr(DEAD_PORT)).await.unwrap_err();
+
+    let runs = log_a.runs(10).unwrap();
+    assert_eq!(runs.len(), 2, "两笔失败 = 两行流水（失败不静默）");
+    assert_eq!(runs[0].peer, c.b_id, "peer 记用户点的那台设备 id");
+    assert_eq!(runs[0].role, ROLE_INITIATOR);
+    assert_eq!(
+        runs[0].error.as_deref(),
+        Some(e2.to_string().as_str()),
+        "error 列存的就是上抛给调用方的那句原文"
+    );
+    assert_eq!(runs[1].peer, "ghost");
+    assert!(runs[1]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("未配对"));
+    for r in &runs {
+        assert_eq!(r.pushed, 0, "没推出去就是 0，不猜");
+        assert!(r.duration_ms >= 0, "耗时不可能是负数");
+    }
+    // 记账不是吞错的替代品：两处失败照样如实上抛
+    assert!(e1.to_string().contains("未配对"));
+}
+
+/// 任务书（09 §10.2 T-B5-3）字面测试名优先于 rustc 命名惯例
+/// 承重④的对称面：被动一侧的结果本机可查；且被动供数也推进出站游标（每 peer 进度事实源）
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncRun_responderSideRecorded() {
+    let c = paired("resprow", RUN_PEER_PORT);
+    wait_port(RUN_PEER_PORT).await;
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    let log_b = OpLog::open(c.b.db_path()).unwrap();
+
+    // 第一轮：A 推 2 条给 B（B 侧 responder 行 pulled_applied=2，自己没东西可推）
+    c.a_store.put("a1.md", "one");
+    c.a.record_change("a1.md", "create").unwrap();
+    c.a_store.put("a2.md", "two");
+    c.a.record_change("a2.md", "create").unwrap();
+    let before_b = newest_id(&log_b);
+    let s1 = c.a.sync_with(&c.b_id, &addr(RUN_PEER_PORT)).await.unwrap();
+    assert_eq!(s1.pushed, 2);
+    let r1 = wait_run_row(&log_b, &c.a_id, before_b).await;
+    assert_eq!(
+        r1.error, None,
+        "被动侧本轮是成功的（T-B5-1 落地补记④：修前发起方从不回 Ack，这一行恒为 EOF 失败）"
+    );
+    assert_eq!(r1.pulled_applied, 2, "被动侧知道自己应用了几条");
+    assert_eq!(r1.pushed, 0, "B 这一轮没有自产变更可回");
+    assert_eq!(r1.conflicts, 0);
+
+    // 第二轮：B 改一篇 → A 拉走 ⇒ B 的 pushed 与出站游标都要动起来
+    c.b_store.put("b1.md", "from B");
+    c.b.record_change("b1.md", "create").unwrap();
+    let b_ts = log_b
+        .ops_of_device(&c.b_id, 0, 10)
+        .unwrap()
+        .last()
+        .expect("B 的自产 op 在册")
+        .ts;
+    let before_b = newest_id(&log_b);
+    let s2 = c.a.sync_with(&c.b_id, &addr(RUN_PEER_PORT)).await.unwrap();
+    assert_eq!(s2.pushed, 0);
+    assert_eq!(s2.pulled_applied, 1);
+    let r2 = wait_run_row(&log_b, &c.a_id, before_b).await;
+    assert_eq!(r2.error, None);
+    assert_eq!(
+        r2.pushed, 1,
+        "Pull 应答方向回的那一批也是推送（否则被动侧流水在说谎）"
+    );
+    assert_eq!(
+        log_b.push_cursor(&c.a_id),
+        b_ts,
+        "对端回执 after 被动供数也要落进出站游标：否则 B 视角的 pending 永久虚高"
+    );
+    assert_eq!(
+        log_b
+            .count_ops_after(&c.b_id, log_b.push_cursor(&c.a_id))
+            .unwrap(),
+        0,
+        "游标一推进，pending 归零"
+    );
+    // 发起侧同样各留一行（A 主动两轮 ⇒ 两行 initiator）
+    let a_rows: Vec<_> = log_a
+        .runs(20)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.role == ROLE_INITIATOR)
+        .collect();
+    assert_eq!(a_rows.len(), 2);
+}
+
+/// 任务书（09 §10.2 T-B5-3）字面测试名优先于 rustc 命名惯例
+/// pending 算式与真实 pushed 一致（承重③：面板上"还欠对端几条"必须是真的欠）
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn countOpsAfter_matchesPushedSemantics() {
+    let c = paired("pending", RUN_PENDING_PORT);
+    wait_port(RUN_PENDING_PORT).await;
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    let pending = |log: &OpLog| {
+        log.count_ops_after(&c.a_id, log.push_cursor(&c.b_id))
+            .unwrap()
+    };
+
+    for (i, name) in ["p1.md", "p2.md", "p3.md"].iter().enumerate() {
+        c.a_store.put(name, &format!("v{i}"));
+        c.a.record_change(name, "create").unwrap();
+    }
+    assert_eq!(pending(&log_a), 3, "三条自产变更还没推给 B");
+
+    let s =
+        c.a.sync_with(&c.b_id, &addr(RUN_PENDING_PORT))
+            .await
+            .unwrap();
+    assert_eq!(
+        s.pushed as u64, 3,
+        "pending 算式与真实 pushed 必须数到同一批东西"
+    );
+    assert_eq!(pending(&log_a), 0, "推完即不欠");
+
+    // 新增一条 ⇒ 又欠一条（不是"首轮清零后永远清零"）
+    c.a_store.put("p4.md", "v4");
+    c.a.record_change("p4.md", "create").unwrap();
+    assert_eq!(pending(&log_a), 1);
+    let s2 =
+        c.a.sync_with(&c.b_id, &addr(RUN_PENDING_PORT))
+            .await
+            .unwrap();
+    assert_eq!(s2.pushed, 1);
+    assert_eq!(pending(&log_a), 0);
+
+    // 算式按产出设备分维：对端产出的条目会经拉取进了本机库（入站），但不计进"我欠对端"
+    c.b_store.put("q1.md", "b owns it");
+    c.b.record_change("q1.md", "create").unwrap();
+    let s3 =
+        c.a.sync_with(&c.b_id, &addr(RUN_PENDING_PORT))
+            .await
+            .unwrap();
+    assert_eq!(s3.pulled_applied, 1, "B 的这条经拉取进了本机库");
+    assert_eq!(s3.pushed, 0, "拉对端的东西不改变本机欠对端多少");
+    assert_eq!(
+        log_a.count_ops_after(&c.b_id, 0).unwrap(),
+        1,
+        "入站条目按产出设备（B）计数，就在本机库里"
+    );
+    assert_eq!(pending(&log_a), 0, "对端自己产的东西不算本机未出账");
 }

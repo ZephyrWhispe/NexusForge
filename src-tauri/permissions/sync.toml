@@ -24,3 +24,8 @@ commands.allow = ["sync_conflicts_get"]
 identifier = "allow-sync-conflict-restore"
 description = "允许前端调用 sync_conflict_restore 命令（以本地留存快照重新生效并推送；D-28 按窗最小授权）"
 commands.allow = ["sync_conflict_restore"]
+
+[[permission]]
+identifier = "allow-sync-runs-get"
+description = "允许前端调用 sync_runs_get 命令（同步活动流水读，含失败行；D-28 按窗最小授权）"
+commands.allow = ["sync_runs_get"]

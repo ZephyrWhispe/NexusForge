@@ -1078,3 +1078,34 @@ fn auxWindows_neverGrantSyncConflictsAndRestore() {
         );
     }
 }
+
+/// T-B5-3 红线负例：同步流水是运维诊断面（对端身份 + 逐轮推送/拉取量 + 失败原因原文，
+/// 握手前失败的行 peer 列还带着对端 socket 地址）。六个辅助窗都没有"看同步历史"的入口，
+/// 给它们这一枚 = 让任意窗口获得读用户同步行为的能力。main 正对照防空洞。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §10.2 T-B5-3）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantSyncRuns() {
+    let caps = load_capabilities();
+    let ident = "allow-sync-runs-get";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（同步活动流水 main-only）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 {ident}，否则本负例是空洞"
+    );
+}

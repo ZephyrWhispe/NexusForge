@@ -89,3 +89,20 @@ pub async fn sync_conflict_restore(
         ts: op.ts,
     })
 }
+
+/// 流水行 DTO（09 §10.2 T-B5-3）：同 `SyncConflictDto` 的取舍——直接透出 sync-core 结构。
+pub type SyncRunDto = sync_core::SyncRun;
+
+/// 同步活动流水（新行在前）。失败行照实返回（`error` 非空），面板不得只渲染成功行。
+#[tauri::command]
+pub async fn sync_runs_get(
+    limit: u32,
+    state: State<'_, HostState>,
+) -> Result<Vec<SyncRunDto>, AppError> {
+    let sync = state.sync.clone();
+    let limit = (limit.min(200)) as i64;
+    tauri::async_runtime::spawn_blocking(move || sync.runs(limit))
+        .await
+        .map_err(|e| sync_err(sync_core::SyncError::Db(format!("同步流水读任务失败：{e}"))))?
+        .map_err(sync_err)
+}

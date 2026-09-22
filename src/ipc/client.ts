@@ -1960,3 +1960,26 @@ export function syncConflictsGet(limit: number, offset: number): Promise<SyncCon
 export function syncConflictRestore(conflictId: string): Promise<SyncRestoreDto> {
   return invoke("sync_conflict_restore", { conflictId });
 }
+
+/**
+ * 一轮同步会话的流水行（09 §10.2 T-B5-3）：`error` 非空即失败行——
+ * 失败与成功同表同形，面板才不会把"没同步成"渲染成"没什么要同步"。
+ * `peer`：握手成功是对端设备 id，握手前失败如实记对端 socket 地址。
+ */
+export interface SyncRunDto {
+  id: number;
+  /** 会话开始时刻（毫秒） */
+  tsMs: number;
+  peer: string;
+  role: "initiator" | "responder";
+  pushed: number;
+  pulledApplied: number;
+  pulledLost: number;
+  conflicts: number;
+  durationMs: number;
+  error: string | null;
+}
+
+export function syncRunsGet(limit: number): Promise<SyncRunDto[]> {
+  return invoke("sync_runs_get", { limit });
+}

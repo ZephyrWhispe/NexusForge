@@ -348,6 +348,7 @@ pub fn run() {
             commands::sync_now,
             commands::sync_conflicts_get,
             commands::sync_conflict_restore,
+            commands::sync_runs_get,
             // WinOps Tweak 引擎（M16 W0–W1）
             commands::winops_catalog,
             commands::winops_scan,
