@@ -69,3 +69,23 @@ commands.allow = ["screenshot_beautify_apply"]
 identifier = "allow-screenshot-windows"
 description = "允许前端调用 screenshot_windows 命令（D-28 按窗最小授权）"
 commands.allow = ["screenshot_windows"]
+
+[[permission]]
+identifier = "allow-screenshot-scroll-begin"
+description = "允许前端调用 screenshot_scroll_begin 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_scroll_begin"]
+
+[[permission]]
+identifier = "allow-screenshot-scroll-append"
+description = "允许前端调用 screenshot_scroll_append 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_scroll_append"]
+
+[[permission]]
+identifier = "allow-screenshot-scroll-finish"
+description = "允许前端调用 screenshot_scroll_finish 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_scroll_finish"]
+
+[[permission]]
+identifier = "allow-screenshot-scroll-discard"
+description = "允许前端调用 screenshot_scroll_discard 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_scroll_discard"]

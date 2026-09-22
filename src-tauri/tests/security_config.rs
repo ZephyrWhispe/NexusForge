@@ -932,3 +932,49 @@ fn auxWindows_neverGrantScreenshotWindows() {
         "正对照：main 必须持有 {ident}，否则本负例是空洞"
     );
 }
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-5）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantScreenshotScroll() {
+    // T-B4-5 红线：**抓帧会话只能由发起它的那两个窗驱动**。滚动会话每一步都是一次
+    // 全屏 GDI 抓取（EnumWindows 那张表里的每个窗都会被读进去），贴图窗/快捷面板/
+    // 启动器/便签条手里都没有正在进行的截图，却可以凭一个 id 让宿主反复截屏。
+    //
+    // 白名单取 {main, overlay} 而不是任务书括号的"main-only"，是因为"滚动"那颗钮
+    // 长在覆盖层的编辑阶段上——覆盖层本来就是 confirm/discard/finish 的持有者，
+    // 把 scroll 只给 main 会让这条通路在唯一的调用窗上直接 BadState。
+    // 正对照因此落在 overlay 上（它没拿到的话本负例就是空洞）。
+    let caps = load_capabilities();
+    let idents = [
+        "allow-screenshot-scroll-begin",
+        "allow-screenshot-scroll-append",
+        "allow-screenshot-scroll-finish",
+        "allow-screenshot-scroll-discard",
+    ];
+    let mut overlay_granted = 0;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" || name == "overlay" {
+            if name == "overlay" {
+                overlay_granted = idents.iter().filter(|i| perms.contains(i)).count();
+            }
+            continue;
+        }
+        for ident in idents {
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（无会话在手却能驱动逐帧截屏）"
+            );
+        }
+    }
+    assert_eq!(
+        overlay_granted,
+        idents.len(),
+        "正对照：overlay 必须四枚齐备（缺一枚则滚动条在那条通路上半路 BadState，本负例也变空洞）"
+    );
+}

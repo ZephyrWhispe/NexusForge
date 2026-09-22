@@ -439,6 +439,19 @@ export interface FinishDto {
   preview_b64?: string | null;
 }
 
+/**
+ * 滚动截图步进一条（T-B4-5）。`segments > 1` 只可能出现在降级之后：
+ * 相邻两帧认不出共同行时，前一段整体封盘、这一帧另起一段，一帧都不丢。
+ */
+export interface ScrollStepDto {
+  segments: number;
+  /** 累计高度（物理像素）：数字不动就是这一帧没加上，比"事后发现长图缺一截"便宜 */
+  height: number;
+  degraded: boolean;
+  /** 本次新追加那截的 PNG Base64（与产物同源：同一偏移算出来的尾巴） */
+  preview_b64: string;
+}
+
 export interface ShotItemDto {
   id: string;
   created_ms: number;
@@ -508,6 +521,22 @@ export function screenshotDiscard(taskId: string): Promise<void> {
 /** 完成（合成图 + 动作） */
 export function screenshotFinish(taskId: string, request: FinishRequestDto): Promise<FinishDto> {
   return invoke("screenshot_finish", { taskId, request });
+}
+/** 滚动截图：按选区矩形抓首帧开一次会话（覆盖层编辑阶段） */
+export function screenshotScrollBegin(rect: ConfirmRect): Promise<string> {
+  return invoke("screenshot_scroll_begin", { rect });
+}
+/** 滚动截图：用户滚过一段后追加一帧（宿主自己对重叠区，对不上就分段） */
+export function screenshotScrollAppend(id: string): Promise<ScrollStepDto> {
+  return invoke("screenshot_scroll_append", { id });
+}
+/** 滚动截图：收束会话，每段各走一次既有动作通路（分段即各存一图） */
+export function screenshotScrollFinish(id: string, actions: string[]): Promise<FinishDto> {
+  return invoke("screenshot_scroll_finish", { id, actions });
+}
+/** 滚动截图：放弃会话（内存里的带子立刻归还） */
+export function screenshotScrollDiscard(id: string): Promise<void> {
+  return invoke("screenshot_scroll_discard", { id });
 }
 /** 截图历史分页 */
 export function screenshotHistoryList(page: number, size: number): Promise<ShotPageDto> {

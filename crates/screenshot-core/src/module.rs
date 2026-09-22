@@ -29,8 +29,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::store::ShotStore;
 use crate::types::{
     effective_actions, Annotation, ConfirmRect, CropDto, FinishDto, FinishRequest, PinDataDto,
-    PinDto, ScreenshotConfig, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto, WindowTargetDto,
-    POST_ACTION_WHITELIST,
+    PinDto, ScreenshotConfig, ScrollStepDto, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
+    WindowTargetDto, POST_ACTION_WHITELIST,
 };
 use crate::util;
 
@@ -88,6 +88,22 @@ struct PendingTask {
     hwnd: Option<i64>,
 }
 
+/// 一次滚动截图会话（D-29 B4 T-B4-5）：**只住内存**，重启不恢复。
+///
+/// 滚动是秒级会话而不是资产——中间态是几屏高的原始像素，落盘的话每次用户点"放弃"
+/// 都留下孤儿文件；产物在完成时才进历史表（即普通历史行，`file` 走既有 save 通路）。
+struct ScrollSession {
+    /// 重取用的矩形（全屏坐标，步进之间不动）
+    rect: ConfirmRect,
+    /// 已封盘的段（每次对不上就多一段），各段完成时各存一图
+    done: Vec<crate::scroll::ScrollBand>,
+    /// 正在续接的当前段
+    current: crate::scroll::ScrollBand,
+    /// 已追加帧数（不含首帧）
+    steps: u32,
+    degraded: bool,
+}
+
 /// Pin 贴图记录（持久化到 {appData}/pins.json）
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PinRecord {
@@ -109,6 +125,8 @@ pub struct ScreenshotModule {
     clipboard: RwLock<Option<Arc<dyn ClipboardPort>>>,
     bus: RwLock<Option<Arc<EventBus>>>,
     pending: Mutex<HashMap<String, PendingTask>>,
+    /// 滚动会话表（T-B4-5）：与 `pending` 两张表，滚动不占 shot 的单任务槽
+    scrolls: Mutex<HashMap<String, ScrollSession>>,
     pins: Mutex<Vec<PinRecord>>,
     config: Arc<AsyncMutex<ScreenshotConfig>>,
     state: ModuleStateCell,
@@ -125,6 +143,7 @@ impl ScreenshotModule {
             clipboard: RwLock::new(None),
             bus: RwLock::new(None),
             pending: Mutex::new(HashMap::new()),
+            scrolls: Mutex::new(HashMap::new()),
             pins: Mutex::new(Vec::new()),
             config: Arc::new(AsyncMutex::new(ScreenshotConfig::default())),
             state: ModuleStateCell::new(),
@@ -549,6 +568,205 @@ impl ScreenshotModule {
 
     pub fn discard(&self, task_id: &str) {
         self.pending.lock().remove(task_id);
+    }
+
+    // ---------------- 滚动截图（D-29 B4 T-B4-5，手动步进）----------------
+
+    /// 开一次滚动会话：记住矩形 + 抓首帧，返回会话 id。
+    ///
+    /// 与 shot 任务**并存**：覆盖层此时手里已经有一张确认图（`pending` 里那个任务），
+    /// 滚动条是在它之上开出来的，两者各占各的表，因此滚动不会把 shot 的单任务槽顶掉
+    /// （顶掉的话用户点"重选"就再也回不去了）。
+    ///
+    /// 首帧与后续帧一律从**全屏**按同一矩形重取：步进之间用户唯一该动的是目标应用的
+    /// 滚动条，屏幕坐标系不动，矩形才不动。
+    pub fn scroll_begin(&self, rect: ConfirmRect) -> Result<String, AppError> {
+        let band = self.grab_band(rect)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        self.scrolls.lock().insert(
+            id.clone(),
+            ScrollSession {
+                rect,
+                done: Vec::new(),
+                current: band,
+                steps: 0,
+                degraded: false,
+            },
+        );
+        Ok(id)
+    }
+
+    /// 同矩形重取一帧并对上：Some(偏移) → 接尾；None → 当前段整体封盘、新帧另起一段。
+    ///
+    /// **对不上是正常出口而不是失败**：虚拟列表、懒加载图片、动画中的页面都会让相邻两帧
+    /// 没有共同行。此时原样追加成独立段并置 `degraded`，一帧都不丢——把对不上的帧丢掉
+    /// 会产出一张看起来完整、中间却缺了一截的长图，那是这条通路最坏的产物。
+    pub fn scroll_append(&self, id: &str) -> Result<ScrollStepDto, AppError> {
+        let rect = {
+            let sessions = self.scrolls.lock();
+            let s = sessions
+                .get(id)
+                .ok_or_else(|| mod_err("SCREENSHOT_SCROLL_001", "滚动会话不存在或已结束"))?;
+            if s.steps >= crate::scroll::SCROLL_MAX_STEPS {
+                return Err(AppError::module(
+                    "SCREENSHOT_SCROLL_002",
+                    format!("本次滚动已达 {} 帧上限", crate::scroll::SCROLL_MAX_STEPS),
+                    Some("请先完成拼接，再开下一段；上限之内不做有损丢弃"),
+                ));
+            }
+            s.rect
+        };
+        let next = self.grab_band(rect)?;
+        let preview = {
+            let mut sessions = self.scrolls.lock();
+            // 抓帧期间会话可能已被放弃（覆盖层被关掉）：那时这一帧无处安放，如实报
+            let s = sessions
+                .get_mut(id)
+                .ok_or_else(|| mod_err("SCREENSHOT_SCROLL_001", "滚动会话不存在或已结束"))?;
+            let preview = match crate::scroll::find_overlap(
+                &s.current,
+                &next,
+                crate::scroll::SCROLL_MAX_BAND,
+            ) {
+                Some(overlap) => {
+                    let tail = crate::scroll::tail_of(&next, overlap);
+                    s.current = crate::scroll::stitch_v(&s.current, &next, overlap);
+                    tail
+                }
+                None => {
+                    s.degraded = true;
+                    s.done.push(std::mem::replace(&mut s.current, next.clone()));
+                    next
+                }
+            };
+            // 两条出口都算"用掉一帧"：降级那条同样占内存（整帧原样封在 done 里），
+            // 只在拼成功时计数的话，一路对不上的会话就能绕过帧上限
+            s.steps += 1;
+            preview
+        };
+        let sessions = self.scrolls.lock();
+        let s = sessions
+            .get(id)
+            .ok_or_else(|| mod_err("SCREENSHOT_SCROLL_001", "滚动会话不存在或已结束"))?;
+        Ok(ScrollStepDto {
+            segments: (s.done.len() + 1) as u32,
+            height: s.done.iter().map(|b| b.height).sum::<u32>() + s.current.height,
+            degraded: s.degraded,
+            preview_b64: util::encode_png_b64(preview.width, preview.height, &preview.rgba)?,
+        })
+    }
+
+    /// 收束会话：逐段走**既有**动作通路（`run_actions`）+ 逐段入历史。
+    ///
+    /// 分段时各动作的语义（`segments > 1` 只在降级时出现）：`save`/`pin` 每段各一份，
+    /// `copy` 也每段各写一次而剪贴板只有一个图像槽位——落在最后一片上是系统语义，
+    /// 不是这里丢了的动作。历史表因此为一次滚动新增 N 行，与 N 张图一一对应。
+    ///
+    /// 空会话（id 认不出来，或段里一个像素都没有）→ `SCREENSHOT_SCROLL_001` 诚实拒：
+    /// 产出一张 0×0 的"长图"比拒一次糟糕得多，它会带着用户的文件名进历史、进剪贴板。
+    pub fn scroll_finish(&self, id: &str, actions: &[String]) -> Result<FinishDto, AppError> {
+        let Some(session) = self.scrolls.lock().remove(id) else {
+            return Err(mod_err("SCREENSHOT_SCROLL_001", "滚动会话不存在或已结束"));
+        };
+        let pieces: Vec<crate::scroll::ScrollBand> = session
+            .done
+            .into_iter()
+            .chain(std::iter::once(session.current))
+            .filter(|b| !b.is_empty())
+            .collect();
+        if pieces.is_empty() {
+            return Err(mod_err(
+                "SCREENSHOT_SCROLL_001",
+                "滚动会话没有任何画面，不产出空图",
+            ));
+        }
+        let cfg = self
+            .config
+            .try_lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let actions = effective_actions(&cfg, actions);
+        let mut file: Option<String> = None;
+        let mut pin_id: Option<String> = None;
+        for piece in &pieces {
+            let outcome = self.run_actions(ActionRun {
+                actions: &actions,
+                w: piece.width,
+                h: piece.height,
+                rgba: &piece.rgba,
+                fmt_override: None,
+                pin_x: None,
+                pin_y: None,
+            })?;
+            file = file.or(outcome.file.clone());
+            pin_id = pin_id.or(outcome.pin_id.clone());
+            let item = crate::types::ShotItem {
+                id: uuid::Uuid::now_v7().to_string(),
+                created_ms: chrono::Utc::now().timestamp_millis(),
+                width: piece.width,
+                height: piece.height,
+                file: outcome.file,
+                ocr_text: None,
+            };
+            if let Some(store) = self.store.read().clone() {
+                store.insert(&item).ok();
+            }
+            if let Some(bus) = self.bus.read().clone() {
+                bus.publish(Event::new(
+                    "screenshot.taken",
+                    "screenshot",
+                    serde_json::json!({ "task_id": item.id, "file": item.file }),
+                ))
+                .ok();
+            }
+            // OCR 联动只在第一段上：识别一条几屏高的长图是 OcrPanel 那侧的事，
+            // 逐段请求会让一次滚动冒出 N 条待决任务而覆盖层只关得掉一条
+            if outcome.request_ocr {
+                if let Err(e) =
+                    self.dispatch_ocr_request(&item.id, piece.width, piece.height, &piece.rgba)
+                {
+                    tracing::warn!(error = %e, "滚动联动 OCR 请求失败，本次识别跳过");
+                }
+            }
+        }
+        Ok(FinishDto {
+            file,
+            pin_id,
+            // 多段时 `file` 只报第一段（另存为语义只在单段时有意义；分段本身是降级路径，
+            // 步进条已经把"将分段各存一图"明说给用户了）
+            preview_b64: None,
+        })
+    }
+
+    pub fn scroll_discard(&self, id: &str) {
+        self.scrolls.lock().remove(id);
+    }
+
+    /// 按矩形重取一帧并转成 RGBA 带子（`scroll_begin`/`scroll_append` 共用，
+    /// 两处唯一的差异就是要不要对齐）
+    fn grab_band(&self, rect: ConfirmRect) -> Result<crate::scroll::ScrollBand, AppError> {
+        let capture = self
+            .capture
+            .read()
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "模块未就绪"))?;
+        let frame = capture.capture(CaptureTarget::FullScreen { monitor: 0 })?;
+        // 空矩形在这里就拒（crop_bgra 的 SCREENSHOT_CONFIRM_001）：滚出一个 0 高带子
+        // 会被后面的对齐当成"对不上"，于是用户看到一段一段空白拼在长图里
+        let (w, h, rgba) = util::crop_bgra(
+            &frame,
+            host_core::ports::Rect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+            },
+        )?;
+        Ok(crate::scroll::ScrollBand {
+            width: w,
+            height: h,
+            rgba,
+        })
     }
 
     /// 完成：解码前端合成图 → （可选）美化 → 执行动作（copy/save/pin/ocr）→ 入历史 → 发事件
@@ -1910,11 +2128,15 @@ mod tests {
         }
     }
 
-    /// 记录型窗口端口：收到的 `CaptureTarget` 全部存下，另备一张固定窗口表
+    /// 记录型窗口端口：收到的 `CaptureTarget` 全部存下，另备一张固定窗口表。
+    ///
+    /// `frames` 是给滚动截图用的**按次出片**队列（T-B4-5）：非空时按 FIFO 弹出，
+    /// 空了回到 `fake_frame()`——既有那些"只抓一次帧"的用例因此一字不动。
     #[derive(Default)]
     struct FakeCapture {
         targets: std::sync::Mutex<Vec<CaptureTarget>>,
         windows: std::sync::Mutex<Vec<host_core::ports::WindowTarget>>,
+        frames: std::sync::Mutex<std::collections::VecDeque<host_core::ports::Frame>>,
     }
 
     /// 只会两个旧方法的端口：`list_windows` 走 trait 默认实现臂
@@ -1945,7 +2167,12 @@ mod tests {
         }
         fn capture(&self, target: CaptureTarget) -> Result<host_core::ports::Frame, AppError> {
             self.targets.lock().unwrap().push(target);
-            Ok(fake_frame())
+            Ok(self
+                .frames
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(fake_frame))
         }
         fn list_windows(&self) -> Vec<host_core::ports::WindowTarget> {
             self.windows.lock().unwrap().clone()
@@ -2039,5 +2266,184 @@ mod tests {
 
         // 端口未注册（init 之前）同样是空表：命令层不该因一次枚举失败弹红
         assert!(ScreenshotModule::new().window_targets().is_empty());
+    }
+
+    // ---------------- T-B4-5：滚动截图（手动步进 + 重叠拼接 + 失败降级）----------------
+
+    /// 每行填成自己的颜色（BGRA 全通道同值，`is_black_frame` 采样非 0 即放行）
+    fn rows_frame(width: u32, first_row: u32, rows: u32) -> host_core::ports::Frame {
+        let mut bgra = Vec::with_capacity((width * rows * 4) as usize);
+        for r in 0..rows {
+            let g = (first_row + r) as u8;
+            for _ in 0..width {
+                bgra.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        host_core::ports::Frame {
+            width,
+            height: rows,
+            bgra: Arc::from(bgra.into_boxed_slice()),
+            dpi_scale: 1.0,
+            monitor_id: 0,
+        }
+    }
+
+    fn rect(w: i32, h: i32) -> ConfirmRect {
+        ConfirmRect { x: 0, y: 0, w, h }
+    }
+
+    /// 装配一个会按队列给帧的假端口 + 真历史库 + 只落盘的保存目录
+    fn scroll_module(
+        dir: &std::path::Path,
+        frames: Vec<host_core::ports::Frame>,
+    ) -> (ScreenshotModule, Arc<FakeCapture>) {
+        let cap = Arc::new(FakeCapture {
+            frames: std::sync::Mutex::new(frames.into()),
+            ..Default::default()
+        });
+        let m = ScreenshotModule::new();
+        *m.capture.write() = Some(cap.clone());
+        *m.store.write() = Some(store_of(dir));
+        *m.config.try_lock().unwrap() = ScreenshotConfig {
+            save_dir: dir.join("out").to_string_lossy().into_owned(),
+            post_actions: vec!["save".to_string()],
+            ..Default::default()
+        };
+        (m, cap)
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-5）字面测试名优先于 rustc 命名惯例
+    fn scrollFinish_emptySession_rejects001() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m, _cap) = scroll_module(dir.path(), vec![rows_frame(4, 0, 8)]);
+
+        // 红线：不产出空图——认不出来的会话、以及已收过束的会话，一律 001
+        assert_eq!(
+            m.scroll_finish("no-such-session", &[]).unwrap_err().code(),
+            "SCREENSHOT_SCROLL_001"
+        );
+
+        // 正对照：真开一次会话再收束，必须出得了图（否则上面那行可以是"永远拒"）
+        let id = m.scroll_begin(rect(4, 8)).unwrap();
+        let out = m.scroll_finish(&id, &[]).unwrap();
+        let file = out.file.expect("单段滚动应走既有 save 通路");
+        let (w, h, _) = util::decode_rgba_bytes(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!((w, h), (4, 8), "首帧即成品时尺寸就是那矩形");
+        assert_eq!(out.pin_id, None);
+
+        // 会话一次性：收过束再收一次不是"产一张空图"，而是明说没有这个会话
+        assert_eq!(
+            m.scroll_finish(&id, &[]).unwrap_err().code(),
+            "SCREENSHOT_SCROLL_001"
+        );
+        assert_eq!(
+            m.history_store()
+                .unwrap()
+                .list(&crate::types::HistoryQuery { page: 1, size: 10 })
+                .unwrap()
+                .total,
+            1,
+            "一次滚动一段 → 恰好一行历史"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn scrollAppend_degradesWhenNoOverlap_andKeepsBothSegments() {
+        let dir = tempfile::tempdir().unwrap();
+        // 首帧 = 行 0..8；第二帧整屏换色（虚拟列表重排/切了标签页），共同行为零
+        let (m, cap) = scroll_module(dir.path(), vec![rows_frame(4, 0, 8), rows_frame(4, 200, 8)]);
+        let id = m.scroll_begin(rect(4, 8)).unwrap();
+        let step = m.scroll_append(&id).unwrap();
+
+        // 对不上不是失败：两段都在，帧一帧都没丢
+        assert!(step.degraded, "识别不到重叠区必须如实置位");
+        assert_eq!(
+            step.segments, 2,
+            "两段落都在（丢掉任一段就是产一张缺中间的假长图）"
+        );
+        assert_eq!(step.height, 16, "降级时高度照直累加：没对齐就没减");
+        let (pw, ph, _) = util::decode_png_b64(&step.preview_b64).unwrap();
+        assert_eq!((pw, ph), (4, 8), "预览就是刚追加的那一帧全额");
+
+        let out = m.scroll_finish(&id, &[]).unwrap();
+        assert!(out.file.is_some(), "多段时至少报第一段的路径");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("out")).unwrap().count(),
+            2,
+            "分段各存一图（完成时对每段各调一次既有动作通路）"
+        );
+        assert_eq!(
+            m.history_store()
+                .unwrap()
+                .list(&crate::types::HistoryQuery { page: 1, size: 10 })
+                .unwrap()
+                .total,
+            2,
+            "两张图进两次历史，与文件一一对应"
+        );
+        assert_eq!(
+            cap.targets.lock().unwrap().len(),
+            2,
+            "抓帧次数 = 首帧 + 一次步进（对不上不该多抓一次重试）"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn scrollAppend_overlap_stitchesOneSegmentAndCountsNewRows() {
+        let dir = tempfile::tempdir().unwrap();
+        // 首帧 = 全局行 0..8；第二帧 = 行 4..12 → 真实滚动 4 行、重叠 4 行
+        let (m, _cap) = scroll_module(dir.path(), vec![rows_frame(4, 0, 8), rows_frame(4, 4, 8)]);
+        let id = m.scroll_begin(rect(4, 8)).unwrap();
+        let step = m.scroll_append(&id).unwrap();
+
+        // 正对照（与降级那枚同型不同数据）：对上时不降级、只有一段、高度按新行加
+        assert!(
+            !step.degraded,
+            "对上了却置降级=告诉用户要分段各存一图，那是假警报"
+        );
+        assert_eq!(step.segments, 1);
+        assert_eq!(step.height, 12, "8 + 8 − 4：加的是新行，不是整帧");
+        let (_pw, ph, _) = util::decode_png_b64(&step.preview_b64).unwrap();
+        assert_eq!(ph, 4, "预览只给新追加的 4 行");
+
+        let out = m.scroll_finish(&id, &[]).unwrap();
+        let file = out.file.unwrap();
+        let (w, h, rgba) = util::decode_rgba_bytes(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!((w, h), (4, 12));
+        // 拼接处内容对账：第 8 行是全局第 8 行（重叠区没被重复贴、也没被吃掉）
+        let row_at = |y: usize| rgba[y * 4 * 4];
+        assert_eq!(row_at(7), 7, "首段原样");
+        assert_eq!(row_at(8), 8, "接缝处第一行");
+        assert_eq!(row_at(11), 11, "尾行");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn scrollAppend_afterMaxSteps_honestStopNotLossyDrop() {
+        let dir = tempfile::tempdir().unwrap();
+        // 21 帧全同色不同行号：每帧都对得上，纯测上限这条口
+        let frames: Vec<host_core::ports::Frame> = (0..=crate::scroll::SCROLL_MAX_STEPS)
+            .map(|i| rows_frame(4, i * 4, 8))
+            .collect();
+        let (m, _cap) = scroll_module(dir.path(), frames);
+        let id = m.scroll_begin(rect(4, 8)).unwrap();
+        for _ in 0..crate::scroll::SCROLL_MAX_STEPS {
+            m.scroll_append(&id).unwrap();
+        }
+        let e = m.scroll_append(&id).unwrap_err();
+        assert_eq!(e.code(), "SCREENSHOT_SCROLL_002");
+        assert!(e.to_string().contains("20"), "文案须说清上限是多少：{e}");
+        // 红线：超限是"停在这里"，不是"丢一帧继续"——已拼的部分照旧完整出图
+        let out = m.scroll_finish(&id, &[]).unwrap();
+        let file = out.file.expect("已到上限不该让已完成的部分作废");
+        let (w, h, _) = util::decode_rgba_bytes(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            (w, h),
+            (4, 88),
+            "21 帧首帧 8 行 + 每帧新增 4 行，一帧都没被丢弃"
+        );
     }
 }

@@ -76,6 +76,52 @@ pub async fn screenshot_finish(
         .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
 }
 
+// ---------------- 滚动截图（D-29 B4 T-B4-5，手动步进）----------------
+// 步进由用户点击驱动：全通路不含任何输入注入（不模拟滚轮/键盘），"滚不动"永远不是这里的故障
+
+/// 开一次滚动会话：同矩形抓首帧，返回会话 id
+#[tauri::command]
+pub async fn screenshot_scroll_begin(
+    rect: screenshot_core::types::ConfirmRect,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.scroll_begin(rect))
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
+/// 用户滚过一段后追加：同矩形重取一帧并对上（对不上则原样另起一段，不丢帧）
+#[tauri::command]
+pub async fn screenshot_scroll_append(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<screenshot_core::types::ScrollStepDto, AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.scroll_append(&id))
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
+/// 收束会话：逐段走既有动作通路 + 逐段入历史（分段是降级出口，各存一图）
+#[tauri::command]
+pub async fn screenshot_scroll_finish(
+    id: String,
+    actions: Vec<String>,
+    state: State<'_, HostState>,
+) -> Result<screenshot_core::types::FinishDto, AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.scroll_finish(&id, &actions))
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
+/// 放弃会话：带子只住内存，用户点"放弃"就得立刻还内存，不等进程重启
+#[tauri::command]
+pub fn screenshot_scroll_discard(id: String, state: State<'_, HostState>) {
+    state.screenshot.scroll_discard(&id);
+}
+
 /// 截图历史分页
 #[tauri::command]
 pub async fn screenshot_history_list(

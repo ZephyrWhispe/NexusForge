@@ -246,6 +246,20 @@ pub struct CropDto {
     pub height: u32,
 }
 
+/// 滚动截图步进一条（D-29 B4 T-B4-5）：追加成功后会话的当前面貌
+#[derive(Debug, Serialize)]
+pub struct ScrollStepDto {
+    /// 已成形段数（`>1` = 有过对不上的帧，各段将各存一图）
+    pub segments: u32,
+    /// 累计高度（物理像素）。步进条拿它对账"这一帧真加了几行"——
+    /// 数字不动就是没加上，比事后发现长图缺一段便宜
+    pub height: u32,
+    /// 本会话是否出现过"识别不到重叠区"的降级
+    pub degraded: bool,
+    /// 本次新追加那截的 PNG Base64（恒无损：预览面不参与格式协商，同 T-B4-7 裁定）
+    pub preview_b64: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct FinishRequest {
     /// 前端 canvas 合成后的最终图（PNG Base64）——预览即导出，保证一致性

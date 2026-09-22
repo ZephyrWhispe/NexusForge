@@ -2,6 +2,7 @@
 
 pub mod beautify;
 pub mod module;
+pub mod scroll;
 pub mod store;
 pub mod types;
 pub mod util;

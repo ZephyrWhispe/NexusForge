@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { makeStyles, tokens, Button, Slider, Switch, Text } from "@fluentui/react-components";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
@@ -7,10 +7,15 @@ import {
   screenshotTask,
   screenshotConfirm,
   screenshotFinish,
+  screenshotScrollBegin,
+  screenshotScrollAppend,
+  screenshotScrollFinish,
+  screenshotScrollDiscard,
   ocrRecognize,
   hostLog,
   type TaskStartDto,
   type TaskInfoDto,
+  type ConfirmRect,
   type CropDto,
   type OcrResultDto,
   type AnnotationDto,
@@ -25,6 +30,13 @@ import {
   wholeWindowCss,
   type OverlayRect,
 } from "./overlay/windowMode";
+import ScrollStrip from "./overlay/ScrollStrip";
+import {
+  createScrollFlow,
+  isScrollCapped,
+  isScrolling,
+  scrollStepLabel,
+} from "./overlay/scrollFlow";
 import {
   ANN_KIND_NAME,
   HIGHLIGHT_WIDTH_SCALE,
@@ -441,6 +453,31 @@ export default function OverlayShot() {
   /** 撤销/重做栈深度（state：驱动按钮 disabled，避免 ref 不触发渲染） */
   const [stackCounts, setStackCounts] = useState({ undo: 0, redo: 0 });
 
+  // ---------------- 滚动截图会话（T-B4-5，手动步进）----------------
+
+  /**
+   * 本次确认图对应的**物理选区**：滚动会话的每一帧都按同一矩形从全屏重取，所以矩形就是
+   * 当初点「完成」那张图的选区。存 ref 而不是 state——它不参与任何渲染判定，只在这颗钮
+   * 被按下的那一刻读一次。
+   */
+  const scrollRectRef = useRef<ConfirmRect | null>(null);
+  const scrollFlow = useMemo(
+    () =>
+      createScrollFlow({
+        begin: screenshotScrollBegin,
+        append: screenshotScrollAppend,
+        finish: screenshotScrollFinish,
+        discard: screenshotScrollDiscard,
+        notify: (msg) => {
+          hostLog("error", `滚动截图失败: ${msg}`);
+          setActionError(msg);
+        },
+      }),
+    [],
+  );
+  const scrollState = useSyncExternalStore(scrollFlow.subscribe, scrollFlow.get);
+  const scrolling = isScrolling(scrollState);
+
   /** 装载任务（预热路径）：定位窗口 → 取帧 → 重置状态 → 渲染完成后自显 */
   const loadTask = useCallback(async (info: TaskStartDto) => {
     try {
@@ -459,6 +496,9 @@ export default function OverlayShot() {
       pickedRef.current = null;
       setPicked(null);
       setStackCounts({ undo: 0, redo: 0 });
+      // 新任务进门 = 上一张截图的滚动会话到此为止：带子只住宿主内存，不带走就是漏
+      scrollRectRef.current = null;
+      void scrollFlow.abort();
       // 动作链跟着任务走：预热窗口复用，上一任务的偏好不能顶着新截图的脸生效
       setDefaultActions(completeActions(info.default_actions));
       setError(null);
@@ -484,7 +524,7 @@ export default function OverlayShot() {
           reportError(e2, { context: "覆盖层错误页展示失败", dedupeKey: "overlay-show", toast: false }),
         ); // 出错也要展示错误页
     }
-  }, []);
+  }, [scrollFlow]);
 
   // 任务装载：URL 参数（回退路径）+ nf:overlay:task 事件（预热路径）
   useEffect(() => {
@@ -515,9 +555,10 @@ export default function OverlayShot() {
   }, []);
 
   const cancel = useCallback(() => {
+    void scrollFlow.abort();
     const taskId = task?.task_id ?? new URLSearchParams(window.location.search).get("task");
     void cancelOverlay(taskId);
-  }, [task]);
+  }, [task, scrollFlow]);
 
   /** 确认框在开：对话框的 Esc/Enter 会同时冒泡到本窗全局快捷键，须让位 */
   const confirmPending = useRef(false);
@@ -557,6 +598,9 @@ export default function OverlayShot() {
       )
         return;
     }
+    // 走到这里 = 用户确实要离开这张图：这一次的滚动到此为止，不收掉旧带子就一直压在宿主内存里
+    void scrollFlow.abort();
+    scrollRectRef.current = null;
     annsRef.current = [];
     redoRef.current = [];
     setLayerList([]);
@@ -568,7 +612,7 @@ export default function OverlayShot() {
     setStackCounts({ undo: 0, redo: 0 });
     setStage("select");
     setRect(null);
-  }, [askConfirm, crop]);
+  }, [askConfirm, crop, scrollFlow]);
 
   // Esc 取消（select 阶段直接关窗；edit 阶段回选区，有标注则先确认）
   useEffect(() => {
@@ -633,6 +677,8 @@ export default function OverlayShot() {
     if (!box) return;
     try {
       const c = await screenshotConfirm(task.task_id, box);
+      // 滚动会话的每一帧都按这个物理矩形从全屏重取，因此它就是"当初确认的那块地方"
+      scrollRectRef.current = box;
       setCrop(c);
       setStage("edit");
       if (task.mode === "ocr") {
@@ -1342,6 +1388,26 @@ export default function OverlayShot() {
     }
   };
 
+  /**
+   * 滚动截图唯一的入口钮（T-B4-5）：空闲 = 开一次会话（首帧就是当前选区），会话中 = 采下一帧。
+   *
+   * 窗口轨不给这颗钮：`scroll_*` 的每一帧都从**全屏**按同一矩形重取，而窗口轨的选区坐标是
+   * 该窗帧自己的坐标系，两者不同源。宁可少给一个功能，也不产出一张裁错位置的长图。
+   */
+  const startOrStepScroll = () => {
+    if (scrolling) {
+      void scrollFlow.step();
+      return;
+    }
+    const rect = scrollRectRef.current;
+    if (rect) void scrollFlow.start(rect);
+  };
+
+  /** 会话开着时单张动作一律让位：那会把一整段已采的帧静默留在宿主内存里 */
+  const scrollHoldTip = scrolling
+    ? "滚动会话进行中：请先「完成拼接」或「放弃」，再走单张动作"
+    : undefined;
+
   const runOcr = useCallback(async (c?: CropDto) => {
     const target = c ?? crop;
     if (!target || !task) return;
@@ -1647,11 +1713,17 @@ export default function OverlayShot() {
           size="small"
           appearance="primary"
           onClick={() => void finish(defaultActions)}
-          disabled={busy}
+          disabled={busy || scrolling}
+          title={scrollHoldTip}
         >
           {busy ? "处理中…" : completeLabel(defaultActions)}
         </Button>
-        <Button size="small" onClick={() => void finish(["copy"])} disabled={busy}>
+        <Button
+          size="small"
+          onClick={() => void finish(["copy"])}
+          disabled={busy || scrolling}
+          title={scrollHoldTip}
+        >
           复制
         </Button>
         <Button
@@ -1663,19 +1735,52 @@ export default function OverlayShot() {
         >
           存为 {saveFormat ? EXPORT_LABEL[saveFormat] : "跟随设置"}
         </Button>
-        <Button size="small" onClick={() => void finish(["save"])} disabled={busy}>
+        <Button
+          size="small"
+          onClick={() => void finish(["save"])}
+          disabled={busy || scrolling}
+          title={scrollHoldTip}
+        >
           保存
         </Button>
-        <Button size="small" onClick={() => void finish(["pin"])} disabled={busy}>
+        <Button
+          size="small"
+          onClick={() => void finish(["pin"])}
+          disabled={busy || scrolling}
+          title={scrollHoldTip}
+        >
           贴图
         </Button>
         <Button size="small" onClick={() => void runOcr()} disabled={ocrBusy || busy}>
           OCR
         </Button>
+        {!isWindowTask(task) && (
+          <Button
+            size="small"
+            appearance={scrolling ? "outline" : "secondary"}
+            onClick={startOrStepScroll}
+            disabled={busy || !crop || (scrolling && isScrollCapped(scrollState))}
+            title={
+              scrolling
+                ? "对目标应用滚动一段后点这里，宿主自己对齐重叠行；不做任何自动滚动"
+                : "以当前选区开一次滚动截图会话"
+            }
+          >
+            {scrollStepLabel(scrollState)}
+          </Button>
+        )}
         <Button size="small" onClick={() => void discardToSelect()} disabled={busy}>
           重选
         </Button>
       </div>
+
+      {scrolling && (
+        <ScrollStrip
+          state={scrollState}
+          onFinish={() => void scrollFlow.complete(defaultActions)}
+          onDiscard={() => void scrollFlow.abort()}
+        />
+      )}
 
       {actionError && (
         <div className={styles.errBar}>
