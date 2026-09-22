@@ -1109,3 +1109,34 @@ fn auxWindows_neverGrantSyncRuns() {
         "正对照：main 必须持有 {ident}，否则本负例是空洞"
     );
 }
+
+/// T-B5-6 红线负例：`sync_set_paused` 写的就是内核那枚暂停位——它决定"用户的笔记还要不要
+/// 继续往外发"。六个辅助窗（快速面板/覆盖层等）没有任何同步入口，给它们这一枚 = 任意窗口
+/// 都能悄悄把出账闸门掐掉或放开，而用户在主窗口看到的徽章还以为是自己在管。main 正对照防空洞。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §10.2 T-B5-6）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantSyncSetPaused() {
+    let caps = load_capabilities();
+    let ident = "allow-sync-set-paused";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（出账闸门 main-only）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 {ident}，否则本负例是空洞"
+    );
+}

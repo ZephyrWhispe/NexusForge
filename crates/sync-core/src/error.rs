@@ -17,6 +17,10 @@ pub enum SyncError {
     /// 与 `Apply`（数据集写入本身失败）刻意分野：这两类是**结构**问题，重试无用。
     #[error("数据集拒绝: {0}")]
     Entity(String),
+    /// 配置值被拒（T-B5-6）：坏值在**落运行态之前**弹回，经 `host.config_rejected`
+    /// 回到设置界面。与 `Db`/`Apply` 分野：这不是执行失败，是"这个值本来就不该收"。
+    #[error("配置拒绝: {0}")]
+    Config(String),
     #[error("未就绪: {0}")]
     NotReady(String),
 }
@@ -31,6 +35,7 @@ impl SyncError {
             SyncError::Peer(_) => "SYNC_PEER_001",
             SyncError::Apply(_) => "SYNC_APPLY_001",
             SyncError::Entity(_) => "SYNC_ENTITY_001",
+            SyncError::Config(_) => "SYNC_CONFIG_001",
             SyncError::NotReady(_) => "SYNC_STATE_001",
         }
     }

@@ -127,3 +127,15 @@ pub async fn sync_runs_get(
         .map_err(|e| sync_err(sync_core::SyncError::Db(format!("同步流水读任务失败：{e}"))))?
         .map_err(sync_err)
 }
+
+/// 暂停/恢复同步（09 §10.2 T-B5-6）：**唯一写口**，面板与以后托盘两处入口共用同一实现点
+/// （B3 沉淀纪律：两个入口两份实现迟早漂移，漂移就是"徽章说暂停了内核还在发"）。
+///
+/// 不进 `spawn_blocking`：这一枚既无磁盘也无网络——写一个原子位、掐掉在等的静默窗。
+/// 恢复**不补跑**（语义是"以后照常"，要立刻出账那里有 `sync_now`）。状态读面
+/// `sync_status().paused` 与本命令读同一位，因此面板回读到的就是内核此刻真的那套开关。
+#[tauri::command]
+pub async fn sync_set_paused(paused: bool, state: State<'_, HostState>) -> Result<(), AppError> {
+    state.sync.set_paused(paused);
+    Ok(())
+}

@@ -11,6 +11,9 @@
 //!   pending，全部现读自表；无类型 `json!` 时代"面板说的"与"内核做的"可以各说各话）
 //! - 数据集注册表（T-B5-5）：`SYNC_ENTITIES` 编译期白名单 + 按 entity 分派的应用器映射；
 //!   新增数据集＝往常量数组加一行 + 宿主多装配一个 applier，`engine.rs`/`transport.rs` 零改
+//! - 自动同步（T-B5-6）：`SyncConfig` 三键经 `apply_config` 活派发即改即生效（不重启）；
+//!   变更入流后排静默窗，到期一轮只往"本机成功同步过"的地址出账；`auto_sync` **默认关**
+//!   （不擅自开始往外发用户的笔记），暂停位与面板徽章读同一内存
 //! - 红线：密码库条目**永不**自动同步（白名单硬编码，`attach_applier("vault", …)` 运行期亦拒，
 //!   见 `syncEntity_vaultNeverAdmitted` 三层可否例）
 //!
@@ -20,7 +23,7 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
@@ -105,6 +108,198 @@ pub struct ChangeRecord {
     pub action: String,
 }
 
+/// 静默窗下限（毫秒）：低于这个值，"连续改 20 篇笔记"会变成 20 轮出账会话。
+/// 设置中心与 `merged` 读同一个常量——两处各写一份数字，迟早有一处懒得改。
+pub const QUIET_PERIOD_MIN_MS: u64 = 5_000;
+/// 默认静默窗（与 `config_schema()` 的 `default` 逐值相同：盘上只写过部分键时，
+/// "运行期保持现值"与"下次启动从默认值起"必须落在同一个数上）
+pub const DEFAULT_QUIET_PERIOD_MS: u64 = 60_000;
+/// 冲突快照默认保留天数（同上，与 schema `default` 同源）
+pub const DEFAULT_CONFLICT_KEEP_DAYS: u64 = 30;
+/// 一天的毫秒数（保留窗算式唯一口）
+const DAY_MS: i64 = 86_400_000;
+
+/// 同步模块配置（T-B5-6：`config_schema()` 三键的唯一读者，`apply_config` 的唯一产物）
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SyncConfig {
+    /// 变更入流后静默窗到期即自动出账。**默认关**：没有任何用户装完软件就期望
+    /// 自己的笔记开始往外发的行为，开关必须自己按。
+    pub auto_sync: bool,
+    /// 静默窗（毫秒）：窗口内的连续变更合并成一轮同步（14-sync §4 Resilio 静默期借鉴）
+    pub quiet_period_ms: u64,
+    /// 冲突快照保留天数（`conflict_log` 裁剪的唯一窗口来源）
+    pub conflict_keep_days: u64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            auto_sync: false,
+            quiet_period_ms: DEFAULT_QUIET_PERIOD_MS,
+            conflict_keep_days: DEFAULT_CONFLICT_KEEP_DAYS,
+        }
+    }
+}
+
+impl SyncConfig {
+    /// 现运行态 ⊕ 补丁（**缺键 = 不动运行态**，B4 既定纪律）
+    ///
+    /// 整份反序列化会把"用户没填这一格"与"用户填了默认值"混成同一件事，而两者
+    /// 后果差得远：前者应保持现状，后者应改值。坏值一律在这里弹回（全有或全无：
+    /// 半套配置在跑比配置没生效更难查），`Err` 经派发口变成 `host.config_rejected`。
+    /// 未知键（含旧盘上残留的已废弃键）读侧忽略——不写"已迁移"，旧键就是不再存在。
+    pub fn merged(&self, values: &serde_json::Value) -> R<SyncConfig> {
+        let mut next = self.clone();
+        if let Some(v) = values.get("auto_sync") {
+            next.auto_sync = v
+                .as_bool()
+                .ok_or_else(|| SyncError::Config(format!("auto_sync 须为布尔值，收到 {v}")))?;
+        }
+        if let Some(v) = values.get("quiet_period_ms") {
+            let n = v
+                .as_u64()
+                .ok_or_else(|| SyncError::Config(format!("quiet_period_ms 须为整数，收到 {v}")))?;
+            if n < QUIET_PERIOD_MIN_MS {
+                return Err(SyncError::Config(format!(
+                    "quiet_period_ms 不得低于 {QUIET_PERIOD_MIN_MS} 毫秒（收到 {n}）：静默窗比会话本身还短会把连续变更打成不停出账"
+                )));
+            }
+            next.quiet_period_ms = n;
+        }
+        if let Some(v) = values.get("conflict_keep_days") {
+            let n = v.as_u64().ok_or_else(|| {
+                SyncError::Config(format!("conflict_keep_days 须为整数，收到 {v}"))
+            })?;
+            if n == 0 {
+                return Err(SyncError::Config(
+                    "conflict_keep_days 不得为 0：那等于每次派发就清空全部冲突历史".into(),
+                ));
+            }
+            next.conflict_keep_days = n;
+        }
+        Ok(next)
+    }
+}
+
+/// 静默窗闹钟槽：`(排程序号, 任务句柄)`。号让醒来后发现已被后来者取代的旧闹钟自己退场。
+type AlarmSlot = Option<(u64, tokio::task::JoinHandle<()>)>;
+
+/// 自动同步运行态（T-B5-6：静默窗的**唯一实现点**）
+///
+/// 五枚状态必须住在一起，分开写就会出现"用户按了暂停、闹钟还在等"这类分叉：
+/// - `config` / `paused`：与 `SyncModule` 同一份（不是副本），面板读的状态与排程判定读的是同一位；
+/// - `last_addr`：自动出账的地址事实源＝**最近一次成功会话**用过的地址（T-B5-7 换心跳宣告后接管）；
+/// - `gen` + `slot`：取消-重排。每次排程领一个号，闹钟醒来发现号已被后来者取代就退场；
+/// - `running`：一轮 due-peers 的互斥口——会话进行到一半又来变更时，不并发开第二条
+///   到同一对端的会话（游标交错的代价是重复推送与假 Ack），排队等下一轮即可。
+#[derive(Clone)]
+struct AutoSync {
+    config: Arc<RwLock<SyncConfig>>,
+    paused: Arc<AtomicBool>,
+    last_addr: Arc<RwLock<HashMap<String, String>>>,
+    gen: Arc<AtomicU64>,
+    slot: Arc<parking_lot::Mutex<AlarmSlot>>,
+    running: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl AutoSync {
+    fn new() -> Self {
+        Self {
+            config: Arc::new(RwLock::new(SyncConfig::default())),
+            paused: Arc::new(AtomicBool::new(false)),
+            last_addr: Arc::new(RwLock::new(HashMap::new())),
+            gen: Arc::new(AtomicU64::new(0)),
+            slot: Arc::new(parking_lot::Mutex::new(None)),
+            running: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// 变更已入流 ⇒ 重排静默窗（连投只留最后一颗闹钟）
+    ///
+    /// 关着（默认态）就一个字都不做；暂停态同样不排程（面板徽章已经说明了为什么）。
+    /// 没有 tokio 上下文时**如实 warn**"这次没排上"，不假装成功——变更本身已经入流，
+    /// 少一轮自动出账是可恢复的，谎报"已排程"是不可恢复的（用户不会再手动同步）。
+    fn note_changed(&self, ctx: Arc<SyncCtx>) {
+        let quiet = {
+            let cfg = self.config.read();
+            if !cfg.auto_sync || self.paused.load(Ordering::SeqCst) {
+                return;
+            }
+            cfg.quiet_period_ms
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "无 tokio 运行时上下文，本次变更未排程自动同步（请用「立即同步」手动出账）"
+            );
+            return;
+        };
+        let my_gen = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let me = self.clone();
+        let handle = rt.spawn(async move { me.run_after_quiet(my_gen, quiet, ctx).await });
+        // 取消-重排：摘掉上一颗闹钟（它若已醒来交还槽位，此处 take 到的就是 None，
+        // 正在跑的那轮不会被掐断——半途掐一条会话比多等一轮糟得多）
+        if let Some((_, old)) = self.slot.lock().replace((my_gen, handle)) {
+            old.abort();
+        }
+    }
+
+    async fn run_after_quiet(self, my_gen: u64, quiet: u64, ctx: Arc<SyncCtx>) {
+        tokio::time::sleep(std::time::Duration::from_millis(quiet)).await;
+        // 交还闹钟要在同一把锁里比对号：只认"我仍是最新"，否则摘掉的是后来者的闹钟
+        {
+            let mut g = self.slot.lock();
+            if !g.as_ref().is_some_and(|(gen, _)| *gen == my_gen) {
+                return;
+            }
+            g.take();
+        }
+        // 到期时重读两枚事实：静默窗里用户可能按了暂停，也可能把自动同步整个关掉
+        if self.paused.load(Ordering::SeqCst) || !self.config.read().auto_sync {
+            return;
+        }
+        self.run_due(ctx).await;
+    }
+
+    /// 到期一轮：配对 ∩ 有地址 ∩ 未暂停逐个同步；失败只进流水与 `last_error`，**绝不记成功**
+    async fn run_due(self, ctx: Arc<SyncCtx>) {
+        let _round = self.running.lock().await;
+        let keep_days = self.config.read().conflict_keep_days;
+        for p in ctx.store.all() {
+            if self.paused.load(Ordering::SeqCst) {
+                tracing::info!(peer = %p.device_id, "本轮自动同步就此收手（已暂停）");
+                return;
+            }
+            let Some(addr) = self.last_addr.read().get(&p.device_id).cloned() else {
+                // 没有地址事实源就是没有：记一行失败流水点名原因，绝不拿 127.0.0.1 凑数
+                let err = SyncError::Peer(format!(
+                    "设备 {} 当前无可用地址（本机还没有与它成功同步过的记录，发现层亦未宣告同步端口）；\
+                     可在面板「高级」手输 host:port 后点「立即同步」",
+                    p.device_name
+                ));
+                tracing::warn!(peer = %p.device_id, error = %err, "自动同步跳过该设备（已入账）");
+                record_skipped_run(&ctx, &p.device_id, &err);
+                continue;
+            };
+            match sync_attempt(&ctx, &p.device_id, &addr).await {
+                Ok(s) => tracing::info!(
+                    peer = %p.device_id,
+                    pushed = s.pushed,
+                    applied = s.pulled_applied,
+                    "自动同步完成一轮"
+                ),
+                // `sync_attempt` 内已把失败落进行流水（含 Err 臂），这里只出声不再记一次
+                Err(e) => tracing::warn!(peer = %p.device_id, error = %e, "自动同步失败（已入账）"),
+            }
+        }
+        // 保留窗真消费（每轮裁一次；改小配置后下一轮即生效，不必另立触发口）
+        let cutoff = now_ms() - keep_days as i64 * DAY_MS;
+        if let Err(e) = ctx.log.prune_conflicts_before(cutoff) {
+            tracing::warn!(error = %e, "冲突快照保留窗裁剪失败（不影响本轮同步结果）");
+        }
+    }
+}
+
 /// 同步结果摘要（IPC 返回 + 状态事件）
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct SyncSummary {
@@ -155,8 +350,13 @@ pub struct SyncStatus {
     pub last_bind_error: Option<String>,
     pub self_device_id: String,
     pub self_name: String,
-    /// 手动暂停同步（T-B5-6 落地前恒 false）
+    /// 手动暂停同步（T-B5-6 起读 `paused` 原子位：面板/托盘两个入口共用同一位，
+    /// 读的不是"面板上那个开关的样子"而是那个位本身）
     pub paused: bool,
+    /// 自动同步开关现值（T-B5-6）：与 `config_schema()` 的 `auto_sync` 同一个内存态。
+    /// 面板拿它当开关的初值与回读面——设置写成功但运行态没变（值被派发口拒了）时，
+    /// 这里读回来的仍是旧值，谎报就此无处藏身。
+    pub auto_sync: bool,
     pub peers: Vec<PeerStatus>,
 }
 
@@ -428,7 +628,7 @@ fn finish_run(
     }
 }
 
-/// 发起一侧：配对校验 → 连接 → 握手 → 身份核对 → 跑协议（计时与记账在 `sync_with`）
+/// 发起一侧：配对校验 → 连接 → 握手 → 身份核对 → 跑协议（计时与记账单点在 `sync_attempt`）
 async fn initiate(ctx: &SyncCtx, device_id: &str, addr: &str, summary: &mut SyncSummary) -> R<()> {
     if !ctx.store.is_paired(device_id) {
         return Err(SyncError::Peer(format!("设备 {device_id} 未配对")));
@@ -448,6 +648,40 @@ async fn initiate(ctx: &SyncCtx, device_id: &str, addr: &str, summary: &mut Sync
         )));
     }
     run_initiator(ctx, &mut session, summary).await
+}
+
+/// 一轮主动会话的完整生命周期：计时 → 跑协议 → **无论走到哪一步都落一行流水** → 成功才发状态事件
+///
+/// 从 `SyncModule::sync_with` 提出来是为了让自动出账那一轮与手动「立即同步」走**同一条**
+/// 会话腿（两套记账迟早漂移：漂移的结果是面板上的数与流水表里的数各说各话）。
+async fn sync_attempt(ctx: &Arc<SyncCtx>, device_id: &str, addr: &str) -> R<SyncSummary> {
+    let started = now_ms();
+    let mut summary = SyncSummary::default();
+    let outcome = initiate(ctx, device_id, addr, &mut summary).await;
+    finish_run(
+        ctx,
+        device_id,
+        ROLE_INITIATOR,
+        started,
+        &summary,
+        outcome.as_ref().err(),
+    );
+    outcome?;
+    ctx.publish_state(&summary);
+    Ok(summary)
+}
+
+/// 没开会话就放弃的一轮同样要入账（T-B5-3 纪律"错误路径必须记账"的延伸）：
+/// 面板上"这台压根没动过"与"这台试过但没有地址"是两件事，前者查不到行、后者查得到原因。
+fn record_skipped_run(ctx: &SyncCtx, peer: &str, err: &SyncError) {
+    finish_run(
+        ctx,
+        peer,
+        ROLE_INITIATOR,
+        now_ms(),
+        &SyncSummary::default(),
+        Some(err),
+    );
 }
 
 /// 被动一侧：读 Hello → 握手 → 跑协议。交回 `(流水里的 peer 标签, 会话结果)`。
@@ -621,6 +855,8 @@ pub struct SyncModule {
     listening: Arc<AtomicBool>,
     /// 最近一次 bind 失败文本（与 `listening` 同属一对事实：true 时清空，失败时留存）
     bind_error: Arc<RwLock<Option<String>>>,
+    /// 自动同步运行态（T-B5-6）：配置内存态 + 暂停位 + 地址事实源 + 静默窗闹钟
+    auto: AutoSync,
     db_path: PathBuf,
     cancel: Arc<AtomicBool>,
 }
@@ -640,6 +876,7 @@ impl SyncModule {
             port: AtomicU16::new(DEFAULT_SYNC_PORT),
             listening: Arc::new(AtomicBool::new(false)),
             bind_error: Arc::new(RwLock::new(None)),
+            auto: AutoSync::new(),
             db_path: app_data_dir.join("db").join("sync.db"),
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -763,8 +1000,10 @@ impl SyncModule {
             last_bind_error: self.bind_error.read().clone(),
             self_device_id: identity.device_id.clone(),
             self_name: identity.device_name.clone(),
-            // T-B5-6（自动同步 + 暂停/恢复）落地前恒 false：没有暂停开关就没有暂停态
-            paused: false,
+            // 两枚开关都读运行态本身（不是盘上的值、也不是面板上的样子）：派发被拒时
+            // 这里回读的是"此刻真在跑的那套"，面板因此不可能显示一个内核没在执行的开关
+            paused: self.auto.paused.load(Ordering::SeqCst),
+            auto_sync: self.auto.config.read().auto_sync,
             peers,
         })
     }
@@ -816,33 +1055,82 @@ impl SyncModule {
         }))
     }
 
-    /// 主动与指定设备同步（IPC sync_now；addr 来自发现层/KVM 面板）
+    /// 主动与指定设备同步（IPC sync_now；addr 来自发现层/KVM 面板/用户手输）
     ///
     /// 无论走到哪一步失败都落一行 `sync_run`（含"未配对/连不上"这类还没开会话的失败，
     /// peer 列如实记用户点的那台设备 id）。只有 `ctx` 未就绪时不记——那时连库都没有，
     /// 谈不上静默：错误本身已如实上抛。
+    ///
+    /// 成功一次就记下这个地址：它是"自动出账该往哪台发"目前唯一的事实源（失败过或
+    /// 压根没试过的地址不算数——把猜的地址用于自动出账，等于把用户的笔记发给邻居）。
     pub async fn sync_with(&self, device_id: &str, addr: &str) -> R<SyncSummary> {
         let ctx = self.ctx()?;
-        let started = now_ms();
-        let mut summary = SyncSummary::default();
-        let outcome = initiate(&ctx, device_id, addr, &mut summary).await;
-        finish_run(
-            &ctx,
-            device_id,
-            ROLE_INITIATOR,
-            started,
-            &summary,
-            outcome.as_ref().err(),
-        );
-        outcome?;
-        ctx.publish_state(&summary);
+        let summary = sync_attempt(&ctx, device_id, addr).await?;
+        self.auto
+            .last_addr
+            .write()
+            .insert(device_id.to_string(), addr.to_string());
         Ok(summary)
     }
 
-    /// 本地变更记录入口（notes.changed 订阅回调 / IPC）
+    /// 暂停/恢复同步（**唯一写口**：面板与以后托盘两处入口共用，`status().paused` 读同一位）
+    ///
+    /// 暂停即刻掐掉在等的静默窗；**恢复不补跑**——用户点"恢复"期望的是"以后照常"，
+    /// 不是"立刻往外发一批"，要立刻出账那里有「立即同步」。恢复后下一次变更重新排程。
+    pub fn set_paused(&self, paused: bool) {
+        self.auto.paused.store(paused, Ordering::SeqCst);
+        if paused {
+            if let Some((_, h)) = self.auto.slot.lock().take() {
+                h.abort();
+            }
+        }
+        tracing::info!(paused, "SYNC 暂停位已更新");
+    }
+
+    /// 当前暂停位（托盘等处读用）
+    pub fn is_paused(&self) -> bool {
+        self.auto.paused.load(Ordering::SeqCst)
+    }
+
+    /// 变更入流后的端上通知（静默窗排程的**公开入口**）：IPC `sync_record_change` 与宿主直调都走这里
+    ///
+    /// 自动同步关着时它是空操作（默认关 ⇒ 本批上线行为零变化）。订阅臂在 spawn 任务里
+    /// 只持有 `AutoSync` 克隆（拿不到 `&SyncModule`），因此直呼 `auto.note_changed(ctx)`——
+    /// 排程本体只有那一个实现点，本方法只是把它接到模块 API 上。
+    pub fn note_change_recorded(&self) {
+        let Ok(ctx) = self.ctx() else {
+            return; // 未就绪：没身份没库，排程也无从谈起；真错误由变更记录那条路自己上抛
+        };
+        self.auto.note_changed(ctx);
+    }
+
+    /// 到期一轮自动出账（静默窗跑的就是这个；测试与"以后的一键全部同步"共用同一口）
+    pub async fn sync_due_peers(&self) -> R<()> {
+        let ctx = self.ctx()?;
+        self.auto.clone().run_due(ctx).await;
+        Ok(())
+    }
+
+    /// 本机为某设备记着的可用地址（最近一次**成功**会话用过的那个；无则 None）
+    pub fn peer_addr(&self, device_id: &str) -> Option<String> {
+        self.auto.last_addr.read().get(device_id).cloned()
+    }
+
+    /// 本地变更记录入口（IPC sync_record_change / 宿主直调）：入流成功即端上通知
     pub fn record_change(&self, entity: &str, path: &str, action: &str) -> R<()> {
         let ctx = self.ctx()?;
-        record_change_with(&ctx, entity, path, action)
+        record_change_with(&ctx, entity, path, action)?;
+        // 排程挂在"这笔已经进流"之后：入流失败的东西没有可同步的内容，
+        // 排一次闹钟只会让对端拉一个空批。
+        self.note_change_recorded();
+        Ok(())
+    }
+
+    /// 静默窗闹钟是否挂着（测试缝：负例"没排上"要能一眼看出来，
+    /// 而不是靠 sleep 之后没发生什么——那种断言在真机上永远成立）
+    #[cfg(test)]
+    fn has_pending_timer(&self) -> bool {
+        self.auto.slot.lock().is_some()
     }
 
     /// accept 循环（start 内 tokio spawn）
@@ -954,6 +1242,7 @@ impl Module for SyncModule {
         if let Some(bus) = self.bus.read().clone() {
             if let Ok(mut rx) = bus.subscribe("notes.changed") {
                 let ctx2 = ctx.clone();
+                let auto = self.auto.clone();
                 tokio::spawn(async move {
                     loop {
                         match rx.recv().await {
@@ -961,8 +1250,12 @@ impl Module for SyncModule {
                                 if event.source == "sync" {
                                     continue; // 防自环（理论不可达：apply 直调不发事件）
                                 }
-                                if let Err(e) = record_change_event(&ctx2, &event) {
-                                    tracing::warn!(error = %e, "本地变更入 op_log 失败");
+                                match record_change_event(&ctx2, &event) {
+                                    Ok(0) => {} // 非内容事件（索引/卡片/画布），正常静默
+                                    Ok(_) => auto.note_changed(ctx2.clone()),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "本地变更入 op_log 失败")
+                                    }
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -984,17 +1277,66 @@ impl Module for SyncModule {
         Ok(())
     }
 
-    /// 配置 schema（T-B5-5 起为**空**：原先那枚字符串型"范围说明"键是全仓零读者的死键——
-    /// 设置项要么有真消费方要么不出现，"有个输入框但没人读"会让用户以为它生效了。
-    /// 自动同步/暂停等真键由 T-B5-6 经 `apply_config` 活通路立起来）
+    /// 配置 schema（T-B5-6：三键**全有真读者**——`auto_sync`/`quiet_period_ms` 由
+    /// `AutoSync` 消费，`conflict_keep_days` 由本派发口与每轮自动出账消费）
+    ///
+    /// 数字常量和 `SyncConfig::default()` 同源：schema 里的 `default` 是设置界面的
+    /// 初始展示值，运行态默认值在 `impl Default`，两处各写一份数字迟早有一处懒得改。
     fn config_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "auto_sync": {
+                    "type": "boolean",
+                    "title": "自动同步",
+                    "description": "本地变更入流后，静默窗到期即自动向\"本机成功同步过\"的设备出账；关闭时只手动同步（默认关）",
+                    "default": false
+                },
+                "quiet_period_ms": {
+                    "type": "integer",
+                    "minimum": QUIET_PERIOD_MIN_MS,
+                    "title": "静默期(毫秒)",
+                    "description": "窗口内的连续变更合并为一轮同步（下限 5000：静默窗比一轮会话本身还短会把\"合并\"变成\"不停出账\"）",
+                    "default": DEFAULT_QUIET_PERIOD_MS
+                },
+                "conflict_keep_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "title": "冲突快照保留(天)",
+                    "description": "判负快照在本机 conflict_log 的留存天数，超窗即裁（0 不接受：那等于每次派发清空全部冲突历史）",
+                    "default": DEFAULT_CONFLICT_KEEP_DAYS
+                }
+            }
         })
     }
 
-    fn apply_config(&self, _values: serde_json::Value) -> Result<(), ModuleError> {
+    /// 活配置派发（B3 修好的通路：ConfigStore 写成功 → registry 派发到此，**不重启即生效**）
+    ///
+    /// 三条纪律都在这里：
+    /// - **缺键＝不动运行态**（`merged`）：整份反序列化会把"用户没填这格"和"用户填了默认值"
+    ///   混成一件事，前者应保持现状；
+    /// - **全有或全无**：坏值在写运行态**之前**弹回，经 `host.config_rejected` 回到设置界面，
+    ///   内存里永远不会出现"半个新配置在跑"；
+    /// - **幂等**：同一份值连派两次结果相同（`set_module` 是整段替换，派发也可能重放）。
+    fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError> {
+        let next = self
+            .auto
+            .config
+            .read()
+            .merged(&values)
+            .map_err(|e| ModuleError::Config(e.to_string()))?;
+        *self.auto.config.write() = next.clone();
+        // 保留窗真消费：改小配置不等下一轮自动出账才说话
+        let cutoff = now_ms() - next.conflict_keep_days as i64 * DAY_MS;
+        match self.log_arc() {
+            Ok(log) => {
+                if let Err(e) = log.prune_conflicts_before(cutoff) {
+                    tracing::warn!(error = %e, "冲突快照保留窗裁剪失败（配置值本身已生效）");
+                }
+            }
+            // init 前派发（启动早期 feed）：没库就没什么可裁，配置值照常生效
+            Err(e) => tracing::debug!(error = %e, "op_log 未就绪，跳过冲突快照保留窗裁剪"),
+        }
         Ok(())
     }
 
@@ -1459,5 +1801,449 @@ mod tests {
         assert!(matches!(err, SyncError::Entity(_)), "实际 {err:?}");
         assert!(err.to_string().contains("vault"));
         assert_eq!(ctx.log.count(), 1, "门外的数据集零入流");
+    }
+
+    // ---------------- T-B5-6：自动同步 + 暂停/恢复 ----------------
+
+    /// 有界轮询到条件成立（超时即 panic；把"等一会儿再看"当断言是假绿的温床）
+    async fn poll_until(what: &str, mut f: impl FnMut() -> bool) {
+        for _ in 0..100 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("等待超时：{what}");
+    }
+
+    /// 往 `conflict_log` 塞一条指定落盘时刻的快照（保留窗判据需要可控时钟）
+    fn seed_conflict_at(log: &OpLog, id: &str, recorded_ms: i64) {
+        log.record_conflict(&ConflictEntry {
+            conflict_id: id.into(),
+            entity: ENTITY_NOTE.into(),
+            entity_id: format!("{id}.md"),
+            lost_ts: recorded_ms,
+            lost_device: "devB".into(),
+            winner_device: "devA".into(),
+            winner_ts: recorded_ms + 1,
+            lost_value: serde_json::json!({ "content": "判负的那一份" }),
+            recorded_ms,
+        })
+        .unwrap();
+    }
+
+    /// 自动同步两枚测共用装配：init + 装 note 应用器 + 一台配对设备。
+    ///
+    /// **不调 `start()`**：本行要证的是"排没排闹钟、到期跑没跑"，起监听只会去抢
+    /// 49820（与真应用实例撞口）；地址事实源刻意留空，到期那轮如实记失败行。
+    async fn autosync_module(tag: &str) -> (Arc<SyncModule>, Arc<MemStore>, OpLog, PathBuf) {
+        let dir = temp_appdata(tag);
+        let m = Arc::new(SyncModule::new(&dir));
+        let store = Arc::new(MemStore::default());
+        m.attach_applier(ENTITY_NOTE, store.clone()).unwrap();
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: dir.clone(),
+            ports: Arc::new(host_core::ports::Ports::new()),
+            event_bus: Arc::new(EventBus::new()),
+        });
+        m.init(ctx).unwrap();
+        m.register_peer(PairedPeer {
+            device_id: "devB".into(),
+            device_name: "笔记本-B".into(),
+            fingerprint: "aa:bb".into(),
+            pubkey_b64: "AAAA".into(),
+            paired_at: 0,
+        });
+        let log = OpLog::open(m.db_path()).unwrap();
+        (m, store, log, dir)
+    }
+
+    /// 任务书（09 §10.2 T-B5-6）字面测试名：三键全链（真 ConfigStore + 真派发循环，全程不重启）
+    ///
+    /// 三层各测各的事实：schema 与 `Default` 同源（设置界面显示的初值就是运行态的初值）、
+    /// `merged` 的缺键语义（纯函数面）、写盘→派发→`status()` 的活通路（机检判据的测试形态）。
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(non_snake_case)]
+    async fn syncConfig_threeKeys_roundTrip() {
+        let dir = temp_appdata("cfgroute");
+        let bus = Arc::new(EventBus::new());
+        let store_cfg = Arc::new(host_core::config::ConfigStore::new(
+            dir.join("config"),
+            bus.clone(),
+        ));
+        let module = Arc::new(SyncModule::new(&dir));
+        store_cfg.register_schema("sync", module.config_schema());
+        let registry = Arc::new(host_core::registry::ModuleRegistry::new(bus.clone()));
+        registry.register(module.clone()).unwrap();
+        // 订阅早于第一次写：派发循环只认订阅之后的事件，订阅晚了就是"写了没生效"
+        let rx = bus.subscribe("host.config_changed").unwrap();
+        tokio::spawn(host_core::registry::run_config_feed(
+            rx,
+            registry.clone(),
+            store_cfg.clone(),
+        ));
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: dir.clone(),
+            ports: Arc::new(host_core::ports::Ports::new()),
+            event_bus: bus.clone(),
+        });
+        for (_, r) in registry.init_all(ctx).await {
+            r.expect("init 应成功");
+        }
+
+        // ---- schema 半边：恰三键，且 default 与运行态默认值逐值同源 ----
+        let schema = module.config_schema();
+        let props = schema["properties"]
+            .as_object()
+            .expect("schema properties 应为对象");
+        let mut keys: Vec<&str> = props.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["auto_sync", "conflict_keep_days", "quiet_period_ms"],
+            "三键之外不得出现无读者的键"
+        );
+        let d = SyncConfig::default();
+        assert_eq!(
+            d,
+            SyncConfig {
+                auto_sync: false,
+                quiet_period_ms: 60_000,
+                conflict_keep_days: 30,
+            },
+            "默认关 + 60 秒静默窗 + 30 天保留窗"
+        );
+        assert_eq!(props["auto_sync"]["default"].as_bool(), Some(false));
+        assert_eq!(
+            props["quiet_period_ms"]["default"].as_u64(),
+            Some(d.quiet_period_ms)
+        );
+        assert_eq!(
+            props["conflict_keep_days"]["default"].as_u64(),
+            Some(d.conflict_keep_days)
+        );
+        assert_eq!(
+            props["quiet_period_ms"]["minimum"].as_u64(),
+            Some(QUIET_PERIOD_MIN_MS),
+            "写侧下限与 `merged` 读侧下限必须同一个常量"
+        );
+        assert_eq!(props["conflict_keep_days"]["minimum"].as_u64(), Some(1));
+
+        // ---- 纯语义半边：缺键＝不动运行态（B4 纪律），未知键读侧忽略 ----
+        let patched = d.merged(&serde_json::json!({ "auto_sync": true })).unwrap();
+        assert!(patched.auto_sync);
+        assert_eq!(
+            (patched.quiet_period_ms, patched.conflict_keep_days),
+            (d.quiet_period_ms, d.conflict_keep_days),
+            "没填的键保持现值"
+        );
+        assert_eq!(
+            d.merged(&serde_json::json!({ "auto_sync": false, "an_old_key": 7 }))
+                .unwrap(),
+            d,
+            "未知键（含旧盘上已废弃键的残留）零影响，也不写\"已迁移\""
+        );
+        // 现值≠默认值时才测得出"不动"：9000/7 现值 ⊕ 只改 auto_sync ⇒ 9000/7 仍在
+        let kept = SyncConfig {
+            auto_sync: false,
+            quiet_period_ms: 9_000,
+            conflict_keep_days: 7,
+        };
+        let after = kept
+            .merged(&serde_json::json!({ "auto_sync": true }))
+            .unwrap();
+        assert_eq!(
+            (after.quiet_period_ms, after.conflict_keep_days),
+            (9_000, 7)
+        );
+
+        // ---- 活通路半边：写 ConfigStore → 派发循环 → status() 不重启即反映新值 ----
+        assert!(
+            !module.status().unwrap().auto_sync,
+            "默认关 ⇒ 本批上线行为零变化"
+        );
+        store_cfg
+            .set_module(
+                "sync",
+                serde_json::json!({
+                    "auto_sync": true,
+                    "quiet_period_ms": 9_000,
+                    "conflict_keep_days": 7,
+                }),
+            )
+            .unwrap();
+        poll_until("auto_sync 未经重启即反映到状态读面", || {
+            module.status().unwrap().auto_sync
+        })
+        .await;
+
+        // 保留窗真消费（10 天前的快照在**缺该键**的派发下仍按运行态 7 天窗被裁：
+        // 若"缺键"被当成"回默认 30 天"，这一行会活着）
+        let log = OpLog::open(module.db_path()).unwrap();
+        seed_conflict_at(&log, "aged10", now_ms() - 10 * DAY_MS);
+        assert_eq!(
+            log.conflicts(10, 0).unwrap().len(),
+            1,
+            "先确认它在表里（否则下面的消失说明不了任何事）"
+        );
+        store_cfg
+            .set_module("sync", serde_json::json!({ "auto_sync": false }))
+            .unwrap();
+        poll_until(
+            "缺键派发后旧快照仍按运行态的保留窗被裁",
+            || log.conflicts(10, 0).unwrap().is_empty(),
+        )
+        .await;
+        assert!(
+            !module.status().unwrap().auto_sync,
+            "整段替换语义下 auto_sync 跟着本次写入值翻回关"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 任务书（09 §10.2 T-B5-6）字面测试名：坏值弹回，运行态一个键都不动
+    ///
+    /// 三层证据：`merged` 逐键拒并点名（消息要自证拒的是什么）、`apply_config` 全有或全无
+    /// （同批里的好值也不许偷偷进运行态，且**不得产生裁剪副作用**）、派发循环把同一句真因
+    /// 原样交给 UI（`host.config_rejected`）。对齐 B4"缺键/坏值不动运行态"纪律。
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(non_snake_case)]
+    async fn syncConfig_badValue_rejectedRuntimeKeepsOld() {
+        let dir = temp_appdata("cfgbad");
+        let bus = Arc::new(EventBus::new());
+        let store_cfg = Arc::new(host_core::config::ConfigStore::new(
+            dir.join("config"),
+            bus.clone(),
+        ));
+        let module = Arc::new(SyncModule::new(&dir));
+        store_cfg.register_schema("sync", module.config_schema());
+        let registry = Arc::new(host_core::registry::ModuleRegistry::new(bus.clone()));
+        registry.register(module.clone()).unwrap();
+        let rx = bus.subscribe("host.config_changed").unwrap();
+        tokio::spawn(host_core::registry::run_config_feed(
+            rx,
+            registry.clone(),
+            store_cfg.clone(),
+        ));
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: dir.clone(),
+            ports: Arc::new(host_core::ports::Ports::new()),
+            event_bus: bus.clone(),
+        });
+        for (_, r) in registry.init_all(ctx).await {
+            r.expect("init 应成功");
+        }
+        let log = OpLog::open(module.db_path()).unwrap();
+        seed_conflict_at(&log, "aged10", now_ms() - 10 * DAY_MS);
+
+        // ---- 派发侧：一批里混一个坏值 ⇒ 整批弹回（半套配置在跑比配置没生效更难查） ----
+        let err = module
+            .apply_config(serde_json::json!({
+                "auto_sync": true,
+                "conflict_keep_days": 5,
+                "quiet_period_ms": 100,
+            }))
+            .expect_err("低于静默窗下限的值必须弹回");
+        assert!(
+            matches!(err, ModuleError::Config(_)),
+            "须走配置拒绝臂，实际 {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("quiet_period_ms"),
+            "要点名是哪个键，实际：{msg}"
+        );
+        assert!(
+            msg.contains(&QUIET_PERIOD_MIN_MS.to_string()),
+            "要点名下限是多少，实际：{msg}"
+        );
+        let st = module.status().unwrap();
+        assert!(
+            !st.auto_sync,
+            "同批的 auto_sync:true 不许偷偷进运行态（全有或全无）"
+        );
+        assert_eq!(
+            log.conflicts(10, 0).unwrap().len(),
+            1,
+            "被拒的保留天数不许已经裁过盘（校验在写盘与裁剪之前）"
+        );
+
+        // 另两形坏值：类型错、0 天窗
+        let err = module
+            .apply_config(serde_json::json!({ "auto_sync": "yes" }))
+            .expect_err("字符串不是布尔");
+        assert!(err.to_string().contains("auto_sync"), "实际：{err}");
+        let err = module
+            .apply_config(serde_json::json!({ "conflict_keep_days": 0 }))
+            .expect_err("0 天＝每次派发清空全部冲突历史");
+        assert!(
+            err.to_string().contains("conflict_keep_days"),
+            "实际：{err}"
+        );
+        assert_eq!(log.conflicts(10, 0).unwrap().len(), 1, "两枚坏值之后仍在册");
+
+        // ---- 正对照：同形好值即写即生效，且保留窗真的跟着收紧 ----
+        module
+            .apply_config(serde_json::json!({ "auto_sync": true, "conflict_keep_days": 5 }))
+            .unwrap();
+        assert!(module.status().unwrap().auto_sync);
+        assert!(
+            log.conflicts(10, 0).unwrap().is_empty(),
+            "5 天窗下的 10 天快照该被裁（证明上面那个\"仍在册\"不是断言空洞）"
+        );
+
+        // ---- 写侧：同一坏值经 ConfigStore 也进不来（schema minimum 与 merged 同源） ----
+        store_cfg
+            .set_module(
+                "sync",
+                serde_json::json!({ "auto_sync": true, "conflict_keep_days": 5 }),
+            )
+            .unwrap();
+        let err = store_cfg
+            .set_module("sync", serde_json::json!({ "quiet_period_ms": 100 }))
+            .expect_err("写侧也该拦");
+        assert!(err.to_string().contains("配置校验失败"), "实际：{err}");
+        assert_eq!(
+            store_cfg.get_module("sync").unwrap()["conflict_keep_days"],
+            serde_json::json!(5),
+            "写侧拒绝不得留下半截盘（盘上还是上一次的整份好值）"
+        );
+        assert!(
+            module.status().unwrap().auto_sync,
+            "写侧拒绝 ⇒ 运行态零扰动"
+        );
+
+        // ---- 坏值来自盘（手改/旧版本残留）时，派发拒绝必须出声给 UI，运行态照旧 ----
+        let mut rj = bus.subscribe("host.config_rejected").unwrap();
+        std::fs::write(
+            dir.join("config").join("sync.json"),
+            serde_json::json!({ "quiet_period_ms": 1 }).to_string(),
+        )
+        .unwrap();
+        bus.publish(Event::new(
+            "host.config_changed",
+            "host",
+            serde_json::json!({ "module": "sync" }),
+        ))
+        .unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rj.recv())
+            .await
+            .expect(
+                "派发拒绝必须在 host.config_rejected 里出声（只进日志＝设置看着生效了其实没有）",
+            )
+            .expect("订阅未关闭");
+        assert_eq!(ev.payload["module"], "sync");
+        assert!(
+            ev.payload["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("quiet_period_ms"),
+            "UI 拿到的必须是同一句真因，实际 {:?}",
+            ev.payload
+        );
+        assert!(
+            module.status().unwrap().auto_sync,
+            "被拒的盘值不许改动运行态（此刻内存里仍是上一次的好值）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 任务书（09 §10.2 T-B5-6）字面测试名 · 红线：不擅自开始自动出账
+    ///
+    /// 两臂同预算、同排程口（`record_change` ⇒ `note_changed`）：关着 ⇒ 零闹钟零流水，
+    /// 开着 ⇒ 一闹钟一流水。只有负臂的测试是空洞断言——"没发生"要配一个
+    /// "同一套机制本来会让它发生"的对照才成证据。
+    ///
+    /// 静默窗在运行态上直写 150 ms：5 秒下限本身由 `merged` 与写侧 schema 两层钉住
+    /// （见上两枚），本行要证的是**开关门**而不是下限，为它每臂付五秒真实时钟不值得。
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(non_snake_case)]
+    async fn syncConfig_autoSyncFalse_neverFiresTimer() {
+        let (m, store, log, dir) = autosync_module("autoclose").await;
+        assert!(
+            !m.status().unwrap().auto_sync,
+            "新装实例的自动同步必须是关的"
+        );
+        assert!(!m.has_pending_timer(), "关着 ⇒ 一颗闹钟都不该有");
+
+        // ---- 关臂：三次变更入流，但零出账 ----
+        for i in 0..3 {
+            let name = format!("c{i}.md");
+            store.put(&name, "v");
+            m.record_change(ENTITY_NOTE, &name, "write").unwrap();
+        }
+        assert!(!m.has_pending_timer(), "关着就不该排闹钟");
+        assert_eq!(log.count(), 3, "关的是出账，不是记录：变更照样入流");
+        assert!(log.runs(10).unwrap().is_empty(), "关着 ⇒ 一账不出");
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            log.runs(10).unwrap().is_empty(),
+            "等过正臂的整窗口仍是零（正对照证明该预算足够显形）"
+        );
+
+        // ---- 正对照臂：同一排程口，开关按下去 ⇒ 闹钟真排、轮真跑 ----
+        m.apply_config(serde_json::json!({ "auto_sync": true }))
+            .unwrap();
+        m.auto.config.write().quiet_period_ms = 150;
+        store.put("c3.md", "v");
+        m.record_change(ENTITY_NOTE, "c3.md", "write").unwrap();
+        assert!(
+            m.has_pending_timer(),
+            "开着 ⇒ 同一排程口确实排了闹钟（否则上面的零什么都证明不了）"
+        );
+        poll_until("静默窗到期后留下一轮流水", || {
+            !log.runs(10).unwrap().is_empty()
+        })
+        .await;
+        assert!(
+            !m.has_pending_timer(),
+            "闹钟跑完应交还槽位，不留\"还在等\"的假象"
+        );
+        let rows = log.runs(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].peer, "devB", "流水行要点名是哪台设备");
+        assert!(rows[0].error.is_some(), "无地址 ⇒ 如实记失败行，绝不记成功");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 任务书（09 §10.2 T-B5-6）字面测试名：连投只出一轮（静默期合并，14-sync §4 Resilio 借鉴）
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(non_snake_case)]
+    async fn syncAuto_quietPeriod_coalescesStorm() {
+        let (m, store, log, dir) = autosync_module("coalesce").await;
+        m.apply_config(serde_json::json!({ "auto_sync": true }))
+            .unwrap();
+        m.auto.config.write().quiet_period_ms = 150;
+
+        // 风暴：20 条变更跨 ~600 ms（≈4 个静默窗）；逐条排程的实现会跑出 ≥4 轮
+        for i in 0..20 {
+            let name = format!("s{i}.md");
+            store.put(&name, "v");
+            m.record_change(ENTITY_NOTE, &name, "write").unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        assert!(
+            m.has_pending_timer(),
+            "风暴期间始终只留最新那颗闹钟（取消-重排的另一半：旧的必须被掐掉）"
+        );
+        poll_until("静默窗到期后出账一轮", || {
+            !log.runs(10).unwrap().is_empty()
+        })
+        .await;
+        // 再等两个窗口长度：任何"每颗闹钟各跑一轮"的残留实现都会在此期间显形
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let rows = log.runs(10).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "20 条变更应合并成一轮出账，实际 {} 轮",
+            rows.len()
+        );
+        assert_eq!(
+            log.count(),
+            20,
+            "合并的是出账，不是丢变更：20 条全在变更流里"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

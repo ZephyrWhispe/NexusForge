@@ -29,3 +29,8 @@ commands.allow = ["sync_conflict_restore"]
 identifier = "allow-sync-runs-get"
 description = "允许前端调用 sync_runs_get 命令（同步活动流水读，含失败行；D-28 按窗最小授权）"
 commands.allow = ["sync_runs_get"]
+
+[[permission]]
+identifier = "allow-sync-set-paused"
+description = "允许前端调用 sync_set_paused 命令（暂停/恢复自动出账，写的是内核那一枚暂停位；D-28 按窗最小授权）"
+commands.allow = ["sync_set_paused"]

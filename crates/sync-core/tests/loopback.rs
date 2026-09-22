@@ -3,6 +3,7 @@
 //! 两台 SyncModule（独立临时 appData + 互配信任根 + 假数据集 applier）：
 //! A 记录变更 → sync_with(B) → B 数据集收敛 → B 记录变更 → A 反向拉取收敛。
 //! T-B5-3 起还验收话流水：每轮同步（含失败）在两侧库里都留得下行与计数。
+//! T-B5-6 起还验自动出账的到期语义：没有地址事实源就记失败不记成功，暂停位一处写两处读。
 
 use parking_lot::Mutex;
 use serde_json::json;
@@ -33,6 +34,9 @@ const STATUS_BUSY_PORT: u16 = 49839;
 const STATUS_PEER_PORT: u16 = 49840;
 const STATUS_SHAPE_PORT: u16 = 49841;
 const VAULT_NEVER_PORT: u16 = 49842;
+/// T-B5-6 自动同步两枚（与上方各段错开）
+const NOADDR_PORT: u16 = 49843;
+const PAUSE_PORT: u16 = 49844;
 /// 无人监听的端口（connect 立刻被拒，用来造"注定失败的一轮"）
 const DEAD_PORT: u16 = 49899;
 
@@ -609,7 +613,11 @@ async fn status_listeningTrue_afterSuccessfulBind() {
     assert!(!st.self_name.is_empty());
     assert!(
         !st.paused,
-        "T-B5-6 前恒 false（形状先落位，不提前谎报\"已暂停\"）"
+        "暂停位自 T-B5-6 起是真开关，但新实例的初值必须是\"没暂停\"（不谎报）"
+    );
+    assert!(
+        !st.auto_sync,
+        "自动同步默认关（本批上线行为零变化的负对照）"
     );
     assert!(st.peers.is_empty(), "未配对 ⇒ 无进度行");
 }
@@ -718,6 +726,7 @@ async fn status_shapeIsTyped_notRawJson() {
         .collect();
     keys.sort();
     let expected = [
+        "auto_sync",
         "last_bind_error",
         "listening",
         "op_count",
@@ -760,6 +769,11 @@ async fn status_shapeIsTyped_notRawJson() {
     );
     assert_eq!(value["peers"][0]["sync_addr"], serde_json::Value::Null);
     assert_eq!(value["peers"][0]["online"], json!(false));
+    assert_eq!(
+        value["auto_sync"],
+        json!(false),
+        "新装实例的自动同步位在状态读面上也必须是关（默认关是本行的红线）"
+    );
 }
 
 /// 任务书（09 §10.2 T-B5-5）字面测试名 · 红线："密码库永不自动同步"三层皆可否证
@@ -837,5 +851,129 @@ async fn syncEntity_vaultNeverAdmitted() {
     assert!(
         errs.iter().any(|e| e.contains("vault")),
         "失败要在流水里点名是哪个数据集，实际：{errs:?}"
+    );
+}
+
+/// 任务书（09 §10.2 T-B5-6）字面测试名 · 与 T-B5-7 交界的诚实面：
+/// 从没成功同步过的设备**没有地址事实源**，到期一轮必须记失败行而不是记成功
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncAuto_noAddressPeer_recordsErrorNotSuccess() {
+    let c = paired("auto_noaddr", NOADDR_PORT);
+    c.a_store.put("a1.md", "from A");
+    c.a.record_change(ENTITY_NOTE, "a1.md", "write").unwrap();
+
+    // 到期一轮（静默窗跑的就是这个入口，这里直接调它把 5 秒下限留给 T-B5-7 之后）
+    c.a.sync_due_peers().await.unwrap();
+
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    let rows = log_a.runs(10).unwrap();
+    assert_eq!(rows.len(), 1, "跳过也要留一行（承重③：失败不静默）");
+    assert_eq!(rows[0].peer, c.b_id, "流水行要点名是哪台设备");
+    assert_eq!(rows[0].pushed, 0, "没推就是没推");
+    assert_eq!(rows[0].pulled_applied, 0);
+    let err = rows[0]
+        .error
+        .as_deref()
+        .expect("无地址的一轮必须记错误，绝不记成功");
+    assert!(err.contains("无可用地址"), "要自证拒的是什么，实际：{err}");
+    assert!(err.contains("手输"), "要指路下一步怎么办，实际：{err}");
+    assert!(
+        !err.contains("127.0.0.1"),
+        "绝不拿回环地址凑数（发给邻居比失败更坏），实际：{err}"
+    );
+    assert_eq!(log_a.push_cursor(&c.b_id), 0, "跳过不许推进出站游标");
+    assert_eq!(c.b_store.len(), 0, "B 侧什么都没收到：跳过不是暗推");
+    assert!(c.a.peer_addr(&c.b_id).is_none(), "没成功过就没有地址事实源");
+
+    // 面板同一读面：进度与失败原因一起看得见
+    let st = c.a.status().unwrap();
+    let p = st
+        .peers
+        .iter()
+        .find(|x| x.device_id == c.b_id)
+        .expect("配对设备在状态读面上");
+    assert_eq!(p.pending_ops, 1, "欠着的那条不许被\"跳过\"抹掉");
+    assert!(p.last_error.is_some(), "上次为什么没成得说得出");
+    assert_eq!(p.last_sync_ms, rows[0].ts_ms, "时刻与错误读自同一行流水");
+}
+
+/// 任务书（09 §10.2 T-B5-6）字面测试名：暂停位是**唯一**那一位，
+/// 暂停即收手、恢复不补跑、面板徽章与内核行为读同一内存
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncAuto_pausedSkipsAndReports() {
+    let c = paired("auto_pause", PAUSE_PORT);
+    wait_port(PAUSE_PORT).await;
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    let peer_row = || {
+        c.a.status()
+            .unwrap()
+            .peers
+            .into_iter()
+            .find(|x| x.device_id == c.b_id)
+            .expect("配对设备在状态读面上")
+    };
+
+    // 先成功同步一次：这才留下"该往哪台发"的地址事实源
+    c.a_store.put("p.md", "v1");
+    c.a.record_change(ENTITY_NOTE, "p.md", "write").unwrap();
+    c.a.sync_with(&c.b_id, &addr(PAUSE_PORT)).await.unwrap();
+    assert_eq!(c.b_store.get("p.md").unwrap()["content"], "v1");
+    assert!(
+        c.a.peer_addr(&c.b_id).is_some(),
+        "成功过 ⇒ 有地址（下一臂的\"跳过\"才是真跳过，而不是无从下手）"
+    );
+    let rows0 = log_a.runs(50).unwrap().len();
+    assert!(rows0 >= 1);
+
+    // 暂停臂：新的到期轮一个字节都不许出
+    c.a.set_paused(true);
+    assert!(
+        c.a.status().unwrap().paused,
+        "面板徽章读的就是内核那一位（reports 的半边）"
+    );
+    assert!(
+        peer_row().last_error.is_none(),
+        "暂停不是故障：状态读面不该凭空多出一条错误"
+    );
+    c.a_store.put("p.md", "v2");
+    c.a.record_change(ENTITY_NOTE, "p.md", "write").unwrap();
+    c.a.sync_due_peers().await.unwrap();
+    assert_eq!(
+        log_a.runs(50).unwrap().len(),
+        rows0,
+        "暂停态下到期也不出账，而且**不补记**一行（skips 的半边）"
+    );
+    assert_eq!(
+        c.b_store.get("p.md").unwrap()["content"],
+        "v1",
+        "B 侧停在暂停前的那一份"
+    );
+    assert_eq!(
+        peer_row().pending_ops,
+        1,
+        "暂停不抹掉还欠着的账（恢复后要说得清欠了什么）"
+    );
+
+    // 恢复：按"以后照常"的语义，不立刻补跑一轮
+    c.a.set_paused(false);
+    assert!(!c.a.status().unwrap().paused);
+    assert_eq!(
+        log_a.runs(50).unwrap().len(),
+        rows0,
+        "恢复本身不触发一轮（要立刻出账那里有「立即同步」）"
+    );
+    // 但下一次到期真跑得动（暂停位放行的是同一个入口）
+    c.a.sync_due_peers().await.unwrap();
+    assert_eq!(
+        c.b_store.get("p.md").unwrap()["content"],
+        "v2",
+        "恢复后到期一轮真出账"
+    );
+    assert_eq!(peer_row().pending_ops, 0, "出完账面板的欠账数跟着归零");
+    assert!(
+        log_a.runs(50).unwrap().len() > rows0,
+        "这一轮必须在流水里留痕（不是悄悄同步完了）"
     );
 }

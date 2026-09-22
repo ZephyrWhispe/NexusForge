@@ -1941,8 +1941,10 @@ export interface SyncStatusDto {
   last_bind_error: string | null;
   self_device_id: string;
   self_name: string;
-  /** T-B5-6（暂停/恢复）落地前恒 false */
+  /** 暂停位（T-B5-6）：`sync_set_paused` 写的就是这一位，面板徽章读同一内存 */
   paused: boolean;
+  /** 自动同步开关现值（T-B5-6）：内核运行态，不是盘上的值——被拒的坏值进不了这里 */
+  auto_sync: boolean;
   peers: SyncPeerStatusDto[];
 }
 
@@ -1988,6 +1990,13 @@ export function syncConflictsGet(limit: number, offset: number): Promise<SyncCon
 }
 export function syncConflictRestore(conflictId: string): Promise<SyncRestoreDto> {
   return invoke("sync_conflict_restore", { conflictId });
+}
+/**
+ * 暂停/恢复出账（T-B5-6）：写的是内核那枚暂停位，`syncStatus().paused` 读同一位。
+ * 恢复**不补跑**——语义是"以后照常"，要立刻出账用 `syncNow`。
+ */
+export function syncSetPaused(paused: boolean): Promise<void> {
+  return invoke("sync_set_paused", { paused });
 }
 
 /**

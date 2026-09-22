@@ -73,6 +73,7 @@ function status(over: Partial<SyncStatusDto> = {}): SyncStatusDto {
     self_device_id: SELF_ID,
     self_name: "台式机-A",
     paused: false,
+    auto_sync: false,
     peers: [peerStatus()],
     ...over,
   };
