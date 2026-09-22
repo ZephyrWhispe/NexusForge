@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipSearchParams } from "../ClipboardPanel";
+import { clipSearchParams } from "../panels/HistorySection";
 
 // 剪贴板筛选/分页参数构造（审查 D-17 首批纯逻辑测试之一）
 describe("clipSearchParams", () => {

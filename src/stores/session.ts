@@ -28,6 +28,22 @@ export function isProxySubPanel(v: string): v is ProxySubPanel {
   return PROXY_SUB_PANEL_IDS.includes(v);
 }
 
+/** 剪切板子面板 id（T-B3-1，09 §8.2）：与 SUBNAV[clipboard] 「视图」五项一一对应
+ *  （细案 01§2 IA：历史/收藏与分组/粘贴堆栈/敏感库/统计与设置） */
+export type ClipView = "history" | "groups" | "stack" | "secret" | "settings";
+
+const CLIP_VIEW_IDS: readonly string[] = [
+  "history",
+  "groups",
+  "stack",
+  "secret",
+  "settings",
+];
+
+export function isClipView(v: string): v is ClipView {
+  return CLIP_VIEW_IDS.includes(v);
+}
+
 interface SessionState {
   themeMode: ThemeMode;
   activeModule: string;
@@ -39,12 +55,15 @@ interface SessionState {
   sysCleanSelected: string[];
   /** 代理子面板选择态（T-B2-3）：与 clipGroup 分键——分组筛选与子面板切换两种语义不得互污；旧快照缺键回退 overview */
   proxySubPanel: ProxySubPanel;
+  /** 剪切板子面板选择态（T-B3-1）：与 clipGroup 同为分键红线延续，旧快照缺键回退 history */
+  clipView: ClipView;
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
   setClipSearch: (q: string) => void;
   setSysCleanSelected: (ids: string[]) => void;
   setProxySubPanel: (id: string) => void;
+  setClipView: (id: string) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -57,6 +76,7 @@ export const useSession = create<SessionState>()(
       clipSearch: "",
       sysCleanSelected: [],
       proxySubPanel: "overview",
+      clipView: "history",
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
@@ -65,6 +85,8 @@ export const useSession = create<SessionState>()(
       setSysCleanSelected: (sysCleanSelected) => set({ sysCleanSelected }),
       // 持久化快照可能被手改成野值：非注册 id 不落 store（面板侧恒有 overview 兜底）
       setProxySubPanel: (id) => set(isProxySubPanel(id) ? { proxySubPanel: id } : {}),
+      // 同上（T-B3-1）：野值不落，面板渲染侧再经 isClipView 收窄兜 history
+      setClipView: (id) => set(isClipView(id) ? { clipView: id } : {}),
     }),
     {
       name: "nf-session",
@@ -75,6 +97,7 @@ export const useSession = create<SessionState>()(
         clipGroup: s.clipGroup,
         sysCleanSelected: s.sysCleanSelected,
         proxySubPanel: s.proxySubPanel,
+        clipView: s.clipView,
       }),
     },
   ),

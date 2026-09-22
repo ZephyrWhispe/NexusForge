@@ -51,13 +51,26 @@ describe("SUBNAV 注册表（T-B0-6）", () => {
   });
 
   it("subnav_clipboardGroupsMigrated_countsPreserved：剪切板原 6 分组逐项不丢", () => {
+    // T-B3-1 双维度：原单 section「剪切板」的六项整体迁进新 section「筛选」（新增「视图」section），
+    // 逐项 id/label/badgeKey 判据一字未改——迁移证明仍成立；section 数由 1 变 2 属本行 IA 演进。
     const sections = SUBNAV.clipboard;
-    expect(sections).toHaveLength(1);
-    const [group] = sections;
-    expect(group.group).toBe("剪切板");
+    expect(sections.map((s) => s.group)).toEqual(["视图", "筛选"]);
+    const group = sections[1];
     expect(group.items.map((i) => i.id)).toEqual(["all", "text", "code", "url", "secret", "files"]);
     expect(group.items.map((i) => i.label)).toEqual(["全部", "文本", "代码", "链接", "敏感", "文件"]);
     // 计数徽标键与旧 CLIP_GROUPS 的 id 一一对应（badgeKey 即 counts 索引）
     expect(group.items.map((i) => i.badgeKey)).toEqual(group.items.map((i) => i.id));
+  });
+
+  it("subnavRouting_noModuleTernaryInWorkbench：工作台不再按模块硬分叉选择态", () => {
+    const src = String(mainWorkbenchSrc);
+    // 负例：原 `moduleId === "proxy" ? proxySub : group` 一类的模块三元清零
+    expect(src).not.toContain('moduleId === "proxy" ?');
+    expect(src).not.toContain("subActive");
+    expect(src).not.toContain("subSelect=");
+    // 正对照防空洞：改由 modules.ts 路由表单点派发（读写各经纯函数）
+    expect(src).toContain("subnavActive(");
+    expect(src).toContain("subnavSelect(");
+    expect(src).toContain("subnavSetters[sel.key]");
   });
 });

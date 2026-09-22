@@ -62,7 +62,12 @@ export interface SubNavItem {
   label: string;
   icon?: string;
   badgeKey?: string;
+  /** 选择语义（T-B3-1）：view=切换子面板，filter=筛选同一清单；缺省 filter（proxy 六项零 churn） */
+  scope?: SubNavScope;
 }
+
+/** 同一栏的两种选择维度（09 §8.1-⑩：clipboard 要同时有「视图 + 筛选」，不能再按模块硬分叉） */
+export type SubNavScope = "view" | "filter";
 
 export interface SubNavSection {
   group: string;
@@ -74,9 +79,21 @@ export interface SubNavSection {
  * 空数组 = 该模块暂无分组栏；面板档 §2 子面板 IA 落地时逐模块填充。
  */
 export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
+  // T-B3-1（09 §8.2）：剪切板两维度——「视图」五子面板（细案 01§2 IA）+「筛选」原六分组
+  // （badgeKey 一项不丢，SubNav 角标语义不变），选择态分键落 clipView / clipGroup。
   clipboard: [
     {
-      group: "剪切板",
+      group: "视图",
+      items: [
+        { id: "history", label: "历史", scope: "view" },
+        { id: "groups", label: "收藏与分组", scope: "view" },
+        { id: "stack", label: "粘贴堆栈", scope: "view" },
+        { id: "secret", label: "敏感库", scope: "view" },
+        { id: "settings", label: "统计与设置", scope: "view" },
+      ],
+    },
+    {
+      group: "筛选",
       items: [
         { id: "all", label: "全部", badgeKey: "all" },
         { id: "text", label: "文本", badgeKey: "text" },
@@ -90,6 +107,7 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
   screenshot: [],
   ocr: [],
   // T-B2-3（09 §5.2）：代理六子面板入口，id 与 session store proxySubPanel 联合类型一一对应
+  // （缺省 scope="filter" 即路由表里的 proxySubPanel 键——代理只有一维，不占 view 维度）
   proxy: [
     {
       group: "代理",
@@ -114,3 +132,46 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
   automation: [],
   sync: [],
 };
+
+/** 二级导航选择态的 session 键（MainWorkbench 的唯一派发目标，禁止再按模块写三元） */
+export type SubnavStateKey = "clipView" | "clipGroup" | "proxySubPanel";
+
+/** 模块 × 维度 → session 键（09 §8.1-⑩ 红线：分组筛选与子面板切换两种语义不得互污，故分键） */
+const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavStateKey>>>> = {
+  clipboard: { view: "clipView", filter: "clipGroup" },
+  proxy: { filter: "proxySubPanel" },
+};
+
+/** 读选择态所需的最小会话快照（不依赖 store 类型，便于纯函数直测） */
+export interface SubnavSelections {
+  clipView: string;
+  clipGroup: string;
+  proxySub: string;
+}
+
+/** 该模块该维度当前高亮项 id；模块未在该维度注册选择态则 undefined */
+export function subnavActive(
+  moduleId: ModuleId,
+  scope: SubNavScope,
+  st: SubnavSelections,
+): string | undefined {
+  const key = SUBNAV_KEYS[moduleId]?.[scope];
+  if (key === "clipView") return st.clipView;
+  if (key === "clipGroup") return st.clipGroup;
+  if (key === "proxySubPanel") return st.proxySub;
+  return undefined;
+}
+
+/** 点击项 → 应写入的 session 键与值；项不在注册表或维度未注册选择态则 undefined（不写野值） */
+export function subnavSelect(
+  moduleId: ModuleId,
+  scope: SubNavScope,
+  id: string,
+): { key: SubnavStateKey; value: string } | undefined {
+  const key = SUBNAV_KEYS[moduleId]?.[scope];
+  if (!key) return undefined;
+  const registered = SUBNAV[moduleId].some((section) =>
+    section.items.some((i) => (i.scope ?? "filter") === scope && i.id === id),
+  );
+  return registered ? { key, value: id } : undefined;
+}

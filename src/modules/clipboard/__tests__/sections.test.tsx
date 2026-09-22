@@ -1,0 +1,173 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+
+import ClipboardPanel from "../ClipboardPanel";
+import {
+  clipboardClear,
+  clipboardGet,
+  clipboardGroupCounts,
+  clipboardSearch,
+  hostConfigGet,
+  hostConfigSchema,
+  type ClipEntry,
+} from "../../../ipc/client";
+import { useSession, type ClipView } from "../../../stores/session";
+import { SUBNAV } from "../../../layout/modules";
+
+// D-29 B3/T-B3-1 回归（09 §8.2）：剪切板五子面板各自挂载、各发自己那份 invoke；
+// 堆栈/敏感两区在新命令面落地前必须是零调用的诚实空态（宁可空，不拿假列表冒充功能）。
+
+vi.mock("../../../ipc/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../ipc/client")>();
+  return {
+    ...actual,
+    clipboardSearch: vi.fn(),
+    clipboardClear: vi.fn(),
+    clipboardGet: vi.fn(),
+    clipboardPaste: vi.fn(),
+    clipboardPin: vi.fn(),
+    clipboardDelete: vi.fn(),
+    clipboardGroupCounts: vi.fn(),
+    hostConfigSchema: vi.fn(),
+    hostConfigGet: vi.fn(),
+    hostConfigSet: vi.fn(),
+  };
+});
+
+vi.mock("../../../ipc/env", () => ({ IN_TAURI: true }));
+// jsdom 无 Tauri 事件后端：listen() 必然 reject，本用例只关心「谁被调用」，故给直通假卸载
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
+
+vi.mock("../../../stores/notifications", () => ({
+  notify: vi.fn(),
+  reportError: vi.fn(),
+}));
+
+// jsdom 无 ResizeObserver/真实 rect，虚拟器观测不到滚动容器就不产行（同 toolbarDetail.test 处置）
+vi.mock("@tanstack/react-virtual", () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 64,
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, i) => ({ index: i, start: i * 64, key: i, size: 64 })),
+    measureElement: () => {},
+  }),
+}));
+
+function clip(id: string, over: Partial<ClipEntry> = {}): ClipEntry {
+  return {
+    id,
+    content_type: "text",
+    preview: "短预览",
+    blob_path: null,
+    origin: "local",
+    source_app: "Notepad",
+    pinned: false,
+    group: null,
+    secret: false,
+    created_at: Date.parse("2026-09-22T07:05:00"),
+    usage_count: 0,
+    ...over,
+  };
+}
+
+let container: HTMLDivElement;
+let root: Root | null = null;
+
+beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.append(container);
+  vi.mocked(clipboardSearch).mockResolvedValue({
+    items: [clip("c1")],
+    has_more: false,
+    total: null,
+  });
+  vi.mocked(clipboardGroupCounts).mockResolvedValue({ text: 3, code: 1 });
+  vi.mocked(clipboardGet).mockResolvedValue("");
+  vi.mocked(clipboardClear).mockResolvedValue(0);
+  vi.mocked(hostConfigSchema).mockResolvedValue({
+    properties: { max_entries: { type: "integer", title: "保留条数", minimum: 1, maximum: 9999 } },
+  });
+  vi.mocked(hostConfigGet).mockResolvedValue({});
+});
+
+afterEach(() => {
+  act(() => {
+    try {
+      root?.unmount();
+    } catch {
+      /* 用例内已卸载 */
+    }
+  });
+  root = null;
+  container.remove();
+  vi.clearAllMocks();
+  useSession.setState({ clipView: "history", clipGroup: "all" });
+});
+
+async function mountView(view: ClipView) {
+  // 真实用户路径：SubNav 点「视图」→ session 键 clipView → 面板壳读取并分流
+  act(() => useSession.getState().setClipView(view));
+  await act(async () => {
+    root = createRoot(container);
+    root.render(<ClipboardPanel search="" group="all" onCounts={() => {}} />);
+  });
+  await act(async () => {});
+}
+
+describe("剪切板五子面板挂载（T-B3-1）", () => {
+  it("clipPanel_fiveSectionsEachMountsWithOwnInvoke：五区逐个挂载，未落地命令面的两区零 invoke", async () => {
+    // 注册表 ↔ store 联合一致性：SUBNAV 的 view 项 id 必须都在 ClipView 联合内
+    const viewIds = SUBNAV.clipboard
+      .flatMap((s) => s.items)
+      .filter((i) => (i.scope ?? "filter") === "view")
+      .map((i) => i.id);
+    expect(viewIds).toEqual(["history", "groups", "stack", "secret", "settings"]);
+
+    await mountView("history");
+    expect(clipboardSearch).toHaveBeenCalled();
+    expect(container.textContent).toContain("短预览");
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    vi.clearAllMocks();
+
+    await mountView("groups");
+    expect(clipboardGroupCounts).toHaveBeenCalled();
+    expect(container.textContent).toContain("分组");
+    expect(clipboardSearch).not.toHaveBeenCalled();
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    vi.clearAllMocks();
+
+    await mountView("settings");
+    expect(hostConfigSchema).toHaveBeenCalledWith("clipboard");
+    expect(container.textContent).toContain("保留条数");
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    vi.clearAllMocks();
+
+    // 堆栈/敏感：命令面在 T-B3-3/T-B3-5，挂载期一个 invoke 都不发（诚实空态）
+    for (const view of ["stack", "secret"] as const) {
+      await mountView(view);
+      expect(clipboardSearch, `${view} 不应查历史`).not.toHaveBeenCalled();
+      expect(clipboardGroupCounts, `${view} 不应读分组计数`).not.toHaveBeenCalled();
+      expect(hostConfigSchema, `${view} 不应读设置`).not.toHaveBeenCalled();
+      expect(clipboardGet).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("T-B3");
+      act(() => {
+        root?.unmount();
+      });
+      root = null;
+      vi.clearAllMocks();
+    }
+  });
+});

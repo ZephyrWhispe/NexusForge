@@ -11,7 +11,15 @@ import MicaBackdrop from "../layout/MicaBackdrop";
 // 子窗口（launcher/notebar/overlay）本就动态 import
 // D-29 B0/T-B0-1：模块→组件与副标题一律走 PANELS/SUBNAV 注册表，禁止再写渲染三元
 import { PANELS } from "../layout/panels";
-import { MODULES, SUBNAV, isModuleId } from "../layout/modules";
+import {
+  MODULES,
+  SUBNAV,
+  isModuleId,
+  subnavActive,
+  subnavSelect,
+  type SubnavStateKey,
+  type SubNavScope,
+} from "../layout/modules";
 import { IN_TAURI } from "../ipc/env";
 import { toggleLauncher } from "./launcherController";
 import { toggleNoteBar } from "./notebarController";
@@ -90,6 +98,9 @@ export default function MainWorkbench() {
   // 与 clipGroup 分道（否则在代理页点「分流」会把剪切板回来后的筛选悄悄改掉）
   const proxySub = useSession((s) => s.proxySubPanel);
   const setProxySub = useSession((s) => s.setProxySubPanel);
+  // T-B3-1：剪切板同理再分一键——「视图」维度（五子面板）与「筛选」维度（六分组）互不覆写
+  const clipView = useSession((s) => s.clipView);
+  const setClipView = useSession((s) => s.setClipView);
   const search = useSession((s) => s.clipSearch);
   const setSearch = useSession((s) => s.setClipSearch);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -154,8 +165,18 @@ export default function MainWorkbench() {
 
   // 持久化的会话值可能是历史/损坏 id：收窄失败确定性回落剪切板（首屏默认模块）
   const moduleId = isModuleId(active) ? active : "clipboard";
-  const subActive = moduleId === "proxy" ? proxySub : group;
-  const subSelect = moduleId === "proxy" ? setProxySub : setGroup;
+  // T-B3-1：选择态读写一律经 modules.ts 路由表（模块 × 维度 → session 键），
+  // 取代原先按模块硬分叉的选择态三元
+  const subnavSelections = { clipView, clipGroup: group, proxySub };
+  const subnavSetters: Record<SubnavStateKey, (id: string) => void> = {
+    clipView: setClipView,
+    clipGroup: setGroup,
+    proxySubPanel: setProxySub,
+  };
+  const selectSubnav = (scope: SubNavScope, id: string) => {
+    const sel = subnavSelect(moduleId, scope, id);
+    if (sel) subnavSetters[sel.key](sel.value);
+  };
   const current = MODULES.find((m) => m.id === moduleId);
   const def = PANELS[moduleId];
   const ModulePanel = def.panel;
@@ -177,7 +198,15 @@ export default function MainWorkbench() {
         <ModuleNav active={active} onChange={setActive} />
         <div className={styles.work}>
           {SUBNAV[moduleId].length > 0 && !isSettings && (
-            <SubNav moduleId={moduleId} active={subActive} onSelect={subSelect} counts={counts} />
+            <SubNav
+              moduleId={moduleId}
+              active={{
+                view: subnavActive(moduleId, "view", subnavSelections),
+                filter: subnavActive(moduleId, "filter", subnavSelections),
+              }}
+              onSelect={selectSubnav}
+              counts={counts}
+            />
           )}
           <section className={styles.content} aria-label="内容区">
             {isSettings ? (
