@@ -170,6 +170,8 @@
     "allow-screenshot-upload",
     "allow-screenshot-upload-targets",
     "allow-screenshot-windows",
+    "allow-sync-conflict-restore",
+    "allow-sync-conflicts-get",
     "allow-sync-now",
     "allow-sync-peers",
     "allow-sync-status",

@@ -1917,6 +1917,34 @@ export interface SyncStatusDto {
   port: number;
 }
 
+/**
+ * 冲突历史行（09 §10.2 T-B5-2）：camelCase 与 sync-core `ConflictEntry` 的
+ * `serde(rename_all = "camelCase")` 一一对应（该结构体是单一真源，命令层直接透出）。
+ */
+export interface SyncConflictDto {
+  conflictId: string;
+  entity: string;
+  entityId: string;
+  /** 败方条目时间戳（毫秒） */
+  lostTs: number;
+  lostDevice: string;
+  /** 当时压住它的本机条目 */
+  winnerDevice: string;
+  winnerTs: number;
+  /** 败方内容快照（删除标记即 `{ deleted: true }`） */
+  lostValue: { content?: string; title?: string; deleted?: boolean };
+  recordedMs: number;
+}
+
+/** 恢复结果（只承诺"本机新变更已入流"，不含"对端已回滚"——本机无法保证对端此后不再改） */
+export interface SyncRestoreDto {
+  conflictId: string;
+  entity: string;
+  entityId: string;
+  opId: string;
+  ts: number;
+}
+
 export function syncPeers(): Promise<PairedPeerDto[]> {
   return invoke("sync_peers");
 }
@@ -1925,4 +1953,10 @@ export function syncStatus(): Promise<SyncStatusDto> {
 }
 export function syncNow(deviceId: string, addr: string): Promise<SyncSummaryDto> {
   return invoke("sync_now", { deviceId, addr });
+}
+export function syncConflictsGet(limit: number, offset: number): Promise<SyncConflictDto[]> {
+  return invoke("sync_conflicts_get", { limit, offset });
+}
+export function syncConflictRestore(conflictId: string): Promise<SyncRestoreDto> {
+  return invoke("sync_conflict_restore", { conflictId });
 }

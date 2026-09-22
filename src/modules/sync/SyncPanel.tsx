@@ -19,6 +19,7 @@ import {
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import ConflictsSection from "./ConflictsSection";
 
 /**
  * 跨设备同步面板（docs/impl/07 SYNC1–SYNC4，M15 v1）：
@@ -166,6 +167,8 @@ export default function SyncPanel() {
           ))
         )}
       </Section>
+
+      <ConflictsSection />
 
       <Section title="同步范围">
         <Text className={styles.muted}>

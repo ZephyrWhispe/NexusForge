@@ -14,3 +14,13 @@ commands.allow = ["sync_status"]
 identifier = "allow-sync-now"
 description = "允许前端调用 sync_now 命令（D-28 按窗最小授权）"
 commands.allow = ["sync_now"]
+
+[[permission]]
+identifier = "allow-sync-conflicts-get"
+description = "允许前端调用 sync_conflicts_get 命令（冲突历史分页读；D-28 按窗最小授权）"
+commands.allow = ["sync_conflicts_get"]
+
+[[permission]]
+identifier = "allow-sync-conflict-restore"
+description = "允许前端调用 sync_conflict_restore 命令（以本地留存快照重新生效并推送；D-28 按窗最小授权）"
+commands.allow = ["sync_conflict_restore"]

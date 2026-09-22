@@ -2,7 +2,8 @@
 //!
 //! - SYNC1 拓扑：局域网 P2P（独立 TCP 监听 49820；中继 v1 不做，"仅局域网"即默认形态）
 //! - SYNC2 协议：op_log 变更流（交换游标 → 拉取缺失 → 本地应用）
-//! - SYNC3 冲突：LWW（engine.rs）；sync.conflict 事件通知
+//! - SYNC3 冲突：LWW（engine.rs）；败方快照落 `conflict_log` 可查可恢复（T-B5-2），
+//!   sync.conflict 事件只作提示（事件即焚不是数据源）
 //! - SYNC4 加密：复用 K2 配对信任根的端到端加密通道（transport.rs）
 //! - 数据集 v1 = note（订阅 notes.changed 记录本地变更；applier 由宿主注入写穿 NoteLibrary）
 //! - 红线：密码库条目**永不**自动同步（数据集白名单硬编码，无 vault 通路）
@@ -24,7 +25,7 @@ use host_core::module::{
 
 use crate::engine::{ApplyOutcome, ChangeApplier, PushBatch, SyncEngine};
 use crate::error::SyncError;
-use crate::oplog::{OpLog, DELETED_KEY};
+use crate::oplog::{ConflictEntry, OpLog, DELETED_KEY};
 use crate::transport::{
     handshake_client, handshake_server, read_hello_frame, read_msg, write_msg, SyncMsg,
     SyncSession, BATCH_LIMIT,
@@ -64,16 +65,20 @@ impl SyncCtx {
     }
 
     /// 发 sync.conflict 事件（LWW 通知）
-    fn notify_conflict(&self, op: &crate::oplog::OpEntry) {
+    ///
+    /// `conflict_id` 供视图按 id 回查落盘行——事件本身不再是唯一事实源（承重⑥根因）。
+    /// 载荷刻意不带 `lost_value`：内容只经 `sync_conflicts_get` 按需读取，不广播进每个窗口。
+    fn notify_conflict(&self, op: &crate::oplog::OpEntry, conflict_id: &str) {
         let Some(bus) = &self.bus else { return };
         if let Some(t) = topic("sync.conflict") {
             let _ = bus.publish(Event::new(
                 t,
                 "sync",
                 serde_json::json!({
+                    "conflict_id": conflict_id,
                     "entity": op.entity,
                     "entity_id": op.entity_id,
-                    "winner_device": op.device,
+                    "loser_device": op.device,
                     "ts": op.ts,
                 }),
             ));
@@ -91,7 +96,7 @@ impl SyncCtx {
         }
     }
 
-    /// 应用一批远端变更（统计 + 游标推进；initiator 与 responder 共用）
+    /// 应用一批远端变更（统计 + 游标推进 + 冲突落盘；initiator 与 responder 共用）
     fn apply_ops(&self, ops: &[crate::oplog::OpEntry], peer_key: &str) -> (u32, u32, u32) {
         let Ok(applier) = self.applier() else {
             return (0, 0, 0);
@@ -107,7 +112,21 @@ impl SyncCtx {
                 Ok(ApplyOutcome::LostLww) => {
                     lost += 1;
                     conflicts += 1;
-                    self.notify_conflict(op);
+                    // 落盘先于事件：这一刻之前败方原文只活在这条待广播的 op 里（承重⑤）
+                    let winner = self
+                        .log
+                        .latest_for(&op.entity, &op.entity_id)
+                        .ok()
+                        .flatten();
+                    let entry = SyncEngine::conflict_of(op, winner.as_ref(), now_ms());
+                    if let Err(e) = self.log.record_conflict(&entry) {
+                        tracing::warn!(
+                            conflict_id = %entry.conflict_id,
+                            error = %e,
+                            "冲突快照落盘失败（事件仍发，冲突视图会缺这一行）"
+                        );
+                    }
+                    self.notify_conflict(op, &entry.conflict_id);
                 }
                 Ok(ApplyOutcome::Noop) => {}
                 Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "远端变更应用失败（跳过）"),
@@ -216,6 +235,14 @@ async fn run_responder(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummar
     Ok(summary)
 }
 
+/// 当前毫秒（op ts 与冲突落盘时刻共用一个时钟口）
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// 本地变更记录（自由函数：订阅任务与 IPC 包装共用；op_log 快照式入库）
 pub fn record_change_with(ctx: &SyncCtx, path: &str, action: &str) -> R<()> {
     let value = if action == "delete" {
@@ -227,12 +254,43 @@ pub fn record_change_with(ctx: &SyncCtx, path: &str, action: &str) -> R<()> {
             None => serde_json::json!({ DELETED_KEY: true }),
         }
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    SyncEngine::record_local(&ctx.log, ENTITY, path, value, &ctx.identity.device_id, now)?;
+    SyncEngine::record_local(
+        &ctx.log,
+        ENTITY,
+        path,
+        value,
+        &ctx.identity.device_id,
+        now_ms(),
+    )?;
     Ok(())
+}
+
+/// 以本地留存的败方快照重新生效（IPC sync_conflict_restore 的同形入口）
+///
+/// 两步缺一不可：① 写穿数据集——只往 op_log 塞新条目会让本机自己不一致
+/// （日志说最新值是快照，磁盘上还是胜者那份，对端反向拉取时也拿不到恢复结果）；
+/// ② `record_local` 以新 ts 入流 ⇒ 下轮同步覆盖对端。
+///
+/// 文案红线：一律称"以本地副本重新生效并推送"，**不称**"撤销对端/强制回滚"——
+/// 本机无法保证对端在此之后不再修改，声称能撤销就是假保证。
+pub fn restore_conflict_with(ctx: &SyncCtx, conflict_id: &str) -> R<crate::oplog::OpEntry> {
+    let entry = ctx.log.find_conflict(conflict_id)?.ok_or_else(|| {
+        SyncError::Apply(format!("冲突记录 {conflict_id} 不存在（可能已超出保留窗）"))
+    })?;
+    let applier = ctx.applier()?;
+    if entry.is_delete() {
+        applier.apply_delete(&entry.entity, &entry.entity_id)?;
+    } else {
+        applier.apply_upsert(&entry.entity, &entry.entity_id, &entry.lost_value)?;
+    }
+    SyncEngine::record_local(
+        &ctx.log,
+        &entry.entity,
+        &entry.entity_id,
+        entry.lost_value.clone(),
+        &ctx.identity.device_id,
+        now_ms(),
+    )
 }
 
 pub struct SyncModule {
@@ -331,6 +389,29 @@ impl SyncModule {
     pub fn status(&self) -> serde_json::Value {
         let count = self.log.read().clone().map(|l| l.count()).unwrap_or(0);
         serde_json::json!({ "op_count": count, "port": self.port.load(Ordering::SeqCst) })
+    }
+
+    fn log_arc(&self) -> R<Arc<OpLog>> {
+        self.log
+            .read()
+            .clone()
+            .ok_or_else(|| SyncError::NotReady("op_log 未就绪".into()))
+    }
+
+    /// 冲突历史分页（IPC sync_conflicts_get；limit/offset 由读侧收口，表可无限长但视图不跟着涨）
+    pub fn conflicts(&self, limit: i64, offset: i64) -> R<Vec<ConflictEntry>> {
+        self.log_arc()?.conflicts(limit, offset)
+    }
+
+    /// 冲突历史保留窗裁剪（IPC/配置消费方：T-B5-6 的 conflict_keep_days 真消费点）
+    pub fn prune_conflicts_before(&self, cutoff_ms: i64) -> R<u64> {
+        self.log_arc()?.prune_conflicts_before(cutoff_ms)
+    }
+
+    /// 以本地留存的败方快照重新生效（IPC sync_conflict_restore）
+    pub fn restore_conflict(&self, conflict_id: &str) -> R<crate::oplog::OpEntry> {
+        let ctx = self.ctx()?;
+        restore_conflict_with(&ctx, conflict_id)
     }
 
     /// 组装会话上下文（未就绪返回 Err）
@@ -579,5 +660,184 @@ mod tests {
             "已有 db/sync.db 不应被旧路径文件覆盖"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 内存数据集（恢复路径必须真的写穿，不能只动 op_log）
+    #[derive(Default)]
+    struct MemStore {
+        data: parking_lot::Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    }
+    impl MemStore {
+        fn put(&self, id: &str, content: &str) {
+            self.data
+                .lock()
+                .insert(id.to_string(), serde_json::json!({ "content": content }));
+        }
+        fn content_of(&self, id: &str) -> Option<String> {
+            self.data
+                .lock()
+                .get(id)
+                .and_then(|v| v["content"].as_str().map(String::from))
+        }
+    }
+    impl ChangeApplier for MemStore {
+        fn snapshot(&self, _e: &str, id: &str) -> R<Option<serde_json::Value>> {
+            Ok(self.data.lock().get(id).cloned())
+        }
+        fn apply_upsert(&self, _e: &str, id: &str, value: &serde_json::Value) -> R<()> {
+            self.data.lock().insert(id.to_string(), value.clone());
+            Ok(())
+        }
+        fn apply_delete(&self, _e: &str, id: &str) -> R<()> {
+            self.data.lock().remove(id);
+            Ok(())
+        }
+    }
+
+    /// 一整套会话上下文（身份 + 空 PairStore + 真 op_log + 真总线）：
+    /// 冲突落盘点在 `apply_ops` 里，绕开它就测不到"op 在手是唯一零成本落盘点"这件事。
+    fn harness(tag: &str) -> (Arc<SyncCtx>, Arc<MemStore>) {
+        let dir = temp_appdata(tag);
+        let kvm = dir.join("kvm");
+        let identity = Arc::new(DeviceIdentity::load_or_create(&kvm, None).unwrap());
+        let store = Arc::new(PairStore::load_or_default(&kvm).unwrap());
+        let log = Arc::new(OpLog::open(&dir.join("db").join("sync.db")).unwrap());
+        let applier = Arc::new(MemStore::default());
+        let dyn_applier: Arc<dyn ChangeApplier> = applier.clone();
+        let ctx = Arc::new(SyncCtx {
+            identity,
+            store,
+            log,
+            applier: Some(dyn_applier),
+            bus: Some(Arc::new(EventBus::new())),
+        });
+        (ctx, applier)
+    }
+
+    fn note_op(id: &str, device: &str, ts: i64, content: &str) -> crate::oplog::OpEntry {
+        crate::oplog::OpEntry {
+            op_id: id.into(),
+            entity: "note".into(),
+            entity_id: "x.md".into(),
+            ts,
+            device: device.into(),
+            value: serde_json::json!({ "content": content }),
+        }
+    }
+
+    /// 任务书（09 §10.2 T-B5-2）字面测试名优先于 rustc 命名惯例
+    #[test]
+    #[allow(non_snake_case)]
+    fn conflictLog_lostRemoteValue_persistedAndQueryable() {
+        let (ctx, store) = harness("conflictpersist");
+        let self_dev = ctx.identity.device_id.clone();
+        // 本地胜者在前：ts=200 压住随后到达的 ts=100
+        ctx.log
+            .append(&note_op("w1", &self_dev, 200, "本地一份"))
+            .unwrap();
+        store.put("x.md", "本地一份");
+        let mut rx = ctx
+            .bus
+            .clone()
+            .unwrap()
+            .subscribe("sync.conflict")
+            .expect("sync.conflict 主题在册");
+
+        let (applied, lost, conflicts) =
+            ctx.apply_ops(&[note_op("l1", "devB", 100, "远端那份被比掉了")], "devB");
+        assert_eq!((applied, lost, conflicts), (0, 1, 1));
+
+        let rows = ctx.log.conflicts(10, 0).unwrap();
+        assert_eq!(rows.len(), 1, "承重⑤：判负内容今天必须能在本机查回");
+        assert_eq!(rows[0].lost_value["content"], "远端那份被比掉了");
+        assert_eq!(rows[0].lost_device, "devB");
+        assert_eq!(rows[0].winner_device, self_dev, "胜者是本机条目");
+        assert_eq!(rows[0].winner_ts, 200);
+        assert!(!rows[0].conflict_id.is_empty());
+
+        // 事件只是提示，且带得上回查用的 id；内容不经事件广播
+        let ev = rx.try_recv().expect("冲突事件应已发布");
+        assert_eq!(ev.payload["conflict_id"], rows[0].conflict_id);
+        assert_eq!(ev.payload["loser_device"], "devB");
+        assert!(
+            ev.payload.get("lost_value").is_none(),
+            "笔记内容不进广播载荷（按需读 sync_conflicts_get）"
+        );
+    }
+
+    /// 任务书（09 §10.2 T-B5-2）字面测试名优先于 rustc 命名惯例
+    #[test]
+    #[allow(non_snake_case)]
+    fn conflictLog_sameLoserReplay_singleRow() {
+        let (ctx, _store) = harness("conflictreplay");
+        let self_dev = ctx.identity.device_id.clone();
+        ctx.log
+            .append(&note_op("w1", &self_dev, 200, "本地一份"))
+            .unwrap();
+        let loser = note_op("l1", "devB", 100, "同一份败方内容");
+        // 对端没收到 Ack 而重推同一批：确定性 id ⇒ INSERT OR IGNORE 吸收
+        ctx.apply_ops(std::slice::from_ref(&loser), "devB");
+        ctx.apply_ops(std::slice::from_ref(&loser), "devB");
+        assert_eq!(
+            ctx.log.conflicts(10, 0).unwrap().len(),
+            1,
+            "重放不得把一次冲突灌成两行历史"
+        );
+
+        // 正对照：换了 ts 就是另一个败方快照，另起一行（不是 id 恒同的假去重）
+        ctx.apply_ops(&[note_op("l2", "devB", 101, "另一份")], "devB");
+        assert_eq!(ctx.log.conflicts(10, 0).unwrap().len(), 2);
+    }
+
+    /// 任务书（09 §10.2 T-B5-2）字面测试名优先于 rustc 命名惯例
+    #[test]
+    #[allow(non_snake_case)]
+    fn conflictRestore_reappliesAsNewerLocalOp() {
+        let (ctx, store) = harness("conflictrestore");
+        let self_dev = ctx.identity.device_id.clone();
+        ctx.log
+            .append(&note_op("w1", &self_dev, 200, "本地新格"))
+            .unwrap();
+        store.put("x.md", "本地新格");
+        ctx.apply_ops(&[note_op("l1", "devB", 100, "远端旧格")], "devB");
+        let rows = ctx.log.conflicts(10, 0).unwrap();
+
+        let restored = restore_conflict_with(&ctx, &rows[0].conflict_id).unwrap();
+        // ① 数据集真的换回败方内容（只写 op_log 不写盘＝本机自己不一致）
+        assert_eq!(store.content_of("x.md").as_deref(), Some("远端旧格"));
+        // ② 以本机自产 + 更新 ts 入流 ⇒ 下轮同步覆盖对端
+        assert_eq!(restored.device, self_dev);
+        assert!(
+            restored.ts > 200,
+            "新 op 必须晚于当时胜者，否则 LWW 仍判它负"
+        );
+        let fetchable = ctx.log.ops_of_device(&self_dev, 200, 10).unwrap();
+        assert_eq!(fetchable.len(), 1, "对端按自产游标拉得到这条恢复 op");
+        assert_eq!(fetchable[0].op_id, restored.op_id);
+        // ③ 本地快照随后被这条新 op 覆盖（latest 不再是当时的胜者行）
+        assert_eq!(
+            ctx.log
+                .latest_for("note", "x.md")
+                .unwrap()
+                .expect("恢复后必有最新条目")
+                .op_id,
+            restored.op_id
+        );
+    }
+
+    /// 任务书（09 §10.2 T-B5-2）字面测试名优先于 rustc 命名惯例
+    #[test]
+    #[allow(non_snake_case)]
+    fn conflictLog_unknownId_honestErr() {
+        let (ctx, store) = harness("conflictunknown");
+        store.put("y.md", "保持原样");
+        let err = restore_conflict_with(&ctx, "deadbeef").unwrap_err();
+        assert!(matches!(err, SyncError::Apply(_)), "实际 {err:?}");
+        assert!(
+            err.to_string().contains("deadbeef"),
+            "错误消息要点名是哪个 id 取不到，实际：{err}"
+        );
+        assert_eq!(ctx.log.count(), 0, "取不到快照就不该往变更流里塞东西");
+        assert_eq!(store.content_of("y.md").as_deref(), Some("保持原样"));
     }
 }

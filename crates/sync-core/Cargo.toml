@@ -14,5 +14,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 x25519-dalek = { workspace = true }
 rand = { workspace = true }

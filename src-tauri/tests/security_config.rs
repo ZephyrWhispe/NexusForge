@@ -1047,3 +1047,34 @@ fn auxWindows_neverGrantScreenshotHistoryDelete() {
         "正对照：main 必须持有 {ident}，否则本负例是空洞"
     );
 }
+
+/// T-B5-2 红线负例：冲突历史读的是用户笔记内容快照，恢复会把旧内容重新入流并推给对端
+/// （改写数据集 + 产生新变更）。覆盖层/快速面板等六辅助窗永不持有，main 正对照防空洞。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §10.2 T-B5-2）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantSyncConflictsAndRestore() {
+    let caps = load_capabilities();
+    for ident in ["allow-sync-conflicts-get", "allow-sync-conflict-restore"] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（冲突快照读与恢复是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}

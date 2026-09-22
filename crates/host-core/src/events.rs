@@ -92,7 +92,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)] = &[
     ("automation.notify", "自动化规则前端通知。payload: {rule_id, title, body}", BackpressurePolicy::None),
     ("automation.rule_fired", "规则已触发。payload: {rule_id, rule_name}", BackpressurePolicy::None),
     ("sync.state_changed", "跨设备同步状态。payload: {pushed, pulled_applied, pulled_lost, conflicts}", BackpressurePolicy::None),
-    ("sync.conflict", "同步冲突（LWW 本地胜出被覆盖/对端胜出）。payload: {entity, entity_id, winner_device, ts}", BackpressurePolicy::None),
+    ("sync.conflict", "同步冲突（LWW 本地胜出被覆盖/对端胜出）。payload: {conflict_id, entity, entity_id, loser_device, ts}（内容快照不落事件，按 conflict_id 查 sync_conflicts_get）", BackpressurePolicy::None),
 ];
 
 /// 按名取静态主题（仅编译期登记主题可发布——总线契约；模块层发布入口）

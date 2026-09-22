@@ -3,11 +3,15 @@
 //! v1 裁剪：不做 diff-match-patch 3-way 文本合并（依赖重、价值密度低）；
 //! LWW 输掉的本地改动以 sync.conflict 事件通知（UI 可查），数据本身不丢
 //! （op_log 仍保留本地条目，下一次本地修改 ts 更新即可胜出）。
+//!
+//! T-B5-2 起，判负一侧的**内容快照**另落 `conflict_log`（见 oplog.rs）：
+//! 事件是提示不是事实源，只发事件等于"阅后即焚"。
 
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::{Result, SyncError};
-use crate::oplog::{OpEntry, OpLog};
+use crate::oplog::{ConflictEntry, OpEntry, OpLog};
 
 /// 变更应用回调（宿主注入：notes → NoteLibrary；v1 数据集 = note）
 pub trait ChangeApplier: Send + Sync {
@@ -46,6 +50,51 @@ impl SyncEngine {
     pub fn plan_push(raw: Vec<OpEntry>, limit: usize) -> PushBatch {
         let more = limit > 0 && raw.len() == limit;
         PushBatch { ops: raw, more }
+    }
+
+    /// 冲突行的**确定性**主键：sha256(entity ‖ \0 ‖ entity_id ‖ \0 ‖ lost_ts ‖ \0 ‖ lost_device) 前 32 hex。
+    ///
+    /// 与 op_id 的 UUIDv7 刻意分野：op 是"一次事实"（每次产生都得新 id），冲突行是
+    /// "同一个败方快照被再次观测到"——对端没收到 Ack 而重推同一批时，UUID 会把一次
+    /// 网络抖动灌成一堆重复历史，确定性 id 让 `INSERT OR IGNORE` 天然吸收。
+    pub fn conflict_id(entity: &str, entity_id: &str, lost_ts: i64, lost_device: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(entity.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(entity_id.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(lost_ts.to_le_bytes());
+        hasher.update([0u8]);
+        hasher.update(lost_device.as_bytes());
+        // 取前 16 字节 = 32 个 hex 字符（冲突行非信任根素材，截断只为可读可贴）
+        hasher
+            .finalize()
+            .iter()
+            .take(16)
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// 由败方条目 + 当时压住它的本地条目组装冲突行（纯函数，落盘时机留在会话里）。
+    ///
+    /// `winner` 正常必为 `Some`（判负的前提就是本地有更新条目）；`None` 只可能是
+    /// 查表 IO 失败，此时以空胜者如实留痕——快照本身才是用户要的东西，不因审计列缺失而丢行。
+    pub fn conflict_of(
+        lost: &OpEntry,
+        winner: Option<&OpEntry>,
+        recorded_ms: i64,
+    ) -> ConflictEntry {
+        ConflictEntry {
+            conflict_id: Self::conflict_id(&lost.entity, &lost.entity_id, lost.ts, &lost.device),
+            entity: lost.entity.clone(),
+            entity_id: lost.entity_id.clone(),
+            lost_ts: lost.ts,
+            lost_device: lost.device.clone(),
+            winner_device: winner.map(|w| w.device.clone()).unwrap_or_default(),
+            winner_ts: winner.map(|w| w.ts).unwrap_or(0),
+            lost_value: lost.value.clone(),
+            recorded_ms,
+        }
     }
 
     /// 记录本地变更：snapshot 由调用方提供（避免 engine 依赖 applier 时机）
