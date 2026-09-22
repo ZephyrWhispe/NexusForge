@@ -30,9 +30,24 @@ pub enum ApplyOutcome {
     Noop,
 }
 
+/// 推送批次切分结果（纯函数产物，调用方据此写帧并驱动出站游标）
+#[derive(Clone, Debug)]
+pub struct PushBatch {
+    pub ops: Vec<OpEntry>,
+    /// 本批恰满 limit ⇒ 可能还有下一批（对端回执后继续按游标取）
+    pub more: bool,
+}
+
 pub struct SyncEngine;
 
 impl SyncEngine {
+    /// 切分推送批次：raw 须是 `ops_of_device(device, push_cursor, limit)` 的升序结果，
+    /// 切分本身不触 IO（§9.1-④ 两半制：语义可直测，游标读写留在会话里）。
+    pub fn plan_push(raw: Vec<OpEntry>, limit: usize) -> PushBatch {
+        let more = limit > 0 && raw.len() == limit;
+        PushBatch { ops: raw, more }
+    }
+
     /// 记录本地变更：snapshot 由调用方提供（避免 engine 依赖 applier 时机）
     pub fn record_local(
         log: &OpLog,
@@ -88,6 +103,7 @@ impl SyncEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::BATCH_LIMIT;
     use parking_lot::Mutex;
     use serde_json::json;
     use std::sync::Arc;
@@ -226,5 +242,47 @@ mod tests {
     fn applier_object_safe() {
         let a: Arc<dyn ChangeApplier> = Arc::new(FakeStore::default());
         assert!(a.snapshot("note", "x").unwrap().is_none());
+    }
+
+    /// 任务书（09 §10.2 T-B5-1）字面测试名优先于 rustc 命名惯例
+    #[test]
+    #[allow(non_snake_case)]
+    fn plan_push_boundary_exactLimit_setsMore() {
+        let all: Vec<OpEntry> = (0..600)
+            .map(|i| op(&format!("p{i}"), &format!("{i}.md"), 1_000 + i, "devA", "x"))
+            .collect();
+
+        // 600 条自产 ⇒ 512 + 88 两批（首批恰满 → more=true；次批不满 → more=false）
+        let mut cursor = 0i64;
+        let mut batches: Vec<(usize, bool)> = Vec::new();
+        loop {
+            let raw: Vec<OpEntry> = all
+                .iter()
+                .filter(|o| o.ts > cursor)
+                .take(BATCH_LIMIT)
+                .cloned()
+                .collect();
+            let batch = SyncEngine::plan_push(raw, BATCH_LIMIT);
+            let n = batch.ops.len();
+            let more = batch.more;
+            if let Some(last) = batch.ops.last() {
+                cursor = last.ts;
+            }
+            batches.push((n, more));
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(batches, vec![(512, true), (88, false)]);
+        assert_eq!(cursor, 1_599, "两批跑完出站游标落在最后一条 ts");
+
+        // 511 条（差一条不满）⇒ 无后续批
+        let slim: Vec<OpEntry> = all.iter().take(BATCH_LIMIT - 1).cloned().collect();
+        assert!(!SyncEngine::plan_push(slim, BATCH_LIMIT).more);
+
+        // 空批（游标已对齐）⇒ 不标记续传，会话据此零推送退出
+        let empty = SyncEngine::plan_push(vec![], BATCH_LIMIT);
+        assert!(empty.ops.is_empty());
+        assert!(!empty.more);
     }
 }

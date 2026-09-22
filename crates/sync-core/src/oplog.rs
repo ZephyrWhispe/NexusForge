@@ -1,4 +1,7 @@
-//! SYNC2 变更流（docs/impl/07 SYNC2）：op_log 追加表 + 设备游标。
+//! SYNC2 变更流（docs/impl/07 SYNC2）：op_log 追加表 + 双向设备游标。
+//!
+//! 游标两维分表：`cursors` = 从该设备**收到**的最大 ts（入站），
+//! `push_cursors` = 本机自产变更**推给**该设备的最大 ts（出站，发起方按此分批续传）。
 //!
 //! op_log = 实体快照式变更记录（v1 实体级 LWW，字段级合并随 SYNC3 深化）：
 //! `{ op_id(ULID→uuid v7), entity, entity_id, ts, device, value }`
@@ -56,6 +59,10 @@ CREATE TABLE IF NOT EXISTS op_log (
 CREATE INDEX IF NOT EXISTS idx_op_log_ts ON op_log(ts);
 CREATE INDEX IF NOT EXISTS idx_op_log_entity ON op_log(entity, entity_id);
 CREATE TABLE IF NOT EXISTS cursors (
+    device  TEXT PRIMARY KEY,
+    last_ts INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS push_cursors (
     device  TEXT PRIMARY KEY,
     last_ts INTEGER NOT NULL DEFAULT 0
 );
@@ -151,6 +158,31 @@ impl OpLog {
         Ok(())
     }
 
+    /// 出站游标：本机自产变更已推给该设备的最大 ts（缺行 = 0，与 cursor 同形）
+    ///
+    /// 与入站 `cursors` 分表：两方向单调性互斥，混表会让一次重放把"我推到哪"污染成"对端推到哪"。
+    pub fn push_cursor(&self, device: &str) -> i64 {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT last_ts FROM push_cursors WHERE device = ?1",
+            rusqlite::params![device],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+    }
+
+    /// 推进出站游标（只进不退，与入站同一纪律）
+    pub fn set_push_cursor(&self, device: &str, ts: i64) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO push_cursors (device, last_ts) VALUES (?1, ?2)
+             ON CONFLICT(device) DO UPDATE SET last_ts = MAX(last_ts, excluded.last_ts)",
+            rusqlite::params![device, ts],
+        )
+        .map_err(|e| SyncError::Db(e.to_string()))?;
+        Ok(())
+    }
+
     /// op 总数（状态面板）
     pub fn count(&self) -> u64 {
         let conn = self.conn.lock();
@@ -229,5 +261,18 @@ mod tests {
         l.set_cursor("devB", 200).unwrap();
         l.set_cursor("devB", 150).unwrap(); // 只进不退
         assert_eq!(l.cursor("devB"), 200);
+    }
+
+    /// 任务书（09 §10.2 T-B5-1）字面测试名优先于 rustc 命名惯例
+    #[test]
+    #[allow(non_snake_case)]
+    fn pushCursor_staleAck_neverRewinds() {
+        let l = log("pushcursor");
+        assert_eq!(l.push_cursor("devC"), 0, "缺行即 0（旧库零迁移）");
+        l.set_push_cursor("devC", 500).unwrap();
+        l.set_push_cursor("devC", 120).unwrap(); // 对端回了个旧 ts 回执
+        assert_eq!(l.push_cursor("devC"), 500, "出站游标与入站同一只进不退纪律");
+        l.set_push_cursor("devC", 640).unwrap();
+        assert_eq!(l.push_cursor("devC"), 640);
     }
 }

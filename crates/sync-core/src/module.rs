@@ -22,7 +22,7 @@ use host_core::module::{
     priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
 };
 
-use crate::engine::{ApplyOutcome, ChangeApplier, SyncEngine};
+use crate::engine::{ApplyOutcome, ChangeApplier, PushBatch, SyncEngine};
 use crate::error::SyncError;
 use crate::oplog::{OpLog, DELETED_KEY};
 use crate::transport::{
@@ -120,21 +120,31 @@ impl SyncCtx {
     }
 }
 
-/// 发起方会话：Push 自产 → Ack → Pull 对端 → 应用 → Ack
+/// 发起方会话：按出站游标分批 Push（逐批等 Ack 对账）→ Pull 对端 → 应用
 async fn run_initiator(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummary> {
     let applier = ctx.applier()?;
     let self_device = ctx.identity.device_id.clone();
     let peer_key = session.peer.device_id.clone();
     let mut summary = SyncSummary::default();
 
-    // ---- Push 自产变更（对端应用并自行推进 cursor）----
-    let ops = ctx.log.ops_of_device(&self_device, 0, BATCH_LIMIT)?;
-    summary.pushed = ops.len() as u32;
-    write_msg(session, &SyncMsg::Push { ops, more: false }).await?;
-    match read_msg(session).await? {
-        SyncMsg::Ack { .. } => {}
-        SyncMsg::Err { msg } => return Err(SyncError::Proto(msg)),
-        m => return Err(SyncError::Proto(format!("Push 后非 Ack: {m:?}"))),
+    // ---- Push 自产变更（出站游标驱动批循环；对端回执 until_ts 供对账）----
+    let mut cursor = ctx.log.push_cursor(&peer_key);
+    loop {
+        let raw = ctx.log.ops_of_device(&self_device, cursor, BATCH_LIMIT)?;
+        let PushBatch { ops, more } = SyncEngine::plan_push(raw, BATCH_LIMIT);
+        summary.pushed += ops.len() as u32;
+        write_msg(session, &SyncMsg::Push { ops, more }).await?;
+        let until_ts = match read_msg(session).await? {
+            SyncMsg::Ack { until_ts, .. } => until_ts,
+            SyncMsg::Err { msg } => return Err(SyncError::Proto(msg)),
+            m => return Err(SyncError::Proto(format!("Push 后非 Ack: {m:?}"))),
+        };
+        ctx.log.set_push_cursor(&peer_key, until_ts)?;
+        // 对端游标未前进（旧版本恒回 0 / 空批回执）即停：宁可少推一轮，不可原地重放空转
+        if until_ts <= cursor || !more {
+            break;
+        }
+        cursor = ctx.log.push_cursor(&peer_key);
     }
 
     // ---- Pull 对端变更 ----
@@ -155,30 +165,38 @@ async fn run_initiator(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummar
     Ok(summary)
 }
 
-/// 响应方会话：收 Push → 应用 → Ack；收 Pull → 回自产 Push → 等 Ack
+/// 响应方会话：收 Push（按 more 分批）→ 应用 → 逐批回 Ack（真 until_ts）；收 Pull → 回自产 Push → 等 Ack
 async fn run_responder(ctx: &SyncCtx, session: &mut SyncSession) -> R<SyncSummary> {
     let self_device = ctx.identity.device_id.clone();
     let peer_key = session.peer.device_id.clone();
     let mut summary = SyncSummary::default();
 
-    match read_msg(session).await? {
-        SyncMsg::Push { ops, .. } => {
-            let (applied, lost, conflicts) = ctx.apply_ops(&ops, &peer_key);
-            summary.pulled_applied = applied;
-            summary.pulled_lost = lost;
-            summary.conflicts = conflicts;
-            write_msg(
-                session,
-                &SyncMsg::Ack {
-                    until_ts: 0,
-                    applied,
-                    lost,
-                },
-            )
-            .await?;
+    // 收 Push 批循环（与发起方分批对称：more=false 才进入 Pull 阶段）
+    loop {
+        match read_msg(session).await? {
+            SyncMsg::Push { ops, more } => {
+                let (applied, lost, conflicts) = ctx.apply_ops(&ops, &peer_key);
+                summary.pulled_applied += applied;
+                summary.pulled_lost += lost;
+                summary.conflicts += conflicts;
+                // 本批已处理到的最大 ts（ops 按 ts 升序）——发起方据此推进出站游标
+                let until_ts = ops.iter().map(|o| o.ts).max().unwrap_or(0);
+                write_msg(
+                    session,
+                    &SyncMsg::Ack {
+                        until_ts,
+                        applied,
+                        lost,
+                    },
+                )
+                .await?;
+                if !more {
+                    break;
+                }
+            }
+            SyncMsg::Err { msg } => return Err(SyncError::Proto(msg)),
+            m => return Err(SyncError::Proto(format!("responder 首消息非 Push: {m:?}"))),
         }
-        SyncMsg::Err { msg } => return Err(SyncError::Proto(msg)),
-        m => return Err(SyncError::Proto(format!("responder 首消息非 Push: {m:?}"))),
     }
 
     match read_msg(session).await? {
