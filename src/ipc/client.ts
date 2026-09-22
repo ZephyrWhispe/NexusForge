@@ -1897,14 +1897,6 @@ export function automationPluginRemove(id: string): Promise<boolean> {
 
 // ======================== 跨设备同步（M15 SYNC，docs/impl/07） ========================
 
-export interface PairedPeerDto {
-  device_id: string;
-  device_name: string;
-  fingerprint: string;
-  pubkey_b64: string;
-  paired_at: number;
-}
-
 export interface SyncSummaryDto {
   pushed: number;
   pulled_applied: number;
@@ -1912,9 +1904,46 @@ export interface SyncSummaryDto {
   conflicts: number;
 }
 
+/**
+ * 单台配对设备的同步进度（09 §10.2 T-B5-4）：与 sync-core `PeerStatus` 逐字段镜像，
+ * 键形沿用本模块 IPC 既有形状（`SyncSummaryDto` 同为 snake_case）。
+ * 三个数字（两维游标 + pending）全部现读自表，前端不缓存、不再算一遍。
+ */
+export interface SyncPeerStatusDto {
+  device_id: string;
+  device_name: string;
+  fingerprint: string;
+  /** 该对端推到我这边的进度（入站游标） */
+  inbound_cursor: number;
+  /** 我把自产变更推到那台的进度（出站游标） */
+  push_cursor: number;
+  /** 本机自产且尚未推给这台的条数 */
+  pending_ops: number;
+  /** 与这台最近一轮会话的开始时刻（0 = 从未同步过） */
+  last_sync_ms: number;
+  /** 最近一轮的失败原因（与流水行 `error` 逐字相同） */
+  last_error: string | null;
+  /** 对端 sync 地址：T-B5-7（心跳宣告）落地前恒 null ⇒ 面板不渲染此列 */
+  sync_addr: string | null;
+  /** 发现层在线：同上无事实源，面板不得据此写"离线" */
+  online: boolean;
+}
+
+/**
+ * 同步状态快照（T-B5-4 起类型化，字段与 `sync_core::SyncStatus` 一一对应且**必填**）：
+ * `listening` 是 bind 真结果，不再由"模块启动了"推断——过去端口被占，面板照样显示
+ * `监听 :49820`，那是本模块最显眼的一处假绿。
+ */
 export interface SyncStatusDto {
   op_count: number;
   port: number;
+  listening: boolean;
+  last_bind_error: string | null;
+  self_device_id: string;
+  self_name: string;
+  /** T-B5-6（暂停/恢复）落地前恒 false */
+  paused: boolean;
+  peers: SyncPeerStatusDto[];
 }
 
 /**

@@ -25,6 +25,10 @@ const REPLAY_PORT: u16 = 49834;
 const RUN_ROW_PORT: u16 = 49835;
 const RUN_PEER_PORT: u16 = 49836;
 const RUN_PENDING_PORT: u16 = 49837;
+const STATUS_OK_PORT: u16 = 49838;
+const STATUS_BUSY_PORT: u16 = 49839;
+const STATUS_PEER_PORT: u16 = 49840;
+const STATUS_SHAPE_PORT: u16 = 49841;
 /// 无人监听的端口（connect 立刻被拒，用来造"注定失败的一轮"）
 const DEAD_PORT: u16 = 49899;
 
@@ -523,4 +527,225 @@ async fn countOpsAfter_matchesPushedSemantics() {
         "入站条目按产出设备（B）计数，就在本机库里"
     );
     assert_eq!(pending(&log_a), 0, "对端自己产的东西不算本机未出账");
+}
+
+// ======================== T-B5-4：状态读面类型化 + 监听真态 ========================
+
+/// 有界轮询取一次"监听事实已落地"的状态快照。
+///
+/// bind 发生在 `start()` spawn 的任务里，与测试线程天然并发；不轮询就等于把竞态写进
+/// 断言（要么偶发红，要么靠 sleep 时长许愿）。失败时把最后一次快照如实打进 panic 消息。
+async fn wait_bind_fact(module: &SyncModule) -> sync_core::SyncStatus {
+    let mut last = None;
+    for _ in 0..100 {
+        let st = module.status().unwrap();
+        if st.listening || st.last_bind_error.is_some() {
+            return st;
+        }
+        last = Some(st);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("监听事实从未落地（最后一次：{last:?}）");
+}
+
+/// 任务书（09 §10.2 T-B5-4）字面测试名优先于 rustc 命名惯例
+/// 真占端口造红：bind 失败后 `listening` 必须 false 且错误点名端口号
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn status_listeningFalse_whenPortAlreadyBound() {
+    // 先把端口真占住（accept_loop 的 bind 必然失败，不是模拟返回值）
+    let blocker = std::net::TcpListener::bind(("0.0.0.0", STATUS_BUSY_PORT)).unwrap();
+    let (module, _store, _id) = setup("status_busy", None, STATUS_BUSY_PORT);
+
+    let st = wait_bind_fact(&module).await;
+    assert!(
+        !st.listening,
+        "端口被占时不得报\"在听\"（修前：start 无条件置 Running + 面板直读 port）"
+    );
+    let err = st
+        .last_bind_error
+        .clone()
+        .expect("bind 失败原因要如实可读，不是只剩一个 false");
+    assert!(
+        err.contains(&STATUS_BUSY_PORT.to_string()),
+        "错误消息须点名端口号，面板才能说清是谁占了：{err}"
+    );
+    assert_eq!(
+        st.port, STATUS_BUSY_PORT,
+        "未监听也要如实报出口端口（主动同步这条腿仍然可用）"
+    );
+
+    drop(blocker);
+}
+
+/// 正对照防空洞：若只测失败臂，`listening` 写成常量 false 也能绿
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn status_listeningTrue_afterSuccessfulBind() {
+    let (module, _store, id) = setup("status_ok", None, STATUS_OK_PORT);
+
+    let st = wait_bind_fact(&module).await;
+    assert!(st.listening, "bind 成功即真在听");
+    assert!(
+        st.last_bind_error.is_none(),
+        "成功臂不得留下上一轮的失败残文：{:?}",
+        st.last_bind_error
+    );
+    assert_eq!(st.port, STATUS_OK_PORT);
+    assert_eq!(st.op_count, 0, "全新实例零变更");
+    assert_eq!(st.self_device_id, id.device_id);
+    assert!(!st.self_name.is_empty());
+    assert!(
+        !st.paused,
+        "T-B5-6 前恒 false（形状先落位，不提前谎报\"已暂停\"）"
+    );
+    assert!(st.peers.is_empty(), "未配对 ⇒ 无进度行");
+}
+
+/// 任务书字面测试名：两维游标（入站/出站）+ pending 一致，且三个数各自对得上表里的真值
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn status_peersCarryCursorsAndPending() {
+    let c = paired("status_peer", STATUS_PEER_PORT);
+    wait_port(STATUS_PEER_PORT).await;
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    let peer_of = |st: &sync_core::SyncStatus| {
+        st.peers
+            .iter()
+            .find(|p| p.device_id == c.b_id)
+            .expect("配对设备在状态读面上")
+            .clone()
+    };
+
+    // 还没同步过：三条自产变更全欠着，两维游标都是 0，没有流水行
+    for name in ["s1.md", "s2.md", "s3.md"] {
+        c.a_store.put(name, "v");
+        c.a.record_change(name, "create").unwrap();
+    }
+    let p0 = peer_of(&c.a.status().unwrap());
+    assert!(!p0.device_name.is_empty(), "面板显示的是设备名，不是裸 id");
+    assert!(!p0.fingerprint.is_empty());
+    assert_eq!(p0.pending_ops, 3, "面板上的\"还欠几条\"必须是真的欠");
+    assert_eq!(p0.push_cursor, 0, "一次没推 ⇒ 出站游标为零");
+    assert_eq!(p0.inbound_cursor, 0, "一次没收 ⇒ 入站游标为零");
+    assert_eq!(
+        p0.last_sync_ms, 0,
+        "从没同步过就是从没同步过，不拿 now_ms 凑数"
+    );
+    assert!(p0.last_error.is_none());
+
+    // 推完：pending 归零，出站游标 == 表里的出站游标 == 本机最后一条自产 op 的 ts
+    let s1 =
+        c.a.sync_with(&c.b_id, &addr(STATUS_PEER_PORT))
+            .await
+            .unwrap();
+    assert_eq!(s1.pushed, 3);
+    let p1 = peer_of(&c.a.status().unwrap());
+    assert_eq!(p1.pending_ops, 0);
+    assert_eq!(
+        p1.push_cursor,
+        log_a.push_cursor(&c.b_id),
+        "出站游标读自表，不是另算一份"
+    );
+    assert_eq!(
+        p1.push_cursor,
+        log_a
+            .ops_of_device(&c.a_id, 0, 10)
+            .unwrap()
+            .last()
+            .expect("本机自产 op 在册")
+            .ts,
+        "出站游标推进到已出账的那一条"
+    );
+    assert!(p1.last_sync_ms > 0, "有流水行 ⇒ 时刻非零");
+    assert!(p1.last_error.is_none());
+
+    // 对端产出一条 → 本机拉走：入站游标动起来，出站游标**不该**跟着动（两维分离）
+    c.b_store.put("t1.md", "from B");
+    c.b.record_change("t1.md", "create").unwrap();
+    let s2 =
+        c.a.sync_with(&c.b_id, &addr(STATUS_PEER_PORT))
+            .await
+            .unwrap();
+    assert_eq!(s2.pulled_applied, 1);
+    let p2 = peer_of(&c.a.status().unwrap());
+    assert_eq!(p2.inbound_cursor, log_a.cursor(&c.b_id));
+    assert_eq!(
+        p2.push_cursor, p1.push_cursor,
+        "拉对端的东西不改本机出账进度"
+    );
+    assert_eq!(p2.pending_ops, 0);
+    assert!(
+        p2.inbound_cursor > p2.push_cursor,
+        "两维游标各读各的表：混用即谎报（入站 {} vs 出站 {}）",
+        p2.inbound_cursor,
+        p2.push_cursor
+    );
+}
+
+/// 任务书字面测试名：`to_value` 后键集合恰等于结构体字段集——偷偷加键（或退回裸 json）都判红
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn status_shapeIsTyped_notRawJson() {
+    let peer = PairedPeer {
+        device_id: "dev-shape".into(),
+        device_name: "形状机".into(),
+        fingerprint: "ab:cd".into(),
+        pubkey_b64: "AAAA".into(),
+        paired_at: 1,
+    };
+    let (module, _store, _id) = setup("status_shape", Some(peer), STATUS_SHAPE_PORT);
+    let st = module.status().unwrap();
+
+    let value = serde_json::to_value(&st).unwrap();
+    let mut keys: Vec<String> = value
+        .as_object()
+        .expect("状态序列化为对象")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    let expected = [
+        "last_bind_error",
+        "listening",
+        "op_count",
+        "paused",
+        "peers",
+        "port",
+        "self_device_id",
+        "self_name",
+    ];
+    let mut expected: Vec<String> = expected.iter().map(|k| (*k).to_string()).collect();
+    expected.sort();
+    assert_eq!(keys, expected, "状态键集合恰等于 SyncStatus 字段集");
+
+    let mut peer_keys: Vec<String> = value["peers"][0]
+        .as_object()
+        .expect("peer 序列化为对象")
+        .keys()
+        .cloned()
+        .collect();
+    peer_keys.sort();
+    let mut expected_peer: Vec<String> = [
+        "device_id",
+        "device_name",
+        "fingerprint",
+        "inbound_cursor",
+        "push_cursor",
+        "pending_ops",
+        "last_sync_ms",
+        "last_error",
+        "sync_addr",
+        "online",
+    ]
+    .iter()
+    .map(|k| (*k).to_string())
+    .collect();
+    expected_peer.sort();
+    assert_eq!(
+        peer_keys, expected_peer,
+        "peer 键集合恰等于 PeerStatus 字段集"
+    );
+    assert_eq!(value["peers"][0]["sync_addr"], serde_json::Value::Null);
+    assert_eq!(value["peers"][0]["online"], json!(false));
 }

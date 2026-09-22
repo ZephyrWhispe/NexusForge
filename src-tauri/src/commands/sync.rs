@@ -10,20 +10,41 @@ fn sync_err(e: sync_core::SyncError) -> AppError {
 }
 
 /// 配对设备列表（信任根复用 KVM 配对；UI 选择同步目标）
+///
+/// `peers()` 走 PairStore（内存表 + 磁盘读），与其余同步读命令同规走 `spawn_blocking`
+/// （09 §10.1 承重⑬ 随行修：本模块三条读命令过去全是 `async fn` 里直接做阻塞 I/O）。
 #[tauri::command]
 pub async fn sync_peers(
     state: State<'_, HostState>,
 ) -> Result<Vec<kvm_core::PairedPeer>, AppError> {
-    Ok(state.sync.peers())
+    let sync = state.sync.clone();
+    tauri::async_runtime::spawn_blocking(move || sync.peers())
+        .await
+        .map_err(|e| sync_err(sync_core::SyncError::Db(format!("配对读任务失败：{e}"))))
 }
 
-/// op_log 状态（计数/监听端口）
+/// 同步状态快照（T-B5-4 类型化：DTO 就是 sync-core 的 `SyncStatus`，单一真源）
+///
+/// 本命令的返回类型过去是无类型 JSON 值——里面有什么键全靠人记，
+/// 加键/漏键两端都不报错，面板因此可以在内核根本没监听时说"监听 :49820"。
+/// 类型化后编译期就是这道门（09 §10.2 T-B5-4 的机检面：本文件 grep 不到 `Value` 返回）。
+pub type SyncStatusDto = sync_core::SyncStatus;
+
 #[tauri::command]
-pub async fn sync_status(state: State<'_, HostState>) -> Result<serde_json::Value, AppError> {
-    Ok(state.sync.status())
+pub async fn sync_status(state: State<'_, HostState>) -> Result<SyncStatusDto, AppError> {
+    let sync = state.sync.clone();
+    tauri::async_runtime::spawn_blocking(move || sync.status())
+        .await
+        .map_err(|e| sync_err(sync_core::SyncError::Db(format!("状态读任务失败：{e}"))))?
+        .map_err(sync_err)
 }
 
 /// 立即与指定设备同步（addr 如 "192.168.1.10:49820"；端口默认 DEFAULT_SYNC_PORT）
+///
+/// 本命令保持 `async`：会话本体是 await 网络 I/O，整段塞进 `spawn_blocking` 不可表达。
+/// ⑬ 的适用面在这里只剩"会话内的 op_log 读写"，其量级按批封顶（`BATCH_LIMIT`），
+/// 与三条读命令的"面板每开一次就吃一次 worker"不是同一风险面——差异已记 09 §10.2
+/// T-B5-4 落地补记，不在这里悄悄留个注释就当没说。
 #[tauri::command]
 pub async fn sync_now(
     device_id: String,

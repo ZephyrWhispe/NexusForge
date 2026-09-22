@@ -17,7 +17,8 @@ pub mod transport;
 pub use engine::{ApplyOutcome, ChangeApplier, SyncEngine};
 pub use error::{Result, SyncError};
 pub use module::{
-    record_change_with, restore_conflict_with, SyncCtx, SyncModule, SyncSummary, DEFAULT_SYNC_PORT,
+    record_change_with, restore_conflict_with, PeerStatus, SyncCtx, SyncModule, SyncStatus,
+    SyncSummary, DEFAULT_SYNC_PORT,
 };
 pub use oplog::{ConflictEntry, OpEntry, OpLog, SyncRun};
 pub use transport::{SyncMsg, SyncSession};

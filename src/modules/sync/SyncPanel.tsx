@@ -27,6 +27,10 @@ import ConflictsSection from "./ConflictsSection";
  * - 拓扑：局域网 P2P（信任根复用 KVM 配对；端到端加密）
  * - 数据集 v1 = 笔记库；密码库永不自动同步
  * - 冲突：LWW 自动解 + sync.conflict 事件通知
+ * - 监听真态来自 `status.listening`（T-B5-4）：**不是**端口号在场的同义词。修前
+ *   `start()` 无条件置 Running、面板直读 `status.port` ⇒ 端口被占时照样显示"监听 :49820"。
+ *   `sync_addr` / `online` 两字段随形状先落位而恒 None/false（真值归 T-B5-7），
+ *   因此这里刻意不据它们渲染任何文案——没有事实源就没有字。
  * 面板内无删除/解绑类操作（解除配对只在「键鼠共享」面板做，D-18 已在那里加确认）。
  */
 const useStyles = makeStyles({
@@ -50,6 +54,8 @@ const useStyles = makeStyles({
   itemBody: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "2px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
+  /** 未出账提示（T-B5-4）：黄字而非红字——落后不是故障，谎报才是 */
+  warn: { color: tokens.colorPaletteDarkOrangeForeground1, fontSize: tokens.fontSizeBase200 },
 });
 
 export default function SyncPanel() {
@@ -109,13 +115,26 @@ export default function SyncPanel() {
             {status && (
               <>
                 <Badge appearance="outline">变更记录 {status.op_count} 条</Badge>
-                <Badge appearance="outline">监听 :{status.port}</Badge>
+                <Badge
+                  appearance="tint"
+                  color={status.listening ? "success" : "danger"}
+                >
+                  {status.listening ? `监听 :${status.port}` : `未监听 :${status.port}`}
+                </Badge>
               </>
             )}
             {busy && <Spinner size="tiny" />}
           </>
         }
       >
+        <InlineError
+          text={
+            status && !status.listening
+              ? status.last_bind_error ??
+                `监听未就绪（端口 ${status.port}）——本机仍可主动发起同步，但对端连不进来`
+              : ""
+          }
+        />
         <div className={styles.row}>
           <Input
             size="small"
@@ -145,27 +164,44 @@ export default function SyncPanel() {
             loading={!loaded}
           />
         ) : (
-          peers.map((p) => (
-            <div key={p.device_id} className={styles.item}>
-              <div className={styles.itemBody}>
-                <div className={styles.row}>
-                  <Text weight="semibold" size={300}>
-                    {p.device_name}
+          peers.map((p) => {
+            // 进度来自 status.peers（现读自三张表），设备清单来自 sync_peers（带 paired_at）：
+            // 按 device_id 关联，两个来源各说各的事实，互不覆写。
+            const prog = status?.peers.find((x) => x.device_id === p.device_id);
+            return (
+              <div key={p.device_id} className={styles.item}>
+                <div className={styles.itemBody}>
+                  <div className={styles.row}>
+                    <Text weight="semibold" size={300}>
+                      {p.device_name}
+                    </Text>
+                    <Text className={styles.mono}>{p.fingerprint}</Text>
+                  </div>
+                  <Text className={styles.muted}>
+                    配对于 {new Date(p.paired_at).toLocaleString()}
+                    {prog &&
+                      (prog.last_sync_ms > 0
+                        ? ` · 上次同步 ${new Date(prog.last_sync_ms).toLocaleString()}`
+                        : " · 从未同步")}
                   </Text>
-                  <Text className={styles.mono}>{p.fingerprint}</Text>
+                  {!!prog && prog.pending_ops > 0 && (
+                    <Text className={styles.warn}>未出账 {prog.pending_ops} 条</Text>
+                  )}
+                  {prog?.last_error && (
+                    <InlineError text={`上次同步失败：${prog.last_error}`} />
+                  )}
                 </div>
-                <Text className={styles.muted}>配对于 {new Date(p.paired_at).toLocaleString()}</Text>
+                <Button
+                  size="small"
+                  appearance="primary"
+                  disabled={busy}
+                  onClick={() => void sync(p.device_id)}
+                >
+                  立即同步
+                </Button>
               </div>
-              <Button
-                size="small"
-                appearance="primary"
-                disabled={busy}
-                onClick={() => void sync(p.device_id)}
-              >
-                立即同步
-              </Button>
-            </div>
-          ))
+            );
+          })
         )}
       </Section>
 

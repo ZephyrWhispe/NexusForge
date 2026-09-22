@@ -7,6 +7,8 @@
 //! - SYNC4 加密：复用 K2 配对信任根的端到端加密通道（transport.rs）
 //! - 会话流水：每轮同步（含失败）落一行 `sync_run`（T-B5-3：摘要过去只活在 tracing 里，
 //!   阅后即焚 ⇒ 面板答不出"上次到底同步了没"）
+//! - 状态读面：`status()` 返回类型化 `SyncStatus`（T-B5-4：监听真态 + 每 peer 两维游标与
+//!   pending，全部现读自表；无类型 `json!` 时代"面板说的"与"内核做的"可以各说各话）
 //! - 数据集 v1 = note（订阅 notes.changed 记录本地变更；applier 由宿主注入写穿 NoteLibrary）
 //! - 红线：密码库条目**永不**自动同步（数据集白名单硬编码，无 vault 通路）
 //!
@@ -14,6 +16,7 @@
 //! 本地订阅仅记录用户操作产生的变更。
 
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
@@ -48,6 +51,52 @@ pub struct SyncSummary {
     pub pulled_applied: u32,
     pub pulled_lost: u32,
     pub conflicts: u32,
+}
+
+/// 单个配对设备在本机的同步进度（T-B5-4：面板"这台落后多少 / 上次到底成没成"的读面）
+///
+/// 两半制：三个数字全部现读自 op_log 三表（`cursors` / `push_cursors` / `sync_run`），
+/// 本结构不另立事实源、不缓存 ⇒ 协议跑的与面板看的同一份数。
+/// `sync_addr` / `online` 随形状先落位而**恒为 None/false**：其真值分属 T-B5-7（心跳宣告
+/// sync 端口 + 地址解析），今天没有任何事实源，前端因此也不据这两列渲染任何东西——
+/// 无事实源就无文案，宁可空着也不写"离线"（那同样是断言）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PeerStatus {
+    pub device_id: String,
+    pub device_name: String,
+    pub fingerprint: String,
+    /// 该对端推到我这边的进度（入站游标）
+    pub inbound_cursor: i64,
+    /// 我把自产变更推到那台的进度（出站游标）
+    pub push_cursor: i64,
+    /// 本机自产且尚未推给这台的条数（pending 唯一算式：`count_ops_after(本机, 出站游标)`）
+    pub pending_ops: u64,
+    /// 与这台最近一轮会话的**开始**时刻（0 = 本机从没跟它同步过）
+    pub last_sync_ms: i64,
+    /// 最近一轮的失败原因（None = 那轮成功；与 `sync_run.error` 逐字相同）
+    pub last_error: Option<String>,
+    /// 对端 sync 地址（T-B5-7 前恒 None）
+    pub sync_addr: Option<String>,
+    /// 发现层在线（T-B5-7 前恒 false，且不进任何 UI 文案）
+    pub online: bool,
+}
+
+/// 同步模块状态（T-B5-4 起**类型化**：过去是 `serde_json::Value` 二键，
+/// 命令层加键、前端少读，两边静默漂移无人报警——类型是这件事唯一的编译器级防线）
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SyncStatus {
+    pub op_count: u64,
+    pub port: u16,
+    /// 监听真态：只有 `accept_loop` 真的 bind 成功才 true。
+    /// 过去 `start()` 无条件置 Running、面板直接渲染 `监听 :端口` ⇒ 端口被占时仍报"在听"。
+    pub listening: bool,
+    /// 最近一次 bind 失败的原因（成功或还没试过则 None；面板据此出红条）
+    pub last_bind_error: Option<String>,
+    pub self_device_id: String,
+    pub self_name: String,
+    /// 手动暂停同步（T-B5-6 落地前恒 false）
+    pub paused: bool,
+    pub peers: Vec<PeerStatus>,
 }
 
 /// 会话/记录上下文（Arc 化供 tokio 任务持有；Module 方法 &self 无法直接 Arc）
@@ -407,6 +456,10 @@ pub struct SyncModule {
     identity: RwLock<Option<Arc<DeviceIdentity>>>,
     store: Arc<PairStore>,
     port: AtomicU16,
+    /// 监听真态（T-B5-4）：只由 `accept_loop` 的 bind 结果写，不由 `start()` 许愿写
+    listening: Arc<AtomicBool>,
+    /// 最近一次 bind 失败文本（与 `listening` 同属一对事实：true 时清空，失败时留存）
+    bind_error: Arc<RwLock<Option<String>>>,
     db_path: PathBuf,
     cancel: Arc<AtomicBool>,
 }
@@ -424,6 +477,8 @@ impl SyncModule {
             identity: RwLock::new(None),
             store: Arc::new(store),
             port: AtomicU16::new(DEFAULT_SYNC_PORT),
+            listening: Arc::new(AtomicBool::new(false)),
+            bind_error: Arc::new(RwLock::new(None)),
             db_path: app_data_dir.join("db").join("sync.db"),
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -491,10 +546,57 @@ impl SyncModule {
         let _ = self.store.upsert(peer);
     }
 
-    /// op_log 状态（面板统计）
-    pub fn status(&self) -> serde_json::Value {
-        let count = self.log.read().clone().map(|l| l.count()).unwrap_or(0);
-        serde_json::json!({ "op_count": count, "port": self.port.load(Ordering::SeqCst) })
+    /// 同步模块状态快照（面板唯一读面）
+    ///
+    /// **可失败**是刻意的：本方法背后是四次真查询（`op_log` 计数 + 入站/出站游标 +
+    /// 每 peer 最近流水）。若签名收成无 `Result`，查询失败就只能落成"0 条待同步"——
+    /// 那正是本行要消灭的"面板谎报"的另一张脸。未就绪（init 前）同理如实报错。
+    ///
+    /// 游标与 pending 一律现读自表：这里不留任何缓存副本，协议推进游标后面板不必
+    /// 等事件也知道变了（单一事实源；两处各写迟早漂移，漂移就是谎报）。
+    pub fn status(&self) -> R<SyncStatus> {
+        let log = self.log_arc()?;
+        let identity = self
+            .identity
+            .read()
+            .clone()
+            .ok_or_else(|| SyncError::NotReady("设备身份未就绪".into()))?;
+        let inbound: HashMap<String, i64> = log.all_cursors()?.into_iter().collect();
+        let outbound: HashMap<String, i64> = log.all_push_cursors()?.into_iter().collect();
+        let last_runs = log.last_run_per_peer()?;
+        let self_device = identity.device_id.clone();
+        let mut peers = Vec::new();
+        for p in self.store.all() {
+            let push_ts = outbound.get(&p.device_id).copied().unwrap_or(0);
+            // 一次查询失败就整面失败：游标读不到时"pending=0"会被面板读成"都同步过了"
+            let pending_ops = log.count_ops_after(&self_device, push_ts)?;
+            let last = last_runs.get(&p.device_id);
+            peers.push(PeerStatus {
+                fingerprint: p.fingerprint,
+                device_id: p.device_id.clone(),
+                device_name: p.device_name.clone(),
+                inbound_cursor: inbound.get(&p.device_id).copied().unwrap_or(0),
+                push_cursor: push_ts,
+                pending_ops,
+                last_sync_ms: last.map(|r| r.ts_ms).unwrap_or(0),
+                last_error: last.and_then(|r| r.error.clone()),
+                // T-B5-7 前无事实源：发现层尚未宣告对端 sync 端口。
+                // 留 None/false 且不进任何 UI 文案——"没查过"与"查了说离线"是两件事。
+                sync_addr: None,
+                online: false,
+            });
+        }
+        Ok(SyncStatus {
+            op_count: log.count(),
+            port: self.port.load(Ordering::SeqCst),
+            listening: self.listening.load(Ordering::SeqCst),
+            last_bind_error: self.bind_error.read().clone(),
+            self_device_id: identity.device_id.clone(),
+            self_name: identity.device_name.clone(),
+            // T-B5-6（自动同步 + 暂停/恢复）落地前恒 false：没有暂停开关就没有暂停态
+            paused: false,
+            peers,
+        })
     }
 
     fn log_arc(&self) -> R<Arc<OpLog>> {
@@ -574,14 +676,30 @@ impl SyncModule {
     }
 
     /// accept 循环（start 内 tokio spawn）
-    async fn accept_loop(ctx: Arc<SyncCtx>, port: u16, cancel: Arc<AtomicBool>) {
+    ///
+    /// `listening` / `bind_error` 是监听真态的唯一写口：bind 成功才 true（并清旧错），
+    /// 失败则存下含端口号的原文（面板拿它出红条）。过去 bind 失败只 warn 后 return，
+    /// 而 `start()` 无条件置 Running ⇒ 端口被占时面板依旧写"监听 :49820"，是假绿位。
+    async fn accept_loop(
+        ctx: Arc<SyncCtx>,
+        port: u16,
+        cancel: Arc<AtomicBool>,
+        listening: Arc<AtomicBool>,
+        bind_error: Arc<RwLock<Option<String>>>,
+    ) {
         let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => l,
             Err(e) => {
+                // 文本必须带端口号：占用者往往是别的进程，用户要知道抢的是哪个口
+                let msg = format!("端口 {port} 监听失败：{e}");
+                *bind_error.write() = Some(msg.clone());
+                listening.store(false, Ordering::SeqCst);
                 tracing::warn!(port, error = %e, "SYNC 监听失败（仅可发起同步）");
                 return;
             }
         };
+        *bind_error.write() = None;
+        listening.store(true, Ordering::SeqCst);
         tracing::info!(port, "SYNC 监听就绪");
         loop {
             if cancel.load(Ordering::SeqCst) {
@@ -613,6 +731,8 @@ impl SyncModule {
                 }
             });
         }
+        // 退出循环即监听套接字已被丢弃：真态跟着翻回 false，不留"上次启动时确实在听"的余温
+        listening.store(false, Ordering::SeqCst);
     }
 }
 
@@ -646,11 +766,18 @@ impl Module for SyncModule {
             tracing::warn!("SYNC 上下文未就绪，跳过启动");
             return Ok(());
         };
-        // SYNC1：accept 循环（bind 失败仅告警——仍可主动发起同步）
+        // SYNC1：accept 循环（bind 失败仍可主动发起同步，但监听真态如实落 listening）
         let port = self.port.load(Ordering::SeqCst);
         let cancel = self.cancel.clone();
+        // 每次启动先把两枚事实清零：上一轮遗留的 true 会让面板在"这一轮其实没听上"时仍报绿
+        self.listening.store(false, Ordering::SeqCst);
+        *self.bind_error.write() = None;
         let ctx_listen = ctx.clone();
-        tokio::spawn(async move { SyncModule::accept_loop(ctx_listen, port, cancel).await });
+        let listening = self.listening.clone();
+        let bind_error = self.bind_error.clone();
+        tokio::spawn(async move {
+            SyncModule::accept_loop(ctx_listen, port, cancel, listening, bind_error).await
+        });
         // SYNC2：订阅本地变更（notes.changed → op_log 快照）
         if let Some(bus) = self.bus.read().clone() {
             if let Ok(mut rx) = bus.subscribe("notes.changed") {
@@ -690,6 +817,8 @@ impl Module for SyncModule {
 
     fn stop(&self) -> Result<(), ModuleError> {
         self.cancel.store(true, Ordering::SeqCst);
+        // 取消信号发出即不再接受新会话：监听真态跟着落，不等 accept_loop 下一轮醒来
+        self.listening.store(false, Ordering::SeqCst);
         self.state.set(ModuleState::Stopped);
         Ok(())
     }
