@@ -41,6 +41,26 @@ fn frames_dir(app_data: &std::path::Path) -> std::path::PathBuf {
     app_data.join("frames")
 }
 
+/// `run_actions` 的结果（OCR 只登记意向：交接帧要 task_id，语义归调用侧）
+struct ActionOutcome {
+    file: Option<String>,
+    pin_id: Option<String>,
+    request_ocr: bool,
+}
+
+/// 一次后处理动作的入参包：像素 + 尺寸 + 动作 + 两个可选覆盖项。
+/// 收成结构体而不是七个位置参数——`finish` 与 `beautify_apply` 两侧都要填同一组，
+/// 位置参数让"哪一维是 pin 坐标、哪一维是格式"只能靠调用点对齐。
+struct ActionRun<'a> {
+    actions: &'a [String],
+    w: u32,
+    h: u32,
+    rgba: &'a [u8],
+    fmt_override: Option<&'a str>,
+    pin_x: Option<i32>,
+    pin_y: Option<i32>,
+}
+
 /// 从 `ocr.completed` 事件解析历史回填载荷（纯函数便于测试）。
 /// `ocr_copy_text` 也发布本主题（{action:"copied"}），故必须同时具备
 /// source_task_id 与 text 才算回填事件。
@@ -434,12 +454,19 @@ impl ScreenshotModule {
         self.pending.lock().remove(task_id);
     }
 
-    /// 完成：解码前端合成图 → 执行动作（copy/save/pin/ocr）→ 入历史 → 发事件
+    /// 完成：解码前端合成图 → （可选）美化 → 执行动作（copy/save/pin/ocr）→ 入历史 → 发事件
     ///
     /// ocr 动作不阻塞识别：帧写 {appData}/frames 后只发 `screenshot.ocr_requested`
     /// 事件，结果经 `ocr.completed` 异步回流回填历史（D-09 第 1 步）
+    ///
+    /// 美化（D-29 B4 T-B4-6）放在动作循环**之前**而不是各臂里各做一次：分叉的下游
+    /// 就是"预览是原图、保存是美化图"这类报告，一次决议四面同源是唯一不收口就说不清的位置
     pub fn finish(&self, task_id: &str, req: &FinishRequest) -> Result<FinishDto, AppError> {
-        let (w, h, rgba) = util::decode_png_b64(&req.image_b64)?;
+        let (raw_w, raw_h, raw_rgba) = util::decode_png_b64(&req.image_b64)?;
+        let (w, h, rgba) = match req.beautify.as_ref() {
+            Some(spec) => crate::beautify::beautify(&raw_rgba, raw_w, raw_h, spec)?,
+            None => (raw_w, raw_h, raw_rgba),
+        };
 
         // 配置动作 = 显式 actions + auto_* 兜底（前端总是显式传；auto_* 用于面板默认行为）
         let mut actions = req.actions.clone();
@@ -460,36 +487,17 @@ impl ScreenshotModule {
             }
         }
 
-        let mut file: Option<String> = None;
-        let mut pin_id: Option<String> = None;
-        let mut request_ocr = false;
-        for action in &actions {
-            match action.as_str() {
-                "copy" => self.action_copy(w, h, &rgba)?,
-                "save" => {
-                    // 本次格式：请求覆盖（覆盖层"另存为"选了 jpeg）> 配置默认。
-                    // 解析放在 save 臂里而不是函数开头：一个写坏的 format 只该让保存失败，
-                    // 不该波及"只复制/只贴图"这两条与编码格式无关的动作。
-                    let raw = req.format.as_deref().unwrap_or(&cfg.format);
-                    let fmt = util::EncodeFormat::from_str_honest(raw)?;
-                    file = Some(self.action_save(w, h, &rgba, fmt, cfg.quality)?);
-                }
-                "pin" => {
-                    let id = self.action_pin(
-                        w,
-                        h,
-                        &rgba,
-                        req.pin_x.unwrap_or(100),
-                        req.pin_y.unwrap_or(100),
-                    )?;
-                    pin_id = Some(id);
-                }
-                // docs/impl/03 P5：Ocr 动作只转发事件，识别在 ocr-core 侧异步完成，
-                // 结果经 ocr.completed 回流（历史回填 + 截图 UI），此处登记待触发
-                "ocr" => request_ocr = true,
-                other => tracing::warn!(action = other, "未知截图后处理动作，已忽略"),
-            }
-        }
+        let outcome = self.run_actions(ActionRun {
+            actions: &actions,
+            w,
+            h,
+            rgba: &rgba,
+            fmt_override: req.format.as_deref(),
+            pin_x: req.pin_x,
+            pin_y: req.pin_y,
+        })?;
+        let file = outcome.file;
+        let pin_id = outcome.pin_id;
 
         // 入历史
         let item = crate::types::ShotItem {
@@ -535,13 +543,114 @@ impl ScreenshotModule {
         // 帧走文件、事件只带路径引用——forward_events 会把全量 payload 转发到
         // 每个窗口，MB 级 base64 会淹掉 IPC；识别在 ocr-core 侧异步完成。
         // best-effort：截图产物已落盘，OCR 请求失败只告警不判 finish 失败。
-        if request_ocr {
+        if outcome.request_ocr {
             if let Err(e) = self.dispatch_ocr_request(task_id, w, h, &rgba) {
                 tracing::warn!(error = %e, "截图联动 OCR 请求失败，本次识别跳过");
             }
         }
         self.discard(task_id);
-        Ok(FinishDto { file, pin_id })
+        Ok(FinishDto {
+            file,
+            pin_id,
+            preview_b64: None,
+        })
+    }
+
+    /// 历史条目的美化出口（D-29 B4 T-B4-6）：读原字节 → 解码 → 美化 → 走**同一条**
+    /// 动作通路（`run_actions`），因此不存在第二套导出实现。
+    ///
+    /// **`actions` 为空 = 只预览不落盘**（字面写在这里，前端预览钮传 `[]`）：
+    /// 返回 `preview_b64`（PNG，展示面恒无损，同 T-B4-7 对显示路径的裁定），
+    /// 零磁盘写、零剪贴板写、零历史新增。
+    /// 非空时按请求执行 save/copy/pin（OCR 动作同样复用，帧走既有交接），
+    /// 但**不新增历史行**——美化产物是既有条目的派生物，历史表语义不变（本行"无 DB 变更"）。
+    pub fn beautify_apply(
+        &self,
+        id: &str,
+        spec: &crate::beautify::BeautifySpec,
+        actions: &[String],
+    ) -> Result<FinishDto, AppError> {
+        let (_item, bytes) = self.history_raw(id)?;
+        // 解码按内容嗅探（历史文件可能是 png/jpeg/webp 三形之一，见 T-B4-7 单向门）
+        let (w, h, rgba) = util::decode_rgba_bytes(&bytes)?;
+        let (nw, nh, nrgba) = crate::beautify::beautify(&rgba, w, h, spec)?;
+        if actions.is_empty() {
+            return Ok(FinishDto {
+                file: None,
+                pin_id: None,
+                preview_b64: Some(util::encode_png_b64(nw, nh, &nrgba)?),
+            });
+        }
+        // 格式跟随配置（fmt_override=None）：美化面板不重复覆盖层那颗格式钮的语义
+        let outcome = self.run_actions(ActionRun {
+            actions,
+            w: nw,
+            h: nh,
+            rgba: &nrgba,
+            fmt_override: None,
+            pin_x: None,
+            pin_y: None,
+        })?;
+        if outcome.request_ocr {
+            if let Err(e) = self.dispatch_ocr_request(id, nw, nh, &nrgba) {
+                tracing::warn!(error = %e, "美化联动 OCR 请求失败，本次识别跳过");
+            }
+        }
+        Ok(FinishDto {
+            file: outcome.file,
+            pin_id: outcome.pin_id,
+            preview_b64: None,
+        })
+    }
+
+    /// 后处理动作的唯一执行点（finish 与 beautify_apply 共用）
+    ///
+    /// `fmt_override` = 覆盖层那颗格式钮的请求值；None 时回到配置 `format`。
+    /// `save` 臂之外的动作与编码格式无关（copy/pin 恒 PNG，见各自函数 doc）。
+    fn run_actions(&self, run: ActionRun<'_>) -> Result<ActionOutcome, AppError> {
+        let ActionRun {
+            actions,
+            w,
+            h,
+            rgba,
+            fmt_override,
+            pin_x,
+            pin_y,
+        } = run;
+        let cfg = self
+            .config
+            .try_lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let mut file: Option<String> = None;
+        let mut pin_id: Option<String> = None;
+        let mut request_ocr = false;
+        for action in actions {
+            match action.as_str() {
+                "copy" => self.action_copy(w, h, rgba)?,
+                "save" => {
+                    // 解析放在 save 臂里而不是函数开头：一个写坏的 format 只该让保存失败，
+                    // 不该波及"只复制/只贴图"这两条与编码格式无关的动作。
+                    let raw = fmt_override.unwrap_or(&cfg.format);
+                    let fmt = util::EncodeFormat::from_str_honest(raw)?;
+                    file = Some(self.action_save(w, h, rgba, fmt, cfg.quality)?);
+                }
+                "pin" => {
+                    let id =
+                        self.action_pin(w, h, rgba, pin_x.unwrap_or(100), pin_y.unwrap_or(100))?;
+                    pin_id = Some(id);
+                }
+                // docs/impl/03 P5：Ocr 动作只转发事件，识别在 ocr-core 侧异步完成，
+                // 结果经 ocr.completed 回流（历史回填 + 截图 UI），此处登记待触发
+                "ocr" => request_ocr = true,
+                other => tracing::warn!(action = other, "未知截图后处理动作，已忽略"),
+            }
+        }
+        Ok(ActionOutcome {
+            file,
+            pin_id,
+            request_ocr,
+        })
     }
 
     /// 写联动帧到 {appData}/frames/{task_id}.png（tmp+rename，规约 5）并发布
@@ -949,6 +1058,7 @@ mod tests {
             pin_y: None,
             annotations,
             format: None,
+            beautify: None,
         };
         m.finish(task_id, &req).unwrap();
     }
@@ -1188,6 +1298,259 @@ mod tests {
         // 正对照：真 png 存成 .png 时同一函数报 image/png（否则可以是"永远报 jpeg"）
         std::fs::write(&lie, b"\x89PNG\r\n\x1a\n body").unwrap();
         assert_eq!(m.history_get("liar").unwrap().format, "image/png");
+    }
+
+    /// 捕获写入的位图字节（T-B4-6 三面同源判据的观察窗：剪贴板是唯一能被测试
+    /// 直接看见的落点，磁盘与帧文件另有各自断言）
+    #[derive(Default)]
+    struct CaptureClipboard {
+        images: std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>,
+    }
+    impl ClipboardPort for CaptureClipboard {
+        fn start_listener(
+            &self,
+            _cb: Box<dyn Fn(host_core::ports::ClipContent, Option<String>) + Send + Sync>,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+        fn write(&self, content: &host_core::ports::ClipContent) -> Result<(), AppError> {
+            if let host_core::ports::ClipContent::Image {
+                width,
+                height,
+                bytes,
+                ..
+            } = content
+            {
+                self.images
+                    .lock()
+                    .unwrap()
+                    .push((*width, *height, bytes.to_vec()));
+            }
+            Ok(())
+        }
+    }
+
+    /// 美化后的四面同源断言（T-B4-6 承重判据）：`finish` 里美化只发生一次，
+    /// 因此剪贴板字节 / 落盘字节 / 联动帧字节三者逐字节相等，且等于"单跑一次
+    /// beautify + 单跑一次 png 编码"的结果。任何"某一面偷偷用原图"的写法都会在这里红。
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-6）字面测试名优先于 rustc 命名惯例
+    async fn finish_beautifyAppliedOnceForAllThreeActions() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = ScreenshotModule::new();
+        let clip = Arc::new(CaptureClipboard::default());
+        *m.clipboard.write() = Some(clip.clone());
+        let store = store_of(dir.path());
+        *m.store.write() = Some(store);
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe("screenshot.ocr_requested").unwrap();
+        *m.bus.write() = Some(bus);
+        *m.app_data_dir.write() = Some(dir.path().to_path_buf());
+        *m.config.try_lock().unwrap() = ScreenshotConfig {
+            save_dir: dir.path().join("out").to_string_lossy().into_owned(),
+            auto_copy: false,
+            auto_save: false,
+            auto_pin: false,
+            ..Default::default()
+        };
+
+        // 源图：2×2 每像素不同值——搬运错位一眼可见
+        let src: Vec<u8> = vec![
+            10, 11, 12, 255, 20, 21, 22, 255, 30, 31, 32, 255, 40, 41, 42, 255,
+        ];
+        let spec = crate::beautify::BeautifySpec {
+            radius: 0,
+            padding: 2,
+            shadow: false,
+            bg_from: "#000000".into(),
+            bg_to: "#000000".into(),
+        };
+        let (ew, eh, ebytes) = crate::beautify::beautify(&src, 2, 2, &spec).unwrap();
+        assert_eq!((ew, eh), (6, 6), "2×2 + padding 2 → 6×6");
+        let expected_png = util::encode_rgba(util::EncodeFormat::Png, 80, ew, eh, &ebytes)
+            .unwrap()
+            .0;
+
+        let req = FinishRequest {
+            image_b64: util::encode_png_b64(2, 2, &src).unwrap(),
+            actions: vec!["copy".into(), "save".into(), "pin".into(), "ocr".into()],
+            pin_x: Some(5),
+            pin_y: Some(6),
+            annotations: vec![],
+            format: None,
+            beautify: Some(spec.clone()),
+        };
+        let out = m.finish("t1", &req).unwrap();
+        let file = out.file.clone().expect("save 动作应返回路径");
+        let pin = out.pin_id.clone().expect("pin 动作应返回 id");
+        assert!(out.preview_b64.is_none(), "正常完成动作不填预览");
+
+        // ① 剪贴板面（块内读完即释放锁：下面有 await，同步锁跨 await 是 clippy 硬拦）
+        {
+            let images = clip.images.lock().unwrap();
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].0, 6);
+            assert_eq!(images[0].1, 6);
+            assert_eq!(
+                images[0].2, expected_png,
+                "剪贴板字节须等于单跑 beautify 的编码"
+            );
+        }
+
+        // ② 磁盘面
+        let saved = std::fs::read(&file).unwrap();
+        assert_eq!(saved, expected_png, "落盘字节须与剪贴板同源");
+
+        // ③ 贴图面
+        let pinned = std::fs::read(dir.path().join(format!("pins/{pin}.png"))).unwrap();
+        assert_eq!(pinned, expected_png, "贴图字节须与另两面同源");
+
+        // ④ OCR 交接帧面（行字面"ocr 臂另断帧文件同像素"）
+        let frame = dir.path().join("frames").join("t1.png");
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(
+            ev.payload["frame_ref"],
+            frame.to_string_lossy().as_ref(),
+            "事件带的就是那枚帧路径"
+        );
+        assert_eq!(std::fs::read(&frame).unwrap(), expected_png);
+
+        // 历史行记的是美化后的实际产物尺寸（不是原图尺寸），面板才不会显错缩略图比例
+        let item = m.history_store().unwrap().get("t1").unwrap().unwrap();
+        assert_eq!((item.width, item.height), (6, 6));
+        // 正对照：不带 beautify 时原样（否则上面四条可以是"永远加 4 像素"的假绿）
+        let plain = FinishRequest {
+            beautify: None,
+            actions: vec!["copy".into()],
+            ..req
+        };
+        m.finish("t2", &plain).unwrap();
+        let imgs = clip.images.lock().unwrap();
+        assert_eq!((imgs[1].0, imgs[1].1), (2, 2), "无 beautify 时尺寸不变");
+    }
+
+    /// 预览臂（行字面 `actions: []` = 只预览不落盘）：零磁盘写、零剪贴板写、零历史新增
+    #[test]
+    #[allow(non_snake_case)]
+    fn beautifyApply_emptyActions_previewsOnly() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        let src: Vec<u8> = vec![7, 7, 7, 255, 9, 9, 9, 255];
+        std::fs::write(
+            &shot,
+            util::encode_rgba(util::EncodeFormat::Png, 80, 2, 1, &src)
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        let m = ScreenshotModule::new();
+        let clip = Arc::new(CaptureClipboard::default());
+        *m.clipboard.write() = Some(clip.clone());
+        let store = store_of(dir.path());
+        store
+            .insert(&ShotItem {
+                id: "s1".into(),
+                created_ms: 1,
+                width: 2,
+                height: 1,
+                file: Some(shot.to_string_lossy().into_owned()),
+                ocr_text: None,
+            })
+            .unwrap();
+        *m.store.write() = Some(store);
+        let save_dir = dir.path().join("out");
+        *m.config.try_lock().unwrap() = ScreenshotConfig {
+            save_dir: save_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let spec = crate::beautify::BeautifySpec {
+            padding: 3,
+            ..Default::default()
+        };
+        let out = m.beautify_apply("s1", &spec, &[]).unwrap();
+        let b64 = out.preview_b64.expect("空 actions 必须回预览字节");
+        assert!(out.file.is_none() && out.pin_id.is_none());
+        let (w, h, _) = util::decode_png_b64(&b64).unwrap();
+        assert_eq!((w, h), (8, 7), "预览须是美化后的 2×1+padding3 而非原图");
+        assert_eq!(clip.images.lock().unwrap().len(), 0, "预览不碰剪贴板");
+        assert!(!save_dir.exists(), "预览不落盘（连保存目录都不该建出来）");
+        assert_eq!(
+            m.history_store()
+                .unwrap()
+                .list(&crate::types::HistoryQuery { page: 1, size: 10 })
+                .unwrap()
+                .total,
+            1,
+            "预览不新增历史"
+        );
+    }
+
+    /// 出盘面复用同一条 `run_actions`：美化另存真的落盘，且**不新增历史行**
+    #[test]
+    #[allow(non_snake_case)]
+    fn beautifyApply_saveAction_writesFileAndKeepsHistoryRow() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        let src: Vec<u8> = vec![7u8; 8];
+        std::fs::write(
+            &shot,
+            util::encode_rgba(util::EncodeFormat::Png, 80, 2, 1, &src)
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        let m = ScreenshotModule::new();
+        let store = store_of(dir.path());
+        store
+            .insert(&ShotItem {
+                id: "s1".into(),
+                created_ms: 1,
+                width: 2,
+                height: 1,
+                file: Some(shot.to_string_lossy().into_owned()),
+                ocr_text: None,
+            })
+            .unwrap();
+        let n_before = store
+            .list(&crate::types::HistoryQuery { page: 1, size: 10 })
+            .unwrap()
+            .total;
+        *m.store.write() = Some(store);
+        let save_dir = dir.path().join("out");
+        *m.config.try_lock().unwrap() = ScreenshotConfig {
+            save_dir: save_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let spec = crate::beautify::BeautifySpec {
+            padding: 1,
+            shadow: true,
+            ..Default::default()
+        };
+        let actions = vec!["save".to_string()];
+        let out = m.beautify_apply("s1", &spec, &actions).unwrap();
+        let file = out.file.expect("save 动作应返回路径");
+        assert!(out.preview_b64.is_none(), "出盘臂不返预览（两臂语义互斥）");
+        let (w, h, _) = util::decode_rgba_bytes(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!((w, h), (4, 27), "card 4×3 + 阴影带 24 行在卡片之外");
+        assert_eq!(
+            m.history_store()
+                .unwrap()
+                .list(&crate::types::HistoryQuery { page: 1, size: 10 })
+                .unwrap()
+                .total,
+            n_before,
+            "美化产物是派生物，历史行数不变"
+        );
+        // 红线：坏 spec 出盘前先拒，不留半个文件
+        let bad = crate::beautify::BeautifySpec {
+            bg_from: "not-a-color".into(),
+            ..spec
+        };
+        assert_eq!(
+            m.beautify_apply("s1", &bad, &actions).unwrap_err().code(),
+            "SCREENSHOT_BEAUTIFY_002"
+        );
+        assert_eq!(std::fs::read_dir(&save_dir).unwrap().count(), 1);
     }
 
     /// D-29 B0-2：历史字节出口错误路径三类可分辨（未就绪 / 记录不存在 / 文件丢失）

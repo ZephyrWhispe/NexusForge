@@ -59,3 +59,8 @@ commands.allow = ["screenshot_history_get"]
 identifier = "allow-screenshot-history-copy"
 description = "允许前端调用 screenshot_history_copy 命令（D-28 按窗最小授权）"
 commands.allow = ["screenshot_history_copy"]
+
+[[permission]]
+identifier = "allow-screenshot-beautify-apply"
+description = "允许前端调用 screenshot_beautify_apply 命令（D-28 按窗最小授权）"
+commands.allow = ["screenshot_beautify_apply"]

@@ -216,8 +216,14 @@ pub fn resolve_filename(template: &str, ts: &str, fmt: EncodeFormat) -> String {
 pub fn decode_png_b64(b64: &str) -> Result<(u32, u32, Vec<u8>), AppError> {
     let bytes = host_core::util::b64_decode(b64.trim())
         .ok_or_else(|| err("SCREENSHOT_DECODE_001", "Base64 解码失败"))?;
-    let img = image::load_from_memory(&bytes)
-        .map_err(|e| err("SCREENSHOT_DECODE_002", format!("PNG 解码失败: {e}")))?;
+    decode_rgba_bytes(&bytes)
+}
+
+/// 文件/内存原始字节 → RGBA（**按内容嗅探**解码器，不看后缀：T-B4-7 之后
+/// 历史文件可能是 png/jpeg/webp 三形之一，美化与再编码这条读路必须先过这一口）
+pub fn decode_rgba_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), AppError> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| err("SCREENSHOT_DECODE_002", format!("图像解码失败: {e}")))?;
     let rgba = img.to_rgba8();
     Ok((rgba.width(), rgba.height(), rgba.into_raw()))
 }

@@ -149,6 +149,7 @@
     "allow-proxy-sub-update",
     "allow-proxy-subs",
     "allow-proxy-wintun-install",
+    "allow-screenshot-beautify-apply",
     "allow-screenshot-confirm",
     "allow-screenshot-discard",
     "allow-screenshot-finish",

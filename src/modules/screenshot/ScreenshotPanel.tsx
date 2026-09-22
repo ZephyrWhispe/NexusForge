@@ -24,13 +24,14 @@ import {
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
 import { EXPORT_FORMATS, EXPORT_LABEL, type ExportFormat } from "../../windows/overlay/exportFormats";
+import BeautifyPopover, { type BeautifyTarget } from "./BeautifyPopover";
 import { saveShotAs } from "./saveAs";
 import EmptyState from "../../components/EmptyState";
 import DeferredBadge from "../../components/DeferredBadge";
 
 /**
  * 截图与贴图主面板（D-29 B0/T-B0-2）：历史网格（真缩略图，screenshot_history_get 字节出口）
- * + 再复制（CF_DIB 经 ClipboardPort）+ 贴图条。发起截取沿用覆盖层事件通路（overlayController）。
+ * + 再复制（CF_DIB 经 ClipboardPort）+ 贴图条 + 行内美化导出弹层（T-B4-6，预览/另存/复制）。发起截取沿用覆盖层事件通路（overlayController）。
  * 筛选为当前页本地过滤（HistoryQuery 无 text 字段；服务端过滤归 B4）。
  */
 
@@ -128,6 +129,7 @@ export default function ScreenshotPanel() {
   const [filter, setFilter] = useState("");
   const [thumbs, setThumbs] = useState<Record<string, string | null>>({});
   const [pins, setPins] = useState<PinDataDto[]>([]);
+  const [beautify, setBeautify] = useState<BeautifyTarget | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -239,6 +241,14 @@ export default function ScreenshotPanel() {
         </Badge>
       </div>
       <div className={styles.body}>
+        {/* key 带上目标行：换行时整块重挂，上一行的预览不会顶着新图的脸留在屏幕上 */}
+        {beautify && (
+          <BeautifyPopover
+            key={`${beautify.id}:${beautify.label}`}
+            target={beautify}
+            onClose={() => setBeautify(null)}
+          />
+        )}
         {pins.length > 0 && (
           <>
             <Text className={styles.sectionTitle}>当前贴图 · {pins.length}</Text>
@@ -309,6 +319,25 @@ export default function ScreenshotPanel() {
                       复制文字
                     </Button>
                   )}
+                  {/* 美化两枚（T-B4-6）：入口只选定"导出带哪个动作"，真正落字节的是
+                      BeautifyPopover 里那颗导出钮——菜单点下去不写盘，用户还能取消。 */}
+                  <Menu>
+                    <MenuTrigger disableButtonEnhancement>
+                      <MenuButton size="small" appearance="subtle" disabled={!it.file}>
+                        美化
+                      </MenuButton>
+                    </MenuTrigger>
+                    <MenuPopover>
+                      <MenuList>
+                        <MenuItem onClick={() => setBeautify({ id: it.id, label: "美化另存", actions: ["save"] })}>
+                          美化另存
+                        </MenuItem>
+                        <MenuItem onClick={() => setBeautify({ id: it.id, label: "美化复制", actions: ["copy"] })}>
+                          美化复制
+                        </MenuItem>
+                      </MenuList>
+                    </MenuPopover>
+                  </Menu>
                 </div>
               </div>
               );

@@ -1,5 +1,6 @@
 //! 截图与贴图模块（docs/impl/03）
 
+pub mod beautify;
 pub mod module;
 pub mod store;
 pub mod types;

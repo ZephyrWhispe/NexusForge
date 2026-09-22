@@ -370,9 +370,27 @@ export interface AnnotationDto {
 }
 
 
+/**
+ * 美化导出参数（D-29 B4 T-B4-6）：给截图加一张"渐变卡片"——内边距 + 圆角 + 投影 + 渐变底。
+ * 字段一一对应 Rust `screenshot_core::beautify::BeautifySpec`。
+ */
+export interface BeautifySpecDto {
+  /** 圆角半径（物理像素，0 = 直角） */
+  radius: number;
+  /** 内边距：源图在卡片内居中，四边各留 padding 像素 */
+  padding: number;
+  /** 投影：卡片下方额外 `BEAUTIFY_SHADOW_SPREAD` 行渐隐阴影 */
+  shadow: boolean;
+  /** 渐变起色 `#RRGGBB`（非法值宿主点名报错，不回落） */
+  bg_from: string;
+  /** 渐变止色 `#RRGGBB` */
+  bg_to: string;
+}
+
 export interface FinishRequestDto {
+  /** 覆盖层 canvas 合成后的最终图（PNG Base64）——必填，预览即导出 */
   image_b64: string;
-  /** save | copy | pin；空 = 应用设置中的默认动作 */
+  /** save | copy | pin | ocr；空 = 应用设置中的默认动作 */
   actions: string[];
   pin_x?: number | null;
   pin_y?: number | null;
@@ -383,11 +401,18 @@ export interface FinishRequestDto {
    * 见 src/windows/overlay/exportFormats.ts）。
    */
   format?: string;
+  /** 美化参数（T-B4-6）：不传 = 不美化；在场即在动作循环之前作用于最终图 */
+  beautify?: BeautifySpecDto | null;
 }
 
 export interface FinishDto {
   file: string | null;
   pin_id: string | null;
+  /**
+   * 只预览不落盘时的成品（PNG Base64）。**仅 `screenshot_beautify_apply` 传空 actions 时出现**，
+   * `screenshot_finish` 恒无此键——所以前端读取处一律按可选处理。
+   */
+  preview_b64?: string | null;
 }
 
 export interface ShotItemDto {
@@ -467,6 +492,18 @@ export function screenshotHistoryGet(id: string): Promise<ShotDataDto> {
 /** 历史截图再复制进系统剪贴板 */
 export function screenshotHistoryCopy(id: string): Promise<void> {
   return invoke("screenshot_history_copy", { id });
+}
+/**
+ * 对既有历史条目做美化导出（T-B4-6）。`actions` 与 `screenshot_finish` 同一套词表
+ * （save/copy/pin/ocr），**传空数组 = 只要预览**：返回 `preview_b64`，零落盘、零剪贴板写、
+ * 零历史新增。美化产物是派生物，不新开历史行。
+ */
+export function screenshotBeautifyApply(
+  id: string,
+  spec: BeautifySpecDto,
+  actions: string[],
+): Promise<FinishDto> {
+  return invoke("screenshot_beautify_apply", { id, spec, actions });
 }
 /** 全部贴图（启动恢复） */
 export function screenshotPins(): Promise<PinDto[]> {

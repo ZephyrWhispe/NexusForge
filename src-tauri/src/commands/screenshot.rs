@@ -109,6 +109,23 @@ pub async fn screenshot_history_copy(
         .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
 }
 
+/// 历史条目的美化出口（D-29 B4 T-B4-6）：读原字节 → 美化 → 走与 finish 同一条动作通路。
+///
+/// **`actions` 为空数组 = 只预览不落盘**：返回 `preview_b64` 供 `<img>`，零磁盘写、
+/// 零剪贴板写、零历史新增（面板那颗"预览"钮传 `[]`，语义写在字面上）。
+#[tauri::command]
+pub async fn screenshot_beautify_apply(
+    id: String,
+    spec: screenshot_core::beautify::BeautifySpec,
+    actions: Vec<String>,
+    state: State<'_, HostState>,
+) -> Result<screenshot_core::types::FinishDto, AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.beautify_apply(&id, &spec, &actions))
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
 /// 单个贴图数据（Pin 窗口加载用）
 #[tauri::command]
 pub async fn screenshot_pin_get(

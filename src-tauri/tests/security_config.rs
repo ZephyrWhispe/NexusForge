@@ -814,6 +814,38 @@ fn auxWindows_neverGrantOcrExport() {
     assert!(main_granted, "正对照：main 必须持有 {ident}");
 }
 
+/// T-B4-6 红线负例：`screenshot_beautify_apply` 是**历史内容批量出盘面**（读任意一条
+/// 历史字节 → 美化 → 落盘/上剪贴板）。覆盖层只有当场完成的口子（allow-screenshot-finish），
+/// 不得回头翻历史；六辅助窗永不，main 正对照防空洞。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-6）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantScreenshotBeautifyApply() {
+    let caps = load_capabilities();
+    let ident = "allow-screenshot-beautify-apply";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（历史内容出盘是 main-only）"
+        );
+    }
+    assert!(
+        caps.iter().any(|(name, _)| name == "overlay"),
+        "负例须覆盖 overlay（它能完成截图但翻不到历史），否则本断言空洞"
+    );
+    assert!(main_granted, "正对照：main 必须持有 {ident}");
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

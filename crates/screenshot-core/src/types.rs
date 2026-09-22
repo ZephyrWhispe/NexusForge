@@ -163,12 +163,21 @@ pub struct FinishRequest {
     /// None = 用配置里的 `format`。未知值不回落默认，点名拒（`SCREENSHOT_FORMAT_001`）
     #[serde(default)]
     pub format: Option<String>,
+    /// 美化参数（D-29 B4 T-B4-6）：None = 不美化。在场即在动作循环**之前**作用于
+    /// 合成图，因此 copy/save/pin/ocr 四面看到的是同一张美化后的图——分叉正是
+    /// "预览是原图、保存是美化图"这类报告的根因
+    #[serde(default)]
+    pub beautify: Option<crate::beautify::BeautifySpec>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct FinishDto {
     pub file: Option<String>,
     pub pin_id: Option<String>,
+    /// 预览字节（PNG Base64）：**只有** `screenshot_beautify_apply` 的空 actions 分支填它，
+    /// 正常完成动作一律 None（`skip_serializing_if` 让旧前端 DTO 形状零变化）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_b64: Option<String>,
 }
 
 /// 单条截图历史的原始字节出口（D-29 B0-2：主面板缩略图/再复制；历史表只存路径）
