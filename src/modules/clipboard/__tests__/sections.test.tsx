@@ -16,6 +16,7 @@ import {
   clipboardSuggestionApply,
   clipboardSuggestions,
   clipboardSearch,
+  clipboardSecretReveal,
   clipboardStackList,
   hostConfigGet,
   hostConfigSchema,
@@ -24,8 +25,9 @@ import {
 import { useSession, type ClipView } from "../../../stores/session";
 import { SUBNAV } from "../../../layout/modules";
 
-// D-29 B3/T-B3-1 回归（09 §8.2）：剪切板五子面板各自挂载、各发自己那份 invoke；
-// 堆栈/敏感两区在新命令面落地前必须是零调用的诚实空态（宁可空，不拿假列表冒充功能）。
+// D-29 B3/T-B3-1 回归（09 §8.2）：剪切板五子面板各自挂载、各发自己那份 invoke。
+// 行内「未落地命令面的两区零 invoke = 诚实空态」的判据随 T-B3-3（堆栈）与 T-B3-5
+// （敏感库）两行落地而自然退役——现在五区各有真命令面，判据收为「各区只发自己那份」。
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -47,6 +49,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     clipboardCaptureGet: vi.fn(),
     clipboardCaptureSet: vi.fn(),
     clipboardStackList: vi.fn(),
+    clipboardSecretReveal: vi.fn(),
     hostConfigSchema: vi.fn(),
     hostConfigGet: vi.fn(),
     hostConfigSet: vi.fn(),
@@ -130,6 +133,7 @@ beforeEach(() => {
   vi.mocked(clipboardCaptureGet).mockResolvedValue({ paused: false, skipped: 0 });
   vi.mocked(clipboardCaptureSet).mockResolvedValue({ paused: false, skipped: 0 });
   vi.mocked(clipboardStackList).mockResolvedValue([]);
+  vi.mocked(clipboardSecretReveal).mockResolvedValue({ id: "c1", text: "不应被挂载期触发" });
 });
 
 afterEach(() => {
@@ -157,7 +161,7 @@ async function mountView(view: ClipView) {
 }
 
 describe("剪切板五子面板挂载（T-B3-1）", () => {
-  it("clipPanel_fiveSectionsEachMountsWithOwnInvoke：五区逐个挂载，未落地命令面的两区零 invoke", async () => {
+  it("clipPanel_fiveSectionsEachMountsWithOwnInvoke：五区逐个挂载，各区只发自己那份 invoke", async () => {
     // 注册表 ↔ store 联合一致性：SUBNAV 的 view 项 id 必须都在 ClipView 联合内
     const viewIds = SUBNAV.clipboard
       .flatMap((s) => s.items)
@@ -193,7 +197,7 @@ describe("剪切板五子面板挂载（T-B3-1）", () => {
     root = null;
     vi.clearAllMocks();
 
-    // T-B3-3 起堆栈区有真命令面（clipboard_stack_list），故此处只剩敏感区仍是零调用的诚实空态
+    // T-B3-3 起堆栈区有真命令面（clipboard_stack_list），堆栈只读队列、不查历史
     await mountView("stack");
     expect(clipboardStackList).toHaveBeenCalledTimes(1);
     expect(clipboardSearch, "stack 不应查历史").not.toHaveBeenCalled();
@@ -205,12 +209,16 @@ describe("剪切板五子面板挂载（T-B3-1）", () => {
     root = null;
     vi.clearAllMocks();
 
+    // T-B3-5 起敏感区也有真命令面：掩码清单走 clipboard_search({group:"secret"})，
+    // 但挂载期既不调通用读口也不调揭示口（揭示只在用户确认之后发生）。
     await mountView("secret");
-    expect(clipboardSearch, "secret 不应查历史").not.toHaveBeenCalled();
+    expect(clipboardSearch).toHaveBeenCalledTimes(1);
+    expect(clipboardSearch).toHaveBeenCalledWith(expect.objectContaining({ group: "secret" }));
     expect(clipboardGroupCounts, "secret 不应读分组计数").not.toHaveBeenCalled();
     expect(hostConfigSchema, "secret 不应读设置").not.toHaveBeenCalled();
     expect(clipboardGet).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("T-B3");
+    expect(clipboardSecretReveal).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("敏感内容");
   });
 });
 

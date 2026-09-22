@@ -7,7 +7,7 @@ commands.allow = ["clipboard_search"]
 
 [[permission]]
 identifier = "allow-clipboard-get"
-description = "允许前端调用 clipboard_get 命令（D-28 按窗最小授权）"
+description = "允许前端调用 clipboard_get 命令（D-28 按窗最小授权；T-B3-5 起敏感行由 CLIPBOARD_GET_001 拒绝）"
 commands.allow = ["clipboard_get"]
 
 [[permission]]
@@ -114,3 +114,8 @@ commands.allow = ["clipboard_suggestion_apply"]
 identifier = "allow-clipboard-stats"
 description = "允许前端调用 clipboard_stats 命令（库内聚合统计，只读）"
 commands.allow = ["clipboard_stats"]
+
+[[permission]]
+identifier = "allow-clipboard-secret-reveal"
+description = "允许前端调用 clipboard_secret_reveal 命令（敏感条目按需揭示，main-only 且写审计日志）"
+commands.allow = ["clipboard_secret_reveal"]

@@ -243,6 +243,19 @@ export function clipboardSuggestionApply(ids: string[], accept: boolean): Promis
 export function clipboardStats(): Promise<ClipStats> {
   return invoke<ClipStats>("clipboard_stats");
 }
+
+// ---------------- 敏感库按需揭示（docs/impl/09 §8.2 T-B3-5）----------------
+
+/** 揭示结果：明文只活在这一次响应里，列表侧恒为掩码 */
+export interface ClipReveal {
+  id: string;
+  text: string;
+}
+
+/** 敏感条目明文的唯一出口（clipboard_get 对此类行返回 CLIPBOARD_GET_001，宿主侧写审计） */
+export function clipboardSecretReveal(id: string): Promise<ClipReveal> {
+  return invoke<ClipReveal>("clipboard_secret_reveal", { id });
+}
 /** 读模块配置 schema（设置中心自动渲染） */
 export function hostConfigSchema(module: string): Promise<Record<string, unknown>> {
   return invoke("host_config_schema", { module });

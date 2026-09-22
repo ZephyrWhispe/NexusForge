@@ -334,7 +334,9 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   const openDetail = (e: ClipEntry) => {
     setDetail({ entry: e, text: null, failed: null });
     setGroupDraft(e.group ?? "");
-    if (e.content_type === "image") return;
+    // 图片走 DibThumb；敏感条目走通用读口必被 CLIPBOARD_GET_001 拒（T-B3-5 揭示门），
+    // 详情框只显掩码并指路敏感库——把拒答当"读取失败"摆给用户看是第二种噪声。
+    if (e.content_type === "image" || e.secret) return;
     clipboardGet(e.id)
       .then((t) => setDetail((d) => (d && d.entry.id === e.id ? { ...d, text: t } : d)))
       .catch((err) =>
@@ -550,6 +552,13 @@ export default function HistorySection({ search, group, onCounts }: Props) {
                   </Text>
                   {detail.entry.content_type === "image" ? (
                     <DibThumb id={detail.entry.id} width={420} height={280} />
+                  ) : detail.entry.secret ? (
+                    <>
+                      <pre className={styles.fullText}>{detail.entry.preview}</pre>
+                      <span className={styles.detailHint}>
+                        敏感条目不在历史区揭示：请到「敏感库」视图逐行确认揭示（需二次确认，并写宿主审计日志）。
+                      </span>
+                    </>
                   ) : detail.failed ? (
                     <span className={styles.detailHint}>读取失败：{detail.failed}</span>
                   ) : detail.text === null ? (

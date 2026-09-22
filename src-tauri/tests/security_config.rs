@@ -634,6 +634,40 @@ fn auxWindows_neverGrantClipboardGroupsAndSuggestions() {
     }
 }
 
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-5）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantClipboardSecretReveal() {
+    // T-B3-5 红线负例：揭示口是敏感明文的唯一出口，且成功即写审计日志——
+    // quickpanel / launcher / notebar / overlay / pin 五窗永不得持有（辅助窗可被
+    // 全局热键在任意上下文呼出，等于把明文送到无人看管的界面上）。
+    let caps = load_capabilities();
+    let ident = "allow-clipboard-secret-reveal";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（明文揭示口是 main-only）"
+        );
+    }
+    assert!(main_granted, "正对照：main 必须持有 {ident}");
+    for window in ["quickpanel", "launcher", "notebar", "overlay", "pin"] {
+        assert!(
+            caps.iter().any(|(name, _)| name == window),
+            "负例须覆盖的辅助窗 {window} 不在册，本断言会空洞"
+        );
+    }
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

@@ -591,29 +591,21 @@ impl ClipboardModule {
     /// 红线：敏感条目既不写也不出栈；写失败同样不出栈（内容根本没进剪贴板）；
     /// 注入失败则已出栈——明文确实进了剪贴板，项不能凭空留栈。
     pub fn stack_deliver_head(&self, seq: &[RawInput]) -> Result<Option<StackDelivery>, AppError> {
-        use crate::store::Payload;
         let Some(id) = self.stack_peek()? else {
             return Ok(None);
         };
-        let payload = self
-            .raw_payload(&id)?
-            .ok_or_else(|| AppError::module("CLIPBOARD_PASTE_002", "条目不存在", None))?;
-        let content = match payload {
-            Payload::Text(text) => ClipContent::Text { text, html: None },
-            Payload::Files(paths) => ClipContent::Files { paths },
-            Payload::Image { format, bytes } => ClipContent::Image {
-                format,
-                width: 0,
-                height: 0,
-                bytes: Arc::from(bytes.into_boxed_slice()),
-            },
-            Payload::SecretB64(_) => {
+        // 载荷解析与 clipboard_paste 同一决策点：敏感行在那里被拒，就在这里被拒，
+        // 两处规则各写一份迟早分叉。
+        let content = match self.paste_content(&id) {
+            Ok(content) => content,
+            Err(ref e) if e.code() == "CLIPBOARD_PASTE_004" => {
                 return Ok(Some(StackDelivery {
                     id,
                     delivered: false,
-                    error: Some("敏感条目需先揭示后粘贴".into()),
+                    error: Some(e.to_string()),
                 }))
             }
+            Err(e) => return Err(e),
         };
         if let Err(e) = self.write_back(&content) {
             return Ok(Some(StackDelivery {
@@ -667,7 +659,18 @@ impl ClipboardModule {
     }
 
     /// 解密读取（clipboard_get；信封解密经 CryptoPort）
+    ///
+    /// 红线（09 §8.1-⑤）：敏感行**不随通用读口**返回明文。写侧把明文封进信封，
+    /// 读侧若一口全放则加密只剩存储成本，故明文只有一个出口：`reveal_secret`
+    /// （带前端二次确认 + 宿主审计）。
     pub fn get_content(&self, id: &str) -> Result<Option<String>, AppError> {
+        if let Some(crate::store::Payload::SecretB64(_)) = self.raw_payload(id)? {
+            return Err(AppError::module(
+                "CLIPBOARD_GET_001",
+                "敏感条目不随通用读口返回明文",
+                Some("请调用 clipboard_secret_reveal；揭示会写入宿主审计日志"),
+            ));
+        }
         let store = self.require_store()?;
         let crypto = self.crypto.read().clone().ok_or(AppError::module(
             "CLIPBOARD_QUERY_001",
@@ -677,7 +680,76 @@ impl ClipboardModule {
         store.get_content(id, move |c| crypto.unprotect(c))
     }
 
-    /// 载荷读取（clipboard_paste / clipboard_get_image 用；secret 自动解密）
+    /// 按需揭示（唯一明文出口，T-B3-5）：成功即落一条 audit 目标日志。
+    pub fn reveal_secret(&self, id: &str) -> Result<String, AppError> {
+        use crate::store::Payload;
+        use base64::Engine;
+        let b64 = match self.raw_payload(id)? {
+            None => {
+                return Err(AppError::module(
+                    "CLIPBOARD_REVEAL_002",
+                    "敏感条目内容缺失",
+                    Some("密文列为空或 blob 文件已清理，无法还原明文"),
+                ))
+            }
+            Some(Payload::SecretB64(b64)) => b64,
+            Some(_) => {
+                return Err(AppError::module(
+                    "CLIPBOARD_REVEAL_001",
+                    "该条目不是敏感条目",
+                    Some("普通条目用 clipboard_get"),
+                ))
+            }
+        };
+        let crypto = self.crypto.read().clone().ok_or(AppError::module(
+            "CLIPBOARD_QUERY_001",
+            "CryptoPort 未就绪",
+            None,
+        ))?;
+        let cipher = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .map_err(|e| reveal_failed(e.to_string()))?;
+        let plain = crypto
+            .unprotect(&cipher)
+            .map_err(|e| reveal_failed(e.to_string()))?;
+        let text = String::from_utf8_lossy(&plain).to_string();
+        tracing::warn!(
+            target: "audit",
+            kind = crate::types::SECRET_CATEGORY_LABEL,
+            "clipboard secret revealed id={id}"
+        );
+        Ok(text)
+    }
+
+    /// clipboard_paste 的载荷解析：敏感行当场拒投。
+    /// 必须走 `raw_payload`——`get_payload` 的自动解密臂会把密文行还原成明文，
+    /// 那样 `CLIPBOARD_PASTE_004` 成一具永远到不了的空壳，粘贴即外泄明文。
+    pub fn paste_content(&self, id: &str) -> Result<ClipContent, AppError> {
+        use crate::store::Payload;
+        let payload = self
+            .raw_payload(id)?
+            .ok_or_else(|| AppError::module("CLIPBOARD_PASTE_002", "条目不存在", None))?;
+        Ok(match payload {
+            Payload::Text(text) => ClipContent::Text { text, html: None },
+            Payload::Files(paths) => ClipContent::Files { paths },
+            Payload::Image { format, bytes } => ClipContent::Image {
+                format,
+                width: 0,
+                height: 0,
+                bytes: Arc::from(bytes.into_boxed_slice()),
+            },
+            Payload::SecretB64(_) => {
+                return Err(AppError::module(
+                    "CLIPBOARD_PASTE_004",
+                    "敏感条目需先揭示后粘贴",
+                    Some("请在敏感库点「揭示」确认后再复制，或改用堆栈投递明文条目"),
+                ))
+            }
+        })
+    }
+
+    /// 载荷读取（clipboard_get_image 用；secret 自动解密成明文，
+    /// 因此**粘贴/揭示都不走此口**——见 `paste_content` 与 `reveal_secret`）
     pub fn get_payload(&self, id: &str) -> Result<Option<crate::store::Payload>, AppError> {
         use crate::store::Payload;
         let store =
@@ -702,6 +774,16 @@ impl ClipboardModule {
             other => Ok(other),
         }
     }
+}
+
+/// 揭示失败（密文解不开）：与"非敏感"分开编码，hint 指向 KEK 这一真因，
+/// 否则用户只会看到一个没有下文的"解密失败"。
+fn reveal_failed(reason: String) -> AppError {
+    AppError::module(
+        "CLIPBOARD_REVEAL_002",
+        format!("敏感条目解密失败：{reason}"),
+        Some("信封 KEK 可能已变更（重装/密钥重置），旧密文不可恢复"),
+    )
 }
 
 impl TrayProvider for ClipboardModule {
@@ -1309,5 +1391,179 @@ mod tests {
             "空栈全部粘贴返回 0"
         );
         assert!(h.log.lock().is_empty(), "空栈不得触碰任何端口");
+    }
+
+    // ---------------- T-B3-5 敏感库视图 + 按需揭示门 ----------------
+
+    /// 假 CryptoPort 是恒等变换，故"密文列"= 明文的 base64；揭示即还原。
+    fn secret_row(h: &Harness, plain: &str) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(plain);
+        h.module
+            .store()
+            .unwrap()
+            .insert_encrypted(&b64, None, None, None, "local")
+            .unwrap()
+    }
+
+    fn plain_row(h: &Harness, text: &str) -> String {
+        h.module
+            .store()
+            .unwrap()
+            .insert_row(&NewClip::new(text))
+            .unwrap()
+    }
+
+    /// 错误三要素拆开断言：码给程序、message 给用户、hint 给指路，任一错位都是契约破裂
+    fn err_parts(e: AppError) -> (String, String, Option<String>) {
+        match e {
+            AppError::Module {
+                code,
+                message,
+                hint,
+            } => (code, message, hint),
+            other => panic!("期望 Module 变体，实际: {other:?}"),
+        }
+    }
+
+    /// 红线主件：通用读口对敏感行必须拒，且指路点名揭示口、错误里零明文。
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-5）字面测试名优先于 rustc 命名惯例
+    async fn get_secretRow_refusedWithRevealHint_notPlaintext() {
+        let h = harness("reveal_gate").await;
+        let plain = "sk-gate-8f2c19e0a1b2c3d4";
+        let id = secret_row(&h, plain);
+
+        let err = h.module.get_content(&id).unwrap_err();
+        let (code, message, hint) = err_parts(err);
+        assert_eq!(code, "CLIPBOARD_GET_001");
+        assert!(
+            !message.contains(plain),
+            "错误消息本身不得夹带明文：{message}"
+        );
+        assert_eq!(
+            hint.as_deref(),
+            Some("请调用 clipboard_secret_reveal；揭示会写入宿主审计日志")
+        );
+
+        // 正对照：普通条目同口照常返回——否则上面那臂只是"整个读口坏了"
+        let open = plain_row(&h, "plain-row-visible");
+        assert_eq!(
+            h.module.get_content(&open).unwrap().as_deref(),
+            Some("plain-row-visible")
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    async fn secretReveal_returnsPlaintextOnce() {
+        let h = harness("reveal_roundtrip").await;
+        let plain = "ghp_AAAABBBBccccDDDD1234567890abcdefghij";
+        let id = secret_row(&h, plain);
+        assert_eq!(
+            h.module.reveal_secret(&id).unwrap(),
+            plain,
+            "揭示须还原原文"
+        );
+        assert!(
+            h.module.get_content(&id).is_err(),
+            "揭示一次不等于该条目从此随通用读口放行"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    async fn secretReveal_nonSecret_rejected001() {
+        let h = harness("reveal_nonsecret").await;
+        let open = plain_row(&h, "ordinary-text");
+        let err = h.module.reveal_secret(&open).unwrap_err();
+        let (code, _, hint) = err_parts(err);
+        assert_eq!(code, "CLIPBOARD_REVEAL_001");
+        assert_eq!(hint.as_deref(), Some("普通条目用 clipboard_get"));
+
+        // 正对照：敏感行走同一函数成功，证明拒的是"非敏感"而非函数本身不通
+        let secret = secret_row(&h, "AKIA1234567890ABCDEF12");
+        assert!(h.module.reveal_secret(&secret).is_ok());
+
+        // 不存在的条目 → 002（内容缺失）而非 001（非敏感）：两种失败必须分得开
+        let missing = h.module.reveal_secret("no-such-entry").unwrap_err();
+        assert_eq!(missing.code(), "CLIPBOARD_REVEAL_002");
+    }
+
+    /// 红线：搜索列表整棵 JSON 里既无明文也无其 base64 变体（掩码在 DTO 层，不靠前端不显示）
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    async fn search_previewForSecret_neverContainsPlaintext() {
+        use base64::Engine;
+        let h = harness("reveal_search").await;
+        let plain = "sk-search-must-not-leak-0042";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(plain);
+        secret_row(&h, plain);
+
+        let page = h
+            .module
+            .search(&crate::types::SearchQuery {
+                group: Some("secret".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        let dump = serde_json::to_string(&page.items).unwrap();
+        assert!(!dump.contains(plain), "列表泄漏明文：{dump}");
+        assert!(!dump.contains(&b64), "列表泄漏密文原串：{dump}");
+        assert!(page.items[0].secret);
+        assert_eq!(
+            page.items[0].preview,
+            format!("[{}] 已加密存储", crate::types::SECRET_CATEGORY_LABEL)
+        );
+    }
+
+    /// 既有拒语义回归不破，并顺手钉住「此口此前是死码」的修复：
+    /// clipboard_paste 必须走 raw 载荷，否则 get_payload 的自动解密臂会让
+    /// CLIPBOARD_PASTE_004 永远到不了，粘贴敏感行等于外泄明文。
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    async fn paste_secretEntry_stillRefused004() {
+        let h = harness("reveal_paste").await;
+        let id = secret_row(&h, "sk-paste-stay-encrypted-778899");
+        let err = h.module.paste_content(&id).unwrap_err();
+        let (code, message, _) = err_parts(err);
+        assert_eq!(code, "CLIPBOARD_PASTE_004");
+        assert_eq!(message, "敏感条目需先揭示后粘贴");
+        assert!(
+            h.log.lock().is_empty() && h.port.writes.lock().is_empty(),
+            "拒粘贴不得写系统剪贴板：{:?}",
+            h.port.writes.lock()
+        );
+
+        // 正对照：普通条目同口解析成功（否则断言的是"谁都拒"）
+        let open = plain_row(&h, "paste-visible");
+        assert!(matches!(
+            h.module.paste_content(&open).unwrap(),
+            ClipContent::Text { ref text, .. } if text == "paste-visible"
+        ));
+    }
+
+    /// 审计面存在性静态钉：日志捕获 crate 不在依赖面，无法断言"日志真被写出"，
+    /// 于是钉更弱但可核的一件事——揭示成功路径里确实带着 `target: "audit"` 的 warn
+    /// 调用（把它删掉或改了 target，本条即判红）。
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn revealSecret_auditLogTargetPresent() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/module.rs"))
+            .expect("读自身源码");
+        let at = src
+            .find("pub fn reveal_secret")
+            .expect("揭示口须在册（明文唯一出口）");
+        let after = &src[at..];
+        let end = ["\n    pub fn ", "\n    fn ", "\n}"]
+            .iter()
+            .filter_map(|p| after.find(p))
+            .min()
+            .unwrap_or(after.len());
+        assert!(
+            after[..end].contains(r#"target: "audit""#),
+            "明文出口必须落宿主审计日志"
+        );
     }
 }

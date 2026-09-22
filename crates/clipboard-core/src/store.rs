@@ -1192,7 +1192,7 @@ fn sanitize_group_name(name: &str) -> Result<String, AppError> {
 
 fn build_preview(content: &str, secret: bool) -> String {
     if secret {
-        return "[敏感内容] 已加密存储".into();
+        return format!("[{}] 已加密存储", crate::types::SECRET_CATEGORY_LABEL);
     }
     let mut s: String = content.chars().take(200).collect();
     if content.chars().count() > 200 {

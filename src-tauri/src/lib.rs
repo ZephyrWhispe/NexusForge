@@ -157,6 +157,7 @@ pub fn run() {
             commands::clipboard_suggestions,
             commands::clipboard_suggestion_apply,
             commands::clipboard_stats,
+            commands::clipboard_secret_reveal,
             commands::screenshot_start,
             commands::screenshot_task,
             commands::screenshot_confirm,

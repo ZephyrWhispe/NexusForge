@@ -43,6 +43,10 @@ pub struct StatsDto {
     pub bytes_blob: u64,
 }
 
+/// 敏感桶类目标签（T-B3-5）：v1 只到"敏感内容"这一档，**不谎报具体密钥类型**——
+/// `SecretKind` 精类目标签需 clip_entries 新列，已 [收窄] 登记归 B7（09 §8.2 T-B3-10 ④）。
+pub const SECRET_CATEGORY_LABEL: &str = "敏感内容";
+
 /// 搜索查询（C6）
 #[derive(Debug, Deserialize, Default)]
 pub struct SearchQuery {

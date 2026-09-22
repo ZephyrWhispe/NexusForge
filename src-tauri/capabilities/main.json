@@ -28,6 +28,7 @@
     "allow-clipboard-paste",
     "allow-clipboard-pin",
     "allow-clipboard-search",
+    "allow-clipboard-secret-reveal",
     "allow-clipboard-stack-clear",
     "allow-clipboard-stack-list",
     "allow-clipboard-stack-move",

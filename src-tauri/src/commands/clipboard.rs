@@ -19,7 +19,7 @@ pub async fn clipboard_search(
         .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
 }
 
-/// 解密读取条目内容（secret 条目经信封解密还原，D-04）
+/// 解密读取条目内容（**敏感行一律拒**，明文只走 clipboard_secret_reveal，T-B3-5）
 #[tauri::command]
 pub async fn clipboard_get(id: String, state: State<'_, HostState>) -> Result<String, AppError> {
     let clipboard = state.clipboard.clone();
@@ -32,34 +32,33 @@ pub async fn clipboard_get(id: String, state: State<'_, HostState>) -> Result<St
 /// 写回系统剪贴板（先置回写窗口，防自捕获循环；文本/图片/文件多格式）
 #[tauri::command]
 pub async fn clipboard_paste(id: String, state: State<'_, HostState>) -> Result<(), AppError> {
-    use clipboard_core::store::Payload;
-    use host_core::ports::ClipContent;
     let clipboard = state.clipboard.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let payload = clipboard
-            .get_payload(&id)?
-            .ok_or_else(|| AppError::module("CLIPBOARD_PASTE_002", "条目不存在", None))?;
-        let content = match payload {
-            Payload::Text(text) => ClipContent::Text { text, html: None },
-            Payload::Files(paths) => ClipContent::Files { paths },
-            Payload::Image { format, bytes } => ClipContent::Image {
-                format,
-                width: 0,
-                height: 0,
-                bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
-            },
-            Payload::SecretB64(_) => {
-                return Err(AppError::module(
-                    "CLIPBOARD_PASTE_004",
-                    "加密条目状态异常",
-                    None,
-                ))
-            }
-        };
+        let content = clipboard.paste_content(&id)?;
         clipboard.write_back(&content)
     })
     .await
     .map_err(|e| AppError::module("CLIPBOARD_PASTE_003", e.to_string(), None))?
+}
+
+/// 敏感条目按需揭示（唯一明文出口；成功由 clipboard-core 落 audit 日志）
+#[derive(Serialize)]
+pub struct RevealDto {
+    pub id: String,
+    pub text: String,
+}
+
+#[tauri::command]
+pub async fn clipboard_secret_reveal(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<RevealDto, AppError> {
+    let clipboard = state.clipboard.clone();
+    let id2 = id.clone();
+    let text = tauri::async_runtime::spawn_blocking(move || clipboard.reveal_secret(&id2))
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))??;
+    Ok(RevealDto { id, text })
 }
 
 /// 图片条目字节（Base64 DIB），前端 canvas 解码预览用
