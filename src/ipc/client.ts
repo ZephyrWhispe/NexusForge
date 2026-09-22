@@ -568,6 +568,14 @@ export function screenshotHistoryCopy(id: string): Promise<void> {
   return invoke("screenshot_history_copy", { id });
 }
 /**
+ * 删一条历史：历史行与磁盘上那张图一起移除，**不进回收站、不可撤销**（T-B4-14）。
+ * 宿主先删行后删文件，文件删不掉只记日志、不回滚已删的行；id 不存在则报错点名该 id，
+ * 不会谎称删好了。
+ */
+export function screenshotHistoryDelete(id: string): Promise<void> {
+  return invoke("screenshot_history_delete", { id });
+}
+/**
  * 对既有历史条目做美化导出（T-B4-6）。`actions` 与 `screenshot_finish` 同一套词表
  * （save/copy/pin/ocr），**传空数组 = 只要预览**：返回 `preview_b64`，零落盘、零剪贴板写、
  * 零历史新增。美化产物是派生物，不新开历史行。

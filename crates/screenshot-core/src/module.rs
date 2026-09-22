@@ -43,6 +43,59 @@ fn frames_dir(app_data: &std::path::Path) -> std::path::PathBuf {
     app_data.join("frames")
 }
 
+/// 一次文件删除的结局。**为什么不是 `io::Result<()>`**：调用方三种结局的处理完全一样
+/// （都不影响"这一条已经没了"），区别只在要不要往日志里留话——把分类交给调用方，
+/// 比让每个调用方各自去猜 `ErrorKind` 更省，也让"删不动"这件事在测试里可核对。
+enum Removal {
+    /// 删掉了：没什么要记的
+    Removed,
+    /// 本来就不在（手工删过文件 / 盘被搬走）：不是失败，但如实记一笔
+    Absent,
+    /// 删不动（占用、权限、目标是目录）：带回 io 成因原文
+    Failed(String),
+}
+
+/// 删一个文件并归类结局——错误只在这一个地方被翻译，不在十几个 `let _ =` 里蒸发。
+fn remove_file_classified(file: &str) -> Removal {
+    match std::fs::remove_file(file) {
+        Ok(()) => Removal::Removed,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Removal::Absent,
+        Err(e) => Removal::Failed(e.to_string()),
+    }
+}
+
+/// 把结局汇成一句**带路径**的话（`None` = 没什么要记的）。
+///
+/// 返回文本而不是就地 `warn!`：本模块的依赖里没有日志订阅器，测试能钉住的就是这句话——
+/// 而"不吞错"的全部含义正是"话里看得见是哪个文件、因为什么"，光有个 warn 不算。
+fn removal_note(file: &str, removal: &Removal) -> Option<String> {
+    match removal {
+        Removal::Removed => None,
+        Removal::Absent => Some(format!("截图文件本就不在，无需处理: {file}")),
+        Removal::Failed(cause) => Some(format!(
+            "截图文件删除失败，该路径需人工清理: {file}（成因: {cause}）"
+        )),
+    }
+}
+
+/// 一次性清掉上次进程遗留的 OCR 联动帧（交接物消费即删，残留皆孤儿）。
+///
+/// 交回"删不掉的那些话"而不是 `let _ =`：孤儿帧躺在盘上没人再提它，一句"删了"和
+/// "其实一个都没删掉"在日志里长得一模一样。子目录在这条通路里必然删失败，
+/// 那正是"不吞错"最容易复现的形态，测试按它钉。
+fn sweep_leftover_frames(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new(); // 目录本就不在 = 没有残留，不是失败
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.path().display().to_string();
+            removal_note(&file, &remove_file_classified(&file))
+        })
+        .collect()
+}
+
 /// `run_actions` 的结果（OCR 只登记意向：交接帧要 task_id，语义归调用侧）
 struct ActionOutcome {
     file: Option<String>,
@@ -237,10 +290,8 @@ impl Module for ScreenshotModule {
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.restore_pins();
         // 上次进程遗留的 OCR 联动帧一次性清空（交接物消费即删，残留皆孤儿）
-        if let Ok(entries) = std::fs::read_dir(frames_dir(&ctx.app_data_dir)) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        for note in sweep_leftover_frames(&frames_dir(&ctx.app_data_dir)) {
+            tracing::warn!("{note}");
         }
         self.state.set(ModuleState::Stopped);
         Ok(())
@@ -1405,6 +1456,37 @@ impl ScreenshotModule {
             height: item.height,
             bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
         })
+    }
+
+    // ---------------- 历史删除（D-29 B4 T-B4-14：清 B0/B1 两次"如实遗留"）----------------
+
+    /// 删一条历史：先删行、后删文件。
+    ///
+    /// 次序是用户预期决定的——点「删除」后要的结果是"这一条没了"。文件删不掉时回滚
+    /// 已删的行等于把同一行再问他一次，而他刚说过不要；残留路径进 warn 交人收拾。
+    /// 既然文件失败不回滚，这里就不该有第二条错误通路：返回 `Err` 的只有"库里没有这个
+    /// id"（红线：不谎称成功）与模块/存储本身坏了两种。
+    pub fn history_delete(&self, id: &str) -> Result<(), AppError> {
+        let store = self
+            .store
+            .read()
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "模块未就绪"))?;
+        let item = store.delete(id)?.ok_or_else(|| {
+            mod_err(
+                "SCREENSHOT_DELETE_001",
+                format!("没有 id 为「{id}」的历史记录"),
+            )
+        })?;
+        let Some(file) = item.file else {
+            // 从来没有落过盘的行（"只复制不保存"那一档）：删掉行就是全部后果
+            return Ok(());
+        };
+        let removal = remove_file_classified(&file);
+        if let Some(note) = removal_note(&file, &removal) {
+            tracing::warn!("{note}");
+        }
+        Ok(())
     }
 
     // ---------------- 上传轨（D-29 B4 T-B4-9）----------------
@@ -2755,5 +2837,162 @@ mod tests {
             .expect("启用后应拿到直链");
         assert_eq!(link, "https://x.example/i/1");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ---------------- T-B4-14：历史按 id 删除 ----------------
+
+    /// 入一行历史并（可选）真造出它的磁盘文件（`file_exists=false` = 手工删过文件/盘被搬走）
+    fn seeded_shot(
+        dir: &std::path::Path,
+        store: &Arc<ShotStore>,
+        id: &str,
+        file_exists: bool,
+    ) -> std::path::PathBuf {
+        let file = dir.join(format!("{id}.png"));
+        if file_exists {
+            std::fs::write(&file, b"whatever bytes, presence is what matters").unwrap();
+        }
+        store
+            .insert(&ShotItem {
+                id: id.into(),
+                created_ms: 1,
+                width: 2,
+                height: 2,
+                file: Some(file.to_string_lossy().into_owned()),
+                ocr_text: None,
+            })
+            .unwrap();
+        file
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-14）字面测试名优先于 rustc 命名惯例
+    fn historyDelete_removesRowAndFile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_of(dir.path());
+        // 两行同目录：只删其中一行。另一行必须原样在——否则"这一行没了"是整表清空蒙对的
+        let gone = seeded_shot(dir.path(), &store, "h-gone", true);
+        let kept = seeded_shot(dir.path(), &store, "h-kept", true);
+        let m = ScreenshotModule::new();
+        *m.store.write() = Some(store.clone());
+
+        m.history_delete("h-gone").unwrap();
+
+        assert!(!gone.exists(), "磁盘文件应随行一起消失");
+        assert!(kept.exists(), "正对照：同目录另一张图不该被牵连");
+        assert!(store.get("h-gone").unwrap().is_none());
+        assert!(store.get("h-kept").unwrap().is_some());
+        // 面板看到的口径正是 list：它的 total 必须跟着减一
+        assert_eq!(
+            store
+                .list(&crate::types::HistoryQuery { page: 1, size: 10 })
+                .unwrap()
+                .total,
+            1
+        );
+        // 目录口径（任务书字面的"read_dir 无此文件"）：留下的 png 只有被保留那张
+        let pngs: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".png"))
+            .collect();
+        assert_eq!(pngs, vec!["h-kept.png".to_string()]);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-14）字面测试名优先于 rustc 命名惯例
+    fn historyDelete_missingId_rejects001NamingId() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_of(dir.path());
+        let m = ScreenshotModule::new();
+        *m.store.write() = Some(store.clone());
+
+        // 红线：不谎称成功——库里没有这个 id 就是错误，而且要点名是哪个 id
+        let e = m.history_delete("ghost").unwrap_err();
+        assert_eq!(e.code(), "SCREENSHOT_DELETE_001");
+        assert!(
+            e.to_string().contains("ghost"),
+            "错误消息须点名 id，否则用户不知道刚才那下删的是哪条: {e}"
+        );
+        // 正对照：同库同模块删一条真存在的行必须放行（否则本枚对任何配置都成立=空洞）
+        seeded_shot(dir.path(), &store, "real", true);
+        m.history_delete("real").unwrap();
+        assert!(store.get("real").unwrap().is_none());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-14）字面测试名优先于 rustc 命名惯例
+    fn historyDelete_fileGoneAlready_stillRemovesRowAndWarns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_of(dir.path());
+        // 面板看得见这一行，磁盘文件却早被手工删过：程序不能说"没有这条记录"
+        let ghost = seeded_shot(dir.path(), &store, "manual", false);
+        let m = ScreenshotModule::new();
+        *m.store.write() = Some(store.clone());
+
+        m.history_delete("manual").unwrap();
+
+        assert!(
+            store.get("manual").unwrap().is_none(),
+            "行照删：用户点的是\"这条不要了\"，文件本来不在不影响它没了"
+        );
+        // warn 话术由分类决定，两臂必须可分辨（缺这一枚，"本就不在"与"删不动"会退化成同一个分支）
+        assert!(
+            matches!(
+                remove_file_classified(&ghost.to_string_lossy()),
+                Removal::Absent
+            ),
+            "文件不在应归 Absent（记一笔而非报错）"
+        );
+        let live = seeded_shot(dir.path(), &store, "live", true);
+        assert!(
+            matches!(
+                remove_file_classified(&live.to_string_lossy()),
+                Removal::Removed
+            ),
+            "正对照：真在盘上的文件删完归 Removed"
+        );
+        assert!(!live.exists());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-14）字面测试名优先于 rustc 命名惯例
+    fn prune_fileRemovalFailure_doesNotSwallowError() {
+        // 任务书点名的 `prune` 通路在本模块并不存在（09 行落地补记已更正）：全模块唯一
+        // 一处"批量删文件"是 init 的残留联动帧清扫，随行核因此钉它。
+        let root = tempfile::tempdir().unwrap();
+        let frames = root.path().join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        std::fs::write(frames.join("orphan.png"), b"x").unwrap();
+        // remove_file 对目录必然失败——这正是"吞错"最容易长出来的形状
+        let stuck = frames.join("stuck");
+        std::fs::create_dir(&stuck).unwrap();
+
+        let notes = sweep_leftover_frames(&frames);
+
+        assert_eq!(
+            notes.len(),
+            1,
+            "孤儿帧删掉了不该有话，卡住的那个必须留下一句：{notes:?}"
+        );
+        assert!(
+            notes[0].contains(&stuck.display().to_string()),
+            "话里必须点名残留路径，否则日志里\"删了\"和\"没删掉\"长得一样: {:?}",
+            notes[0]
+        );
+        assert!(!frames.join("orphan.png").exists(), "能删的那个要真删掉");
+        // 删不动那一臂连成因一起带（Absent/Failed 之外没有第三种话可说）
+        assert!(
+            removal_note("D:/shots/a.png", &Removal::Failed("拒绝访问".into()))
+                .is_some_and(|n| n.contains("D:/shots/a.png") && n.contains("拒绝访问")),
+            "失败话术须同时带路径与成因"
+        );
+        // 正对照：全删光 → 空表；目录本就不在 → 空表（不是失败）
+        let clean = root.path().join("clean");
+        std::fs::create_dir_all(&clean).unwrap();
+        std::fs::write(clean.join("f.png"), b"x").unwrap();
+        assert!(sweep_leftover_frames(&clean).is_empty());
+        assert!(sweep_leftover_frames(&root.path().join("absent")).is_empty());
     }
 }

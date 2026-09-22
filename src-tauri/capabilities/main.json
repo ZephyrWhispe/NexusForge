@@ -154,6 +154,7 @@
     "allow-screenshot-discard",
     "allow-screenshot-finish",
     "allow-screenshot-history-copy",
+    "allow-screenshot-history-delete",
     "allow-screenshot-history-get",
     "allow-screenshot-history-list",
     "allow-screenshot-pin-close",

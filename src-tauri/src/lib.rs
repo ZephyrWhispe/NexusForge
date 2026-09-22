@@ -174,6 +174,7 @@ pub fn run() {
             commands::screenshot_history_list,
             commands::screenshot_history_get,
             commands::screenshot_history_copy,
+            commands::screenshot_history_delete,
             commands::screenshot_beautify_apply,
             commands::screenshot_pins,
             commands::screenshot_pin_get,

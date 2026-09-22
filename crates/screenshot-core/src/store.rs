@@ -148,6 +148,39 @@ impl ShotStore {
         .map_err(|e| err("SCREENSHOT_STORE_004", e.to_string()))
     }
 
+    /// 按 id 删除一条历史，返回被删的那行（`None` = 库里没有这个 id）。
+    ///
+    /// 交回整行而非只交 `file`：`file` 列可空（"只复制不保存"的那一行从来没有落过盘），
+    /// 把"行不存在"与"行在但没有文件"压成同一个 `None`，前者与后者就分不开了——
+    /// 用户看得见那一行，程序却说"没有这条记录"，等于当着人的面撒谎。
+    /// SELECT 与 DELETE 同持一把锁：中间不能有第二个写者把行换掉。
+    pub fn delete(&self, id: &str) -> Result<Option<ShotItem>, AppError> {
+        let conn = self.conn.lock();
+        let item = conn
+            .query_row(
+                "SELECT id, created_ms, width, height, file, ocr_text FROM shots WHERE id = ?1",
+                rusqlite::params![id],
+                |r| {
+                    Ok(ShotItem {
+                        id: r.get(0)?,
+                        created_ms: r.get(1)?,
+                        width: r.get::<_, i64>(2)? as u32,
+                        height: r.get::<_, i64>(3)? as u32,
+                        file: r.get(4)?,
+                        ocr_text: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| err("SCREENSHOT_STORE_004", e.to_string()))?;
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        conn.execute("DELETE FROM shots WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| err("SCREENSHOT_STORE_003", e.to_string()))?;
+        Ok(Some(item))
+    }
+
     pub fn list(&self, q: &HistoryQuery) -> Result<Page<ShotItem>, AppError> {
         let conn = self.conn.lock();
         let size = q.size.clamp(1, 100);

@@ -1015,3 +1015,35 @@ fn auxWindows_neverGrantScreenshotUpload() {
         "正对照：main 必须两枚齐备，否则本负例对任何配置都成立=空洞"
     );
 }
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-14）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantScreenshotHistoryDelete() {
+    // T-B4-14 红线：**删除面辅助窗永不**。`screenshot_history_delete` 一步就同时抹掉
+    // 历史行和磁盘上那张图，不进回收站、不可撤销。贴图窗/快捷面板/启动器/便签条/
+    // 覆盖层上都没有"这条不要了"的入口——给它们这一枚，等于让任何一个后来长在
+    // 那些窗上的小按钮拥有不可逆删除。唯一的调用点是主窗口截图面板的溢出菜单。
+    let caps = load_capabilities();
+    let ident = "allow-screenshot-history-delete";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（不可逆删除面 main-only）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 {ident}，否则本负例是空洞"
+    );
+}

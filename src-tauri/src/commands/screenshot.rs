@@ -201,6 +201,20 @@ pub async fn screenshot_history_copy(
         .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
 }
 
+/// 删一条历史（D-29 B4 T-B4-14）：历史行与磁盘文件一起移除。
+/// 次序与失败语义（先删行、文件删不掉只 warn 不回滚）归
+/// `ScreenshotModule::history_delete`，本层只搬运。
+#[tauri::command]
+pub async fn screenshot_history_delete(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.history_delete(&id))
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
 /// 历史条目的美化出口（D-29 B4 T-B4-6）：读原字节 → 美化 → 走与 finish 同一条动作通路。
 ///
 /// **`actions` 为空数组 = 只预览不落盘**：返回 `preview_b64` 供 `<img>`，零磁盘写、

@@ -19,6 +19,7 @@ import {
   hostConfigSet,
   parseAppError,
   screenshotHistoryCopy,
+  screenshotHistoryDelete,
   screenshotHistoryGet,
   screenshotHistoryList,
   screenshotPinGet,
@@ -33,6 +34,7 @@ import {
 } from "../../ipc/client";
 import { IN_TAURI } from "../../ipc/env";
 import { notify, reportError } from "../../stores/notifications";
+import { confirmAction } from "../../stores/confirm";
 import { EXPORT_FORMATS, EXPORT_LABEL, type ExportFormat } from "../../windows/overlay/exportFormats";
 import BeautifyPopover, { type BeautifyTarget } from "./BeautifyPopover";
 import { saveShotAs } from "./saveAs";
@@ -387,7 +389,9 @@ export default function ScreenshotPanel() {
       }
     },
     [uploadHeaderName, credValue],
-  );  const saveAs = useCallback(async (id: string, file: string | null, fmt: ExportFormat) => {
+  );
+
+  const saveAs = useCallback(async (id: string, file: string | null, fmt: ExportFormat) => {
     try {
       const name = await saveShotAs(id, file, fmt);
       notify("success", "已交给浏览器下载", `${name} · 落点为浏览器下载目录（不是设置里的保存目录）`);
@@ -430,6 +434,33 @@ export default function ScreenshotPanel() {
       reportError(e, { context: "再复制失败", dedupeKey: `shot-copy-${id}` });
     }
   }, []);
+
+  /**
+   * 删一条历史（T-B4-14）：确认框点「取消」时一个 invoke 都不发（红线取消臂）。
+   * 成功后**重取列表**而不是本地滤掉那一行——宿主那边还可能顺手删了磁盘文件，
+   * 面板若只信自己内存里的那份，就会在文件其实没删掉时显示"已删"的空网格。
+   */
+  const removeShot = useCallback(
+    async (id: string) => {
+      if (
+        !(await confirmAction({
+          title: "删除截图记录",
+          impact: "从历史与磁盘同时移除该截图文件（不进回收站）",
+          command: id,
+          confirmLabel: "删除",
+          danger: true,
+        }))
+      )
+        return;
+      try {
+        await screenshotHistoryDelete(id);
+        await reload();
+      } catch (e) {
+        reportError(e, { context: "删除历史失败", dedupeKey: `shot-delete-${id}` });
+      }
+    },
+    [reload],
+  );
 
   const copyText = useCallback((text: string) => {
     void navigator.clipboard.writeText(text).catch((e) => reportError(e, { context: "复制文字失败" }));
@@ -738,6 +769,21 @@ export default function ScreenshotPanel() {
                         <MenuItem onClick={() => setBeautify({ id: it.id, label: "美化复制", actions: ["copy"] })}>
                           美化复制
                         </MenuItem>
+                      </MenuList>
+                    </MenuPopover>
+                  </Menu>
+                  {/* 溢出菜单里的「删除」（T-B4-14）：这一枚**不**跟"有没有文件"联动禁用——
+                      "只复制不保存"那一档的历史行没有文件，但行照样得能删掉；
+                      宿主对没有文件的行就是删行（module.rs history_delete 的 None 臂）。 */}
+                  <Menu>
+                    <MenuTrigger disableButtonEnhancement>
+                      <MenuButton size="small" appearance="subtle">
+                        更多
+                      </MenuButton>
+                    </MenuTrigger>
+                    <MenuPopover>
+                      <MenuList>
+                        <MenuItem onClick={() => void removeShot(it.id)}>删除</MenuItem>
                       </MenuList>
                     </MenuPopover>
                   </Menu>
