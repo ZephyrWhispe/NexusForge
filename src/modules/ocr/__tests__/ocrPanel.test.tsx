@@ -42,7 +42,14 @@ beforeEach(() => {
   document.body.append(container);
   vi.mocked(ocrEngineStatus).mockResolvedValue(STATUS);
   // 设置里确有持久语言：若前端把配置塞进请求（第二真源），下面 langs: [] 的断言即红
-  vi.mocked(ocrConfigGet).mockResolvedValue({ langs: ["zh-Hans"], preferred_engine: "win-ocr" });
+  vi.mocked(ocrConfigGet).mockResolvedValue({
+    langs: ["zh-Hans"],
+    preferred_engine: "win-ocr",
+    tesseract_enabled: false,
+    tesseract_exe: "",
+    tesseract_data_dir: null,
+    tesseract_timeout_ms: 20000,
+  });
 });
 
 afterEach(() => {

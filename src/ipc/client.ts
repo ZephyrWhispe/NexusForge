@@ -463,6 +463,11 @@ export interface OcrRequestDto {
 export interface OcrConfigDto {
   langs: string[];
   preferred_engine: string;
+  /** Tesseract CLI 第二引擎四键（T-B4-11）：默认关，关着时它不出现在引擎状态面 */
+  tesseract_enabled: boolean;
+  tesseract_exe: string;
+  tesseract_data_dir: string | null;
+  tesseract_timeout_ms: number;
 }
 
 export interface OcrLineDto {

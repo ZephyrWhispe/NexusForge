@@ -1,7 +1,8 @@
 //! O1 引擎抽象（docs/impl/04 O1，DESIGN §4.3 / D-09 第 1 步）：
 //! `OcrEngine` trait + `EngineRegistry` 注册表。v1 仅注册 win-ocr（OcrPort 适配器）；
-//! PaddleOCR sidecar（D-09 第 2 步）届时作为新引擎项 `push` 进注册表即可，
-//! 管线与模块层不改。
+//! 第二引擎（Tesseract CLI，T-B4-11）随设置在 [`crate::module::build_registry`] 里
+//! **重建即得（引擎项自身无状态，状态在设置与注册表）**——不是往活注册表里 push：
+//! 注册表的引擎集是 `Vec` 不可变，且"启用与否"决定它是否出现在 `ocr_engine_status` 里。
 //!
 //! 签名口径：trait 保持同步（与 OcrPort/管线一致，阻塞调用的
 //! spawn_blocking/超时由命令层与事件消费层负责），规约草图的 async 仅为形态，
@@ -92,6 +93,15 @@ impl EngineRegistry {
 
     pub fn contains(&self, id: &str) -> bool {
         self.engines.iter().any(|e| e.id() == id)
+    }
+
+    /// 除指定 id 外的引擎项（设置面增删 TesseractEngine 时"其余照抄"的口）
+    pub fn engines_except(&self, id: &str) -> Vec<Arc<dyn OcrEngine>> {
+        self.engines
+            .iter()
+            .filter(|e| e.id() != id)
+            .cloned()
+            .collect()
     }
 
     pub fn set_preferred(&self, id: &str) -> Result<(), AppError> {

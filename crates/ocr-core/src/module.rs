@@ -23,7 +23,10 @@ use tokio::sync::watch;
 
 use crate::engine::{EngineRegistry, WinOcrEngine};
 use crate::pipeline::OcrPipeline;
-use crate::types::{EngineStatusDto, OcrConfig, OcrRequest, OcrResultDto};
+use crate::tesseract::{
+    CommandRunner, SystemRunner, TesseractEngine, TesseractSettings, TESSERACT_ID,
+};
+use crate::types::{EngineStatusDto, OcrConfig, OcrConfigPatch, OcrRequest, OcrResultDto};
 
 use host_core::util::app_err as mod_err;
 
@@ -33,6 +36,12 @@ pub struct OcrModule {
     state: ModuleStateCell,
     /// 事件消费协作文档/停机信道（S4 模式，同 automation-core）
     shutdown: RwLock<Option<watch::Sender<bool>>>,
+    /// Tesseract 设置（引擎项随其变更重建，见 [`build_registry`]）
+    tess: RwLock<TesseractSettings>,
+    /// 子进程执行口（真机 SystemRunner；测试面走 build_registry 直注假执行器）
+    runner: Arc<dyn CommandRunner>,
+    /// {app_data}：TesseractEngine 的一次性临时帧目录落点
+    app_data: RwLock<Option<PathBuf>>,
 }
 
 impl OcrModule {
@@ -42,6 +51,9 @@ impl OcrModule {
             bus: RwLock::new(None),
             state: ModuleStateCell::new(),
             shutdown: RwLock::new(None),
+            tess: RwLock::new(TesseractSettings::default()),
+            runner: Arc::new(SystemRunner),
+            app_data: RwLock::new(None),
         }
     }
 
@@ -81,14 +93,60 @@ impl OcrModule {
     /// 运行态配置快照（`ocr_config_get` 读口：设置中心显示的是模块真正在用的值，
     /// 写侧仍只有 host_config_set 一个入口）
     pub fn config(&self) -> OcrConfig {
-        match self.engines.read().clone() {
-            Some(registry) => OcrConfig {
-                langs: registry.config_langs(),
-                preferred_engine: registry.preferred(),
-            },
-            None => OcrConfig::default(),
+        let mut cfg = OcrConfig::default();
+        if let Some(registry) = self.engines.read().clone() {
+            cfg.langs = registry.config_langs();
+            cfg.preferred_engine = registry.preferred();
         }
+        let tess = self.tess.read();
+        cfg.tesseract_enabled = tess.enabled;
+        cfg.tesseract_exe = tess.exe.clone();
+        cfg.tesseract_data_dir = tess.data_dir.clone();
+        cfg.tesseract_timeout_ms = tess.timeout_ms;
+        cfg
     }
+
+    /// （重）接截图联动消费协程：协程持有的是接手那一刻的 `Arc<EngineRegistry>`，
+    /// 而 Tesseract 开关会重建注册表——不重接就会出现"直接 IPC 走新引擎集、
+    /// 截图联动走旧引擎集"的两条路径分叉。非运行态零副作用（stop 已负责停机）。
+    fn rewire_consumer(&self) {
+        if self.state.get() != ModuleState::Running {
+            return;
+        }
+        let bus = self.bus.read().clone();
+        let registry = self.engines.read().clone();
+        let (Some(bus), Some(registry)) = (bus, registry) else {
+            return;
+        };
+        if let Some(tx) = self.shutdown.write().take() {
+            tx.send(true).ok();
+        }
+        let (tx, rx) = watch::channel(false);
+        *self.shutdown.write() = Some(tx);
+        // 句柄即弃：协程终结由停机信道控制，与 JoinHandle 无关
+        drop(spawn_ocr_requested_consumer(bus, registry, rx));
+    }
+}
+
+/// 按设置重建引擎注册表（§9.1-⑭：注册表引擎集不可变，"第二引擎"是重建出来的而非 push 进去的）
+///
+/// `base` 是其余引擎项（含构造期的 win-ocr、测试注入的假引擎）；Tesseract 项按
+/// `tess.enabled` 追加，关着的时候连"不可用"都不该出现在引擎状态面上。
+pub(crate) fn build_registry(
+    base: Vec<Arc<dyn crate::engine::OcrEngine>>,
+    tess: &TesseractSettings,
+    runner: Arc<dyn CommandRunner>,
+    app_data: PathBuf,
+) -> Arc<EngineRegistry> {
+    let mut engines = base;
+    if tess.enabled {
+        engines.push(Arc::new(TesseractEngine::new(
+            Arc::new(RwLock::new(tess.clone())),
+            runner,
+            app_data,
+        )));
+    }
+    Arc::new(EngineRegistry::new(engines))
 }
 
 /// 共享识别核心：图像字节（PNG 等）→ 预处理 → 管线（直接 IPC 与事件联动两条路径共用）
@@ -236,10 +294,16 @@ impl Module for OcrModule {
             .ports
             .get::<dyn OcrPort>()
             .ok_or_else(|| ModuleError::Init("OcrPort 未注册（win-integration 缺失）".into()))?;
-        // O1：唯一内置引擎以注册表项形式登记（D-09 第 1 步）
-        *self.engines.write() = Some(Arc::new(EngineRegistry::new(vec![Arc::new(
-            WinOcrEngine::new(port),
-        )])));
+        // O1：唯一内置引擎以注册表项形式登记（D-09 第 1 步）；第二引擎（Tesseract CLI）
+        // 按设置在此重建——默认关，故启动期注册表仍只有 win-ocr 一项
+        *self.app_data.write() = Some(ctx.app_data_dir.clone());
+        let base: Vec<Arc<dyn crate::engine::OcrEngine>> = vec![Arc::new(WinOcrEngine::new(port))];
+        *self.engines.write() = Some(build_registry(
+            base,
+            &self.tess.read(),
+            self.runner.clone(),
+            ctx.app_data_dir.clone(),
+        ));
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.state.set(ModuleState::Stopped);
         Ok(())
@@ -261,13 +325,8 @@ impl Module for OcrModule {
             Err(e) => tracing::warn!(error = %e, "OCR 引擎探测失败"),
         }
         // D-09 第 1 步：接线截图联动（每次 start 重建协作停机信道，S4）
-        if let Some(bus) = self.bus.read().clone() {
-            let (tx, rx) = watch::channel(false);
-            *self.shutdown.write() = Some(tx);
-            // 句柄即弃：协程终结由 stop() 的停机信道控制，与 JoinHandle 无关
-            drop(spawn_ocr_requested_consumer(bus, registry, rx));
-        }
         self.state.set(ModuleState::Running);
+        self.rewire_consumer();
         Ok(())
     }
 
@@ -306,26 +365,75 @@ impl Module for OcrModule {
                     "title": "偏好语言（BCP-47，逗号分隔）",
                     "description": "识别时优先尝试的语言，按序取引擎支持的首个；留空 = 由系统语言决定（单次请求里手选的语言优先于本设置）",
                     "default": []
+                },
+                // Tesseract CLI 第二引擎四键（T-B4-11）：默认关；路径校验在 apply_config
+                "tesseract_enabled": {
+                    "type": "boolean",
+                    "title": "启用 Tesseract 引擎（本地命令行）",
+                    "description": "用你自装的 tesseract.exe 作第二引擎（子进程调用，不经 shell）；关闭时它不出现在引擎列表里",
+                    "default": false
+                },
+                "tesseract_exe": {
+                    "type": "string",
+                    "title": "Tesseract 可执行文件（绝对路径）",
+                    "description": "必须是绝对路径，例 C:\\Program Files\\Tesseract-OCR\\tesseract.exe；裸程序名与相对路径会走 PATH 解析，等同给任意同名程序开门，故直接拒",
+                    "default": ""
+                },
+                "tesseract_data_dir": {
+                    "type": "string",
+                    "title": "tessdata 目录（留空 = 用引擎自带缺省）",
+                    "description": "语言包所在目录，传给 --tessdata-dir",
+                    "default": ""
+                },
+                "tesseract_timeout_ms": {
+                    "type": "integer",
+                    "title": "单次识别超时（毫秒）",
+                    "description": "超时即强杀子进程并报错，不会挂着不动",
+                    "minimum": 1000,
+                    "maximum": 120000,
+                    "default": 20000
                 }
             }
         })
     }
 
+    /// 补丁 → 生效值 → 校验 → 重建注册表 → 一次 swap：任一校验不过则运行态零改动
+    /// （含"启用 Tesseract 却没填绝对路径"与"未知优先引擎"两臂，不留半写状态）
     fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError> {
-        let cfg: OcrConfig = serde_json::from_value(values.clone())
+        let patch: OcrConfigPatch = serde_json::from_value(values)
             .map_err(|e| ModuleError::Config(format!("ocr 配置无效: {e}")))?;
         let Some(registry) = self.engines.read().clone() else {
             return Err(ModuleError::Config("引擎注册表未初始化".into()));
         };
-        // 缺键 = 不动运行态：serde default 把"未提供"与"提供默认值"混为一谈，故按原始键判定
-        if values.get("preferred_engine").is_some() {
-            registry
-                .set_preferred(&cfg.preferred_engine)
-                .map_err(|e| ModuleError::Config(e.to_string()))?;
+        let Some(app_data) = self.app_data.read().clone() else {
+            return Err(ModuleError::Config(
+                "ocr 模块未初始化（缺 app_data 目录）".into(),
+            ));
+        };
+        // 缺键 = 不动运行态：生效值 = 现运行态 ⊕ 补丁（OcrConfigPatch 的 None 臂保留现值）
+        let next = self.config().merged(&patch);
+        let tess = next.tesseract();
+        tess.validate()
+            .map_err(|e| ModuleError::Config(e.to_string()))?;
+        if next.preferred_engine == TESSERACT_ID && !tess.enabled {
+            // 单看 set_preferred 只会得到"未知引擎 tesseract"，而真因是本次把引擎关了
+            return Err(ModuleError::Config(
+                "优先引擎为 Tesseract 时不能同时关闭它（请同批把优先引擎改为其余项）".into(),
+            ));
         }
-        if values.get("langs").is_some() {
-            registry.set_config_langs(&cfg.langs);
-        }
+        let rebuilt = build_registry(
+            registry.engines_except(TESSERACT_ID),
+            &tess,
+            self.runner.clone(),
+            app_data,
+        );
+        rebuilt.set_config_langs(&next.langs);
+        rebuilt
+            .set_preferred(&next.preferred_engine)
+            .map_err(|e| ModuleError::Config(e.to_string()))?;
+        *self.tess.write() = tess;
+        *self.engines.write() = Some(rebuilt);
+        self.rewire_consumer();
         Ok(())
     }
 
@@ -560,22 +668,25 @@ mod tests {
     }
 
     /// 用户可配置优先级（DESIGN §4.3）经模块 config 通道落注册表
+    /// （T-B4-11 后注册表随设置重建，故断言读穿 `m.registry()` 而非旧句柄）
     #[test]
     fn apply_config_sets_preferred_and_rejects_unknown() {
         let m = OcrModule::new();
+        let dir = tempfile::tempdir().unwrap();
         let (registry, _) = test_registry();
-        let reg2 = registry.clone();
         *m.engines.write() = Some(registry);
+        *m.app_data.write() = Some(dir.path().to_path_buf());
+        let preferred = || m.registry().unwrap().preferred();
         let err = m
             .apply_config(json!({"preferred_engine": "nope"}))
             .unwrap_err();
         assert!(err.to_string().contains("未知引擎"), "{err}");
-        assert_eq!(reg2.preferred(), "mock", "拒绝后保持原优先级");
+        assert_eq!(preferred(), "mock", "拒绝后保持原优先级");
         m.apply_config(json!({"preferred_engine": "mock"})).unwrap();
-        assert_eq!(reg2.preferred(), "mock");
+        assert_eq!(preferred(), "mock");
         // 缺省字段 = 不动优先级
         m.apply_config(json!({})).unwrap();
-        assert_eq!(reg2.preferred(), "mock");
+        assert_eq!(preferred(), "mock");
     }
 
     struct NamedEngine {
@@ -634,29 +745,31 @@ mod tests {
     #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
     fn applyConfig_langsPersistAndUnknownEngineStillRejects() {
         let m = OcrModule::new();
+        let dir = tempfile::tempdir().unwrap();
         let (registry, _) = test_registry();
-        let reg2 = registry.clone();
         *m.engines.write() = Some(registry);
+        *m.app_data.write() = Some(dir.path().to_path_buf());
+        let config_langs = || m.registry().unwrap().config_langs();
         m.apply_config(json!({"langs": ["zh-CN", "en-US"], "preferred_engine": "mock"}))
             .unwrap();
         assert_eq!(
-            reg2.config_langs(),
+            config_langs(),
             vec!["zh-CN".to_string(), "en-US".to_string()]
         );
-        assert_eq!(m.config().langs, reg2.config_langs(), "读口即运行态本身");
+        assert_eq!(m.config().langs, config_langs(), "读口即运行态本身");
         assert_eq!(m.config().preferred_engine, "mock");
         let err = m
             .apply_config(json!({"langs": ["fr-FR"], "preferred_engine": "nope"}))
             .unwrap_err();
         assert!(err.to_string().contains("未知引擎"), "{err}");
         assert_eq!(
-            reg2.config_langs(),
+            config_langs(),
             vec!["zh-CN".to_string(), "en-US".to_string()],
             "整次派发被拒 ⇒ 同批的 langs 也不得半写"
         );
         m.apply_config(json!({})).unwrap();
         assert_eq!(
-            reg2.config_langs(),
+            config_langs(),
             vec!["zh-CN".to_string(), "en-US".to_string()],
             "缺键 = 不动运行态（与 preferred_engine 同纪律）"
         );

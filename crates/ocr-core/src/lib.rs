@@ -3,7 +3,9 @@
 pub mod engine;
 pub mod module;
 pub mod pipeline;
+pub mod tesseract;
 pub mod types;
 
-pub use engine::{EngineRegistry, OcrEngine, WinOcrEngine};
+pub use engine::{resolve_langs, EngineRegistry, OcrEngine, WinOcrEngine};
 pub use module::OcrModule;
+pub use tesseract::{CmdOutput, CommandRunner, SystemRunner, TesseractEngine, TesseractSettings};

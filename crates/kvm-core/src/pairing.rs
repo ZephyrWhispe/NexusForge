@@ -527,6 +527,14 @@ mod tests {
         // 双方都落盘
         assert!(store_a.is_paired(&id_b.device_id));
         assert!(store_b.is_paired(&id_a.device_id));
+        // 回调由 accept_loop 的任务侧异步 push，与 pair_with 返回之间无先后保证：
+        // 全量 workspace 并发下此处偶发读到 0（首跑即命中）。有界轮询等它，
+        // 超时仍断言原值——既不放松判据，也不把时序竞态留给下一次随机红灯。
+        let mut ticks = 0;
+        while paired_sink.lock().is_empty() && ticks < 200 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            ticks += 1;
+        }
         assert_eq!(paired_sink.lock().len(), 1);
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);

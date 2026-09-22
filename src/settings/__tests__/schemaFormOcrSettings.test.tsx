@@ -41,7 +41,14 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
-  vi.mocked(ocrConfigGet).mockResolvedValue({ langs: ["zh-CN"], preferred_engine: "win-ocr" });
+  vi.mocked(ocrConfigGet).mockResolvedValue({
+    langs: ["zh-CN"],
+    preferred_engine: "win-ocr",
+    tesseract_enabled: false,
+    tesseract_exe: "",
+    tesseract_data_dir: null,
+    tesseract_timeout_ms: 20000,
+  });
   vi.mocked(hostConfigSet).mockResolvedValue(undefined);
   vi.mocked(ocrEngineStatus).mockResolvedValue({
     engines: [{ id: "win-ocr", name: "Windows OCR", available: true }],
@@ -95,26 +102,42 @@ async function pickFile(name = "cap.png") {
   }
 }
 
-/**
- * Fluent v9 下拉：单选 Listbox 只在展开后入 DOM，多选选项常驻——统一先按真实指针序列
- * 展开触发钮，再按文本点选项（document 作用域取，兼容展开层落在 container 外）。
- */
-async function clickOptionByText(text: string) {
-  const trigger = document.querySelector<HTMLElement>('[role="combobox"]');
-  expect(trigger, "缺下拉触发钮").toBeDefined();
+/** Fluent v9 下拉只在真实指针序列下展开（单选 Listbox 展开后才入 DOM） */
+async function pointerClick(el: HTMLElement) {
   for (const type of ["pointerdown", "mousedown", "click"] as const) {
     await act(async () => {
-      trigger!.dispatchEvent(new MouseEvent(type, { bubbles: true }));
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true }));
     });
   }
+}
+
+/** 展开页面上唯一的单选下拉（点一次触发钮），返回展开后的选项文本 */
+async function openDropdown(): Promise<string[]> {
+  const trigger = document.querySelector<HTMLElement>('[role="combobox"]');
+  expect(trigger, "缺下拉触发钮").toBeDefined();
+  await pointerClick(trigger!);
+  return [...document.querySelectorAll<HTMLElement>(".fui-Option")].map(
+    (o) => o.textContent ?? "",
+  );
+}
+
+/** 展开后按文本点选项（document 作用域取，兼容展开层落在 container 外） */
+async function clickOptionByText(text: string) {
+  await openDropdown();
   const options = [...document.querySelectorAll<HTMLElement>(".fui-Option")];
   const target = options.find((o) => o.textContent?.includes(text));
   expect(target, `可选项：${options.map((o) => o.textContent).join("|")}`).toBeDefined();
-  for (const type of ["pointerdown", "mousedown", "click"] as const) {
-    await act(async () => {
-      target!.dispatchEvent(new MouseEvent(type, { bubbles: true }));
-    });
-  }
+  await pointerClick(target!);
+}
+
+/** React 受控 Input 写值：走原生 value setter，否则 onChange 收不到变化 */
+async function typeInput(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {});
 }
 
 describe("SchemaForm enum 分支（T-B4-10）", () => {
@@ -189,5 +212,114 @@ describe("OcrPanel 语言持久化显示（T-B4-10）", () => {
     expect(langPlaceholder(null)).toBe("语言：读取设置中…");
     expect(langPlaceholder(["zh-CN", "en-US"])).toBe("语言：跟随设置（zh-CN · en-US）");
     expect(langPlaceholder([])).toContain("引擎按系统语言自选");
+  });
+});
+
+// D-29 B4/T-B4-11 回归：第二引擎（Tesseract CLI）表观面——启用后引擎状态卡与优先引擎
+// 词表同步长出它；路径写错时后端 001 文案原样可见（不静默回滚成"看起来保存成功"）。
+
+/** 换一棵树：卸载 + 换新容器（同一用例内多次 mount 时用，避免 React 双 root 警告） */
+async function remount(jsx: ReactElement) {
+  await act(async () => {
+    root?.unmount();
+  });
+  container.remove();
+  container = document.createElement("div");
+  document.body.append(container);
+  await mount(jsx);
+}
+
+/** ocr 模块的实时 schema 形状（六键；enum 由后端按引擎注册表给出） */
+const OCR_SCHEMA = {
+  preferred_engine: {
+    type: "string",
+    title: "优先 OCR 引擎",
+    enum: ["win-ocr", "tesseract"],
+    default: "win-ocr",
+  },
+  langs: { type: "array", items: { type: "string" }, title: "偏好语言", default: [] },
+  tesseract_enabled: { type: "boolean", title: "启用 Tesseract 引擎（本地命令行）", default: false },
+  tesseract_exe: { type: "string", title: "Tesseract 可执行文件（绝对路径）", default: "" },
+  tesseract_data_dir: { type: "string", title: "tessdata 目录（留空 = 用引擎自带缺省）", default: "" },
+  tesseract_timeout_ms: {
+    type: "integer",
+    title: "单次识别超时（毫秒）",
+    minimum: 1000,
+    maximum: 120000,
+    default: 20000,
+  },
+};
+
+const TWO_ENGINES = {
+  engines: [
+    { id: "win-ocr", name: "Windows.Media.Ocr", available: true },
+    { id: "tesseract", name: "Tesseract（本地命令行）", available: false },
+  ],
+  languages: ["zh-CN", "en-US", "chi_sim"],
+};
+const ONE_ENGINE = {
+  engines: [{ id: "win-ocr", name: "Windows.Media.Ocr", available: true }],
+  languages: ["zh-CN", "en-US"],
+};
+
+describe("Tesseract 第二引擎表观面（T-B4-11）", () => {
+  it("ocrPanel_secondEngineAppearsAfterEnable：两引擎→引擎卡两行 + 优先引擎下拉两项", async () => {
+    vi.mocked(ocrEngineStatus).mockResolvedValue(TWO_ENGINES);
+    await mount(<OcrPanel />);
+    expect(container.textContent).toContain("1/2 引擎可用");
+    expect(container.textContent).toContain("Tesseract（本地命令行）");
+    expect(container.textContent).toContain("chi_sim");
+    // 正对照：关着的引擎不进注册表 → 面板只有一张卡（"两行"不是恒定表观）
+    vi.mocked(ocrEngineStatus).mockResolvedValue(ONE_ENGINE);
+    await remount(<OcrPanel />);
+    expect(container.textContent).toContain("1/1 引擎可用");
+    expect(container.textContent).not.toContain("Tesseract");
+    // 启用后设置中心的优先引擎词表跟着长（enum 来自注册表，非前端硬编码）
+    vi.mocked(hostConfigSchema).mockResolvedValue({ properties: OCR_SCHEMA } as never);
+    vi.mocked(hostConfigGet).mockResolvedValue({} as never);
+    await remount(<SchemaForm moduleId="ocr" />);
+    const trigger = document.querySelector<HTMLElement>('[role="combobox"]');
+    expect(trigger?.textContent).toContain("win-ocr");
+    // 展开一次取全部词表项（再点触发钮会收起，故选项直接在展开态里点）
+    expect(await openDropdown()).toEqual(["win-ocr", "tesseract"]);
+    const target = [...document.querySelectorAll<HTMLElement>(".fui-Option")].find((o) =>
+      o.textContent?.includes("tesseract"),
+    );
+    expect(target, "词表应含第二引擎 tesseract").toBeDefined();
+    await pointerClick(target!);
+    expect(hostConfigSet).toHaveBeenCalledWith(
+      "ocr",
+      expect.objectContaining({ preferred_engine: "tesseract" }),
+    );
+  });
+
+  it("ocrSettings_tesseractExe_requiresAbsoluteHint：后端 001 文案原样显示，不静默", async () => {
+    vi.mocked(hostConfigSchema).mockResolvedValue({ properties: OCR_SCHEMA } as never);
+    vi.mocked(hostConfigGet).mockResolvedValue({ tesseract_enabled: true } as never);
+    await mount(<SchemaForm moduleId="ocr" />);
+    const exeInput = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(exeInput, "无词表的 string 键渲染为 Input").not.toBeNull();
+    expect(container.textContent).toContain("启用 Tesseract 引擎");
+    expect(container.textContent).toContain("单次识别超时");
+    vi.mocked(hostConfigSet).mockRejectedValue({
+      data: {
+        code: "OCR_TESS_001",
+        message: "Tesseract 可执行文件必须是绝对路径，当前值：tesseract.exe",
+        hint: "不吃相对路径与裸程序名：那会走 PATH 解析，等于给任意同名程序开门",
+      },
+    });
+    await typeInput(exeInput!, "tesseract.exe");
+    expect(hostConfigSet).toHaveBeenCalledWith(
+      "ocr",
+      expect.objectContaining({ tesseract_exe: "tesseract.exe" }),
+    );
+    expect(container.textContent).toContain("必须是绝对路径，当前值：tesseract.exe");
+    expect(container.textContent).toContain("PATH 解析");
+    // 红线：拒写既不吞原因，也不吞用户输入（框里仍是他打的值，改了即可再试）
+    expect(exeInput!.value).toBe("tesseract.exe");
+    // 正对照：填对路径后错误行消失
+    vi.mocked(hostConfigSet).mockResolvedValue(undefined);
+    await typeInput(exeInput!, "C:\\Program Files\\Tesseract-OCR\\tesseract.exe");
+    expect(container.textContent).not.toContain("必须是绝对路径");
   });
 });

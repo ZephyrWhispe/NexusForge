@@ -15,7 +15,7 @@ pub struct OcrRequest {
     pub source_task_id: Option<String>,
 }
 
-/// 模块配置（写侧唯一入口仍是 `host_config_set`；本结构是 schema 两键的强类型投影）
+/// 模块配置（写侧唯一入口仍是 `host_config_set`；本结构是 schema 六键的强类型投影）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrConfig {
     /// 偏好语言（BCP-47，按序）；空 = 引擎按系统语言自选
@@ -23,10 +23,24 @@ pub struct OcrConfig {
     pub langs: Vec<String>,
     #[serde(default = "default_preferred")]
     pub preferred_engine: String,
+    /// 以下四键 = Tesseract CLI 第二引擎（T-B4-11，默认关；扁平命名而非 object 子键，
+    /// 因为设置面 SchemaForm 只渲染 bool/int/string/array 四形，渲染不出的设置等于没有设置）
+    #[serde(default)]
+    pub tesseract_enabled: bool,
+    #[serde(default)]
+    pub tesseract_exe: String,
+    #[serde(default)]
+    pub tesseract_data_dir: Option<String>,
+    #[serde(default = "default_tess_timeout")]
+    pub tesseract_timeout_ms: u64,
 }
 
 fn default_preferred() -> String {
     "win-ocr".into()
+}
+
+fn default_tess_timeout() -> u64 {
+    20_000
 }
 
 impl Default for OcrConfig {
@@ -34,6 +48,57 @@ impl Default for OcrConfig {
         Self {
             langs: vec![],
             preferred_engine: default_preferred(),
+            tesseract_enabled: false,
+            tesseract_exe: String::new(),
+            tesseract_data_dir: None,
+            tesseract_timeout_ms: default_tess_timeout(),
+        }
+    }
+}
+
+/// 配置补丁（写侧的"缺键 = 不动"显式形：整份反序列化会把"未提供"与"提供默认值"混为一谈）
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct OcrConfigPatch {
+    pub langs: Option<Vec<String>>,
+    pub preferred_engine: Option<String>,
+    pub tesseract_enabled: Option<bool>,
+    pub tesseract_exe: Option<String>,
+    pub tesseract_data_dir: Option<String>,
+    pub tesseract_timeout_ms: Option<u64>,
+}
+
+impl OcrConfig {
+    /// 应用补丁得到生效配置（None 键保留现值）
+    pub fn merged(&self, patch: &OcrConfigPatch) -> OcrConfig {
+        OcrConfig {
+            langs: patch.langs.clone().unwrap_or_else(|| self.langs.clone()),
+            preferred_engine: patch
+                .preferred_engine
+                .clone()
+                .unwrap_or_else(|| self.preferred_engine.clone()),
+            tesseract_enabled: patch.tesseract_enabled.unwrap_or(self.tesseract_enabled),
+            tesseract_exe: patch
+                .tesseract_exe
+                .clone()
+                .unwrap_or_else(|| self.tesseract_exe.clone()),
+            tesseract_data_dir: patch
+                .tesseract_data_dir
+                .clone()
+                .or_else(|| self.tesseract_data_dir.clone()),
+            tesseract_timeout_ms: patch
+                .tesseract_timeout_ms
+                .unwrap_or(self.tesseract_timeout_ms),
+        }
+    }
+
+    /// Tesseract 四键的引擎侧投影（键名去掉前缀：住在本模块命名空间里前缀是噪音）
+    pub fn tesseract(&self) -> crate::tesseract::TesseractSettings {
+        crate::tesseract::TesseractSettings {
+            enabled: self.tesseract_enabled,
+            exe: self.tesseract_exe.clone(),
+            data_dir: self.tesseract_data_dir.clone(),
+            timeout_ms: self.tesseract_timeout_ms,
         }
     }
 }
