@@ -41,7 +41,7 @@ impl Default for ScreenshotConfig {
     }
 }
 
-/// 标注（前端 canvas 坐标归一化 0..1；最终合成图由前端导出，Rust 仅存档）
+/// 标注（前端 canvas 坐标为画布像素；最终合成图由前端导出，Rust 仅存档）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Annotation {
     /// pen | rect | ellipse | arrow | text | mosaic | number
@@ -59,6 +59,24 @@ pub struct Annotation {
     /// number 工具的序号
     #[serde(default)]
     pub seq: Option<u32>,
+    /// z 序：小在下先绘制。缺省 0 让旧前端/旧历史条目零迁移即可读
+    #[serde(default)]
+    pub layer: u32,
+    /// 锁定：仍绘制，但点选穿透（选择穿透 = hitTest 的 skipLocked 臂）
+    #[serde(default)]
+    pub locked: bool,
+}
+
+impl Annotation {
+    /// 落库序：`layer` 升序的稳定排序（同层保持入参序）。
+    ///
+    /// 稳定性是这一排序的全部要点——`sort_unstable_by_key` 在同层条目上会给出不连续
+    /// 的次序，撤销/重做与图层面板就会看到标注"自己乱动"。
+    pub fn sort_by_layer(list: &[Annotation]) -> Vec<Annotation> {
+        let mut out = list.to_vec();
+        out.sort_by_key(|a| a.layer);
+        out
+    }
 }
 
 // ---------------- IPC DTO（docs/impl/03 P8）----------------
@@ -123,10 +141,14 @@ pub struct FinishDto {
 }
 
 /// 单条截图历史的 PNG 字节出口（D-29 B0-2：主面板缩略图/再复制；历史表只存路径）
+///
+/// `annotations` 为当年入库的标注矢量（D-29 B4 T-B4-1"收即持久"）：旧行为 NULL，
+/// 读回空表而非报错——空标注与无标注在列上同为 NULL，因此历史列不必承担语义分裂。
 #[derive(Debug, Clone, Serialize)]
 pub struct ShotDataDto {
     pub id: String,
     pub png_b64: String,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Debug, Clone, Serialize)]

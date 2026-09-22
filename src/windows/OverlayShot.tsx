@@ -19,6 +19,21 @@ import { reportError } from "../stores/notifications";
 import { confirmAction, type ConfirmOptions } from "../stores/confirm";
 import InlineError from "../components/InlineError";
 import { cancelOverlay } from "./overlayController";
+import {
+  ANN_KIND_NAME,
+  LAYER_OP_LABEL,
+  boundsOf,
+  hitTest,
+  layerRows,
+  moveLayer,
+  nextLayer,
+  removeAt,
+  sortByLayer,
+  toggleLock,
+  translate,
+  type Ann,
+  type LayerOp,
+} from "./overlay/annotations";
 
 /**
  * 截图覆盖层（docs/impl/03 P3 选区 + P4 标注 + P5 动作 + docs/impl/04 O7 结果面板）。
@@ -168,23 +183,59 @@ const useStyles = makeStyles({
     border: `1px solid ${tokens.colorPaletteRedBorder1}`,
     maxWidth: "86vw",
   },
+  // 图层侧栏（T-B4-1）：与画布并排，行=最上层在首行
+  editRow: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "10px",
+  },
+  layerPanel: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+    width: "240px",
+    maxHeight: "76vh",
+    overflowY: "auto",
+    padding: "8px",
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground2,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+  },
+  layerRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
+    padding: "2px 4px",
+    borderRadius: tokens.borderRadiusMedium,
+    border: "1px solid transparent",
+    cursor: "pointer",
+  },
+  layerRowSelected: {
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
+    padding: "2px 4px",
+    borderRadius: tokens.borderRadiusMedium,
+    border: `1px solid ${tokens.colorBrandStroke1}`,
+    backgroundColor: tokens.colorNeutralBackground3,
+    cursor: "pointer",
+  },
+  layerSwatch: {
+    width: "12px",
+    height: "12px",
+    flexShrink: 0,
+    borderRadius: "3px",
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+  },
 });
 
 type Stage = "select" | "edit";
-type Tool = AnnotationDto["kind"];
+type AnnKind = AnnotationDto["kind"];
+/** `select` 是伪工具：它不产生标注，只把 mousedown 交给图层命中测试（T-B4-1） */
+type Tool = AnnKind | "select";
 
 const COLORS = ["#ff4d4f", "#ffb020", "#52c41a", "#1677ff", "#ffffff"];
 const WIDTHS = [2, 4, 8];
-/** 确认框用的工具全名（工具条上是单字缩写，不足以说明丢了什么） */
-const TOOL_NAME: Record<Tool, string> = {
-  pen: "画笔",
-  rect: "矩形",
-  ellipse: "椭圆",
-  arrow: "箭头",
-  text: "文字",
-  mosaic: "马赛克",
-  number: "序号",
-};
 
 /** CSS 坐标 → 抓帧物理坐标（窗口铺满虚拟桌面，比例恒定） */
 function cssToPhysical(css: number, physical: number, view: number): number {
@@ -237,8 +288,13 @@ export default function OverlayShot() {
   /** 已提交标注的离屏合成画布：提交增量写入，undo/redo 全量重放 */
   const committedRef = useRef<HTMLCanvasElement | null>(null);
   /** 标注状态机（docs/impl/03 P4）：undo = 弹出末条 → 重放；redo = 反向压回 → 重放 */
-  const annsRef = useRef<AnnotationDto[]>([]);
-  const redoRef = useRef<AnnotationDto[]>([]);
+  const annsRef = useRef<Ann[]>([]);
+  const redoRef = useRef<Ann[]>([]);
+  /** 图层面板的可渲染快照：唯一写入点是 syncStackCounts（真源仍是 annsRef，避免双写漂移） */
+  const [layerList, setLayerList] = useState<Ann[]>([]);
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  /** select 工具按下时定格的位移基线（拖动过程中不回写基线，否则误差累积） */
+  const dragBase = useRef<{ index: number; from: { x: number; y: number }; src: Ann } | null>(null);
   const drawing = useRef(false);
   const startPoint = useRef<{ x: number; y: number } | null>(null);
   /** 笔画中上一采样点（pen/mosaic 段式绘制） */
@@ -261,6 +317,8 @@ export default function OverlayShot() {
       // 重置上一任务残留状态（预热窗口复用，组件不重新 mount）
       annsRef.current = [];
       redoRef.current = [];
+      setLayerList([]);
+      setSelectedIdx(null);
       setStackCounts({ undo: 0, redo: 0 });
       setError(null);
       setActionError(null);
@@ -338,11 +396,11 @@ export default function OverlayShot() {
   const discardToSelect = useCallback(async () => {
     const anns = annsRef.current;
     if (anns.length > 0) {
-      const byKind = new Map<Tool, number>();
+      const byKind = new Map<AnnKind, number>();
       for (const a of anns) byKind.set(a.kind, (byKind.get(a.kind) ?? 0) + 1);
       const impact = [
         `将丢弃未导出的标注 ${anns.length} 处：${[...byKind]
-          .map(([k, n]) => `${TOOL_NAME[k]} ${n}`)
+          .map(([k, n]) => `${ANN_KIND_NAME[k]} ${n}`)
           .join("、")}`,
       ];
       if (redoRef.current.length > 0) impact.push(`已撤销待重做 ${redoRef.current.length} 处`);
@@ -360,6 +418,8 @@ export default function OverlayShot() {
     }
     annsRef.current = [];
     redoRef.current = [];
+    setLayerList([]);
+    setSelectedIdx(null);
     setStackCounts({ undo: 0, redo: 0 });
     setStage("select");
     setRect(null);
@@ -446,6 +506,8 @@ export default function OverlayShot() {
       committed.getContext("2d")?.drawImage(img, 0, 0);
       annsRef.current = [];
       redoRef.current = [];
+      setLayerList([]);
+      setSelectedIdx(null);
       setStackCounts({ undo: 0, redo: 0 });
     };
     img.src = b64ToUrl(c.png_b64);
@@ -608,8 +670,8 @@ export default function OverlayShot() {
     }
   };
 
-  /** 全量重放：离屏画布 = 底图 + 全部标注，再同步到可见画布 */
-  const replayAll = (list: AnnotationDto[]) => {
+  /** 全量重放：离屏画布 = 底图 + 全部标注（按 layer 升序），再同步到可见画布 */
+  const replayAll = (list: Ann[]) => {
     const committed = committedRef.current;
     const canvas = canvasRef.current;
     if (!committed || !canvas || !baseImg.current) return;
@@ -618,22 +680,31 @@ export default function OverlayShot() {
     if (!cctx || !vctx) return;
     cctx.clearRect(0, 0, committed.width, committed.height);
     cctx.drawImage(baseImg.current, 0, 0);
-    for (const ann of list) applyAnn(cctx, ann);
+    // 锁定项照旧绘制：锁定只作用于点选穿透，不改变画面（图层面板的"锁定"不是隐藏）
+    for (const ann of sortByLayer(list)) applyAnn(cctx, ann);
     vctx.clearRect(0, 0, canvas.width, canvas.height);
     vctx.drawImage(committed, 0, 0);
   };
 
+  /** 栈与面板的唯一同步出口：任何改动 annsRef 的路径都必须过这里 */
   const syncStackCounts = () => {
     setStackCounts({ undo: annsRef.current.length, redo: redoRef.current.length });
+    setLayerList(annsRef.current.slice());
+    const n = annsRef.current.length;
+    setSelectedIdx((cur) => (cur === null || cur >= n ? null : cur));
   };
 
-  /** 提交一条标注：增量写入离屏画布 + 入撤销栈 + 清空重做栈 */
-  const commitAnn = (ann: AnnotationDto) => {
+  /**
+   * 提交一条标注：增量写入离屏画布 + 入撤销栈 + 清空重做栈。
+   * layer 在这里定格（新笔恒为最上层），所以增量绘制与 sortByLayer 全量重放同序。
+   */
+  const commitAnn = (draft: AnnotationDto) => {
     const committed = committedRef.current;
     const canvas = canvasRef.current;
     if (!committed || !canvas) return;
     const cctx = committed.getContext("2d");
     if (!cctx) return;
+    const ann: Ann = { ...draft, layer: nextLayer(annsRef.current), locked: false };
     applyAnn(cctx, ann);
     annsRef.current.push(ann);
     redoRef.current = [];
@@ -659,6 +730,52 @@ export default function OverlayShot() {
     replayAll(annsRef.current);
     syncStackCounts();
   };
+
+  /** 图层面板四个行操作：全部走纯模块函数，再全量重放（z 序变了就不能增量画） */
+  const applyLayerOp = (index: number, op: LayerOp) => {
+    const list = annsRef.current;
+    if (index < 0 || index >= list.length) return;
+    if (op === "delete") {
+      annsRef.current = removeAt(list, index);
+      replayAll(annsRef.current);
+      syncStackCounts();
+      setSelectedIdx(null);
+      return;
+    }
+    annsRef.current =
+      op === "lock"
+        ? toggleLock(list, index)
+        : moveLayer(list, index, op === "up" ? 1 : -1);
+    replayAll(annsRef.current);
+    syncStackCounts();
+  };
+
+  /** 选中项描边：只画在可见画布上，不进离屏合成（导出图不含 UI 痕迹） */
+  const drawSelectionOutline = () => {
+    const canvas = canvasRef.current;
+    const committed = committedRef.current;
+    if (!canvas || !committed) return;
+    const vctx = canvas.getContext("2d");
+    if (!vctx) return;
+    vctx.clearRect(0, 0, canvas.width, canvas.height);
+    vctx.drawImage(committed, 0, 0);
+    if (selectedIdx === null) return;
+    const ann = annsRef.current[selectedIdx];
+    const box = ann ? boundsOf(ann) : null;
+    if (!box) return;
+    vctx.save();
+    vctx.setLineDash([6, 4]);
+    vctx.strokeStyle = "#1677ff";
+    vctx.lineWidth = 2;
+    vctx.strokeRect(box.x - 2, box.y - 2, box.w + 4, box.h + 4);
+    vctx.restore();
+  };
+
+  // 选中/图层变化后补描边（绘制路径本身只维护离屏，UI 痕迹一律留在可见画布这一层）
+  useEffect(() => {
+    drawSelectionOutline();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 依赖即"这两个变了才重描"
+  }, [selectedIdx, layerList]);
 
   /** 实时预览：可见画布 = 已提交合成 + 进行中笔画（形状类每帧从离屏重绘） */
   const previewShape = (from: { x: number; y: number }, to: { x: number; y: number }) => {
@@ -690,6 +807,19 @@ export default function OverlayShot() {
     const p = toCanvas(e);
     strokeStyle.current = { color, width: strokeWidth };
 
+    if (tool === "select") {
+      // 点选：从最上层往下命中（锁定项穿透，但锁定项在图层面板里仍可选、仍可解锁）
+      const hit = hitTest(annsRef.current, [p.x, p.y], [canvas.width, canvas.height], {
+        skipLocked: true,
+      });
+      if (hit === null) {
+        setSelectedIdx(null);
+        return;
+      }
+      setSelectedIdx(hit);
+      dragBase.current = { index: hit, from: { x: p.x, y: p.y }, src: annsRef.current[hit] };
+      return;
+    }
     if (tool === "text") {
       // 取消/空文本：不产生任何标注与栈条目（修复取消污染撤销栈）
       const text = window.prompt("输入标注文本");
@@ -730,6 +860,14 @@ export default function OverlayShot() {
   };
 
   const onCanvasMouseMove = (e: React.MouseEvent) => {
+    const base = dragBase.current;
+    if (base) {
+      // 拖动位移：每帧从按下时的基线重算（不在当前坐标上累加，否则误差会随帧累积）
+      const cur = toCanvas(e);
+      annsRef.current[base.index] = translate(base.src, cur.x - base.from.x, cur.y - base.from.y);
+      replayAll(annsRef.current);
+      return;
+    }
     if (!drawing.current) return;
     const p = toCanvas(e);
     if (tool === "pen") {
@@ -761,6 +899,15 @@ export default function OverlayShot() {
   };
 
   const onCanvasMouseUp = (e: React.MouseEvent) => {
+    const base = dragBase.current;
+    if (base) {
+      const cur = toCanvas(e);
+      annsRef.current[base.index] = translate(base.src, cur.x - base.from.x, cur.y - base.from.y);
+      dragBase.current = null;
+      replayAll(annsRef.current);
+      syncStackCounts();
+      return;
+    }
     if (!drawing.current) return;
     drawing.current = false;
     const p = toCanvas(e);
@@ -808,7 +955,12 @@ export default function OverlayShot() {
   /** 合成导出（预览即导出） */
   const compositeB64 = (): string | null => {
     const canvas = canvasRef.current;
-    if (!canvas) return null;
+    const committed = committedRef.current;
+    if (!canvas || !committed) return null;
+    // 导出前把可见画布重置为纯合成：选中描边是 UI 痕迹，不该进导出图
+    const vctx = canvas.getContext("2d");
+    vctx?.clearRect(0, 0, canvas.width, canvas.height);
+    vctx?.drawImage(committed, 0, 0);
     return dataUrlToB64(canvas.toDataURL("image/png"));
   };
 
@@ -967,7 +1119,14 @@ export default function OverlayShot() {
   return (
     <div className={styles.editRoot}>
       <div className={styles.toolbar}>
-        {(["pen", "rect", "ellipse", "arrow", "text", "mosaic", "number"] as Tool[]).map((t) => (
+        <Button
+          className={tool === "select" ? styles.activeTool : styles.tool}
+          size="small"
+          onClick={() => setTool("select")}
+        >
+          选
+        </Button>
+        {(["pen", "rect", "ellipse", "arrow", "text", "mosaic", "number"] as AnnKind[]).map((t) => (
           <Button
             key={t}
             className={tool === t ? styles.activeTool : styles.tool}
@@ -1007,14 +1166,52 @@ export default function OverlayShot() {
         </Button>
       </div>
 
-      <div className={styles.canvasBox}>
-        <canvas
-          ref={canvasRef}
-          style={{ maxWidth: "86vw", maxHeight: "76vh" }}
-          onMouseDown={onCanvasMouseDown}
-          onMouseMove={onCanvasMouseMove}
-          onMouseUp={onCanvasMouseUp}
-        />
+      <div className={styles.editRow}>
+        <div className={styles.canvasBox}>
+          <canvas
+            ref={canvasRef}
+            style={{ maxWidth: "86vw", maxHeight: "76vh" }}
+            onMouseDown={onCanvasMouseDown}
+            onMouseMove={onCanvasMouseMove}
+            onMouseUp={onCanvasMouseUp}
+          />
+        </div>
+        {/* 图层面板（T-B4-1）：行模型出自纯模块 layerRows，本处只按行铺四钮 */}
+        {layerList.length > 0 && (
+          <div className={styles.layerPanel} data-layer-panel="">
+            <Text weight="semibold" size={200}>
+              图层（{layerList.length}）
+            </Text>
+            {layerRows(layerList).map((row) => (
+              <div
+                key={row.index}
+                className={row.index === selectedIdx ? styles.layerRowSelected : styles.layerRow}
+                // 行本身是选择器（画布上点不到的细标注由此可达）；键盘侧由四钮承担
+                role="presentation"
+                onClick={() => setSelectedIdx(row.index)}
+              >
+                <span className={styles.layerSwatch} style={{ backgroundColor: row.color }} />
+                <Text size={200}>
+                  {row.name}
+                  {row.locked ? " 🔒" : ""}
+                </Text>
+                {row.ops.map((op) => (
+                  <Button
+                    key={op}
+                    size="small"
+                    className={styles.tool}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      applyLayerOp(row.index, op);
+                    }}
+                  >
+                    {op === "lock" && row.locked ? "解锁" : LAYER_OP_LABEL[op]}
+                  </Button>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {(ocrBusy || ocrResult) && (

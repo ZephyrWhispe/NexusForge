@@ -28,8 +28,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::store::ShotStore;
 use crate::types::{
-    ConfirmRect, CropDto, FinishDto, FinishRequest, PinDataDto, PinDto, ScreenshotConfig,
-    ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
+    Annotation, ConfirmRect, CropDto, FinishDto, FinishRequest, PinDataDto, PinDto,
+    ScreenshotConfig, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
 };
 use crate::util;
 
@@ -477,8 +477,27 @@ impl ScreenshotModule {
             file: file.clone(),
             ocr_text: None,
         };
+        // 标注"收即持久"（D-29 B4 T-B4-1）：按 layer 升序稳定排序后整表存 JSON。
+        // 排序放在这一侧而不是信任前端序——图层面板与历史读回必须同一份次序。
+        let ordered = Annotation::sort_by_layer(&req.annotations);
+        let annotations_json = if ordered.is_empty() {
+            None
+        } else {
+            match serde_json::to_string(&ordered) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    // 标注是合成图的旁证而非产物：序列化失败不该让一次截图整体失败，
+                    // 但也不能静默——真因进 warn 日志（D-16 错误可见面纪律）
+                    tracing::warn!(error = %e, "标注序列化失败，本次历史不存标注");
+                    None
+                }
+            }
+        };
         if let Some(store) = self.store.read().clone() {
             store.insert(&item).ok();
+            if let Err(e) = store.set_annotations(&item.id, annotations_json.as_deref()) {
+                tracing::warn!(error = %e, "标注写库失败");
+            }
         }
 
         if let Some(bus) = self.bus.read().clone() {
@@ -770,9 +789,17 @@ impl ScreenshotModule {
 
     pub fn history_get(&self, id: &str) -> Result<ShotDataDto, AppError> {
         let (item, bytes) = self.history_png(id)?;
+        // 标注与字节同读取口：旧行列为 NULL → 空表（T-B4-1 零迁移承诺的消费侧）
+        let store = self
+            .store
+            .read()
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "模块未就绪"))?;
+        let annotations = store.annotations_of(&item.id)?;
         Ok(ShotDataDto {
             id: item.id,
             png_b64: host_core::util::b64_encode(&bytes),
+            annotations,
         })
     }
 
@@ -852,6 +879,151 @@ mod tests {
         assert_eq!(parse_ocr_backfill(&foreign), None);
         let no_text = ocr_event("ocr", json!({ "source_task_id": "t1" }));
         assert_eq!(parse_ocr_backfill(&no_text), None);
+    }
+
+    fn ann(kind: &str, layer: u32) -> Annotation {
+        Annotation {
+            kind: kind.into(),
+            color: "#ff4d4f".into(),
+            width: 2.0,
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+            text: None,
+            seq: None,
+            layer,
+            locked: false,
+        }
+    }
+
+    /// 只入历史、不跑后处理动作的 finish（auto_* 全关：测试不碰剪贴板与磁盘保存）
+    fn finish_only(m: &ScreenshotModule, task_id: &str, annotations: Vec<Annotation>) {
+        let mut cfg = ScreenshotConfig::default();
+        cfg.auto_save = false;
+        cfg.auto_copy = false;
+        *m.config.try_lock().unwrap() = cfg;
+        let png = util::encode_png_b64(2, 2, &[0u8; 16]).unwrap();
+        let req = FinishRequest {
+            image_b64: png,
+            actions: vec![],
+            pin_x: None,
+            pin_y: None,
+            annotations,
+        };
+        m.finish(task_id, &req).unwrap();
+    }
+
+    fn store_of(dir: &std::path::Path) -> Arc<ShotStore> {
+        Arc::new(ShotStore::open(&dir.join("shots.db")).unwrap())
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-1）字面测试名优先于 rustc 命名惯例
+    fn finish_annotationsPersistedAsJson_layersOrdered() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = ScreenshotModule::new();
+        let store = store_of(dir.path());
+        *m.store.write() = Some(store.clone());
+        // 入参 layer 乱序（5/1/3）：读回必须是升序，且次序由宿主排而不是信前端序
+        finish_only(
+            &m,
+            "t1",
+            vec![ann("pen", 5), ann("rect", 1), ann("ellipse", 3)],
+        );
+        let back = store.annotations_of("t1").unwrap();
+        assert_eq!(
+            back.iter()
+                .map(|a| (a.layer, a.kind.clone()))
+                .collect::<Vec<_>>(),
+            vec![(1, "rect".into()), (3, "ellipse".into()), (5, "pen".into())]
+        );
+        // 列内容确实是 JSON 文本（而不是逐条一行之类的自定义编码），首元素就是最低层
+        let raw = rusqlite::Connection::open(&dir.path().join("shots.db"))
+            .unwrap()
+            .query_row("SELECT annotations FROM shots WHERE id = 't1'", [], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .unwrap()
+            .expect("t1 的标注列应已写入");
+        assert!(raw.starts_with(r#"[{"kind":"rect""#), "实际落盘：{raw}");
+        // 同层条目保持入参相对序（稳定排序，不是按内容重排）
+        let m2 = ScreenshotModule::new();
+        let store2 = store_of(dir.path());
+        *m2.store.write() = Some(store2.clone());
+        let mut tie = vec![ann("rect", 0), ann("ellipse", 0), ann("pen", 0)];
+        tie[0].color = "#000000".into();
+        finish_only(&m2, "t2", tie);
+        assert_eq!(
+            store2
+                .annotations_of("t2")
+                .unwrap()
+                .iter()
+                .map(|a| a.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rect", "ellipse", "pen"]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn finish_noAnnotations_storesNullNotEmptyJson() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = ScreenshotModule::new();
+        let store = store_of(dir.path());
+        *m.store.write() = Some(store.clone());
+        finish_only(&m, "empty", vec![]);
+        let raw = rusqlite::Connection::open(&dir.path().join("shots.db"))
+            .unwrap()
+            .query_row(
+                "SELECT annotations FROM shots WHERE id = 'empty'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(raw, None, "空数组必须落 NULL，不能落 \"[]\"");
+        assert!(store.annotations_of("empty").unwrap().is_empty());
+        // 正对照：同库一条带标注的落 Some(JSON)，两态可分辨
+        finish_only(&m, "with", vec![ann("rect", 0)]);
+        let raw2 = rusqlite::Connection::open(&dir.path().join("shots.db"))
+            .unwrap()
+            .query_row("SELECT annotations FROM shots WHERE id = 'with'", [], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .unwrap();
+        assert!(raw2.is_some(), "带标注的必须非 NULL");
+        assert_eq!(store.annotations_of("with").unwrap().len(), 1);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn historyGet_annotationsAbsent_returnsEmptyNotError() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n rest-bytes").unwrap();
+        let m = ScreenshotModule::new();
+        let store = store_of(dir.path());
+        *m.store.write() = Some(store.clone());
+        let shot = |id: &str| ShotItem {
+            id: id.into(),
+            created_ms: 1,
+            width: 2,
+            height: 2,
+            file: Some(png.to_string_lossy().into_owned()),
+            ocr_text: None,
+        };
+        store.insert(&shot("absent")).unwrap();
+        store.insert(&shot("present")).unwrap();
+        store
+            .set_annotations(
+                "present",
+                Some(&serde_json::to_string(&[ann("rect", 0)]).unwrap()),
+            )
+            .unwrap();
+        let a = m.history_get("absent").unwrap();
+        assert!(a.annotations.is_empty(), "旧行 NULL 读回空表而非报错");
+        assert!(!a.png_b64.is_empty(), "字节出口不受新列影响");
+        // 正对照：同库带标注那条读回非空（否则上面的"空"可以是永远空的空洞）
+        let p = m.history_get("present").unwrap();
+        assert_eq!(p.annotations.len(), 1);
+        assert_eq!(p.annotations[0].kind, "rect");
     }
 
     /// D-29 B0-2：历史字节出口错误路径三类可分辨（未就绪 / 记录不存在 / 文件丢失）

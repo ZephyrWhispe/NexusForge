@@ -349,7 +349,12 @@ export interface AnnotationDto {
   points: [number, number][];
   text?: string | null;
   seq?: number | null;
+  /** z 序（小在下先绘制）；可选=旧历史条目与手改 JSON 零迁移可读（Rust 侧 serde default 0） */
+  layer?: number;
+  /** 锁定：仍绘制，点选穿透 */
+  locked?: boolean;
 }
+
 
 export interface FinishRequestDto {
   image_b64: string;
@@ -395,11 +400,14 @@ export interface PinDataDto extends PinDto {
   png_b64: string;
 }
 
-/** 单条历史截图的 PNG 字节（D-29 B0-2 主面板缩略图） */
+/** 单条历史截图的 PNG 字节（D-29 B0-2 主面板缩略图）+ 当年入库的标注矢量（T-B4-1） */
 export interface ShotDataDto {
   id: string;
   png_b64: string;
+  /** 旧行 NULL → 空表（不是报错）；次序为宿主侧 layer 升序 */
+  annotations: AnnotationDto[];
 }
+
 
 /** 启动截图（抓全屏帧，返回覆盖层定位） */
 export function screenshotStart(mode: "shot" | "ocr"): Promise<TaskStartDto> {

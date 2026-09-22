@@ -41,7 +41,11 @@ beforeEach(() => {
   vi.mocked(screenshotPinGet).mockResolvedValue({
     id: "p", x: 0, y: 0, width: 1, height: 1, zoom: 1, opacity: 1, png_b64: "AA",
   });
-  vi.mocked(screenshotHistoryGet).mockImplementation(async (id) => ({ id, png_b64: "QUJD" }));
+  vi.mocked(screenshotHistoryGet).mockImplementation(async (id) => ({
+    id,
+    png_b64: "QUJD",
+    annotations: [],
+  }));
 });
 
 afterEach(() => {
