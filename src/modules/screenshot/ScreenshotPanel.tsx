@@ -22,8 +22,10 @@ import {
   screenshotHistoryList,
   screenshotPinGet,
   screenshotPins,
+  screenshotWindows,
   type PinDataDto,
   type ShotItemDto,
+  type WindowTargetDto,
 } from "../../ipc/client";
 import { IN_TAURI } from "../../ipc/env";
 import { notify, reportError } from "../../stores/notifications";
@@ -163,6 +165,14 @@ export default function ScreenshotPanel() {
   const [shotCfg, setShotCfg] = useState<Record<string, unknown> | null>(null);
   const [postActions, setPostActions] = useState<string[]>([]);
   const [presetBusy, setPresetBusy] = useState<string | null>(null);
+  /**
+   * 可截取窗口表（T-B4-4）三态：`null` = 还没成功读到（首次打开菜单时现读，
+   * 不在面板挂载时就枚举——列别人窗口的标题是跨应用隐私面，不该为"也许会被点开"付费）；
+   * `[]` = 读到了，确实没有；`winsErr` 非空 = 读失败（与"没有"分开说，用户才分得清该重试还是该滚开）
+   */
+  const [wins, setWins] = useState<WindowTargetDto[] | null>(null);
+  const [winsErr, setWinsErr] = useState<string | null>(null);
+  const [winsOpen, setWinsOpen] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -261,6 +271,26 @@ export default function ScreenshotPanel() {
       .catch((e) => reportError(e, { context: "发起截取失败", dedupeKey: "shot-start" }));
   }, []);
 
+  /** 菜单展开时现读一次窗口表（每次展开都重读：窗口随时在开合，缓存即撒谎） */
+  const reloadWindows = useCallback(() => {
+    setWinsErr(null);
+    screenshotWindows()
+      .then((list) => setWins(list))
+      .catch((e) => {
+        // 失败不复用上一轮列表：拿旧数据把菜单填满，用户会以为那批窗口还开着
+        setWins(null);
+        setWinsErr(parseAppError(e)?.data.message ?? String(e));
+      });
+  }, []);
+
+  const startWindowShot = useCallback((hwnd: number) => {
+    void import("../../windows/overlayController")
+      .then((m) => m.startOverlay("shot", hwnd))
+      .catch((e) =>
+        reportError(e, { context: "发起窗口截取失败", dedupeKey: "shot-start-window" }),
+      );
+  }, []);
+
   const copyImage = useCallback(async (id: string) => {
     try {
       await screenshotHistoryCopy(id);
@@ -276,6 +306,11 @@ export default function ScreenshotPanel() {
 
   const visible = useMemo(() => items.filter((it) => shotMatchesFilter(it, filter)), [items, filter]);
 
+  // 最小化窗不进下拉（选了也是被宿主明说拒绝），但它们**留在表里**计数：
+  // 空表文案要说清是"一个窗口都没有"还是"有三个都最小化了"，后者用户自己就能动手
+  const pickable = useMemo(() => (wins ?? []).filter((w) => !w.minimized), [wins]);
+  const minimized = (wins ?? []).length - pickable.length;
+
   if (!loaded) {
     return (
       <div className={styles.root}>
@@ -290,6 +325,39 @@ export default function ScreenshotPanel() {
         <Button appearance="primary" size="small" onClick={startCapture}>
           开始截取
         </Button>
+        <Menu
+          open={winsOpen}
+          onOpenChange={(_, d) => {
+            setWinsOpen(d.open);
+            if (d.open) reloadWindows();
+          }}
+        >
+          <MenuTrigger disableButtonEnhancement>
+            <MenuButton size="small">截取窗口</MenuButton>
+          </MenuTrigger>
+          <MenuPopover>
+            <MenuList>
+              {winsErr ? (
+                <MenuItem disabled>窗口枚举失败：{winsErr}</MenuItem>
+              ) : wins === null ? (
+                <MenuItem disabled>正在枚举窗口…</MenuItem>
+              ) : pickable.length === 0 ? (
+                // 红线：空表要说话，不能给一个点开啥也没有的空框（静默无反应＝用户只会反复点）
+                <MenuItem disabled>
+                  {minimized > 0
+                    ? `没有可截取的窗口（${minimized} 个窗口已最小化，请先恢复）`
+                    : "没有可截取的窗口"}
+                </MenuItem>
+              ) : (
+                pickable.map((w) => (
+                  <MenuItem key={w.hwnd} onClick={() => startWindowShot(w.hwnd)}>
+                    {w.title} · {w.width}×{w.height}
+                  </MenuItem>
+                ))
+              )}
+            </MenuList>
+          </MenuPopover>
+        </Menu>
         <Button size="small" onClick={() => void reload()}>
           刷新
         </Button>

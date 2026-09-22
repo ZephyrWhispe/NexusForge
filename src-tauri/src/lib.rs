@@ -162,6 +162,7 @@ pub fn run() {
             commands::clipboard_export,
             commands::clipboard_import,
             commands::screenshot_start,
+            commands::screenshot_windows,
             commands::screenshot_task,
             commands::screenshot_confirm,
             commands::screenshot_discard,

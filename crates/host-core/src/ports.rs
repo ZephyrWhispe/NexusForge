@@ -65,6 +65,22 @@ pub struct MonitorInfo {
     pub dpi_scale: f32,
 }
 
+/// 可枚举窗口目标（D-29 B4 T-B4-4）：虚拟桌面坐标系下的**窗口矩形**（含标题栏与边框，
+/// 与 [`CaptureTarget::Window`] 抓到的帧尺寸同一口径）。
+///
+/// `hwnd` 用 `i64` 而不是 `isize`：它是跨 IPC 边界的句柄值，端口层签名要能被 serde 直转；
+/// 真句柄在 Windows 上永远装得下，非 Windows 端口根本不会生产它。
+#[derive(Clone, Debug, Serialize)]
+pub struct WindowTarget {
+    pub hwnd: i64,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub minimized: bool,
+}
+
 /// 捕获目标（docs/impl/03 P1）
 #[derive(Clone, Debug)]
 pub enum CaptureTarget {
@@ -178,6 +194,11 @@ pub trait CapturePort: Port {
     fn enumerate_monitors(&self) -> Result<Vec<MonitorInfo>, AppError>;
     /// 阻塞调用：调用方放入 spawn_blocking；受保护窗口返回黑帧检测错误
     fn capture(&self, target: CaptureTarget) -> Result<Frame, AppError>;
+    /// 顶层窗口枚举（D-29 B4 T-B4-4）。**默认空表**：非 Windows 端口没有窗口概念，
+    /// 诚实的空列表远胜于谎报一套坐标——消费侧（截图面板）据此显引导文案而非弹空框。
+    fn list_windows(&self) -> Vec<WindowTarget> {
+        Vec::new()
+    }
 }
 
 /// OCR（win-integration：Windows.Media.Ocr 系统引擎）

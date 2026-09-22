@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
     GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -11,12 +11,12 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, GetWindowRect, PW_RENDERFULLCONTENT, SM_CXSCREEN, SM_CYSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    EnumWindows, GetSystemMetrics, GetWindowRect, GetWindowTextW, IsIconic, IsWindowVisible,
+    PW_RENDERFULLCONTENT, SM_CXSCREEN, SM_CYSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use host_core::error::AppError;
-use host_core::ports::{CapturePort, CaptureTarget, Frame, MonitorInfo};
+use host_core::ports::{CapturePort, CaptureTarget, Frame, MonitorInfo, WindowTarget};
 
 use host_core::util::app_err as err;
 
@@ -179,6 +179,64 @@ unsafe fn grab_window(hwnd: isize) -> Result<Frame, AppError> {
     frame.ok_or_else(|| err("SCREENSHOT_CAPTURE_003", "PrintWindow/GetDIBits 失败"))
 }
 
+/// 窗口是否进枚举表（纯函数，四格真值表可测，与 Windows API 无关）。
+///
+/// `minimized` **刻意不作为过滤条件**：最小化窗的 `GetWindowRect` 返回的是系统摆渡坐标
+/// （典型 -32000, -32000）配一个正常尺寸，拿尺寸去挡根本挡不住它；而"表里有没有"和
+/// "能不能选"是两回事——下拉表把它列出来并打标（用户看得见"有这么个窗口，现在截不了"），
+/// 真正拒它的是 `start_capture`（拿到 SCREENSHOT_WINDOW_001 的明说文案，而不是静默无反应）。
+/// 塞进这里只会得到一张"莫名少了几行"的表。
+fn window_kept(title: &str, w: i32, h: i32, minimized: bool) -> bool {
+    let _ = minimized;
+    !title.trim().is_empty() && w > 0 && h > 0
+}
+
+/// 标题取宽字符（GetWindowTextW 返回写入字符数，不含终止符；失败即 0）
+unsafe fn window_title(hwnd: HWND) -> String {
+    const TITLE_MAX: usize = 256;
+    let mut buf = [0u16; TITLE_MAX];
+    let n = GetWindowTextW(hwnd, &mut buf);
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n as usize])
+}
+
+/// 单个 HWND → 窗口目标（不可见/无标题/零尺寸一律 None）
+unsafe fn window_target(hwnd: HWND) -> Option<WindowTarget> {
+    if !IsWindowVisible(hwnd).as_bool() {
+        return None;
+    }
+    let mut rect = RECT::default();
+    // 取不到矩形（窗口刚关闭）不是错误，是这张表少一行
+    GetWindowRect(hwnd, &mut rect).ok()?;
+    let title = window_title(hwnd);
+    let minimized = IsIconic(hwnd).as_bool();
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if !window_kept(&title, w, h, minimized) {
+        return None;
+    }
+    Some(WindowTarget {
+        hwnd: hwnd.0 as isize as i64,
+        title,
+        x: rect.left,
+        y: rect.top,
+        width: w as u32,
+        height: h as u32,
+        minimized,
+    })
+}
+
+unsafe extern "system" fn collect_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // 唯一调用点是本文件下方的 EnumWindows，LPARAM 恒为该栈上 Vec 的裸指针
+    let out = &mut *(lparam.0 as *mut Vec<WindowTarget>);
+    if let Some(t) = window_target(hwnd) {
+        out.push(t);
+    }
+    true.into()
+}
+
 pub struct GdiCapture;
 
 impl GdiCapture {
@@ -229,5 +287,46 @@ impl CapturePort for GdiCapture {
             }
             Ok(frame)
         }
+    }
+
+    fn list_windows(&self) -> Vec<WindowTarget> {
+        // EnumWindows 只给顶层窗口（子窗口不在表里是对的：它们不是用户的"截取目标"）
+        let mut out: Vec<WindowTarget> = Vec::new();
+        unsafe {
+            match EnumWindows(Some(collect_window), LPARAM(&mut out as *mut _ as isize)) {
+                Ok(()) => {}
+                Err(e) => {
+                    // 枚举失败不是"没有窗口"：清空半截结果，消费侧的引导文案才不撒谎
+                    tracing::warn!("EnumWindows 失败，窗口表按空处理: {e}");
+                    out.clear();
+                }
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_kept;
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-4）字面测试名优先于 rustc 命名惯例
+    fn listWindows_filtersZeroSizeAndNoTitle() {
+        // 正对照：正常窗口进表
+        assert!(window_kept("此电脑", 800, 600, false));
+        // 最小化**不过滤**：尺寸照常、坐标是系统摆渡值，过滤它只会得到"莫名少几行"的表，
+        // 拒它是 start_capture 的活（用户要看到明说的原因）
+        assert!(
+            window_kept("此电脑", 800, 600, true),
+            "最小化窗口须带 minimized 标记进表，而不是凭空消失"
+        );
+        // 无标题 / 纯空白标题（消息类隐形窗口）不进表
+        assert!(!window_kept("", 800, 600, false));
+        assert!(!window_kept("  \t ", 800, 600, false));
+        // 零/负尺寸不进表（0 宽或 0 高都截不出东西，负值是矩形反转）
+        assert!(!window_kept("此电脑", 0, 600, false));
+        assert!(!window_kept("此电脑", 800, 0, false));
+        assert!(!window_kept("此电脑", -32000, -32000, false));
     }
 }

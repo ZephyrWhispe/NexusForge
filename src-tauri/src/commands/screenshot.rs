@@ -6,16 +6,30 @@ use crate::state::HostState;
 // ---------------- 截图命令（docs/impl/03 P8）----------------
 // GDI 捕获 / PNG 编解码为阻塞调用，统一 spawn_blocking
 
-/// 启动截图任务：抓全屏帧并返回覆盖层定位信息
+/// 启动截图任务：抓帧并返回覆盖层定位信息。
+/// `hwnd` 为可选参（D-29 B4 T-B4-4）：缺省 = 全屏轨，给出句柄 = 只截该窗。
+/// 加可选参而非新命令——两条轨的产物是同一个任务状态机，分开只会多一条要维护的 ACL 面。
 #[tauri::command]
 pub async fn screenshot_start(
     mode: String,
+    hwnd: Option<i64>,
     state: State<'_, HostState>,
 ) -> Result<screenshot_core::types::TaskStartDto, AppError> {
     let screenshot = state.screenshot.clone();
-    tauri::async_runtime::spawn_blocking(move || screenshot.start_capture(&mode))
+    tauri::async_runtime::spawn_blocking(move || screenshot.start_capture(&mode, hwnd))
         .await
         .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
+/// 可截取窗口表（"截取窗口"下拉）。EnumWindows 是阻塞调用，同样进 spawn_blocking。
+#[tauri::command]
+pub async fn screenshot_windows(
+    state: State<'_, HostState>,
+) -> Result<Vec<screenshot_core::types::WindowTargetDto>, AppError> {
+    let screenshot = state.screenshot.clone();
+    tauri::async_runtime::spawn_blocking(move || screenshot.window_targets())
+        .await
+        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))
 }
 
 /// 覆盖层取背景帧（PNG Base64，编码一次后缓存）

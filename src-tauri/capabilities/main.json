@@ -162,6 +162,7 @@
     "allow-screenshot-pins",
     "allow-screenshot-start",
     "allow-screenshot-task",
+    "allow-screenshot-windows",
     "allow-sync-now",
     "allow-sync-peers",
     "allow-sync-status",

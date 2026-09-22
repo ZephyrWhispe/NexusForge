@@ -313,7 +313,8 @@ export function hostConfigSchema(module: string): Promise<Record<string, unknown
 
 export interface TaskStartDto {
   task_id: string;
-  /** 虚拟桌面原点与尺寸（物理像素），覆盖层窗口定位用 */
+  /** 本次任务定位矩形（物理像素），覆盖层窗口定位用：
+   *  全屏轨 = 虚拟桌面原点与整幅；窗口轨（T-B4-4）= 目标窗的 GetWindowRect */
   x: number;
   y: number;
   width: number;
@@ -326,6 +327,18 @@ export interface TaskStartDto {
   default_actions: string[];
 }
 
+/** 可截取窗口（T-B4-4 `screenshot_windows` 出口，与宿主端口结构同名同型） */
+export interface WindowTargetDto {
+  hwnd: number;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** 最小化窗照样进表并打标：下拉把它排掉，宿主在被选到时明说拒绝 */
+  minimized: boolean;
+}
+
 export interface TaskInfoDto {
   task_id: string;
   /** shot | ocr */
@@ -333,6 +346,11 @@ export interface TaskInfoDto {
   width: number;
   height: number;
   png_b64: string;
+  /**
+   * 窗口轨句柄（T-B4-4）；`null`/缺省 = 全屏轨。覆盖层两条装载路径（预热事件、URL 回退）
+   * 都必然取一次帧，所以这条事实挂在这里而不是 `TaskStartDto`——一个载体、两条路同一个判据。
+   */
+  hwnd?: number | null;
 }
 
 export interface ConfirmRect {
@@ -467,9 +485,13 @@ export interface ShotDataDto {
 }
 
 
-/** 启动截图（抓全屏帧，返回覆盖层定位） */
-export function screenshotStart(mode: "shot" | "ocr"): Promise<TaskStartDto> {
-  return invoke("screenshot_start", { mode });
+/** 启动截图：缺省抓全屏，给出 hwnd 则只截该窗（PrintWindow，被遮挡也抓得全） */
+export function screenshotStart(mode: "shot" | "ocr", hwnd?: number): Promise<TaskStartDto> {
+  return invoke("screenshot_start", { mode, hwnd });
+}
+/** 可截取窗口表（「截取窗口」下拉；跨应用窗口标题面，main 窗独占） */
+export function screenshotWindows(): Promise<WindowTargetDto[]> {
+  return invoke("screenshot_windows");
 }
 /** 覆盖层取背景帧 */
 export function screenshotTask(taskId: string): Promise<TaskInfoDto> {

@@ -902,3 +902,33 @@ fn dead_permission_surface_is_trimmed() {
         );
     }
 }
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-4）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantScreenshotWindows() {
+    // T-B4-4 红线负例：**窗口标题列举是跨应用隐私面**。截图覆盖层/贴图/快捷面板等辅助窗
+    // 没有列他人窗口标题的理由；main-only + 正对照防空洞（本负例若 main 也没拿到就恒真）
+    let caps = load_capabilities();
+    let ident = "allow-screenshot-windows";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（窗口标题枚举是 main-only 隐私面）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 {ident}，否则本负例是空洞"
+    );
+}

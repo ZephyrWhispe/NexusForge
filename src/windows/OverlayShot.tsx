@@ -20,6 +20,12 @@ import { confirmAction, type ConfirmOptions } from "../stores/confirm";
 import InlineError from "../components/InlineError";
 import { cancelOverlay } from "./overlayController";
 import {
+  isWindowTask,
+  wholeFrameCrop,
+  wholeWindowCss,
+  type OverlayRect,
+} from "./overlay/windowMode";
+import {
   ANN_KIND_NAME,
   HIGHLIGHT_WIDTH_SCALE,
   LAYER_OP_LABEL,
@@ -605,19 +611,28 @@ export default function OverlayShot() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, rect, cancel, discardToSelect, textEditing]);
 
-  /** 选区确认：物理坐标裁剪 → 进入编辑阶段（ocr 模式自动识别） */
-  const confirmSelection = useCallback(async () => {
-    if (!task || !rect) return;
+  /**
+   * 选区确认：物理坐标裁剪 → 进入编辑阶段（ocr 模式自动识别）。
+   *
+   * `physical` 显式覆盖是给窗口轨自动整窗用的（T-B4-4）：那条路径的选区就是该窗帧本身，
+   * 按帧尺寸算与视口无关；走 CSS 换算反而要赌 `window.innerWidth` 已经反映刚设过的窗口尺寸
+   * （预热窗口从别的尺寸改过来，这一拍没有同步点）。缺省臂=拖框选区照旧换算，一字未动。
+   */
+  const confirmSelection = useCallback(async (physical?: OverlayRect) => {
+    if (!task) return;
     const viewW = window.innerWidth;
     const viewH = window.innerHeight;
-    const physical = {
-      x: cssToPhysical(rect.x, task.width, viewW),
-      y: cssToPhysical(rect.y, task.height, viewH),
-      w: cssToPhysical(rect.w, task.width, viewW),
-      h: cssToPhysical(rect.h, task.height, viewH),
-    };
+    const box: OverlayRect | null =
+      physical ??
+      (rect && {
+        x: cssToPhysical(rect.x, task.width, viewW),
+        y: cssToPhysical(rect.y, task.height, viewH),
+        w: cssToPhysical(rect.w, task.width, viewW),
+        h: cssToPhysical(rect.h, task.height, viewH),
+      });
+    if (!box) return;
     try {
-      const c = await screenshotConfirm(task.task_id, physical);
+      const c = await screenshotConfirm(task.task_id, box);
       setCrop(c);
       setStage("edit");
       if (task.mode === "ocr") {
@@ -630,6 +645,20 @@ export default function OverlayShot() {
     // runOcr 是本回调之后的 const（TDZ 无法入依赖表）；其只读 ref/setter，快照无害
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task, rect]);
+
+  /**
+   * 窗口轨：零拖框、选区即整窗（T-B4-4）。一次性按 task_id 记账——用户按「重选」回到
+   * 选区阶段后不该再被自动铺满一次（那会把"重新框选"这个钮变成一个死循环）。
+   */
+  const windowAutoDone = useRef<string | null>(null);
+  useEffect(() => {
+    const t = task;
+    if (!t || !isWindowTask(t) || stage !== "select") return;
+    if (windowAutoDone.current === t.task_id) return;
+    windowAutoDone.current = t.task_id;
+    setRect(wholeWindowCss(window.innerWidth, window.innerHeight));
+    void confirmSelection(wholeFrameCrop(t));
+  }, [task, stage, confirmSelection]);
 
   // ---------------- 编辑阶段：canvas 标注（docs/impl/03 P4 状态机）----------------
 

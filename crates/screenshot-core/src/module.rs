@@ -29,7 +29,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::store::ShotStore;
 use crate::types::{
     effective_actions, Annotation, ConfirmRect, CropDto, FinishDto, FinishRequest, PinDataDto,
-    PinDto, ScreenshotConfig, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
+    PinDto, ScreenshotConfig, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto, WindowTargetDto,
     POST_ACTION_WHITELIST,
 };
 use crate::util;
@@ -83,6 +83,9 @@ struct PendingTask {
     mode: String,
     /// 全屏帧 PNG 缓存（4K 一次编码 ~200ms，缓存避免重复编码）
     info_b64: Option<String>,
+    /// 窗口轨句柄（D-29 B4 T-B4-4）；`None` = 全屏轨。随帧一起存：
+    /// 覆盖层经 `task_info` 拿它决定"跳过拖框"，两条装载路径因此共用一个判据。
+    hwnd: Option<i64>,
 }
 
 /// Pin 贴图记录（持久化到 {appData}/pins.json）
@@ -385,14 +388,53 @@ impl HotkeyProvider for ScreenshotModule {
 impl ScreenshotModule {
     // ---------------- 任务状态机（P8 IPC 后端）----------------
 
-    /// 全屏抓帧（阻塞 GDI 调用，命令层负责 spawn_blocking）
-    pub fn start_capture(&self, mode: &str) -> Result<TaskStartDto, AppError> {
+    /// 抓帧开任务（阻塞 GDI 调用，命令层负责 spawn_blocking）。
+    ///
+    /// `hwnd: None` = 全屏轨（虚拟桌面整幅，逐字沿用旧行为）；`Some(h)` = 窗口轨
+    /// （D-29 B4 T-B4-4）：抓帧走 [`CaptureTarget::Window`]（PrintWindow，被遮挡也抓得全），
+    /// 定位矩形取该窗的 `GetWindowRect` 口径。覆盖层窗口因此贴在目标窗之上、背景即该窗帧，
+    /// 选区坐标仍是"帧内坐标"，`confirm` 的裁剪逻辑一字节都不用改。
+    pub fn start_capture(&self, mode: &str, hwnd: Option<i64>) -> Result<TaskStartDto, AppError> {
         let capture = self
             .capture
             .read()
             .clone()
             .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "模块未就绪"))?;
-        let frame = capture.capture(CaptureTarget::FullScreen { monitor: 0 })?;
+        // 窗口轨先查表再抓帧：拿不到矩形就没法定位覆盖层，而"抓到了却摆错地方"比"没抓"
+        // 更糟——用户会拿着一张裁错的图，且没有任何线索指向句柄这条根因。
+        let window = match hwnd {
+            Some(h) => {
+                let w = capture
+                    .list_windows()
+                    .into_iter()
+                    .find(|w| w.hwnd == h)
+                    .ok_or_else(|| {
+                        AppError::module(
+                            "SCREENSHOT_WINDOW_001",
+                            format!(
+                                "窗口句柄 {h} 不在当前窗口表中（可能已关闭，或属于更高权限进程）"
+                            ),
+                            Some("请重新打开窗口列表再选择"),
+                        )
+                    })?;
+                if w.minimized {
+                    return Err(AppError::module(
+                        "SCREENSHOT_WINDOW_002",
+                        format!("窗口「{}」处于最小化状态，无法截取", w.title),
+                        Some("请先恢复该窗口：PrintWindow 对最小化窗只给得出空图"),
+                    ));
+                }
+                Some(w)
+            }
+            None => None,
+        };
+        let target = match &window {
+            Some(w) => CaptureTarget::Window {
+                hwnd: w.hwnd as isize,
+            },
+            None => CaptureTarget::FullScreen { monitor: 0 },
+        };
+        let frame = capture.capture(target)?;
         if util::is_black_frame(&frame) {
             return Err(AppError::module(
                 "SCREENSHOT_CAPTURE_002",
@@ -401,14 +443,17 @@ impl ScreenshotModule {
             ));
         }
         // 虚拟桌面 bounds（覆盖层窗口定位；副屏负坐标场景见 docs/impl/03 P2）
-        let (vx, vy, vw, vh) = capture
-            .enumerate_monitors()
-            .ok()
-            .and_then(|m| {
-                m.first()
-                    .map(|i| (i.x, i.y, i.width as i32, i.height as i32))
-            })
-            .unwrap_or((0, 0, frame.width as i32, frame.height as i32));
+        let (x, y, width, height) = match &window {
+            Some(w) => (w.x, w.y, w.width as i32, w.height as i32),
+            None => capture
+                .enumerate_monitors()
+                .ok()
+                .and_then(|m| {
+                    m.first()
+                        .map(|i| (i.x, i.y, i.width as i32, i.height as i32))
+                })
+                .unwrap_or((0, 0, frame.width as i32, frame.height as i32)),
+        };
         let task_id = uuid::Uuid::now_v7().to_string();
         let mut pending = self.pending.lock();
         pending.clear(); // 单任务模型：替换遗留任务，释放旧帧内存
@@ -418,14 +463,15 @@ impl ScreenshotModule {
                 frame,
                 mode: mode.to_owned(),
                 info_b64: None,
+                hwnd,
             },
         );
         Ok(TaskStartDto {
             task_id,
-            x: vx,
-            y: vy,
-            width: vw,
-            height: vh,
+            x,
+            y,
+            width,
+            height,
             // 配置真源直达覆盖层：这里是它读偏好的唯一途径（§9.1-⑪ 不给覆盖层开 config_get）
             default_actions: effective_actions(
                 &self
@@ -436,6 +482,21 @@ impl ScreenshotModule {
                 &[],
             ),
         })
+    }
+
+    /// 窗口表透传（D-29 B4 T-B4-4）：端口缺失或端口没有枚举能力 → **空表 + warn**，
+    /// 不是错误。枚举不出窗口是端口的能力边界，把它上报成一次失败会让面板弹红色 toast，
+    /// 而正确反应是显"当前环境没有可截取的窗口"引导文案。
+    pub fn window_targets(&self) -> Vec<WindowTargetDto> {
+        let Some(capture) = self.capture.read().clone() else {
+            tracing::warn!("window_targets: CapturePort 未注册，按空表处理");
+            return Vec::new();
+        };
+        let wins = capture.list_windows();
+        if wins.is_empty() {
+            tracing::warn!("window_targets: 端口未给出任何窗口（枚举能力缺失或全部被过滤）");
+        }
+        wins.into_iter().map(WindowTargetDto::from).collect()
     }
 
     /// 覆盖层取背景帧（PNG Base64，编码一次后缓存）
@@ -459,6 +520,7 @@ impl ScreenshotModule {
             width: task.frame.width,
             height: task.frame.height,
             png_b64: b64,
+            hwnd: task.hwnd,
         })
     }
 
@@ -1833,5 +1895,149 @@ mod tests {
         assert_eq!(ev.source, "screenshot");
         assert_eq!(ev.payload["mode"], "shot");
         assert_eq!(m.tray_menu_items()[0].label, "截图选区");
+    }
+
+    // ---------------- T-B4-4：窗口轨（枚举 + 按句柄抓帧）----------------
+
+    fn fake_frame() -> host_core::ports::Frame {
+        host_core::ports::Frame {
+            width: 4,
+            height: 4,
+            // 全非零：`is_black_frame` 采样 16 点，任一非 0 即放行（假端口不该自己把任务判死）
+            bgra: Arc::from(vec![7u8; 4 * 4 * 4].into_boxed_slice()),
+            dpi_scale: 1.0,
+            monitor_id: 0,
+        }
+    }
+
+    /// 记录型窗口端口：收到的 `CaptureTarget` 全部存下，另备一张固定窗口表
+    #[derive(Default)]
+    struct FakeCapture {
+        targets: std::sync::Mutex<Vec<CaptureTarget>>,
+        windows: std::sync::Mutex<Vec<host_core::ports::WindowTarget>>,
+    }
+
+    /// 只会两个旧方法的端口：`list_windows` 走 trait 默认实现臂
+    struct LegacyCapture;
+
+    fn win(hwnd: i64, title: &str, minimized: bool) -> host_core::ports::WindowTarget {
+        host_core::ports::WindowTarget {
+            hwnd,
+            title: title.into(),
+            x: 100,
+            y: 20,
+            width: 800,
+            height: 600,
+            minimized,
+        }
+    }
+
+    impl CapturePort for FakeCapture {
+        fn enumerate_monitors(&self) -> Result<Vec<host_core::ports::MonitorInfo>, AppError> {
+            Ok(vec![host_core::ports::MonitorInfo {
+                id: 0,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                dpi_scale: 1.0,
+            }])
+        }
+        fn capture(&self, target: CaptureTarget) -> Result<host_core::ports::Frame, AppError> {
+            self.targets.lock().unwrap().push(target);
+            Ok(fake_frame())
+        }
+        fn list_windows(&self) -> Vec<host_core::ports::WindowTarget> {
+            self.windows.lock().unwrap().clone()
+        }
+    }
+
+    impl CapturePort for LegacyCapture {
+        fn enumerate_monitors(&self) -> Result<Vec<host_core::ports::MonitorInfo>, AppError> {
+            Ok(vec![])
+        }
+        fn capture(&self, _target: CaptureTarget) -> Result<host_core::ports::Frame, AppError> {
+            Ok(fake_frame())
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-4）字面测试名优先于 rustc 命名惯例
+    fn startCapture_hwndPassed_routesToWindowTarget_notFullScreen() {
+        let m = ScreenshotModule::new();
+        let port = Arc::new(FakeCapture {
+            windows: std::sync::Mutex::new(vec![
+                win(4242, "此电脑", false),
+                win(5, "收件箱", true),
+            ]),
+            ..Default::default()
+        });
+        *m.capture.write() = Some(port.clone());
+
+        let dto = m.start_capture("shot", Some(4242)).unwrap();
+        let got = port.targets.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert!(
+            matches!(got[0], CaptureTarget::Window { hwnd: 4242 }),
+            "带句柄必须打到窗口轨，实收 {:?}",
+            got[0]
+        );
+        // 定位矩形 = 该窗矩形：覆盖层贴在目标窗之上，选区坐标因此仍是帧内坐标
+        assert_eq!((dto.x, dto.y, dto.width, dto.height), (100, 20, 800, 600));
+        // 窗口态随帧存、经 task_info 带下去（两条装载路径共用一个判据）
+        assert_eq!(
+            m.task_info(&dto.task_id).unwrap().hwnd,
+            Some(4242),
+            "覆盖层据此跳过拖框"
+        );
+
+        // 正对照（缺省臂）：不传句柄 → 全屏 bounds，逐字沿用旧行为
+        let full = m.start_capture("shot", None).unwrap();
+        let got = port.targets.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert!(
+            matches!(got[1], CaptureTarget::FullScreen { monitor: 0 }),
+            "缺省臂仍是全屏，实收 {:?}",
+            got[1]
+        );
+        assert_eq!(m.task_info(&full.task_id).unwrap().hwnd, None);
+        assert_eq!((full.width, full.height), (1920, 1080));
+
+        // 失效句柄：明说原因，而不是悄悄改抓全屏（用户刚点的就是那一行）
+        let e = m.start_capture("shot", Some(9999)).unwrap_err();
+        assert_eq!(e.code(), "SCREENSHOT_WINDOW_001");
+        assert!(e.to_string().contains("9999"), "错误须点名被拒句柄：{e}");
+        // 最小化窗：表里看得见，点上必拒（PrintWindow 对最小化窗只给得出空图）
+        let e = m.start_capture("shot", Some(5)).unwrap_err();
+        assert_eq!(e.code(), "SCREENSHOT_WINDOW_002");
+        assert!(e.to_string().contains("收件箱"), "文案须点名是哪个窗：{e}");
+        assert_eq!(
+            port.targets.lock().unwrap().len(),
+            2,
+            "两次被拒的调用一次帧都不该抓"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-4）字面测试名优先于 rustc 命名惯例
+    fn windowTargets_portWithoutList_returnsEmptyNotError() {
+        // trait 默认实现臂：端口没有枚举能力 → 空表（不 panic、不谎报一套坐标、不是错误）
+        let m = ScreenshotModule::new();
+        *m.capture.write() = Some(Arc::new(LegacyCapture));
+        assert!(m.window_targets().is_empty());
+
+        // 正对照：装上会枚举的端口就真有表（否则上面那行可以是"永远返回空"的假绿）
+        *m.capture.write() = Some(Arc::new(FakeCapture {
+            windows: std::sync::Mutex::new(vec![win(4242, "此电脑", false)]),
+            ..Default::default()
+        }));
+        let listed = m.window_targets();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].hwnd, listed[0].title.as_str()), (4242, "此电脑"));
+        assert_eq!((listed[0].width, listed[0].height), (800, 600));
+        assert!(!listed[0].minimized);
+
+        // 端口未注册（init 之前）同样是空表：命令层不该因一次枚举失败弹红
+        assert!(ScreenshotModule::new().window_targets().is_empty());
     }
 }

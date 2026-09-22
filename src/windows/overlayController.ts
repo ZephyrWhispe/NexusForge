@@ -56,16 +56,19 @@ export async function prewarmOverlay(): Promise<void> {
   }
 }
 
-export async function startOverlay(mode: "shot" | "ocr"): Promise<void> {
+export async function startOverlay(mode: "shot" | "ocr", hwnd?: number): Promise<void> {
   if (!IN_TAURI) return;
   if (creating) return;
   creating = true; // 先于任何 await 置位，防事件双发竞态
   try {
     let info: TaskStartDto;
     try {
-      info = await screenshotStart(mode);
+      info = await screenshotStart(mode, hwnd);
     } catch (e) {
-      hostLog("error", `startOverlay: screenshot_start 失败 mode=${mode}: ${JSON.stringify(e)}`);
+      hostLog(
+        "error",
+        `startOverlay: screenshot_start 失败 mode=${mode} hwnd=${hwnd ?? "全屏"}: ${JSON.stringify(e)}`,
+      );
       return;
     }
     const existing = await WebviewWindow.getByLabel("overlay");

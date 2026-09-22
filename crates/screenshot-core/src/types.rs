@@ -172,7 +172,8 @@ impl Annotation {
 #[derive(Debug, Serialize)]
 pub struct TaskStartDto {
     pub task_id: String,
-    /// 虚拟桌面原点与尺寸（物理像素），覆盖层窗口定位用
+    /// 本次任务的定位矩形（物理像素），覆盖层窗口定位用：
+    /// 全屏轨 = 虚拟桌面原点与整幅；窗口轨 = 目标窗的 `GetWindowRect`
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -184,6 +185,36 @@ pub struct TaskStartDto {
     pub default_actions: Vec<String>,
 }
 
+/// 可选窗口（`screenshot_windows` 出口，D-29 B4 T-B4-4）。
+///
+/// 与 `host_core::ports::WindowTarget` 同名同型是刻意的：这一层只是把端口结构换成
+/// "模块自己的 DTO"，好让命令面签名不泄漏 host-core 类型；字段一旦开始分叉，
+/// 就再没人看得出下拉里那行标题和实际窗口是不是同一件事。
+#[derive(Debug, Serialize)]
+pub struct WindowTargetDto {
+    pub hwnd: i64,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub minimized: bool,
+}
+
+impl From<host_core::ports::WindowTarget> for WindowTargetDto {
+    fn from(w: host_core::ports::WindowTarget) -> Self {
+        Self {
+            hwnd: w.hwnd,
+            title: w.title,
+            x: w.x,
+            y: w.y,
+            width: w.width,
+            height: w.height,
+            minimized: w.minimized,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct TaskInfoDto {
     pub task_id: String,
@@ -193,6 +224,11 @@ pub struct TaskInfoDto {
     pub height: u32,
     /// 全屏帧 PNG（Base64），覆盖层背景
     pub png_b64: String,
+    /// 窗口轨句柄（D-29 B4 T-B4-4）；`None` = 全屏轨。
+    /// 覆盖层据此跳过拖框、把选区初值铺成整窗。它是这条事实的**唯一**携带者：
+    /// 装载覆盖层的两条路（预热事件带 `TaskStartDto`、URL 回退带 `?task=`）都必然取一次帧，
+    /// 挂在这里就等于"两条路同一个判据"，不必再给回退路径加一个 URL 参数。
+    pub hwnd: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
