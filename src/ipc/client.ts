@@ -343,7 +343,17 @@ export interface CropDto {
 }
 
 export interface AnnotationDto {
-  kind: "pen" | "rect" | "ellipse" | "arrow" | "text" | "mosaic" | "number";
+  kind:
+    | "pen"
+    | "rect"
+    | "ellipse"
+    | "line"
+    | "arrow"
+    | "highlight"
+    | "text"
+    | "mosaic"
+    | "number"
+    | "blur";
   color: string;
   width: number;
   points: [number, number][];
@@ -353,6 +363,10 @@ export interface AnnotationDto {
   layer?: number;
   /** 锁定：仍绘制，点选穿透 */
   locked?: boolean;
+  /** 形状类是否实心（缺省 false = 旧条目仍是描边框） */
+  fill?: boolean;
+  /** 笔画透明度 0..1（缺省 1 = 旧条目不透明；独立键而非 #RRGGBBAA 字符串扩展） */
+  alpha?: number;
 }
 
 

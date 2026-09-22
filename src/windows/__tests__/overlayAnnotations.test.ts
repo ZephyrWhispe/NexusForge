@@ -32,6 +32,8 @@ function ann(kind: Ann["kind"], layer: number, opts: Partial<Ann> = {}): Ann {
     ],
     layer,
     locked: false,
+    alpha: 1,
+    fill: false,
     ...opts,
   };
 }

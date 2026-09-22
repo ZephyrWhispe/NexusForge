@@ -341,6 +341,8 @@ mod tests {
             seq: None,
             layer: 7,
             locked: true,
+            fill: true,
+            alpha: 0.5,
         };
         s.set_annotations("a", Some(&serde_json::to_string(&[ann]).unwrap()))
             .unwrap();
@@ -348,6 +350,8 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].layer, 7);
         assert!(back[0].locked);
+        assert!(back[0].fill);
+        assert_eq!(back[0].alpha, 0.5);
         // 显式写 NULL = 清空（不是残留旧 JSON）
         s.set_annotations("a", None).unwrap();
         assert!(s.annotations_of("a").unwrap().is_empty());

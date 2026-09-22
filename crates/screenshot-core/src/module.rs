@@ -891,14 +891,18 @@ mod tests {
             seq: None,
             layer,
             locked: false,
+            fill: false,
+            alpha: 1.0,
         }
     }
 
     /// 只入历史、不跑后处理动作的 finish（auto_* 全关：测试不碰剪贴板与磁盘保存）
     fn finish_only(m: &ScreenshotModule, task_id: &str, annotations: Vec<Annotation>) {
-        let mut cfg = ScreenshotConfig::default();
-        cfg.auto_save = false;
-        cfg.auto_copy = false;
+        let cfg = ScreenshotConfig {
+            auto_save: false,
+            auto_copy: false,
+            ..Default::default()
+        };
         *m.config.try_lock().unwrap() = cfg;
         let png = util::encode_png_b64(2, 2, &[0u8; 16]).unwrap();
         let req = FinishRequest {
@@ -936,7 +940,7 @@ mod tests {
             vec![(1, "rect".into()), (3, "ellipse".into()), (5, "pen".into())]
         );
         // 列内容确实是 JSON 文本（而不是逐条一行之类的自定义编码），首元素就是最低层
-        let raw = rusqlite::Connection::open(&dir.path().join("shots.db"))
+        let raw = rusqlite::Connection::open(dir.path().join("shots.db"))
             .unwrap()
             .query_row("SELECT annotations FROM shots WHERE id = 't1'", [], |r| {
                 r.get::<_, Option<String>>(0)
@@ -970,7 +974,7 @@ mod tests {
         let store = store_of(dir.path());
         *m.store.write() = Some(store.clone());
         finish_only(&m, "empty", vec![]);
-        let raw = rusqlite::Connection::open(&dir.path().join("shots.db"))
+        let raw = rusqlite::Connection::open(dir.path().join("shots.db"))
             .unwrap()
             .query_row(
                 "SELECT annotations FROM shots WHERE id = 'empty'",
@@ -982,7 +986,7 @@ mod tests {
         assert!(store.annotations_of("empty").unwrap().is_empty());
         // 正对照：同库一条带标注的落 Some(JSON)，两态可分辨
         finish_only(&m, "with", vec![ann("rect", 0)]);
-        let raw2 = rusqlite::Connection::open(&dir.path().join("shots.db"))
+        let raw2 = rusqlite::Connection::open(dir.path().join("shots.db"))
             .unwrap()
             .query_row("SELECT annotations FROM shots WHERE id = 'with'", [], |r| {
                 r.get::<_, Option<String>>(0)

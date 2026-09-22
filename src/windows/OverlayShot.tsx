@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { makeStyles, tokens, Button, Text } from "@fluentui/react-components";
+import { makeStyles, tokens, Button, Slider, Switch, Text } from "@fluentui/react-components";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
@@ -21,19 +21,29 @@ import InlineError from "../components/InlineError";
 import { cancelOverlay } from "./overlayController";
 import {
   ANN_KIND_NAME,
+  HIGHLIGHT_WIDTH_SCALE,
   LAYER_OP_LABEL,
+  TOOL_ABBR,
+  TOOL_KINDS,
   boundsOf,
+  finishTextDraft,
   hitTest,
+  honoursFill,
   layerRows,
   moveLayer,
-  nextLayer,
   removeAt,
   sortByLayer,
+  stampNewAnn,
+  strokeAlphaOf,
   toggleLock,
   translate,
   type Ann,
+  type AnnKind,
   type LayerOp,
+  type TextDraft,
+  type Tool,
 } from "./overlay/annotations";
+import { applyBoxBlurPass } from "./overlay/pixel";
 
 /**
  * 截图覆盖层（docs/impl/03 P3 选区 + P4 标注 + P5 动作 + docs/impl/04 O7 结果面板）。
@@ -227,12 +237,35 @@ const useStyles = makeStyles({
     borderRadius: "3px",
     border: `1px solid ${tokens.colorNeutralStroke1}`,
   },
+  /** 内联文字输入框：绝对定位在点击处（canvasBox 已是 relative 容器） */
+  textInput: {
+    position: "absolute",
+    minWidth: "140px",
+    userSelect: "text",
+    fontSize: "14px",
+    padding: "1px 4px",
+    backgroundColor: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground1,
+    border: `1px solid ${tokens.colorBrandStroke1}`,
+    borderRadius: tokens.borderRadiusSmall,
+  },
+  /** 自定义色：原生 `<input type="color">` 只留一个色块那么大的可点区 */
+  colorInput: {
+    width: "22px",
+    height: "22px",
+    padding: 0,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderRadius: "3px",
+    background: "transparent",
+  },
+  alphaCell: {
+    display: "flex",
+    alignItems: "center",
+    width: "120px",
+  },
 });
 
 type Stage = "select" | "edit";
-type AnnKind = AnnotationDto["kind"];
-/** `select` 是伪工具：它不产生标注，只把 mousedown 交给图层命中测试（T-B4-1） */
-type Tool = AnnKind | "select";
 
 const COLORS = ["#ff4d4f", "#ffb020", "#52c41a", "#1677ff", "#ffffff"];
 const WIDTHS = [2, 4, 8];
@@ -243,6 +276,16 @@ function cssToPhysical(css: number, physical: number, view: number): number {
   return Math.round((css * physical) / view);
 }
 
+/** canvas 像素 → 容器内 CSS 偏移（`toCanvas` 的逆变换）：内联文字输入框要落在点击处 */
+function canvasToCss(
+  pt: { x: number; y: number },
+  canvas: HTMLCanvasElement | null,
+): { left: number; top: number } {
+  const r = canvas?.getBoundingClientRect();
+  if (!canvas || !r || r.width <= 0 || r.height <= 0) return { left: pt.x, top: pt.y };
+  return { left: (pt.x * r.width) / canvas.width, top: (pt.y * r.height) / canvas.height };
+}
+
 function b64ToUrl(b64: string): string {
   return `data:image/png;base64,${b64}`;
 }
@@ -250,6 +293,16 @@ function b64ToUrl(b64: string): string {
 function dataUrlToB64(url: string): string {
   const idx = url.indexOf(",");
   return idx >= 0 ? url.slice(idx + 1) : url;
+}
+
+/** 折线描边（pen / highlight 共用）：单点也留可见痕迹，否则单击成笔等于什么都不画 */
+function strokePath(ctx: CanvasRenderingContext2D, pts: [number, number][]) {
+  if (pts.length === 0) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  if (pts.length === 1) ctx.lineTo(pts[0][0] + 0.01, pts[0][1]);
+  ctx.stroke();
 }
 
 /** 错误规范化：Tauri invoke 抛的是对象，String(e) 会显示成 "[object Object]" */
@@ -278,6 +331,19 @@ export default function OverlayShot() {
   const [tool, setTool] = useState<Tool>("rect");
   const [color, setColor] = useState(COLORS[3]);
   const [strokeWidth, setStrokeWidth] = useState(4);
+  /** 笔画透明度（样式条 Slider 的取值区间 0.1–1.0：给不到 0，全透明的笔画等于看不见） */
+  const [strokeAlpha, setStrokeAlpha] = useState(1);
+  /** 形状类是否实心（开关对非形状工具禁用，见样式条） */
+  const [fillShape, setFillShape] = useState(false);
+  /** 文字内联编辑草稿（null = 无进行中的输入）：取代原生弹窗式输入 */
+  const [textDraft, setTextDraft] = useState<TextDraft | null>(null);
+  /**
+   * 草稿的"未落定"凭据。Enter 提交后往往紧跟一次 blur，两个入口都通向落定，
+   * 只有先取走草稿的那个会真的提交，后到的取到 null 即返回。
+   */
+  const textDraftRef = useRef<TextDraft | null>(null);
+  /** 内联编辑中：Esc/Enter 归输入框，全局快捷键让位（判据只看"有没有草稿"，与内容无关） */
+  const textEditing = textDraft !== null;
 
   // 选区（CSS 像素）
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -302,7 +368,7 @@ export default function OverlayShot() {
   /** 当前笔画路径（mousedown 起点 + mousemove 采样） */
   const pathRef = useRef<[number, number][]>([]);
   /** 笔画开始时定格的样式（拖拽中改工具栏不影响进行中的笔画） */
-  const strokeStyle = useRef<{ color: string; width: number }>({ color: "#1677ff", width: 4 });
+  const strokeStyle = useRef({ color: "#1677ff", width: 4, alpha: 1, fill: false });
   /** 撤销/重做栈深度（state：驱动按钮 disabled，避免 ref 不触发渲染） */
   const [stackCounts, setStackCounts] = useState({ undo: 0, redo: 0 });
 
@@ -319,6 +385,8 @@ export default function OverlayShot() {
       redoRef.current = [];
       setLayerList([]);
       setSelectedIdx(null);
+      textDraftRef.current = null;
+      setTextDraft(null);
       setStackCounts({ undo: 0, redo: 0 });
       setError(null);
       setActionError(null);
@@ -420,6 +488,8 @@ export default function OverlayShot() {
     redoRef.current = [];
     setLayerList([]);
     setSelectedIdx(null);
+    textDraftRef.current = null;
+    setTextDraft(null);
     setStackCounts({ undo: 0, redo: 0 });
     setStage("select");
     setRect(null);
@@ -429,6 +499,8 @@ export default function OverlayShot() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (confirmPending.current) return;
+      // 内联文字编辑中：本窗全局键（Esc/Enter/Ctrl+Z…）一律让位给输入框
+      if (textEditing) return;
       if (e.key === "Escape") {
         e.preventDefault();
         if (stage === "edit") void discardToSelect();
@@ -457,7 +529,7 @@ export default function OverlayShot() {
     // undo/redo/confirmSelection 为 ref-only 普通函数（每次渲染新身份），入依赖表
     // 会导致每帧重挂监听且行为不变；stage/rect/cancel 已在表内保证语义快照
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, rect, cancel, discardToSelect]);
+  }, [stage, rect, cancel, discardToSelect, textEditing]);
 
   /** 选区确认：物理坐标裁剪 → 进入编辑阶段（ocr 模式自动识别） */
   const confirmSelection = useCallback(async () => {
@@ -508,6 +580,8 @@ export default function OverlayShot() {
       redoRef.current = [];
       setLayerList([]);
       setSelectedIdx(null);
+      textDraftRef.current = null;
+      setTextDraft(null);
       setStackCounts({ undo: 0, redo: 0 });
     };
     img.src = b64ToUrl(c.png_b64);
@@ -578,26 +652,38 @@ export default function OverlayShot() {
     ctx.lineWidth = ann.width;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
+    // 高亮在此处就被钳到 HIGHLIGHT_ALPHA_MAX：预览、提交、重放走的是同一个数
+    ctx.globalAlpha = strokeAlphaOf(ann.kind, ann.alpha ?? 1);
+    const fill = ann.fill === true;
     const pts = ann.points;
     switch (ann.kind) {
       case "pen": {
-        if (pts.length === 0) break;
+        strokePath(ctx, pts);
+        break;
+      }
+      case "highlight": {
+        // 荧光笔与画笔的全部区别就是这两处常量：宽 ×4、平头（首尾不鼓包），加上钳位透明度
+        ctx.lineCap = "butt";
+        ctx.lineWidth = ann.width * HIGHLIGHT_WIDTH_SCALE;
+        strokePath(ctx, pts);
+        break;
+      }
+      case "line": {
+        if (pts.length < 2) break;
         ctx.beginPath();
         ctx.moveTo(pts[0][0], pts[0][1]);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-        // 单击（路径只有一点）：画一个点
-        if (pts.length === 1) ctx.lineTo(pts[0][0] + 0.01, pts[0][1]);
+        ctx.lineTo(pts[1][0], pts[1][1]);
         ctx.stroke();
         break;
       }
       case "rect": {
         if (pts.length < 2) break;
-        ctx.strokeRect(
-          Math.min(pts[0][0], pts[1][0]),
-          Math.min(pts[0][1], pts[1][1]),
-          Math.abs(pts[1][0] - pts[0][0]),
-          Math.abs(pts[1][1] - pts[0][1]),
-        );
+        const x = Math.min(pts[0][0], pts[1][0]);
+        const y = Math.min(pts[0][1], pts[1][1]);
+        const w = Math.abs(pts[1][0] - pts[0][0]);
+        const h = Math.abs(pts[1][1] - pts[0][1]);
+        if (fill) ctx.fillRect(x, y, w, h);
+        else ctx.strokeRect(x, y, w, h);
         break;
       }
       case "ellipse": {
@@ -612,7 +698,20 @@ export default function OverlayShot() {
           0,
           Math.PI * 2,
         );
-        ctx.stroke();
+        if (fill) ctx.fill();
+        else ctx.stroke();
+        break;
+      }
+      case "blur": {
+        if (pts.length < 2) break;
+        const x0 = Math.max(0, Math.round(Math.min(pts[0][0], pts[1][0])));
+        const y0 = Math.max(0, Math.round(Math.min(pts[0][1], pts[1][1])));
+        const w = Math.min(ctx.canvas.width - x0, Math.round(Math.abs(pts[1][0] - pts[0][0])));
+        const h = Math.min(ctx.canvas.height - y0, Math.round(Math.abs(pts[1][1] - pts[0][1])));
+        if (w <= 0 || h <= 0) break;
+        const data = ctx.getImageData(x0, y0, w, h);
+        applyBoxBlurPass(data, Math.max(2, Math.round(ann.width * 2)));
+        ctx.putImageData(data, x0, y0);
         break;
       }
       case "arrow": {
@@ -636,6 +735,8 @@ export default function OverlayShot() {
       case "text": {
         if (!ann.text || pts.length < 1) break;
         ctx.font = `bold ${ann.width * 6 + 8}px "Segoe UI", sans-serif`;
+        // 序号绘制把 textAlign 改成了 center，不在此复位就会串到后画的文字上（重放序无关性）
+        ctx.textAlign = "left";
         ctx.textBaseline = "top";
         ctx.fillText(ann.text, pts[0][0], pts[0][1]);
         break;
@@ -668,6 +769,7 @@ export default function OverlayShot() {
         break;
       }
     }
+    ctx.globalAlpha = 1;
   };
 
   /** 全量重放：离屏画布 = 底图 + 全部标注（按 layer 升序），再同步到可见画布 */
@@ -696,7 +798,8 @@ export default function OverlayShot() {
 
   /**
    * 提交一条标注：增量写入离屏画布 + 入撤销栈 + 清空重做栈。
-   * layer 在这里定格（新笔恒为最上层），所以增量绘制与 sortByLayer 全量重放同序。
+   * layer/alpha/fill 在 stampNewAnn（纯模块）里定格，本处只负责画与入栈——
+   * 高亮的钳位透明度因此"提交的就是显示的那个数"，历史读回来重画也是同一个数。
    */
   const commitAnn = (draft: AnnotationDto) => {
     const committed = committedRef.current;
@@ -704,7 +807,7 @@ export default function OverlayShot() {
     if (!committed || !canvas) return;
     const cctx = committed.getContext("2d");
     if (!cctx) return;
-    const ann: Ann = { ...draft, layer: nextLayer(annsRef.current), locked: false };
+    const ann = stampNewAnn(annsRef.current, draft);
     applyAnn(cctx, ann);
     annsRef.current.push(ann);
     redoRef.current = [];
@@ -713,6 +816,19 @@ export default function OverlayShot() {
     vctx?.clearRect(0, 0, canvas.width, canvas.height);
     vctx?.drawImage(committed, 0, 0);
     syncStackCounts();
+  };
+
+  /**
+   * 内联文字落定：commit（Enter / 失焦）与 cancel（Esc）都先取走草稿凭据再决定是否画。
+   * "要不要产生一条标注"由纯函数 finishTextDraft 裁决（空值与纯空白同样零标注零栈条目）。
+   */
+  const settleText = (action: "commit" | "cancel") => {
+    const draft = textDraftRef.current;
+    if (!draft) return;
+    textDraftRef.current = null;
+    setTextDraft(null);
+    const done = finishTextDraft(draft, action, { color, width: strokeWidth });
+    if (done) commitAnn(done);
   };
 
   const undo = () => {
@@ -778,7 +894,11 @@ export default function OverlayShot() {
   }, [selectedIdx, layerList]);
 
   /** 实时预览：可见画布 = 已提交合成 + 进行中笔画（形状类每帧从离屏重绘） */
-  const previewShape = (from: { x: number; y: number }, to: { x: number; y: number }) => {
+  const previewShape = (
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    path?: [number, number][],
+  ) => {
     const canvas = canvasRef.current;
     const committed = committedRef.current;
     if (!canvas || !committed) return;
@@ -790,13 +910,12 @@ export default function OverlayShot() {
     // 序号预览用"下一个序号"（提交时定格为同值）
     const seq = annsRef.current.filter((a) => a.kind === "number").length + 1;
     applyAnn(vctx, {
-      kind: tool === "number" ? "number" : (tool as AnnotationDto["kind"]),
+      kind: tool === "number" ? "number" : (tool as AnnKind),
       color: style.color,
       width: style.width,
-      points: [
-        [from.x, from.y],
-        [to.x, to.y],
-      ],
+      alpha: style.alpha,
+      fill: style.fill,
+      points: path ?? [[from.x, from.y], [to.x, to.y]],
       seq,
     });
   };
@@ -805,7 +924,7 @@ export default function OverlayShot() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const p = toCanvas(e);
-    strokeStyle.current = { color, width: strokeWidth };
+    strokeStyle.current = { color, width: strokeWidth, alpha: strokeAlpha, fill: fillShape };
 
     if (tool === "select") {
       // 点选：从最上层往下命中（锁定项穿透，但锁定项在图层面板里仍可选、仍可解锁）
@@ -821,17 +940,10 @@ export default function OverlayShot() {
       return;
     }
     if (tool === "text") {
-      // 取消/空文本：不产生任何标注与栈条目（修复取消污染撤销栈）
-      const text = window.prompt("输入标注文本");
-      if (text && text.trim()) {
-        commitAnn({
-          kind: "text",
-          color,
-          width: strokeWidth,
-          points: [[p.x, p.y]],
-          text,
-        });
-      }
+      // 内联编辑：在点击处摆输入框，Enter/失焦提交、Esc 取消（取消与空值零标注零栈条目）
+      const draft: TextDraft = { x: p.x, y: p.y, value: "" };
+      textDraftRef.current = draft;
+      setTextDraft(draft);
       return;
     }
     if (tool === "number") {
@@ -851,11 +963,23 @@ export default function OverlayShot() {
       const vctx = canvas.getContext("2d");
       if (vctx) {
         if (tool === "pen") {
-          applyAnn(vctx, { kind: "pen", color, width: strokeWidth, points: [[p.x, p.y], [p.x + 0.01, p.y]] });
+          applyAnn(vctx, {
+            kind: "pen",
+            color,
+            width: strokeWidth,
+            alpha: strokeAlpha,
+            points: [
+              [p.x, p.y],
+              [p.x + 0.01, p.y],
+            ],
+          });
         } else {
           applyMosaicPair(vctx, p, p, Math.max(6, strokeWidth * 3));
         }
       }
+    } else {
+      // 其余（直线/高亮/模糊/矩形/椭圆/箭头）：零尺寸预览即起点，后续帧由 move 驱动
+      previewShape(p, p, pathRef.current);
     }
   };
 
@@ -879,7 +1003,11 @@ export default function OverlayShot() {
           kind: "pen",
           color: strokeStyle.current.color,
           width: strokeStyle.current.width,
-          points: [[from.x, from.y], [p.x, p.y]],
+          alpha: strokeStyle.current.alpha,
+          points: [
+            [from.x, from.y],
+            [p.x, p.y],
+          ],
         });
       }
       pathRef.current.push([p.x, p.y]);
@@ -892,8 +1020,13 @@ export default function OverlayShot() {
       }
       pathRef.current.push([p.x, p.y]);
       lastPoint.current = p;
+    } else if (tool === "highlight") {
+      // 高亮每帧从合成重画整条路径：半透明笔刷逐段叠加会在接缝处显出深色节点
+      pathRef.current.push([p.x, p.y]);
+      lastPoint.current = p;
+      previewShape(startPoint.current!, p, pathRef.current);
     } else {
-      // rect/ellipse/arrow/number：从离屏合成重绘 + 当前形状
+      // rect/ellipse/line/arrow/blur：从离屏合成重绘 + 当前形状
       previewShape(startPoint.current!, p);
     }
   };
@@ -913,24 +1046,42 @@ export default function OverlayShot() {
     const p = toCanvas(e);
     const start = startPoint.current!;
     const style = strokeStyle.current;
+    const twoPoint: [number, number][] = [
+      [start.x, start.y],
+      [p.x, p.y],
+    ];
     switch (tool) {
       case "pen":
       case "mosaic":
+      case "highlight":
         commitAnn({
           kind: tool,
           color: style.color,
           width: style.width,
-          points: pathRef.current.length > 0 ? pathRef.current : [[p.x, p.y]],
+          alpha: style.alpha,
+          points: pathRef.current.length > 0 ? pathRef.current : twoPoint,
         });
         break;
       case "rect":
       case "ellipse":
-      case "arrow":
         commitAnn({
           kind: tool,
           color: style.color,
           width: style.width,
-          points: [[start.x, start.y], [p.x, p.y]],
+          alpha: style.alpha,
+          fill: style.fill,
+          points: twoPoint,
+        });
+        break;
+      case "line":
+      case "arrow":
+      case "blur":
+        commitAnn({
+          kind: tool,
+          color: style.color,
+          width: style.width,
+          alpha: style.alpha,
+          points: twoPoint,
         });
         break;
       case "number": {
@@ -939,6 +1090,7 @@ export default function OverlayShot() {
           kind: "number",
           color: style.color,
           width: style.width,
+          alpha: style.alpha,
           points: [[p.x, p.y]],
           seq: annsRef.current.filter((a) => a.kind === "number").length + 1,
         });
@@ -1126,14 +1278,15 @@ export default function OverlayShot() {
         >
           选
         </Button>
-        {(["pen", "rect", "ellipse", "arrow", "text", "mosaic", "number"] as AnnKind[]).map((t) => (
+        {TOOL_KINDS.map((t) => (
           <Button
             key={t}
             className={tool === t ? styles.activeTool : styles.tool}
             size="small"
+            title={ANN_KIND_NAME[t]}
             onClick={() => setTool(t)}
           >
-            {{ pen: "笔", rect: "框", ellipse: "圆", arrow: "箭头", text: "文", mosaic: "马", number: "①" }[t]}
+            {TOOL_ABBR[t]}
           </Button>
         ))}
         <span style={{ width: 8 }} />
@@ -1146,6 +1299,14 @@ export default function OverlayShot() {
             aria-label={`颜色 ${c}`}
           />
         ))}
+        <input
+          type="color"
+          className={styles.colorInput}
+          value={color}
+          onChange={(e) => setColor(e.target.value)}
+          aria-label="自定义颜色"
+          title="自定义颜色"
+        />
         <span style={{ width: 8 }} />
         {WIDTHS.map((w) => (
           <Button
@@ -1157,6 +1318,24 @@ export default function OverlayShot() {
             {w}
           </Button>
         ))}
+        <span className={styles.alphaCell}>
+          <Slider
+            size="small"
+            min={0.1}
+            max={1}
+            step={0.05}
+            value={strokeAlpha}
+            onChange={(_, d) => setStrokeAlpha(d.value)}
+            aria-label={`透明度 ${strokeAlpha.toFixed(2)}`}
+          />
+        </span>
+        <Switch
+          checked={fillShape}
+          disabled={!honoursFill(tool)}
+          onChange={(_, d) => setFillShape(d.checked)}
+          label="填充"
+          size="small"
+        />
         <span style={{ width: 8 }} />
         <Button size="small" className={styles.tool} onClick={undo} disabled={stackCounts.undo === 0}>
           ↶
@@ -1175,6 +1354,33 @@ export default function OverlayShot() {
             onMouseMove={onCanvasMouseMove}
             onMouseUp={onCanvasMouseUp}
           />
+          {textDraft && (
+            <input
+              // 覆盖层是模态面：草稿存在的唯一目的就是立刻接住键盘，
+              // 要用户多点一次才进入输入态反而更差（规则的一般性理由在此不成立）
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+              data-text-draft=""
+              className={styles.textInput}
+              style={canvasToCss(textDraft, canvasRef.current)}
+              value={textDraft.value}
+              onChange={(e) => {
+                const next = { ...textDraft, value: e.target.value };
+                textDraftRef.current = next;
+                setTextDraft(next);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  settleText("commit");
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  settleText("cancel");
+                }
+              }}
+              onBlur={() => settleText("commit")}
+            />
+          )}
         </div>
         {/* 图层面板（T-B4-1）：行模型出自纯模块 layerRows，本处只按行铺四钮 */}
         {layerList.length > 0 && (

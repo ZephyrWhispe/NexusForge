@@ -44,7 +44,7 @@ impl Default for ScreenshotConfig {
 /// 标注（前端 canvas 坐标为画布像素；最终合成图由前端导出，Rust 仅存档）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Annotation {
-    /// pen | rect | ellipse | arrow | text | mosaic | number
+    /// pen | rect | ellipse | line | arrow | highlight | text | mosaic | number | blur
     pub kind: String,
     /// "#RRGGBB"
     #[serde(default)]
@@ -65,6 +65,17 @@ pub struct Annotation {
     /// 锁定：仍绘制，但点选穿透（选择穿透 = hitTest 的 skipLocked 臂）
     #[serde(default)]
     pub locked: bool,
+    /// rect/ellipse 是否实心填充（其余类型不消费此键，绘制侧按各自语义走）
+    #[serde(default)]
+    pub fill: bool,
+    /// 不透明度 0..=1。**独立键而非 `#RRGGBBAA` 字符串扩展**（§9.1-⑤）：色值解析点在
+    /// 前端多处，扩字符串要改全部解析点；缺省 1.0 让旧条目零迁移即可读
+    #[serde(default = "default_alpha")]
+    pub alpha: f32,
+}
+
+fn default_alpha() -> f32 {
+    1.0
 }
 
 impl Annotation {
@@ -207,4 +218,41 @@ fn default_page() -> u32 {
 }
 fn default_size() -> u32 {
     30
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-2）字面测试名优先于 rustc 命名惯例
+    fn annotationFillAlpha_deserializeDefaultsForLegacyJson() {
+        // 旧三键 JSON（T-B4-1 之前的形状）直进新结构体：四个新键全走 default
+        let legacy: Annotation = serde_json::from_str(
+            r##"{"kind":"rect","color":"#ff4d4f","width":4,"points":[[0,0],[1,1]]}"##,
+        )
+        .unwrap();
+        assert_eq!(legacy.layer, 0);
+        assert!(!legacy.locked);
+        assert!(!legacy.fill, "缺 fill 必须是不填充，而不是把形状糊成实心");
+        assert_eq!(legacy.alpha, 1.0, "缺 alpha 必须是全不透明");
+        // 正对照：新键真能读进来（否则上面的 default 断言可以是"任何输入都走 default"）
+        let fresh: Annotation = serde_json::from_str(
+            r##"{"kind":"rect","color":"#ff4d4f","width":4,"points":[],"fill":true,"alpha":0.35,"layer":3,"locked":true}"##,
+        )
+        .unwrap();
+        assert!(fresh.fill);
+        assert_eq!(fresh.alpha, 0.35);
+        assert_eq!((fresh.layer, fresh.locked), (3, true));
+        // 出口形状稳定：前端按同一批键读
+        let json = serde_json::to_string(&fresh).unwrap();
+        for key in [
+            "\"fill\":true",
+            "\"alpha\":0.35",
+            "\"layer\":3",
+            "\"locked\":true",
+        ] {
+            assert!(json.contains(key), "序列化缺 {key}：{json}");
+        }
+    }
 }
