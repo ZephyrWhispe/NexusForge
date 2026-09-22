@@ -103,6 +103,8 @@ export interface ClipSearchQuery {
   group?: string;
   page?: number;
   size?: number;
+  /** 内容类型显式筛选（T-B3-6 芯片行）；与 text 里的 `type:` 语法同源，后端语法优先 */
+  content_type?: string;
 }
 
 export function clipboardSearch(query: ClipSearchQuery): Promise<ClipPage> {

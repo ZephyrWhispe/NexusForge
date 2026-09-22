@@ -358,22 +358,34 @@ impl ClipStore {
 
         // 条件与绑定值同源（build_filters）：占位符按 args 出现序编号，
         // 追加 FTS MATCH 时接在其后，两分支共用同一条查询路径。
+        let syntax = q
+            .text
+            .as_deref()
+            .map(crate::query::parse_search_syntax)
+            .unwrap_or_default();
         let (filters, mut args) = build_filters(q);
         let mut conds: Vec<String> = if filters.is_empty() {
             Vec::new()
         } else {
             vec![filters]
         };
-        let use_fts = q
-            .text
-            .as_deref()
-            .map(|t| !t.trim().is_empty())
-            .unwrap_or(false);
+        // 语法解出的组名按真名匹配（伪键只属于 group 字段那条筛选维度，两个维度是 AND）
+        if let Some(g) = syntax.group {
+            conds.push(format!("e.group_name = ?{}", args.len() + 1));
+            args.push(Box::new(g));
+        }
+        let content_type = syntax.content_type.or(q.content_type.clone());
+        if let Some(ct) = &content_type {
+            conds.push(format!("e.content_type = ?{}", args.len() + 1));
+            args.push(Box::new(ct.clone()));
+        }
+        if syntax.unknown_type {
+            conds.push("0".to_string());
+        }
+        let use_fts = !syntax.text.trim().is_empty();
         if use_fts {
             conds.push(format!("clip_fts MATCH ?{}", args.len() + 1));
-            args.push(Box::new(fts_escape(
-                q.text.as_deref().expect("use_fts 已判非空"),
-            )));
+            args.push(Box::new(fts_escape(&syntax.text)));
         }
         let where_sql = if conds.is_empty() {
             String::new()
@@ -2045,5 +2057,280 @@ mod tests {
             1,
             "二次重开不得因重复 ALTER 报错"
         );
+    }
+
+    // ---- T-B3-6 搜索语法（09 §8.2 行字面回归）----
+
+    /// 取命中 id 集合并排序，便于"命中恰好是哪几行"式断言（本文件其余测试多用条数，
+    /// 语法筛选要钉的是身份而非数量，否则正负例可能只是碰巧同数）。
+    fn ids(page: Page<ClipEntry>) -> Vec<String> {
+        sorted(page.items.into_iter().map(|e| e.id).collect())
+    }
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-6）字面测试名优先于 rustc 命名惯例
+    fn searchSyntax_groupAndTypePrefixes_extractedFromText() {
+        let s = open_temp("syntax_g_t");
+        let a = s.insert_row(&NewClip::new("周报A").group("工作")).unwrap();
+        let b = s
+            .insert_files(&[std::path::PathBuf::from("d:/planB.txt")], None, "local")
+            .unwrap();
+        s.set_entry_group(&b, Some("工作")).unwrap();
+        let c = s
+            .insert_files(&[std::path::PathBuf::from("d:/planC.txt")], None, "local")
+            .unwrap();
+        let d = s.insert_row(&NewClip::new("周报D")).unwrap();
+
+        // 两枚前缀都从 text 分离：若残渣留在 text 里，FTS 分支会被打开并滤空全部行
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("group:工作 type:files".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            vec![b.clone()],
+            "组名 + 类型两条件 AND，且语法不进字面查询"
+        );
+        // 三枚单条件正对照：证明上面那枚不是"语法永远滤空"式假严格
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("group:工作".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            sorted(vec![a.clone(), b.clone()])
+        );
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("type:files".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            sorted(vec![b.clone(), c])
+        );
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("周报".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            sorted(vec![a, d])
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn searchSyntax_quotedGroupName_matchesSpaceBearingGroup() {
+        let s = open_temp("syntax_quote");
+        let spaced = s
+            .insert_row(&NewClip::new("评审要点").group("工作 笔记"))
+            .unwrap();
+        s.insert_row(&NewClip::new("另一条")).unwrap();
+
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some(r#"group:"工作 笔记" 评审"#.into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            vec![spaced.clone()],
+            "引号内空白属同一个组名"
+        );
+        // 负对照：组名按全等匹配，前缀式误切（把"工作"当组名）命中 0 行——
+        // 若解析器丢了引号感知，上面那枚会以"工作"为组名而落到这条断言上判红。
+        assert!(
+            s.search(&SearchQuery {
+                text: Some("group:工作 评审".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .is_empty(),
+            "组名不做前缀匹配：误切出的「工作」不该命中「工作 笔记」"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn searchSyntax_unknownTypeValue_returnsNothingNotError() {
+        let s = open_temp("syntax_unknown");
+        s.insert_row(&NewClip::new("普通一行")).unwrap();
+        s.insert_files(&[std::path::PathBuf::from("d:/x.txt")], None, "local")
+            .unwrap();
+
+        let res = s.search(&SearchQuery {
+            text: Some("type:pdf".into()),
+            ..Default::default()
+        });
+        assert!(
+            res.is_ok(),
+            "未知类型是查询条件不成立，不是命令失败：{:?}",
+            res.err()
+        );
+        assert!(
+            res.unwrap().items.is_empty(),
+            "红线：不谎称有效、也不静默忽略该条件返回全部"
+        );
+        // 同一库、同一入口：去掉那枚条件就有行——零命中来自条件而非空库
+        assert_eq!(
+            s.search(&SearchQuery {
+                text: Some("type:text".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .len(),
+            1
+        );
+        assert_eq!(
+            s.search(&SearchQuery::default()).unwrap().items.len(),
+            2,
+            "无条件时全库可见（正对照）"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn searchSyntax_bareWordWithColon_staysLiteralText() {
+        let s = open_temp("syntax_url");
+        let url = s
+            .insert_row(&NewClip::new("http://a:b/c 参考链接"))
+            .unwrap();
+        let weird = s.insert_row(&NewClip::new("type://files 怪串")).unwrap();
+        s.insert_row(&NewClip::new("group://工作 怪串二")).unwrap();
+
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("http://a:b/c".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            vec![url],
+            "URL 型 token 按字面搜"
+        );
+        // `type:` 恰好是已知前缀，只有 `://` 守卫能救它：被吃成语法即 unknown_type → AND 0
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("type://files".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            vec![weird],
+            "含 :// 的 token 不得进语法分支"
+        );
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("group://工作".into()),
+                    ..Default::default()
+                })
+                .unwrap())
+            .len(),
+            1,
+            "同上：group:// 型 token 也是字面文本"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn searchSyntax_repeatedPrefix_lastWins() {
+        let s = open_temp("syntax_repeat");
+        let g1 = s.insert_row(&NewClip::new("甲组一行").group("甲")).unwrap();
+        let g2 = s.insert_row(&NewClip::new("乙组一行").group("乙")).unwrap();
+        let f1 = s
+            .insert_files(&[std::path::PathBuf::from("d:/r1.txt")], None, "local")
+            .unwrap();
+        let f2 = s
+            .insert_files(&[std::path::PathBuf::from("d:/r2.txt")], None, "local")
+            .unwrap();
+
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("group:甲 group:乙".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            vec![g2],
+            "重复 group 前缀：后现覆盖先前"
+        );
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("type:text type:files".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            sorted(vec![f1, f2]),
+            "重复 type 前缀同样后覆盖先（两行 files 都在，两行 text 都不在）"
+        );
+        // 正对照：单枚前缀各自命中自己的那行（否则"last wins"只是"总是滤空"）
+        assert_eq!(
+            ids(s
+                .search(&SearchQuery {
+                    text: Some("group:甲".into()),
+                    ..Default::default()
+                })
+                .unwrap()),
+            vec![g1]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn searchSyntax_contentTypeField_andSyntax_agreeOnSameResult() {
+        let s = open_temp("syntax_field");
+        s.insert_row(&NewClip::new("文本行")).unwrap();
+        let f1 = s
+            .insert_files(&[std::path::PathBuf::from("d:/f1.txt")], None, "local")
+            .unwrap();
+        let f2 = s
+            .insert_files(&[std::path::PathBuf::from("d:/f2.txt")], None, "local")
+            .unwrap();
+        let files = sorted(vec![f1, f2]);
+
+        let by_field = ids(s
+            .search(&SearchQuery {
+                content_type: Some("files".into()),
+                ..Default::default()
+            })
+            .unwrap());
+        let by_syntax = ids(s
+            .search(&SearchQuery {
+                text: Some("type:files".into()),
+                ..Default::default()
+            })
+            .unwrap());
+        let by_both = ids(s
+            .search(&SearchQuery {
+                text: Some("type:files".into()),
+                content_type: Some("files".into()),
+                ..Default::default()
+            })
+            .unwrap());
+        assert_eq!(by_field, files, "显式字段面");
+        assert_eq!(by_syntax, by_field, "语法与字段同值必须同结果");
+        assert_eq!(by_both, by_syntax);
+
+        // 冲突面：语法优先（当场敲进搜索框的那句才是本次意图），且不是"两条件 AND 成空"
+        let conflict = ids(s
+            .search(&SearchQuery {
+                text: Some("type:files".into()),
+                content_type: Some("text".into()),
+                ..Default::default()
+            })
+            .unwrap());
+        assert_eq!(conflict, by_syntax, "语法优先，不与字段求交");
     }
 }

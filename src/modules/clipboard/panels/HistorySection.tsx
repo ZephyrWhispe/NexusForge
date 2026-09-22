@@ -41,7 +41,8 @@ import { GROUP_LABEL, fmtTime } from "../display";
 
 /**
  * 历史子面板（T-B3-1 自 ClipboardPanel 原样搬入，逻辑一行不删）：
- * 数据 clipboard_search FTS/分页；实时 nf:event clipboard.captured/deleted/cleared → 刷新；
+ * 数据 clipboard_search FTS/分页 + group:/type: 语法芯片（T-B3-6）；
+ * 实时 nf:event clipboard.captured/deleted/cleared → 刷新；
  * 行操作（详情/粘贴/置顶/删除）+ 工具栏清空 + 两个 Dialog 形态均沿用 B1 判据。
  */
 const useStyles = makeStyles({
@@ -50,8 +51,32 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
     gap: "8px",
-    height: "40px",
-    padding: "0 20px",
+    minHeight: "40px",
+    flexWrap: "wrap",
+    padding: "6px 20px",
+    flexShrink: 0,
+  },
+  chips: {
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
+    marginLeft: "auto",
+    flexWrap: "wrap",
+  },
+  filterChip: {
+    fontSize: tokens.fontSizeBase200,
+    padding: "2px 9px",
+    borderRadius: tokens.borderRadiusCircular,
+    border: `1px solid ${tokens.colorBrandForeground1}`,
+    color: tokens.colorBrandForeground1,
+    backgroundColor: "transparent",
+    cursor: "pointer",
+  },
+  syntaxHint: {
+    display: "block",
+    margin: "0 20px 6px",
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
     flexShrink: 0,
   },
   // 破坏性主按钮 = 红色（与 ConfirmDialog 同基准，当前 Fluent 版本无 overflow appearance）
@@ -156,13 +181,131 @@ const useStyles = makeStyles({
   },
 });
 
-/** 查询参数构造（纯函数，Vitest 覆盖）：空搜索不参与过滤；"all" 分组不进 SQL；分页页码原样下传 */
-export function clipSearchParams(search: string, group: string, page: number, size = 50): ClipSearchQuery {
+/** 后端 `group:` / `type:` 语法的前端镜像（权威实现见 crates/clipboard-core/src/query.rs）：
+ * 镜像服务两件事——把已生效的筛选显式化（类型芯片高亮、只读组芯片），以及在被用户接管/
+ * 清掉时把对应语法 token 从下传文本里剥出去。未知 type 值一律留在字面文本里下传，
+ * 前端不另判一套：零命中由后端 `AND 0` 给出，判定只有一份。 */
+export interface ClipSyntaxMirror {
+  /** 去掉已消费语法 token 后的字面查询（未知 type 的 token 算未消费，留在里面） */
+  text: string;
+  group?: string;
+  groupToken?: string;
+  type?: string;
+  typeToken?: string;
+  unknownType: boolean;
+  /** 最后一枚未知 type token（留在 text 里下传，供诚实提示点名） */
+  unknownToken?: string;
+}
+
+const TYPE_VALUES = ["text", "image", "files"];
+const TYPE_CHIPS: [string, string][] = [
+  ["text", "文本"],
+  ["image", "图片"],
+  ["files", "文件"],
+];
+
+export function mirrorClipSearchSyntax(raw: string): ClipSyntaxMirror {
+  const literal: string[] = [];
+  let group: string | undefined;
+  let groupToken: string | undefined;
+  let type: string | undefined;
+  let typeToken: string | undefined;
+  let unknownType = false;
+  let unknownToken: string | undefined;
+  for (const token of tokenizeSearch(raw)) {
+    const sep = token.includes("://") ? -1 : token.indexOf(":");
+    const key = sep > 0 ? token.slice(0, sep) : "";
+    const rest = sep > 0 ? token.slice(sep + 1) : "";
+    if (key === "group" && rest !== "") {
+      const value = stripQuotes(rest);
+      if (value) {
+        group = value;
+        groupToken = token;
+      } else {
+        literal.push(token);
+      }
+    } else if (key === "type" && rest !== "") {
+      const value = stripQuotes(rest);
+      if (TYPE_VALUES.includes(value)) {
+        type = value;
+        typeToken = token;
+      } else {
+        unknownType = true;
+        unknownToken = token;
+        literal.push(token);
+      }
+    } else {
+      literal.push(token);
+    }
+  }
   return {
-    text: search || undefined,
-    group: group !== "all" ? group : undefined,
+    text: literal.join(" "),
+    group,
+    groupToken,
+    type,
+    typeToken,
+    unknownType,
+    unknownToken,
+  };
+}
+
+/** 重组下传查询文本：保留的语法 token 留在文本里（后端 AND 两个分组维度），不保留的剥掉 */
+export function clipQueryText(
+  m: ClipSyntaxMirror,
+  keep: { group: boolean; type: boolean },
+): string {
+  return [m.text, keep.group ? m.groupToken : "", keep.type ? m.typeToken : ""]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+}
+
+function tokenizeSearch(raw: string): string[] {
+  const tokens: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (const ch of raw) {
+    if (ch === '"') {
+      quoted = !quoted;
+      cur += ch;
+    } else if (!quoted && /\s/.test(ch)) {
+      if (cur) tokens.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) tokens.push(cur);
+  return tokens;
+}
+
+function stripQuotes(value: string): string {
+  const bare =
+    value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+      ? value.slice(1, -1)
+      : value;
+  return bare.trim();
+}
+
+/**
+ * 查询参数构造（纯函数，Vitest 覆盖）：空搜索不参与过滤；"all" 分组不进 SQL；分页页码原样下传。
+ * `group:` 语法值覆盖 SubNav 筛选维度（打字输入比侧栏选中更具体，且芯片上看得见），
+ * `type:` 语法值让位于芯片（点芯片是更近的一次意图）——两条 precedence 都各有点得见的落点。
+ */
+export function clipSearchParams(
+  search: string,
+  group: string,
+  page: number,
+  size = 50,
+  type?: string,
+): ClipSearchQuery {
+  const m = mirrorClipSearchSyntax(search);
+  return {
+    text: m.text || undefined,
+    group: m.group ?? (group !== "all" ? group : undefined),
     page,
     size,
+    content_type: type ?? m.type,
   };
 }
 
@@ -193,12 +336,22 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   const [groupDraft, setGroupDraft] = useState("");
   // T-B3-2 暂停捕获横幅：读运行态（与设置卡/托盘同源），只在真跳过过内容时出现
   const [capture, setCapture] = useState<ClipCaptureState | null>(null);
+  // T-B3-6 类型芯片与「已清掉的 group: 语法」——后者按搜索原文记账，
+  // 用户再改一个字就自然失效（新那句里的 group: 也许是另一回事，不静默延续旧清空）
+  const [typeTouched, setTypeTouched] = useState(false);
+  const [typeChip, setTypeChip] = useState<string | undefined>(undefined);
+  const [dismissedGroupFor, setDismissedGroupFor] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  const mirror = mirrorClipSearchSyntax(search);
+  const groupDismissed = dismissedGroupFor === search && dismissedGroupFor !== null;
+  const queryText = clipQueryText(mirror, { group: !groupDismissed, type: !typeTouched });
+  const effectiveType = typeTouched ? typeChip : mirror.type;
 
   const load = useCallback(
     async (p: number, append: boolean) => {
       try {
-        const res = await clipboardSearch(clipSearchParams(search, group, p));
+        const res = await clipboardSearch(clipSearchParams(queryText, group, p, 50, typeChip));
         setEntries((prev) => (append ? [...prev, ...res.items] : res.items));
         setHasMore(res.has_more);
         setPage(p);
@@ -206,7 +359,7 @@ export default function HistorySection({ search, group, onCounts }: Props) {
         setLoaded(true);
       }
     },
-    [search, group],
+    [queryText, group, typeChip],
   );
 
   // U3-3：分组计数（每次数据刷新后同步）
@@ -367,7 +520,38 @@ export default function HistorySection({ search, group, onCounts }: Props) {
         <Button size="small" onClick={() => setClearOpen(true)}>
           清空
         </Button>
+        <span className={styles.chips}>
+          {TYPE_CHIPS.map(([value, label]) => (
+            <Button
+              key={value}
+              size="small"
+              appearance={effectiveType === value ? "primary" : "subtle"}
+              onClick={() => {
+                setTypeTouched(true);
+                setTypeChip(effectiveType === value ? undefined : value);
+              }}
+            >
+              {label}
+            </Button>
+          ))}
+          {mirror.group && !groupDismissed && (
+            <button
+              className={styles.filterChip}
+              aria-label="清除分组筛选"
+              title="来自搜索语法 group: 的分组筛选，点一下清掉"
+              onClick={() => setDismissedGroupFor(search)}
+            >
+              组：{mirror.group} ✕
+            </button>
+          )}
+        </span>
       </div>
+      {mirror.unknownType && (
+        <span className={styles.syntaxHint}>
+          未识别的内容类型「{(mirror.unknownToken ?? "").replace(/^type:/, "")}」不在 text / image /
+          files 三档内：该条件按零命中处理，不会被静默忽略。
+        </span>
+      )}
       {capture && capture.skipped > 0 && (
         <span className={styles.banner}>暂停期间已跳过 {capture.skipped} 次复制</span>
       )}

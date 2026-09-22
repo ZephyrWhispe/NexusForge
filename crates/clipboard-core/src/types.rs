@@ -54,6 +54,11 @@ pub struct SearchQuery {
     pub group: Option<String>,
     pub page: Option<u32>,
     pub size: Option<u32>,
+    /// 内容类型显式筛选面（前端芯片用）。与 `text` 里的 `type:` 语法同源同效，
+    /// 两者同时在场且不一致时**语法优先**——用户当场敲进搜索框的那句才是本次意图
+    /// （见 store.rs search 的 `syntax.content_type.or(q.content_type)`）。
+    #[serde(default)]
+    pub content_type: Option<String>,
 }
 
 /// 分页结果

@@ -7,6 +7,7 @@
 pub mod classifier;
 pub mod module;
 pub mod pipeline;
+pub mod query;
 pub mod secrets;
 pub mod store;
 pub mod types;
