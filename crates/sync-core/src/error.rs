@@ -12,6 +12,11 @@ pub enum SyncError {
     Peer(String),
     #[error("变更应用失败: {0}")]
     Apply(String),
+    /// 数据集白名单/注册表层面的拒绝（T-B5-5 承重⑧⑩⑪）：
+    /// 未注册或白名单外的 entity、以及"快照读不到却被要求记删除"这类误删除前兆。
+    /// 与 `Apply`（数据集写入本身失败）刻意分野：这两类是**结构**问题，重试无用。
+    #[error("数据集拒绝: {0}")]
+    Entity(String),
     #[error("未就绪: {0}")]
     NotReady(String),
 }
@@ -25,6 +30,7 @@ impl SyncError {
             SyncError::Proto(_) => "SYNC_PROTO_001",
             SyncError::Peer(_) => "SYNC_PEER_001",
             SyncError::Apply(_) => "SYNC_APPLY_001",
+            SyncError::Entity(_) => "SYNC_ENTITY_001",
             SyncError::NotReady(_) => "SYNC_STATE_001",
         }
     }

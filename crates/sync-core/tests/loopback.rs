@@ -15,7 +15,10 @@ use host_core::module::{Module, ModuleContext};
 use host_core::ports::Ports;
 use sync_core::engine::ChangeApplier;
 use sync_core::oplog::{ROLE_INITIATOR, ROLE_RESPONDER};
-use sync_core::{OpEntry, OpLog, SyncEngine, SyncModule, SyncRun};
+use sync_core::{
+    is_sync_entity, OpEntry, OpLog, SyncEngine, SyncError, SyncModule, SyncRun, ENTITY_NOTE,
+    SYNC_ENTITIES,
+};
 
 /// 回环端口（与 KVM 49800/49801、K9 测试 49810–49812 错开；固定端口进程内单用）
 const LOOPBACK_PORT: u16 = 49831;
@@ -29,6 +32,7 @@ const STATUS_OK_PORT: u16 = 49838;
 const STATUS_BUSY_PORT: u16 = 49839;
 const STATUS_PEER_PORT: u16 = 49840;
 const STATUS_SHAPE_PORT: u16 = 49841;
+const VAULT_NEVER_PORT: u16 = 49842;
 /// 无人监听的端口（connect 立刻被拒，用来造"注定失败的一轮"）
 const DEAD_PORT: u16 = 49899;
 
@@ -96,7 +100,9 @@ fn setup(
     }
     let module = Arc::new(SyncModule::new(&dir));
     let store = Arc::new(FakeStore::default());
-    module.attach_applier(store.clone());
+    module
+        .attach_applier(ENTITY_NOTE, store.clone())
+        .expect("note 应用器装配（白名单内）");
     let ctx = Arc::new(ModuleContext {
         app_data_dir: dir,
         ports: Arc::new(Ports::new()),
@@ -180,7 +186,9 @@ async fn two_instances_converge_bidirectionally() {
 
     // 1. A 本地创建笔记 → 入 op_log
     store_a.put("n.md", "from A");
-    module_a.record_change("n.md", "create").unwrap();
+    module_a
+        .record_change(ENTITY_NOTE, "n.md", "create")
+        .unwrap();
 
     // 2. A → B 同步：B 收敛
     wait_port(LOOPBACK_PORT).await;
@@ -201,7 +209,9 @@ async fn two_instances_converge_bidirectionally() {
 
     // 4. B 本地修改 → A 反向拉取收敛
     store_b.put("n.md", "from B");
-    module_b.record_change("n.md", "write").unwrap();
+    module_b
+        .record_change(ENTITY_NOTE, "n.md", "write")
+        .unwrap();
     let s3 = module_a
         .sync_with(&b_id, &addr(LOOPBACK_PORT))
         .await
@@ -210,7 +220,9 @@ async fn two_instances_converge_bidirectionally() {
     assert_eq!(store_a.get("n.md").unwrap()["content"], "from B");
 
     // 5. 删除传播：A 删除 → B 收敛删除
-    module_a.record_change("n.md", "delete").unwrap();
+    module_a
+        .record_change(ENTITY_NOTE, "n.md", "delete")
+        .unwrap();
     module_a
         .sync_with(&b_id, &addr(LOOPBACK_PORT))
         .await
@@ -264,7 +276,7 @@ async fn runInitiator_secondRoundPushesZero() {
     wait_port(SECOND_ROUND_PORT).await;
 
     c.a_store.put("s1.md", "one");
-    c.a.record_change("s1.md", "create").unwrap();
+    c.a.record_change(ENTITY_NOTE, "s1.md", "create").unwrap();
     let s1 =
         c.a.sync_with(&c.b_id, &addr(SECOND_ROUND_PORT))
             .await
@@ -280,7 +292,7 @@ async fn runInitiator_secondRoundPushesZero() {
 
     // 游标推进后新增的变更仍可出账（不是"一次性关掉推送"）
     c.a_store.put("s2.md", "two");
-    c.a.record_change("s2.md", "create").unwrap();
+    c.a.record_change(ENTITY_NOTE, "s2.md", "create").unwrap();
     let s3 =
         c.a.sync_with(&c.b_id, &addr(SECOND_ROUND_PORT))
             .await
@@ -416,9 +428,9 @@ async fn syncRun_responderSideRecorded() {
 
     // 第一轮：A 推 2 条给 B（B 侧 responder 行 pulled_applied=2，自己没东西可推）
     c.a_store.put("a1.md", "one");
-    c.a.record_change("a1.md", "create").unwrap();
+    c.a.record_change(ENTITY_NOTE, "a1.md", "create").unwrap();
     c.a_store.put("a2.md", "two");
-    c.a.record_change("a2.md", "create").unwrap();
+    c.a.record_change(ENTITY_NOTE, "a2.md", "create").unwrap();
     let before_b = newest_id(&log_b);
     let s1 = c.a.sync_with(&c.b_id, &addr(RUN_PEER_PORT)).await.unwrap();
     assert_eq!(s1.pushed, 2);
@@ -433,7 +445,7 @@ async fn syncRun_responderSideRecorded() {
 
     // 第二轮：B 改一篇 → A 拉走 ⇒ B 的 pushed 与出站游标都要动起来
     c.b_store.put("b1.md", "from B");
-    c.b.record_change("b1.md", "create").unwrap();
+    c.b.record_change(ENTITY_NOTE, "b1.md", "create").unwrap();
     let b_ts = log_b
         .ops_of_device(&c.b_id, 0, 10)
         .unwrap()
@@ -487,7 +499,7 @@ async fn countOpsAfter_matchesPushedSemantics() {
 
     for (i, name) in ["p1.md", "p2.md", "p3.md"].iter().enumerate() {
         c.a_store.put(name, &format!("v{i}"));
-        c.a.record_change(name, "create").unwrap();
+        c.a.record_change(ENTITY_NOTE, name, "create").unwrap();
     }
     assert_eq!(pending(&log_a), 3, "三条自产变更还没推给 B");
 
@@ -503,7 +515,7 @@ async fn countOpsAfter_matchesPushedSemantics() {
 
     // 新增一条 ⇒ 又欠一条（不是"首轮清零后永远清零"）
     c.a_store.put("p4.md", "v4");
-    c.a.record_change("p4.md", "create").unwrap();
+    c.a.record_change(ENTITY_NOTE, "p4.md", "create").unwrap();
     assert_eq!(pending(&log_a), 1);
     let s2 =
         c.a.sync_with(&c.b_id, &addr(RUN_PENDING_PORT))
@@ -514,7 +526,7 @@ async fn countOpsAfter_matchesPushedSemantics() {
 
     // 算式按产出设备分维：对端产出的条目会经拉取进了本机库（入站），但不计进"我欠对端"
     c.b_store.put("q1.md", "b owns it");
-    c.b.record_change("q1.md", "create").unwrap();
+    c.b.record_change(ENTITY_NOTE, "q1.md", "create").unwrap();
     let s3 =
         c.a.sync_with(&c.b_id, &addr(RUN_PENDING_PORT))
             .await
@@ -620,7 +632,7 @@ async fn status_peersCarryCursorsAndPending() {
     // 还没同步过：三条自产变更全欠着，两维游标都是 0，没有流水行
     for name in ["s1.md", "s2.md", "s3.md"] {
         c.a_store.put(name, "v");
-        c.a.record_change(name, "create").unwrap();
+        c.a.record_change(ENTITY_NOTE, name, "create").unwrap();
     }
     let p0 = peer_of(&c.a.status().unwrap());
     assert!(!p0.device_name.is_empty(), "面板显示的是设备名，不是裸 id");
@@ -662,7 +674,7 @@ async fn status_peersCarryCursorsAndPending() {
 
     // 对端产出一条 → 本机拉走：入站游标动起来，出站游标**不该**跟着动（两维分离）
     c.b_store.put("t1.md", "from B");
-    c.b.record_change("t1.md", "create").unwrap();
+    c.b.record_change(ENTITY_NOTE, "t1.md", "create").unwrap();
     let s2 =
         c.a.sync_with(&c.b_id, &addr(STATUS_PEER_PORT))
             .await
@@ -748,4 +760,82 @@ async fn status_shapeIsTyped_notRawJson() {
     );
     assert_eq!(value["peers"][0]["sync_addr"], serde_json::Value::Null);
     assert_eq!(value["peers"][0]["online"], json!(false));
+}
+
+/// 任务书（09 §10.2 T-B5-5）字面测试名 · 红线："密码库永不自动同步"三层皆可否证
+///
+/// ① 编译期常量集不含 vault；② 运行期装配口拒收；③ 线格式与存储层不设防
+/// （`op_log.entity` 只是文本列），因此手工伪造一条 vault 行进对端变更流，
+/// 收侧仍须整会话拒收、数据集零落地、游标零前进。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(non_snake_case)]
+async fn syncEntity_vaultNeverAdmitted() {
+    // ① 编译期：白名单里不存在 vault（"没装"是运行期偶然，"名单上没有"才是结构事实）
+    assert!(!SYNC_ENTITIES.iter().any(|s| s.id == "vault"));
+    assert!(!is_sync_entity("vault"));
+    assert_eq!(
+        SYNC_ENTITIES.len(),
+        1,
+        "v1 白名单恰一员 note；新增数据集须同时带来测试与文档（§10.2 判据）"
+    );
+    assert_eq!(SYNC_ENTITIES[0].id, ENTITY_NOTE);
+    assert_eq!(SYNC_ENTITIES[0].label, "笔记库");
+
+    let c = paired("vault_never", VAULT_NEVER_PORT);
+    wait_port(VAULT_NEVER_PORT).await;
+
+    // ② 装配口：想接 vault，一行代码写不进去（FakeStore 本身对 entity 毫无防备，
+    //    所以这道拒必须来自注册表而不是"数据集自己不肯"——下面第③层同理）
+    let err =
+        c.b.attach_applier("vault", Arc::new(FakeStore::default()))
+            .unwrap_err();
+    assert!(matches!(err, SyncError::Entity(_)), "实际 {err:?}");
+    assert!(err.to_string().contains("vault"), "错误要点名被拒的数据集");
+    assert!(
+        c.b.record_change("vault", "任何路径", "write").is_err(),
+        "拒收后注册表里确实没有 vault：本地记录口同样进不去"
+    );
+
+    // ③ 伪造：vault 行直接写进 A 的 op_log（绕过全部代码路径），A → B 同步
+    let log_a = OpLog::open(c.a.db_path()).unwrap();
+    log_a
+        .append(&OpEntry {
+            op_id: "vault-forged-1".into(),
+            entity: "vault".into(),
+            entity_id: "secret-entry".into(),
+            ts: 100,
+            device: c.a_id.clone(),
+            value: json!({ "secret": "绝不该离开本机的东西" }),
+        })
+        .unwrap();
+
+    let before_b = c.b_store.len();
+    let r = c.a.sync_with(&c.b_id, &addr(VAULT_NEVER_PORT)).await;
+    assert!(
+        r.is_err(),
+        "对端没装 vault 应用器 ⇒ 会话必须失败，不能\"推成功\"了事：{r:?}"
+    );
+    assert_eq!(
+        c.b_store.len(),
+        before_b,
+        "B 侧数据集零动：零个应用器被问过"
+    );
+    assert!(
+        c.b_store.get("secret-entry").is_none(),
+        "密码库条目内容不得出现在对端任何数据集里"
+    );
+
+    // 游标不前进：静默"跳过"会让 B 下轮把这批当成已经收过
+    let log_b = OpLog::open(c.b.db_path()).unwrap();
+    assert_eq!(
+        log_b.cursor(&c.a_id),
+        0,
+        "拒收不许推进入站游标（否则谎报已同步）"
+    );
+    let runs = c.b.runs(5).unwrap();
+    let errs: Vec<String> = runs.iter().filter_map(|r| r.error.clone()).collect();
+    assert!(
+        errs.iter().any(|e| e.contains("vault")),
+        "失败要在流水里点名是哪个数据集，实际：{errs:?}"
+    );
 }

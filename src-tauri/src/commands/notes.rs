@@ -11,14 +11,32 @@ fn notes_err(e: notes_core::NoteError) -> AppError {
 
 use host_core::util::now_ms;
 
+/// notes.changed 载荷（单一构造点：同步层按 `action`/`path`/`old_path` 分派，
+/// 形状在这里、消费在 `sync_core::change_records_of_event`，两侧不各写一份字面量）
+fn notes_change_payload(
+    action: &str,
+    path: Option<&str>,
+    old_path: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "action": action,
+        "path": path,
+        "old_path": old_path,
+    })
+}
+
 /// 变更事件（UI 事件驱动刷新；topic 见 host-core TOPIC_REGISTRY）
-fn notes_notify(state: &HostState, action: &str, path: Option<&str>) {
+///
+/// `old_path` 仅 rename 用：同步层据此记"旧路径删除 + 新路径写入"两笔。
+/// 不带旧路径的 rename 会被整条丢弃（宁可远端不改名，也不要远端凭空多出一份新笔记、
+/// 旧笔记原地留着——那是 T-B5-5 之前 rename 的真实下场）。
+fn notes_notify(state: &HostState, action: &str, path: Option<&str>, old_path: Option<&str>) {
     state
         .bus
         .publish(host_core::events::Event::new(
             "notes.changed",
             "notes",
-            serde_json::json!({ "action": action, "path": path }),
+            notes_change_payload(action, path, old_path),
         ))
         .ok();
 }
@@ -85,13 +103,18 @@ pub async fn notes_create(
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .inspect(|meta| {
-            notes_notify_inner(&state, "create", Some(&meta.path));
+            notes_notify_inner(&state, "create", Some(&meta.path), None);
         })
         .map_err(notes_err)
 }
 
-fn notes_notify_inner(state: &State<'_, HostState>, action: &str, path: Option<&str>) {
-    notes_notify(state.inner(), action, path);
+fn notes_notify_inner(
+    state: &State<'_, HostState>,
+    action: &str,
+    path: Option<&str>,
+    old_path: Option<&str>,
+) {
+    notes_notify(state.inner(), action, path, old_path);
 }
 
 /// 保存笔记（重索引 + 事件）
@@ -110,7 +133,7 @@ pub async fn notes_write(
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .map(|_| {
-            notes_notify_inner(&state, "write", Some(&rel2));
+            notes_notify_inner(&state, "write", Some(&rel2), None);
         })
         .map_err(notes_err)
 }
@@ -127,7 +150,7 @@ pub async fn notes_delete(rel_path: String, state: State<'_, HostState>) -> Resu
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .map(|_| {
-            notes_notify_inner(&state, "delete", Some(&rel2));
+            notes_notify_inner(&state, "delete", Some(&rel2), None);
         })
         .map_err(notes_err)
 }
@@ -144,11 +167,13 @@ pub async fn notes_rename(
         .library()
         .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
     let new2 = new_path.clone();
+    let old2 = old_path.clone();
     tauri::async_runtime::spawn_blocking(move || m.rename(&old_path, &new_path))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .map(|_| {
-            notes_notify_inner(&state, "rename", Some(&new2));
+            // 旧路径一并带上：同步层据此记 delete(old)+write(new) 两笔
+            notes_notify_inner(&state, "rename", Some(&new2), Some(&old2));
         })
         .map_err(notes_err)
 }
@@ -210,7 +235,7 @@ pub async fn notes_sync(
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .inspect(|_r| {
-            notes_notify_inner(&state, "sync", None);
+            notes_notify_inner(&state, "sync", None, None);
         })
         .map_err(notes_err)
 }
@@ -228,7 +253,7 @@ pub async fn notes_reindex(
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .inspect(|_r| {
-            notes_notify_inner(&state, "reindex", None);
+            notes_notify_inner(&state, "reindex", None, None);
         })
         .map_err(notes_err)
 }
@@ -267,7 +292,7 @@ pub async fn notes_card_create(
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .inspect(|_card| {
-            notes_notify_inner(&state, "cards", None);
+            notes_notify_inner(&state, "cards", None, None);
         })
         .map_err(notes_err)
 }
@@ -283,7 +308,7 @@ pub async fn notes_card_delete(id: String, state: State<'_, HostState>) -> Resul
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .inspect(|_ok| {
-            notes_notify_inner(&state, "cards", None);
+            notes_notify_inner(&state, "cards", None, None);
         })
         .map_err(notes_err)
 }
@@ -320,7 +345,7 @@ pub async fn notes_review_grade(
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .inspect(|_card| {
-            notes_notify_inner(&state, "cards", None);
+            notes_notify_inner(&state, "cards", None, None);
         })
         .map_err(notes_err)
 }
@@ -359,7 +384,7 @@ pub async fn notes_canvas_save(
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .map(|_| {
-            notes_notify_inner(&state, "canvas", Some(&dir2));
+            notes_notify_inner(&state, "canvas", Some(&dir2), None);
         })
         .map_err(notes_err)
 }
@@ -375,4 +400,114 @@ pub async fn notes_canvas_dirs(state: State<'_, HostState>) -> Result<Vec<String
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .map_err(notes_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notes_change_payload;
+    use host_core::device::{DeviceIdentity, PairStore};
+    use host_core::events::{Event, EventBus};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use sync_core::{ChangeApplier, OpLog, SyncCtx, ENTITY_NOTE};
+
+    /// 内存笔记库（只需回答快照；本测试关心的是入流的两笔 op 形状）
+    #[derive(Default)]
+    struct MemNotes {
+        data: parking_lot::Mutex<HashMap<String, serde_json::Value>>,
+    }
+    impl ChangeApplier for MemNotes {
+        fn snapshot(
+            &self,
+            _entity: &str,
+            id: &str,
+        ) -> sync_core::Result<Option<serde_json::Value>> {
+            Ok(self.data.lock().get(id).cloned())
+        }
+        fn apply_upsert(
+            &self,
+            _entity: &str,
+            id: &str,
+            value: &serde_json::Value,
+        ) -> sync_core::Result<()> {
+            self.data.lock().insert(id.to_string(), value.clone());
+            Ok(())
+        }
+        fn apply_delete(&self, _entity: &str, id: &str) -> sync_core::Result<()> {
+            self.data.lock().remove(id);
+            Ok(())
+        }
+    }
+
+    fn ctx(tag: &str) -> (Arc<SyncCtx>, Arc<MemNotes>, std::path::PathBuf) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("nf_notes_sync_{tag}_{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let identity = Arc::new(DeviceIdentity::load_or_create(&dir, None).unwrap());
+        let store = Arc::new(PairStore::load_or_default(&dir).unwrap());
+        let log = Arc::new(OpLog::open(&dir.join("sync.db")).unwrap());
+        let notes = Arc::new(MemNotes::default());
+        let mut appliers: HashMap<String, Arc<dyn ChangeApplier>> = HashMap::new();
+        appliers.insert(ENTITY_NOTE.to_string(), notes.clone());
+        let ctx = Arc::new(SyncCtx {
+            identity,
+            store,
+            log,
+            appliers: Arc::new(appliers),
+            bus: Some(Arc::new(EventBus::new())),
+        });
+        (ctx, notes, dir)
+    }
+
+    /// 任务书（09 §10.2 T-B5-5）字面测试名：改名在变更流里是"旧删 + 新写"两笔
+    ///
+    /// 放在 src-tauri 层是因为这条链的断点在两侧交界处：载荷由 `notes_change_payload`
+    /// 造、由 sync-core 解析消费。只测 sync-core 会漏掉"发布方根本没带 old_path"，
+    /// 只测发布方会漏掉"带了也没人拆成两笔"。
+    #[test]
+    #[allow(non_snake_case)]
+    fn syncEntity_renameRecordsDeleteOldAndUpsertNew() {
+        let (ctx, notes, dir) = ctx("rename");
+        // 改名后磁盘上只有新路径（旧路径读不到——正因如此 old_path 必须来自事件本身）
+        notes.data.lock().insert(
+            "new.md".into(),
+            serde_json::json!({ "content": "# 改名后" }),
+        );
+
+        let payload = notes_change_payload("rename", Some("new.md"), Some("old.md"));
+        assert_eq!(payload["action"], "rename");
+        assert_eq!(payload["old_path"], "old.md");
+        let event = Event::new("notes.changed", "notes", payload);
+        let dev = ctx.identity.device_id.clone();
+
+        assert_eq!(sync_core::record_change_event(&ctx, &event).unwrap(), 2);
+        let ops = ctx.log.ops_of_device(&dev, 0, 10).unwrap();
+        assert_eq!(ops.len(), 2, "一次改名两笔：旧删 + 新写");
+        assert_eq!(ops[0].entity_id, "old.md", "顺序必须是 old → new");
+        assert!(ops[0].is_delete(), "旧路径那笔是删除");
+        assert_eq!(ops[1].entity_id, "new.md");
+        assert!(!ops[1].is_delete());
+        assert_eq!(ops[1].value["content"], "# 改名后", "新路径带的是真快照");
+
+        // 负对照：缺 old_path（半截升级的发布方）整条丢弃，绝不留下"只写新不删旧"的半改名
+        let half = Event::new(
+            "notes.changed",
+            "notes",
+            notes_change_payload("rename", Some("x.md"), None),
+        );
+        assert_eq!(sync_core::record_change_event(&ctx, &half).unwrap(), 0);
+        assert_eq!(ctx.log.ops_of_device(&dev, 0, 10).unwrap().len(), 2);
+        // 索引/画布类事件连 path 都没有，同样零入流
+        let reindex = Event::new(
+            "notes.changed",
+            "notes",
+            notes_change_payload("reindex", None, None),
+        );
+        assert_eq!(sync_core::record_change_event(&ctx, &reindex).unwrap(), 0);
+        assert_eq!(ctx.log.ops_of_device(&dev, 0, 10).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

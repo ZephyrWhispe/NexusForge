@@ -265,9 +265,15 @@ impl HostState {
 
         // ---- 阶段四同步（M15，docs/impl/07 SYNC1–SYNC4）：信任根复用 KVM 配对 ----
         let sync = Arc::new(SyncModule::new(&app_data_dir));
-        sync.attach_applier(Arc::new(NotesApplier {
-            notes: notes.clone(),
-        }));
+        // 装配口点名数据集（T-B5-5 双参）：白名单外的 entity 在此 Err ⇒ 启动失败，
+        // 而不是"接上了但没人用"——密码库根本没有这条通路。
+        sync.attach_applier(
+            sync_core::ENTITY_NOTE,
+            Arc::new(NotesApplier {
+                notes: notes.clone(),
+            }),
+        )
+        .map_err(|e| format!("SYNC 数据集装配失败：{e}"))?;
         config.register_schema("sync", sync.config_schema());
         registry.register(sync.clone())?;
 
@@ -428,15 +434,31 @@ struct NotesApplier {
     notes: Arc<NotesModule>,
 }
 
+impl NotesApplier {
+    /// 本应用器只服务笔记库：注册表查表守卫（T-B5-5 之前这里是三处与裸字符串
+    /// `"note"` 的相等比较——泛化后它既不是单一真源、也不会随白名单演进）。
+    ///
+    /// 两个条件都要：`ENTITY_NOTE` 说"我是笔记应用器"，`is_sync_entity` 说"笔记仍在
+    /// 可同步名单里"——将来从白名单摘掉某数据集时，这里跟着一起关门，
+    /// 而不是留下一个还能被会话调到的活应用器。
+    fn serve(entity: &str) -> sync_core::Result<()> {
+        if entity == sync_core::ENTITY_NOTE && sync_core::is_sync_entity(entity) {
+            return Ok(());
+        }
+        Err(sync_core::SyncError::Entity(format!(
+            "笔记应用器仅服务 {:?}，拒收数据集 {entity}",
+            sync_core::ENTITY_NOTE,
+        )))
+    }
+}
+
 impl sync_core::ChangeApplier for NotesApplier {
     fn snapshot(
         &self,
         entity: &str,
         entity_id: &str,
     ) -> sync_core::Result<Option<serde_json::Value>> {
-        if entity != "note" {
-            return Ok(None);
-        }
+        Self::serve(entity)?;
         let Some(lib) = self.notes.library() else {
             return Ok(None);
         };
@@ -454,11 +476,7 @@ impl sync_core::ChangeApplier for NotesApplier {
         entity_id: &str,
         value: &serde_json::Value,
     ) -> sync_core::Result<()> {
-        if entity != "note" {
-            return Err(sync_core::SyncError::Apply(format!(
-                "未知数据集 {entity}（v1 仅 note）"
-            )));
-        }
+        Self::serve(entity)?;
         let Some(lib) = self.notes.library() else {
             return Err(sync_core::SyncError::NotReady("笔记库未就绪".into()));
         };
@@ -474,11 +492,7 @@ impl sync_core::ChangeApplier for NotesApplier {
     }
 
     fn apply_delete(&self, entity: &str, entity_id: &str) -> sync_core::Result<()> {
-        if entity != "note" {
-            return Err(sync_core::SyncError::Apply(format!(
-                "未知数据集 {entity}（v1 仅 note）"
-            )));
-        }
+        Self::serve(entity)?;
         let Some(lib) = self.notes.library() else {
             return Err(sync_core::SyncError::NotReady("笔记库未就绪".into()));
         };

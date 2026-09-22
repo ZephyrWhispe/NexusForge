@@ -83,7 +83,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)] = &[
     ("desktop.launcher_toggled", "快速启动器呼出/隐藏请求（全局快捷键触发）。payload: {}", BackpressurePolicy::None),
     ("desktop.note_quick", "快速速记条呼出请求（全局快捷键触发）。payload: {}", BackpressurePolicy::None),
     ("desktop.remind_due", "随记提醒到期。payload: {id, content, remind_at, tags}", BackpressurePolicy::None),
-    ("notes.changed", "笔记库变更（创建/写入/删除/重命名/索引同步/卡片/画布）。payload: {action, path?}", BackpressurePolicy::None),
+    ("notes.changed", "笔记库变更（创建/写入/删除/重命名/索引同步/卡片/画布）。payload: {action, path?, old_path?, entity?}（rename 带 old_path；entity 缺省由同步层按 note 处理）", BackpressurePolicy::None),
     ("term.output", "终端输出批处理（8ms 窗口合并，单批 ≤ 64KB；内容敏感不进日志）。payload: {session_id, data, seq}", BackpressurePolicy::Batched { window_ms: 8, max_bytes: 64 * 1024 }),
     ("term.exit", "终端会话结束。payload: {session_id, code?}", BackpressurePolicy::None),
     ("sys.metrics", "系统资源采样（1s 合并节流）。payload: {ts_ms, cpu, mem_used, mem_total, net_bps, disks}", BackpressurePolicy::Merged { window_ms: 1000 }),

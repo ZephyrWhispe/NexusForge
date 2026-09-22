@@ -195,12 +195,16 @@ impl OpLog {
     }
 
     /// 拉取指定设备产出的变更（ts 升序；pull 响应方查自己的产出，push 方查自产）
+    ///
+    /// `rowid` 是同级 ts 的确定性次序：T-B5-5 起一次 rename 会在同一毫秒产出两笔
+    /// （delete 旧路径 + write 新路径），只 `ORDER BY ts` 时二者先后由 SQLite 随手决定，
+    /// "先删旧再写新"就成了运气。rowid 是隐式列 ⇒ 零表变更，只需排序键加一位。
     pub fn ops_of_device(&self, device: &str, since_ts: i64, limit: usize) -> Result<Vec<OpEntry>> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT op_id, entity, entity_id, ts, device, value FROM op_log
-                 WHERE device = ?1 AND ts > ?2 ORDER BY ts LIMIT ?3",
+                 WHERE device = ?1 AND ts > ?2 ORDER BY ts, rowid LIMIT ?3",
             )
             .map_err(|e| SyncError::Db(e.to_string()))?;
         let rows = stmt

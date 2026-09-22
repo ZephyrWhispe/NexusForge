@@ -6,7 +6,8 @@
 //!   sync.conflict 事件仅作提示
 //! - SYNC4 加密：复用 K2 配对信任根（同 identity/paired.json）双 DH → HKDF → ChaCha20-Poly1305
 //! - 会话流水：每轮同步（含失败）落一行 sync_run（T-B5-3：摘要不再只是 tracing 里的一行字）
-//! - 数据集 v1 = note；密码库条目**永不**自动同步（白名单硬编码）
+//! - 数据集注册表（T-B5-5）：`SYNC_ENTITIES` 编译期白名单 + 按 entity 分派的应用器映射；
+//!   密码库条目**永不**自动同步（白名单无 vault 条目 + attach 运行期拒 + 分派口永久拒收）
 
 pub mod engine;
 pub mod error;
@@ -17,8 +18,9 @@ pub mod transport;
 pub use engine::{ApplyOutcome, ChangeApplier, SyncEngine};
 pub use error::{Result, SyncError};
 pub use module::{
-    record_change_with, restore_conflict_with, PeerStatus, SyncCtx, SyncModule, SyncStatus,
-    SyncSummary, DEFAULT_SYNC_PORT,
+    is_sync_entity, record_change_event, record_change_with, restore_conflict_with, EntitySpec,
+    PeerStatus, SyncCtx, SyncModule, SyncStatus, SyncSummary, CHANGE_ACTIONS, DEFAULT_SYNC_PORT,
+    ENTITY_NOTE, SYNC_ENTITIES,
 };
 pub use oplog::{ConflictEntry, OpEntry, OpLog, SyncRun};
 pub use transport::{SyncMsg, SyncSession};

@@ -9,8 +9,10 @@
 //!   阅后即焚 ⇒ 面板答不出"上次到底同步了没"）
 //! - 状态读面：`status()` 返回类型化 `SyncStatus`（T-B5-4：监听真态 + 每 peer 两维游标与
 //!   pending，全部现读自表；无类型 `json!` 时代"面板说的"与"内核做的"可以各说各话）
-//! - 数据集 v1 = note（订阅 notes.changed 记录本地变更；applier 由宿主注入写穿 NoteLibrary）
-//! - 红线：密码库条目**永不**自动同步（数据集白名单硬编码，无 vault 通路）
+//! - 数据集注册表（T-B5-5）：`SYNC_ENTITIES` 编译期白名单 + 按 entity 分派的应用器映射；
+//!   新增数据集＝往常量数组加一行 + 宿主多装配一个 applier，`engine.rs`/`transport.rs` 零改
+//! - 红线：密码库条目**永不**自动同步（白名单硬编码，`attach_applier("vault", …)` 运行期亦拒，
+//!   见 `syncEntity_vaultNeverAdmitted` 三层可否例）
 //!
 //! 防死环：远端应用走 NoteLibrary 直调（不发 notes.changed——该事件由 IPC 层发布），
 //! 本地订阅仅记录用户操作产生的变更。
@@ -41,8 +43,67 @@ type R<T> = std::result::Result<T, SyncError>;
 /// SYNC1 默认监听端口（KVM 占 49800/49801；回环测试 49810–49812 之外）
 pub const DEFAULT_SYNC_PORT: u16 = 49820;
 
-/// 数据集实体（v1 仅 note；密码库永不入白名单）
-const ENTITY: &str = "note";
+/// 笔记库数据集 id
+pub const ENTITY_NOTE: &str = "note";
+
+/// 可同步数据集声明（14-sync §5-1 的落地形态）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntitySpec {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+/// **编译期白名单**：同步数据集的唯一准入名单。
+///
+/// "密码库永不自动同步"从文案升格为结构事实：这里没有 `vault` 条目，
+/// `attach_applier` 因此拒绝任何 `vault` 应用器入注册表（运行期第二层），
+/// 而线格式/存储层从来不带数据集枚举（`op_log.entity` 只是文本列）。
+/// 新增一个数据集 = 此处加一行 + 宿主装配一个 applier；
+/// `engine.rs` / `transport.rs` / `oplog.rs` 零改动（`syncRegistry_secondEntityNeedsNoEngineChange` 钉住）。
+pub const SYNC_ENTITIES: &[EntitySpec] = &[EntitySpec {
+    id: ENTITY_NOTE,
+    label: "笔记库",
+}];
+
+/// 白名单查表（准入判定唯一入口：调用方不得再自拼 `entity == "note"` 字面量）
+pub fn is_sync_entity(entity: &str) -> bool {
+    SYNC_ENTITIES.iter().any(|s| s.id == entity)
+}
+
+/// 白名单成员 id 列表（错误消息与面板点名用）
+pub fn sync_entity_ids() -> Vec<&'static str> {
+    SYNC_ENTITIES.iter().map(|s| s.id).collect()
+}
+
+/// 准入守卫：两道**门**（宿主装配 applier、事件层认领数据集）过这一条查表。
+///
+/// 会话内部的分派（`SyncCtx::applier_for`）刻意不看白名单、只看注册表：
+/// 白名单是"谁被允许进门"，注册表是"此刻谁在服"。分清两层，
+/// `syncRegistry_secondEntityNeedsNoEngineChange` 才能用注册表接缝装上假数据集，
+/// 证明真加一个数据集只需要往 `SYNC_ENTITIES` 加一行，引擎与线格式零改。
+pub fn require_sync_entity(entity: &str) -> R<()> {
+    if is_sync_entity(entity) {
+        return Ok(());
+    }
+    Err(SyncError::Entity(format!(
+        "数据集 {entity} 不在同步白名单（当前仅 {:?}）：拒绝装配/拒绝认领",
+        sync_entity_ids()
+    )))
+}
+
+/// 内容变更动作白名单：`create`/`write`/`delete` 是终态快照，`rename` 展开为
+/// "旧路径删除 + 新路径写入"两笔（T-B5-5：过去 rename 完全不入流 ⇒ 对端既留旧文件
+/// 又拿不到新文件，等于一次改名在远端变成一次凭空新增）。
+/// 白名单外的动作（`sync`/`reindex`/`cards`/`canvas` 等索引与视图事件）零入流。
+pub const CHANGE_ACTIONS: &[&str] = &["create", "write", "delete", "rename"];
+
+/// 一条应入 op_log 的变更记录（事件 → 变更流的中间产物，纯函数出口）
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeRecord {
+    pub entity: String,
+    pub path: String,
+    pub action: String,
+}
 
 /// 同步结果摘要（IPC 返回 + 状态事件）
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -104,15 +165,34 @@ pub struct SyncCtx {
     pub identity: Arc<DeviceIdentity>,
     pub store: Arc<PairStore>,
     pub log: Arc<OpLog>,
-    pub applier: Option<Arc<dyn ChangeApplier>>,
+    /// entity → 应用器（T-B5-5：过去是单槽 `Option<Arc<dyn ChangeApplier>>`，
+    /// 于是"泛化"在结构上无处落脚——第二实体没有地方注册，未知 entity 只能被
+    /// 唯一的 note 应用器收下或整批静默计数 0）。
+    ///
+    /// 两层防线各自独立：**准入**在 `attach_applier`（查 `SYNC_ENTITIES` 编译期白名单），
+    /// **分派**在此处查表（谁注册过就谁来收）。测试因此能装一个白名单外的假数据集
+    /// 验证"第二实体不需要动引擎"，而生产路径没有任何口子把 `vault` 塞进这张表。
+    pub appliers: Arc<HashMap<String, Arc<dyn ChangeApplier>>>,
     pub bus: Option<Arc<EventBus>>,
 }
 
 impl SyncCtx {
-    fn applier(&self) -> R<Arc<dyn ChangeApplier>> {
-        self.applier
-            .clone()
-            .ok_or_else(|| SyncError::NotReady("变更应用器未注入".into()))
+    /// 按 entity 取应用器（**分派**口：只看注册表，白名单守卫在两道门上，见 `require_sync_entity`）
+    fn applier_for(&self, entity: &str) -> R<Arc<dyn ChangeApplier>> {
+        self.appliers.get(entity).cloned().ok_or_else(|| {
+            SyncError::Entity(format!(
+                "数据集 {entity} 无应用器（白名单 {:?}；密码库等未注册数据集在此永久拒收）",
+                sync_entity_ids()
+            ))
+        })
+    }
+
+    /// 会话准入：至少有一个数据集在服（`run_initiator` 开会话前的粗门）
+    fn require_appliers(&self) -> R<()> {
+        if self.appliers.is_empty() {
+            return Err(SyncError::NotReady("变更应用器未注入".into()));
+        }
+        Ok(())
     }
 
     /// 发 sync.conflict 事件（LWW 通知）
@@ -148,15 +228,18 @@ impl SyncCtx {
     }
 
     /// 应用一批远端变更（统计 + 游标推进 + 冲突落盘；initiator 与 responder 共用）
-    fn apply_ops(&self, ops: &[crate::oplog::OpEntry], peer_key: &str) -> (u32, u32, u32) {
-        let Ok(applier) = self.applier() else {
-            return (0, 0, 0);
-        };
+    ///
+    /// **可失败**是 T-B5-5 的红线收口：过去应用器不在位/未知 entity 走 `(0,0,0)` 静默返回，
+    /// 而游标照样 `set_cursor` 前进 ⇒ 对端那批变更在本机既没落地又被记成"已同步"，
+    /// 是"谎报进度"最便宜的一种写法。现在整会话 Err，游标停在原地，下轮重来。
+    fn apply_ops(&self, ops: &[crate::oplog::OpEntry], peer_key: &str) -> R<(u32, u32, u32)> {
         let mut applied = 0u32;
         let mut lost = 0u32;
         let mut conflicts = 0u32;
         let mut max_ts = 0i64;
         for op in ops {
+            // 每条 op 按自己的 entity 取应用器：没有应用器 ⇒ 拒收到此为止（不跳过后继续）
+            let applier = self.applier_for(&op.entity)?;
             max_ts = max_ts.max(op.ts);
             match SyncEngine::apply_remote(&self.log, applier.as_ref(), op) {
                 Ok(ApplyOutcome::Applied) => applied += 1,
@@ -184,9 +267,9 @@ impl SyncCtx {
             }
         }
         if max_ts > 0 {
-            let _ = self.log.set_cursor(peer_key, max_ts);
+            self.log.set_cursor(peer_key, max_ts)?;
         }
-        (applied, lost, conflicts)
+        Ok((applied, lost, conflicts))
     }
 }
 
@@ -199,7 +282,7 @@ async fn run_initiator(
     session: &mut SyncSession,
     summary: &mut SyncSummary,
 ) -> R<()> {
-    ctx.applier()?; // 应用器不在位就别开会话（apply_ops 内的零计数是运行期降级，不是配置期）
+    ctx.require_appliers()?; // 应用器一个都不在位就别开会话（分派失败是逐条 Err，此处是配置期粗门）
     let self_device = ctx.identity.device_id.clone();
     let peer_key = session.peer.device_id.clone();
 
@@ -228,7 +311,7 @@ async fn run_initiator(
     write_msg(session, &SyncMsg::Pull { since_ts: since }).await?;
     match read_msg(session).await? {
         SyncMsg::Push { ops, .. } => {
-            let (applied, lost, conflicts) = ctx.apply_ops(&ops, &peer_key);
+            let (applied, lost, conflicts) = ctx.apply_ops(&ops, &peer_key)?;
             summary.pulled_applied += applied;
             summary.pulled_lost += lost;
             summary.conflicts += conflicts;
@@ -266,7 +349,7 @@ async fn run_responder(
     loop {
         match read_msg(session).await? {
             SyncMsg::Push { ops, more } => {
-                let (applied, lost, conflicts) = ctx.apply_ops(&ops, &peer_key);
+                let (applied, lost, conflicts) = ctx.apply_ops(&ops, &peer_key)?;
                 summary.pulled_applied += applied;
                 summary.pulled_lost += lost;
                 summary.conflicts += conflicts;
@@ -398,20 +481,97 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 事件 → 应入流的变更记录（**纯函数**，§9.1-④ 两半制的语义半：零 IO 可直测）
+///
+/// `None` = 该事件不是内容变更：动作在 `CHANGE_ACTIONS` 外（索引/卡片/画布等视图事件）、
+/// 缺 `path`、或 `rename` 缺 `old_path`（少一半就无法两记齐全，宁可不记）。
+/// 数据集认领：`payload["entity"]` 缺省时回落 `ENTITY_NOTE`——notes 侧事件早于本行存在，
+/// 不能要求它先升级；回落这件事由 `record_change_event` 一次性 warn，不静默。
+pub fn change_records_of_event(event: &Event) -> Option<Vec<ChangeRecord>> {
+    let action = event.payload.get("action").and_then(|v| v.as_str())?;
+    if !CHANGE_ACTIONS.contains(&action) {
+        return None;
+    }
+    let path = event.payload.get("path").and_then(|v| v.as_str())?;
+    let entity = event
+        .payload
+        .get("entity")
+        .and_then(|v| v.as_str())
+        .unwrap_or(ENTITY_NOTE);
+    if action == "rename" {
+        let old_path = event.payload.get("old_path").and_then(|v| v.as_str())?;
+        // 顺序即语义：先旧路径删除、后新路径写入。两笔通常同毫秒 ⇒ 先后由 op_log 的
+        // `ORDER BY ts, rowid` 定（rowid 随写入递增），这也是本函数产出有序 Vec 的原因。
+        return Some(vec![
+            ChangeRecord {
+                entity: entity.to_string(),
+                path: old_path.to_string(),
+                action: "delete".into(),
+            },
+            ChangeRecord {
+                entity: entity.to_string(),
+                path: path.to_string(),
+                action: "write".into(),
+            },
+        ]);
+    }
+    Some(vec![ChangeRecord {
+        entity: entity.to_string(),
+        path: path.to_string(),
+        action: action.to_string(),
+    }])
+}
+
+/// 事件缺 `entity` 键的回落只提示一次（每次进程启动一条 warn 足够；刷屏会淹掉真信号）
+static ENTITY_KEY_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// 事件入流（订阅臂唯一入口）：白名单认领 → 解析 → 逐条入库
+///
+/// 返回入库条数（`Ok(0)` = 非内容事件，正常静默；`Err` = 该记的没记上，调用方必须出声）。
+/// rename 的中间态是这里唯一的多写：第一笔已入库而第二笔失败 ⇒ 远端会"只删不建"，
+/// 所以失败绝不能吞成 Ok(0)——订阅臂把它记成 warn 是最后一层，测试面直接看 Err。
+pub fn record_change_event(ctx: &SyncCtx, event: &Event) -> R<usize> {
+    if let Some(entity) = event.payload.get("entity").and_then(|v| v.as_str()) {
+        require_sync_entity(entity)?; // 事件自己声称的数据集也要过白名单这道门
+    } else if event.payload.get("path").is_some() && !ENTITY_KEY_WARNED.swap(true, Ordering::SeqCst)
+    {
+        tracing::warn!(
+            "变更事件缺 entity 键，按 {ENTITY_NOTE} 处理（发布方应显式带 entity；本提示只出一次）"
+        );
+    }
+    let Some(records) = change_records_of_event(event) else {
+        return Ok(0);
+    };
+    for r in &records {
+        record_change_with(ctx, &r.entity, &r.path, &r.action)?;
+    }
+    Ok(records.len())
+}
+
 /// 本地变更记录（自由函数：订阅任务与 IPC 包装共用；op_log 快照式入库）
-pub fn record_change_with(ctx: &SyncCtx, path: &str, action: &str) -> R<()> {
+///
+/// `action == "delete"` 是**唯一**真删除口。其余动作读当前快照入库，读不到就 Err：
+/// 旧语义把 `snapshot()` 的 `None` 直接记成 `{deleted:true}`（承重⑪红线）——
+/// 于是任何 IO 抖动（文件被占用、路径基准差异、泛化后第二实体 id 拼错）都会
+/// **向全部对端广播"删了"**，一次读失败放大成跨设备删除。宁可这一笔不入流、
+/// 下轮用户再改一次，也不替用户做删除的决定。
+pub fn record_change_with(ctx: &SyncCtx, entity: &str, path: &str, action: &str) -> R<()> {
+    let applier = ctx.applier_for(entity)?;
     let value = if action == "delete" {
         serde_json::json!({ DELETED_KEY: true })
     } else {
-        match ctx.applier()?.snapshot(ENTITY, path)? {
+        match applier.snapshot(entity, path)? {
             Some(v) => v,
-            // 实体已不存在（rename 后旧 path 事件等）——记删除
-            None => serde_json::json!({ DELETED_KEY: true }),
+            None => {
+                return Err(SyncError::Entity(format!(
+                    "快照读取失败：实体 {entity}/{path} 不存在，已拒记删除标记（action={action}）"
+                )))
+            }
         }
     };
     SyncEngine::record_local(
         &ctx.log,
-        ENTITY,
+        entity,
         path,
         value,
         &ctx.identity.device_id,
@@ -432,7 +592,7 @@ pub fn restore_conflict_with(ctx: &SyncCtx, conflict_id: &str) -> R<crate::oplog
     let entry = ctx.log.find_conflict(conflict_id)?.ok_or_else(|| {
         SyncError::Apply(format!("冲突记录 {conflict_id} 不存在（可能已超出保留窗）"))
     })?;
-    let applier = ctx.applier()?;
+    let applier = ctx.applier_for(&entry.entity)?;
     if entry.is_delete() {
         applier.apply_delete(&entry.entity, &entry.entity_id)?;
     } else {
@@ -452,7 +612,8 @@ pub struct SyncModule {
     state: ModuleStateCell,
     bus: RwLock<Option<Arc<EventBus>>>,
     log: RwLock<Option<Arc<OpLog>>>,
-    applier: RwLock<Option<Arc<dyn ChangeApplier>>>,
+    /// entity → 应用器注册表（`attach_applier` 是唯一写口，且过白名单这道门）
+    appliers: RwLock<HashMap<String, Arc<dyn ChangeApplier>>>,
     identity: RwLock<Option<Arc<DeviceIdentity>>>,
     store: Arc<PairStore>,
     port: AtomicU16,
@@ -473,7 +634,7 @@ impl SyncModule {
             state: ModuleStateCell::new(),
             bus: RwLock::new(None),
             log: RwLock::new(None),
-            applier: RwLock::new(None),
+            appliers: RwLock::new(HashMap::new()),
             identity: RwLock::new(None),
             store: Arc::new(store),
             port: AtomicU16::new(DEFAULT_SYNC_PORT),
@@ -484,9 +645,18 @@ impl SyncModule {
         }
     }
 
-    /// 宿主注入变更应用器（src-tauri：NoteLibrary 投影）
-    pub fn attach_applier(&self, applier: Arc<dyn ChangeApplier>) {
-        *self.applier.write() = Some(applier);
+    /// 宿主注入某数据集的变更应用器（**双参**：entity 必填）
+    ///
+    /// 白名单外的 entity（含 `"vault"`）一律拒绝并 `tracing::error!`：这一行是
+    /// "密码库永不自动同步"从注释升格为代码的地方——过去想接 vault 只需要
+    /// `attach_applier(vaultApplier)` 一行，注册表连个说"不"的地方都没有。
+    pub fn attach_applier(&self, entity: &str, applier: Arc<dyn ChangeApplier>) -> R<()> {
+        if let Err(e) = require_sync_entity(entity) {
+            tracing::error!(entity, error = %e, "拒绝装配非白名单数据集的应用器");
+            return Err(e);
+        }
+        self.appliers.write().insert(entity.to_string(), applier);
+        Ok(())
     }
 
     /// 监听端口注入（测试随机端口）
@@ -641,7 +811,7 @@ impl SyncModule {
                 .read()
                 .clone()
                 .ok_or_else(|| SyncError::NotReady("op_log 未就绪".into()))?,
-            applier: self.applier.read().clone(),
+            appliers: Arc::new(self.appliers.read().clone()),
             bus: self.bus.read().clone(),
         }))
     }
@@ -670,9 +840,9 @@ impl SyncModule {
     }
 
     /// 本地变更记录入口（notes.changed 订阅回调 / IPC）
-    pub fn record_change(&self, path: &str, action: &str) -> R<()> {
+    pub fn record_change(&self, entity: &str, path: &str, action: &str) -> R<()> {
         let ctx = self.ctx()?;
-        record_change_with(&ctx, path, action)
+        record_change_with(&ctx, entity, path, action)
     }
 
     /// accept 循环（start 内 tokio spawn）
@@ -779,6 +949,8 @@ impl Module for SyncModule {
             SyncModule::accept_loop(ctx_listen, port, cancel, listening, bind_error).await
         });
         // SYNC2：订阅本地变更（notes.changed → op_log 快照）
+        // 主题表 v1 只有 note 一个发布方；第二数据集接入时在这里加一路订阅，
+        // 事件 → 变更记录的解析与入库全在 `record_change_event` 里，不必再动这里。
         if let Some(bus) = self.bus.read().clone() {
             if let Ok(mut rx) = bus.subscribe("notes.changed") {
                 let ctx2 = ctx.clone();
@@ -789,19 +961,8 @@ impl Module for SyncModule {
                                 if event.source == "sync" {
                                     continue; // 防自环（理论不可达：apply 直调不发事件）
                                 }
-                                let action = event
-                                    .payload
-                                    .get("action")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                if let Some(path) =
-                                    event.payload.get("path").and_then(|v| v.as_str())
-                                {
-                                    if matches!(action, "create" | "write" | "delete") {
-                                        if let Err(e) = record_change_with(&ctx2, path, action) {
-                                            tracing::warn!(path, error = %e, "本地变更入 op_log 失败");
-                                        }
-                                    }
+                                if let Err(e) = record_change_event(&ctx2, &event) {
+                                    tracing::warn!(error = %e, "本地变更入 op_log 失败");
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -823,16 +984,13 @@ impl Module for SyncModule {
         Ok(())
     }
 
+    /// 配置 schema（T-B5-5 起为**空**：原先那枚字符串型"范围说明"键是全仓零读者的死键——
+    /// 设置项要么有真消费方要么不出现，"有个输入框但没人读"会让用户以为它生效了。
+    /// 自动同步/暂停等真键由 T-B5-6 经 `apply_config` 活通路立起来）
     fn config_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {
-                "scope_note": {
-                    "type": "string", "title": "同步范围",
-                    "description": "v1 仅笔记库；密码库永不自动同步（仅手动导出加密包）",
-                    "default": ""
-                }
-            }
+            "properties": {}
         })
     }
 
@@ -949,11 +1107,13 @@ mod tests {
         let log = Arc::new(OpLog::open(&dir.join("db").join("sync.db")).unwrap());
         let applier = Arc::new(MemStore::default());
         let dyn_applier: Arc<dyn ChangeApplier> = applier.clone();
+        let mut appliers: HashMap<String, Arc<dyn ChangeApplier>> = HashMap::new();
+        appliers.insert(ENTITY_NOTE.to_string(), dyn_applier);
         let ctx = Arc::new(SyncCtx {
             identity,
             store,
             log,
-            applier: Some(dyn_applier),
+            appliers: Arc::new(appliers),
             bus: Some(Arc::new(EventBus::new())),
         });
         (ctx, applier)
@@ -988,8 +1148,9 @@ mod tests {
             .subscribe("sync.conflict")
             .expect("sync.conflict 主题在册");
 
-        let (applied, lost, conflicts) =
-            ctx.apply_ops(&[note_op("l1", "devB", 100, "远端那份被比掉了")], "devB");
+        let (applied, lost, conflicts) = ctx
+            .apply_ops(&[note_op("l1", "devB", 100, "远端那份被比掉了")], "devB")
+            .unwrap();
         assert_eq!((applied, lost, conflicts), (0, 1, 1));
 
         let rows = ctx.log.conflicts(10, 0).unwrap();
@@ -1021,8 +1182,8 @@ mod tests {
             .unwrap();
         let loser = note_op("l1", "devB", 100, "同一份败方内容");
         // 对端没收到 Ack 而重推同一批：确定性 id ⇒ INSERT OR IGNORE 吸收
-        ctx.apply_ops(std::slice::from_ref(&loser), "devB");
-        ctx.apply_ops(std::slice::from_ref(&loser), "devB");
+        ctx.apply_ops(std::slice::from_ref(&loser), "devB").unwrap();
+        ctx.apply_ops(std::slice::from_ref(&loser), "devB").unwrap();
         assert_eq!(
             ctx.log.conflicts(10, 0).unwrap().len(),
             1,
@@ -1030,7 +1191,8 @@ mod tests {
         );
 
         // 正对照：换了 ts 就是另一个败方快照，另起一行（不是 id 恒同的假去重）
-        ctx.apply_ops(&[note_op("l2", "devB", 101, "另一份")], "devB");
+        ctx.apply_ops(&[note_op("l2", "devB", 101, "另一份")], "devB")
+            .unwrap();
         assert_eq!(ctx.log.conflicts(10, 0).unwrap().len(), 2);
     }
 
@@ -1044,7 +1206,8 @@ mod tests {
             .append(&note_op("w1", &self_dev, 200, "本地新格"))
             .unwrap();
         store.put("x.md", "本地新格");
-        ctx.apply_ops(&[note_op("l1", "devB", 100, "远端旧格")], "devB");
+        ctx.apply_ops(&[note_op("l1", "devB", 100, "远端旧格")], "devB")
+            .unwrap();
         let rows = ctx.log.conflicts(10, 0).unwrap();
 
         let restored = restore_conflict_with(&ctx, &rows[0].conflict_id).unwrap();
@@ -1084,5 +1247,217 @@ mod tests {
         );
         assert_eq!(ctx.log.count(), 0, "取不到快照就不该往变更流里塞东西");
         assert_eq!(store.content_of("y.md").as_deref(), Some("保持原样"));
+    }
+
+    /// 第二个内存数据集（与 note 零共享：证明泛化不是"给 note 特判加一个分支"）
+    #[derive(Default)]
+    struct ClipStore {
+        data: parking_lot::Mutex<HashMap<String, serde_json::Value>>,
+    }
+    impl ChangeApplier for ClipStore {
+        fn snapshot(&self, _e: &str, id: &str) -> R<Option<serde_json::Value>> {
+            Ok(self.data.lock().get(id).cloned())
+        }
+        fn apply_upsert(&self, _e: &str, id: &str, value: &serde_json::Value) -> R<()> {
+            self.data.lock().insert(id.to_string(), value.clone());
+            Ok(())
+        }
+        fn apply_delete(&self, _e: &str, id: &str) -> R<()> {
+            self.data.lock().remove(id);
+            Ok(())
+        }
+    }
+
+    /// 任务书（09 §10.2 T-B5-5）字面测试名：承重⑪红线——快照读不到 ≠ 已被删除
+    #[test]
+    #[allow(non_snake_case)]
+    fn syncRegistry_missingSnapshot_neverBecomesDelete() {
+        let (ctx, store) = harness("missingsnapshot");
+        let err = record_change_with(&ctx, ENTITY_NOTE, "gone.md", "write").unwrap_err();
+        assert!(matches!(err, SyncError::Entity(_)), "实际 {err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("快照读取失败"),
+            "要自证拒的是什么，实际：{msg}"
+        );
+        assert!(
+            msg.contains("已拒记删除标记"),
+            "要点名拒的是删除标记，实际：{msg}"
+        );
+        assert!(msg.contains("gone.md"), "要点名是哪个路径，实际：{msg}");
+        assert_eq!(
+            ctx.log.count(),
+            0,
+            "一笔都不能入流（旧语义在此写入 deleted:true，等于把读失败广播成删除）"
+        );
+
+        // 正对照 A：文件真存在时同一调用正常入流（证明拒的是"读不到"而非 write 动作本身）
+        store.put("here.md", "内容还在");
+        record_change_with(&ctx, ENTITY_NOTE, "here.md", "write").unwrap();
+        let op = ctx
+            .log
+            .latest_for(ENTITY_NOTE, "here.md")
+            .unwrap()
+            .expect("刚写入的快照");
+        assert_eq!(op.value["content"], "内容还在");
+        assert!(!op.is_delete(), "write 永远不该产出删除标记");
+
+        // 正对照 B：真删除仍走 delete 通道（红线是"误删除"，不是"禁止删除"）
+        record_change_with(&ctx, ENTITY_NOTE, "here.md", "delete").unwrap();
+        let op = ctx
+            .log
+            .latest_for(ENTITY_NOTE, "here.md")
+            .unwrap()
+            .expect("删除应入流");
+        assert!(op.is_delete());
+        assert_eq!(ctx.log.count(), 2);
+
+        // 未注册数据集连门都进不来（vault 的 record 侧可否例面）
+        let err = record_change_with(&ctx, "vault", "here.md", "write").unwrap_err();
+        assert!(matches!(err, SyncError::Entity(_)), "实际 {err:?}");
+        assert_eq!(ctx.log.count(), 2, "拒收不留痕");
+    }
+
+    /// 任务书（09 §10.2 T-B5-5）字面测试名：第二个数据集只需注册表一行，引擎零改
+    ///
+    /// 判据的另一半在本行提交的文件清单（`engine.rs` / `transport.rs` / `oplog.rs`
+    /// 未出现在 diff 里），已记入 09 §12 T-B5-5 证据段——测试能证语义，证不了"没改"。
+    #[test]
+    #[allow(non_snake_case)]
+    fn syncRegistry_secondEntityNeedsNoEngineChange() {
+        let dir = temp_appdata("secondentity");
+        let kvm = dir.join("kvm");
+        let identity = Arc::new(DeviceIdentity::load_or_create(&kvm, None).unwrap());
+        let store = Arc::new(PairStore::load_or_default(&kvm).unwrap());
+        let log = Arc::new(OpLog::open(&dir.join("db").join("sync.db")).unwrap());
+        let notes = Arc::new(MemStore::default());
+        let clips = Arc::new(ClipStore::default());
+        let mut appliers: HashMap<String, Arc<dyn ChangeApplier>> = HashMap::new();
+        appliers.insert(ENTITY_NOTE.to_string(), notes.clone());
+        appliers.insert("clip".to_string(), clips.clone());
+        let ctx = Arc::new(SyncCtx {
+            identity,
+            store,
+            log,
+            appliers: Arc::new(appliers),
+            bus: Some(Arc::new(EventBus::new())),
+        });
+
+        // ---- record 半：假实体走同一个 record_change_with，零特判 ----
+        clips
+            .data
+            .lock()
+            .insert("c1".into(), serde_json::json!({ "text": "剪贴板一条" }));
+        record_change_with(&ctx, "clip", "c1", "write").unwrap();
+        let op = ctx
+            .log
+            .latest_for("clip", "c1")
+            .unwrap()
+            .expect("clip 变更入流");
+        assert_eq!(op.entity, "clip", "entity 列就是分派依据，无第二套表");
+        assert_eq!(op.value["text"], "剪贴板一条");
+
+        // ---- apply 半：对端推来的 clip 变更按 entity 找到 clip 应用器 ----
+        let remote = crate::oplog::OpEntry {
+            op_id: "r1".into(),
+            entity: "clip".into(),
+            entity_id: "c2".into(),
+            ts: 300,
+            device: "devB".into(),
+            value: serde_json::json!({ "text": "对端那条" }),
+        };
+        let (applied, lost, conflicts) = ctx
+            .apply_ops(std::slice::from_ref(&remote), "devB")
+            .unwrap();
+        assert_eq!((applied, lost, conflicts), (1, 0, 0));
+        assert_eq!(clips.data.lock()["c2"]["text"], "对端那条");
+        assert!(
+            notes.data.lock().get("c2").is_none(),
+            "clip 的变更绝不落进 note 数据集（分派错就是跨数据集投毒）"
+        );
+        // 游标随成功推进（同一张 cursors 表，无 per-entity 分支）
+        assert_eq!(ctx.log.cursor("devB"), 300);
+
+        // 没装应用器的数据集仍然拒（第三者在场也不会把会话变成静默跳过）
+        let ghost = crate::oplog::OpEntry {
+            entity: "vault".into(),
+            ..remote
+        };
+        let err = ctx
+            .apply_ops(std::slice::from_ref(&ghost), "devB")
+            .unwrap_err();
+        assert!(matches!(err, SyncError::Entity(_)), "实际 {err:?}");
+        assert_eq!(
+            ctx.log.cursor("devB"),
+            300,
+            "拒收的一批不许推进游标（否则对端被谎报\"已同步\"）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 任务书（09 §10.2 T-B5-5）字面测试名：非内容动作零入流
+    #[test]
+    #[allow(non_snake_case)]
+    fn syncEntity_actionNotInWhitelist_ignored() {
+        // 索引/卡片/画布/同步事件不是"某篇笔记变了"——当变更入流会喂对端假删除
+        for (action, path) in [
+            ("sync", serde_json::Value::Null),
+            ("reindex", serde_json::Value::Null),
+            ("cards", serde_json::Value::Null),
+            ("canvas", serde_json::json!("canvas/board1")),
+        ] {
+            let ev = Event::new(
+                "notes.changed",
+                "notes",
+                serde_json::json!({ "action": action, "path": path }),
+            );
+            assert!(
+                change_records_of_event(&ev).is_none(),
+                "动作 {action} 不该解析出任何变更记录"
+            );
+        }
+        assert_eq!(
+            CHANGE_ACTIONS,
+            ["create", "write", "delete", "rename"],
+            "白名单成员变化必须同时带来测试与文档"
+        );
+
+        // 入库面同样零增（不是"解析为空但别处仍写"）；正对照：换动作即一条
+        let (ctx, store) = harness("actionwhitelist");
+        store.put("a.md", "只此一份");
+        let canvas = Event::new(
+            "notes.changed",
+            "notes",
+            serde_json::json!({ "action": "canvas", "path": "a.md" }),
+        );
+        assert_eq!(record_change_event(&ctx, &canvas).unwrap(), 0);
+        assert_eq!(ctx.log.count(), 0);
+        let write = Event::new(
+            "notes.changed",
+            "notes",
+            serde_json::json!({ "action": "write", "path": "a.md" }),
+        );
+        assert_eq!(record_change_event(&ctx, &write).unwrap(), 1);
+        assert_eq!(ctx.log.count(), 1);
+
+        // rename 缺 old_path（发布方半截升级）⇒ 整条丢弃，不写成"只新建不删旧"的半改名
+        let half = Event::new(
+            "notes.changed",
+            "notes",
+            serde_json::json!({ "action": "rename", "path": "b.md" }),
+        );
+        assert!(change_records_of_event(&half).is_none());
+        assert_eq!(record_change_event(&ctx, &half).unwrap(), 0);
+
+        // 事件自称的数据集也要过白名单这道门（vault 的 publish 侧可否例面）
+        let vault = Event::new(
+            "notes.changed",
+            "vault",
+            serde_json::json!({ "action": "write", "path": "secret", "entity": "vault" }),
+        );
+        let err = record_change_event(&ctx, &vault).unwrap_err();
+        assert!(matches!(err, SyncError::Entity(_)), "实际 {err:?}");
+        assert!(err.to_string().contains("vault"));
+        assert_eq!(ctx.log.count(), 1, "门外的数据集零入流");
     }
 }
