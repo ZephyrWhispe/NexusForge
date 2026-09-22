@@ -254,8 +254,18 @@ impl Module for ScreenshotModule {
                 },
                 "filename_template": {
                     "type": "string", "title": "文件名模板",
-                    "description": "{ts} 替换为时间戳",
+                    "description": "{ts} 替换为时间戳，{fmt} 替换为实际扩展名（png/jpg/webp）；未知占位符原样保留",
                     "default": "shot_{ts}"
+                },
+                "format": {
+                    "type": "string", "title": "导出格式",
+                    "enum": ["png", "jpeg", "webp"], "default": "png",
+                    "description": "磁盘写侧唯一编码入口 util::encode_rgba；未知值直接报错不回落 png"
+                },
+                "quality": {
+                    "type": "integer", "title": "编码质量",
+                    "minimum": 1, "maximum": 100, "default": 80,
+                    "description": "仅 JPEG 生效：本代 WebP 只有 VP8L 无损档、PNG 无质量概念，故对二者无效"
                 },
                 "auto_copy": {
                     "type": "boolean", "title": "完成后复制",
@@ -274,6 +284,12 @@ impl Module for ScreenshotModule {
     }
 
     fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError> {
+        // 导出格式在落配置前就校验（设置是用户输入边界）：收下一个拼错的值，
+        // 等于让下一次截图保存才炸——那时用户已经不记得自己在设置里填过什么。
+        if let Some(raw) = values.get("format").and_then(|v| v.as_str()) {
+            util::EncodeFormat::from_str_honest(raw)
+                .map_err(|e| ModuleError::Config(e.to_string()))?;
+        }
         let cfg: ScreenshotConfig =
             serde_json::from_value(values).map_err(|e| ModuleError::Config(e.to_string()))?;
         if let Ok(mut g) = self.config.try_lock() {
@@ -450,7 +466,14 @@ impl ScreenshotModule {
         for action in &actions {
             match action.as_str() {
                 "copy" => self.action_copy(w, h, &rgba)?,
-                "save" => file = Some(self.action_save(w, h, &rgba)?),
+                "save" => {
+                    // 本次格式：请求覆盖（覆盖层"另存为"选了 jpeg）> 配置默认。
+                    // 解析放在 save 臂里而不是函数开头：一个写坏的 format 只该让保存失败，
+                    // 不该波及"只复制/只贴图"这两条与编码格式无关的动作。
+                    let raw = req.format.as_deref().unwrap_or(&cfg.format);
+                    let fmt = util::EncodeFormat::from_str_honest(raw)?;
+                    file = Some(self.action_save(w, h, &rgba, fmt, cfg.quality)?);
+                }
                 "pin" => {
                     let id = self.action_pin(
                         w,
@@ -524,6 +547,9 @@ impl ScreenshotModule {
     /// 写联动帧到 {appData}/frames/{task_id}.png（tmp+rename，规约 5）并发布
     /// `screenshot.ocr_requested {task_id, frame_ref}`（DESIGN O1：截图与 OCR
     /// 只经事件交互，不经函数调用；帧文件由消费端读取后删除）
+    ///
+    /// **恒 PNG**：OCR 输入侧要的是无损像素，JPEG 的块效应会直接打在字形边缘上，
+    /// 而识别精度是这条链路的产物质量上限——导出格式（T-B4-7）因此不适用于此。
     fn dispatch_ocr_request(
         &self,
         task_id: &str,
@@ -531,7 +557,6 @@ impl ScreenshotModule {
         h: u32,
         rgba: &[u8],
     ) -> Result<(), AppError> {
-        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
         let Some(dir) = self.app_data() else {
             return Err(mod_err("SCREENSHOT_STATE_001", "模块未初始化"));
         };
@@ -540,20 +565,11 @@ impl ScreenshotModule {
             .map_err(|e| mod_err("SCREENSHOT_OCR_001", format!("创建帧目录失败: {e}")))?;
         let path = frames.join(format!("{task_id}.png"));
         let tmp = frames.join(format!(".{task_id}.png.tmp"));
-        let encoded = {
-            let f = std::fs::File::create(&tmp)
-                .map_err(|e| mod_err("SCREENSHOT_OCR_001", format!("创建帧文件失败: {e}")))?;
-            PngEncoder::new(f).write_image(rgba, w, h, ExtendedColorType::Rgba8)
-        };
-        if let Err(e) = encoded {
+        let (bytes, _) = util::encode_rgba(util::EncodeFormat::Png, 80, w, h, rgba)?;
+        let written = std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = written {
             let _ = std::fs::remove_file(&tmp);
-            return Err(mod_err(
-                "SCREENSHOT_OCR_001",
-                format!("帧 PNG 编码失败: {e}"),
-            ));
-        }
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&path);
             return Err(mod_err("SCREENSHOT_OCR_001", format!("帧落盘失败: {e}")));
         }
         let bus = self
@@ -572,12 +588,12 @@ impl ScreenshotModule {
         Ok(())
     }
 
+    /// 复制到剪贴板。**恒 PNG，不随配置 `format` 走**（D-29 B4 T-B4-7 的"这条不做"）：
+    /// `ClipContent::Image` 经 win-integration 的 `png_to_dib` 转成 CF_DIB，落到系统
+    /// 剪贴板时已经是位图，编码格式在到达目的地之前就被消费掉了——给剪贴板加 JPEG
+    /// 只会多一次有损解码，用户看到的像素数不会变。
     fn action_copy(&self, w: u32, h: u32, rgba: &[u8]) -> Result<(), AppError> {
-        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
-        let mut buf = std::io::Cursor::new(Vec::new());
-        PngEncoder::new(&mut buf)
-            .write_image(rgba, w, h, ExtendedColorType::Rgba8)
-            .map_err(|e| mod_err("SCREENSHOT_ENCODE_001", format!("PNG 编码失败: {e}")))?;
+        let (bytes, _) = util::encode_rgba(util::EncodeFormat::Png, 80, w, h, rgba)?;
         let clipboard = self
             .clipboard
             .read()
@@ -587,7 +603,7 @@ impl ScreenshotModule {
             format: "png".into(),
             width: w,
             height: h,
-            bytes: std::sync::Arc::from(buf.into_inner().into_boxed_slice()),
+            bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
         })
     }
 
@@ -601,7 +617,18 @@ impl ScreenshotModule {
         }
     }
 
-    fn action_save(&self, w: u32, h: u32, rgba: &[u8]) -> Result<String, AppError> {
+    /// 保存到磁盘：本模块**唯一**跟随配置 `format` 的出口（D-29 B4 T-B4-7）。
+    ///
+    /// `fmt`/`quality` 由调用方（`finish` 的 save 臂）决议后传入，而不是在这里再读一次
+    /// 配置——决议点只有一处，请求级覆盖与配置默认值的优先关系才不会在两处各写一遍。
+    fn action_save(
+        &self,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+        fmt: util::EncodeFormat,
+        quality: u8,
+    ) -> Result<String, AppError> {
         let cfg = self
             .config
             .try_lock()
@@ -611,13 +638,21 @@ impl ScreenshotModule {
         std::fs::create_dir_all(&dir)
             .map_err(|e| mod_err("SCREENSHOT_SAVE_001", format!("创建目录失败: {e}")))?;
 
+        let ext = fmt.ext();
         let ts = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
-        let stem = cfg.filename_template.replace("{ts}", &ts);
-        // 文件名冲突：追加 _1 递增（docs/impl/03 P5）
-        let mut path = dir.join(format!("{stem}.png"));
+        let resolved = util::resolve_filename(&cfg.filename_template, &ts, fmt);
+        // 模板已经写了 `.{fmt}` 的不再补一次后缀（否则 shot_x.jpg.jpg），没写的补上——
+        // 后缀由格式决定这件事只有一个真源，模板里的 {fmt} 只是让用户能控制它出现的位置
+        let dot_ext = format!(".{ext}");
+        let stem = resolved
+            .strip_suffix(dot_ext.as_str())
+            .unwrap_or(resolved.as_str());
+        // 文件名冲突：追加 _1 递增，且扩展名跟随本次格式（docs/impl/03 P5）——
+        // 写死 .png 会产出 `shot_x_1.png.jpg` 这类两后缀名，或在 jpeg 档下反复叠加
+        let mut path = dir.join(format!("{stem}{dot_ext}"));
         let mut n = 1;
         while path.exists() {
-            path = dir.join(format!("{stem}_{n}.png"));
+            path = dir.join(format!("{stem}_{n}{dot_ext}"));
             n += 1;
         }
 
@@ -626,19 +661,18 @@ impl ScreenshotModule {
             ".{}.tmp",
             path.file_name().unwrap_or_default().to_string_lossy()
         ));
-        {
-            let f = std::fs::File::create(&tmp)
-                .map_err(|e| mod_err("SCREENSHOT_SAVE_002", format!("创建文件失败: {e}")))?;
-            use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
-            PngEncoder::new(f)
-                .write_image(rgba, w, h, ExtendedColorType::Rgba8)
-                .map_err(|e| mod_err("SCREENSHOT_SAVE_003", format!("写入失败: {e}")))?;
+        let (bytes, _) = util::encode_rgba(fmt, quality, w, h, rgba)?;
+        let written = std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&path);
+            return Err(mod_err("SCREENSHOT_SAVE_004", format!("落盘失败: {e}")));
         }
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| mod_err("SCREENSHOT_SAVE_004", format!("落盘失败: {e}")))?;
         Ok(path.to_string_lossy().to_string())
     }
 
+    /// 贴图落盘。**恒 PNG**：贴图窗口要把图直接贴在屏幕上，文字边缘的 JPEG 块效应
+    /// 在放大与半透明底色下最显眼，而贴图从不进"另存为"那条格式协商路径。
     fn action_pin(&self, w: u32, h: u32, rgba: &[u8], x: i32, y: i32) -> Result<String, AppError> {
         let Some(dir) = self.app_data() else {
             return Err(mod_err("SCREENSHOT_PIN_001", "模块未初始化"));
@@ -649,14 +683,9 @@ impl ScreenshotModule {
         let id = uuid::Uuid::now_v7().to_string();
         let file_rel = format!("pins/{id}.png");
         let path = dir.join(&file_rel);
-        {
-            let f = std::fs::File::create(&path)
-                .map_err(|e| mod_err("SCREENSHOT_PIN_003", format!("创建文件失败: {e}")))?;
-            use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
-            PngEncoder::new(f)
-                .write_image(rgba, w, h, ExtendedColorType::Rgba8)
-                .map_err(|e| mod_err("SCREENSHOT_PIN_004", format!("写入失败: {e}")))?;
-        }
+        let (bytes, _) = util::encode_rgba(util::EncodeFormat::Png, 80, w, h, rgba)?;
+        std::fs::write(&path, &bytes)
+            .map_err(|e| mod_err("SCREENSHOT_PIN_004", format!("写入失败: {e}")))?;
         let record = PinRecord {
             id: id.clone(),
             x,
@@ -769,7 +798,9 @@ impl ScreenshotModule {
 
     // ---------------- 历史字节出口（D-29 B0-2：面板缩略图 / 再复制）----------------
 
-    fn history_png(&self, id: &str) -> Result<(ShotItem, Vec<u8>), AppError> {
+    /// 取历史条目的磁盘字节（名字里的 `png` 已随 T-B4-7 退役：自本代起扩展名可以是
+    /// png/jpg/webp，因此**读侧一律按内容嗅探**，任何按后缀过滤的写法都是错的）
+    fn history_raw(&self, id: &str) -> Result<(ShotItem, Vec<u8>), AppError> {
         let store = self
             .store
             .read()
@@ -788,7 +819,7 @@ impl ScreenshotModule {
     }
 
     pub fn history_get(&self, id: &str) -> Result<ShotDataDto, AppError> {
-        let (item, bytes) = self.history_png(id)?;
+        let (item, bytes) = self.history_raw(id)?;
         // 标注与字节同读取口：旧行列为 NULL → 空表（T-B4-1 零迁移承诺的消费侧）
         let store = self
             .store
@@ -799,20 +830,26 @@ impl ScreenshotModule {
         Ok(ShotDataDto {
             id: item.id,
             png_b64: host_core::util::b64_encode(&bytes),
+            // 前端拼 data URL 需要 MIME，而它只有 Base64 与（可能骗人的）后缀：
+            // 嗅探放在宿主这一侧，读侧就只剩一个真源
+            format: util::sniff_content_type(&bytes).to_owned(),
             annotations,
         })
     }
 
-    /// 再复制：png 原字节交 ClipboardPort，CF_DIB 转换由 win-integration 负责（module.rs action_copy 同通道）
+    /// 再复制：文件原字节交 ClipboardPort，CF_DIB 转换由 win-integration 负责（module.rs action_copy 同通道）
     pub fn history_copy(&self, id: &str) -> Result<(), AppError> {
-        let (item, bytes) = self.history_png(id)?;
+        let (item, bytes) = self.history_raw(id)?;
         let clipboard = self
             .clipboard
             .read()
             .clone()
             .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "ClipboardPort 未就绪"))?;
         clipboard.write(&host_core::ports::ClipContent::Image {
-            format: "png".into(),
+            // 标签按内容嗅探而不是写死 "png"：win-integration 对非 "dib" 一律走
+            // load_from_memory（内容嗅探），所以贴错标签不会让它选错解码器，
+            // 但会让任何读这个字段的下游（日志、未来的格式判断）拿到假话。
+            format: util::sniff_content_type(&bytes).to_owned(),
             width: item.width,
             height: item.height,
             bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
@@ -911,6 +948,7 @@ mod tests {
             pin_x: None,
             pin_y: None,
             annotations,
+            format: None,
         };
         m.finish(task_id, &req).unwrap();
     }
@@ -1028,6 +1066,128 @@ mod tests {
         let p = m.history_get("present").unwrap();
         assert_eq!(p.annotations.len(), 1);
         assert_eq!(p.annotations[0].kind, "rect");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-7）字面测试名优先于 rustc 命名惯例
+    fn actionSave_usesConfigFormat_endToEnd() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_dir = dir.path().join("out");
+        let m = ScreenshotModule::new();
+        let cfg = ScreenshotConfig {
+            save_dir: save_dir.to_string_lossy().into_owned(),
+            filename_template: "shot_{ts}.{fmt}".into(),
+            format: "jpeg".into(),
+            quality: 40,
+            ..Default::default()
+        };
+        *m.config.try_lock().unwrap() = cfg;
+        let rgba = vec![10u8, 20, 30, 255, 1, 2, 3, 128, 5, 6, 7, 0, 9, 10, 11, 255];
+        let path = m
+            .action_save(2, 2, &rgba, util::EncodeFormat::Jpeg, 40)
+            .unwrap();
+
+        // 目录里必须恰有这一个文件（tmp 不留残，扩展名不写第二遍）
+        let files = std::fs::read_dir(&save_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files.len(),
+            1,
+            "保存目录里只该有落盘的那一个文件：{files:?}"
+        );
+        let name = &files[0];
+        assert!(name.ends_with(".jpg"), "扩展名要跟格式走，实得 {name}");
+        assert!(
+            !name.contains(".jpg.jpg"),
+            "模板里的 {{fmt}} 与补上的后缀重复了：{name}"
+        );
+        assert!(name.starts_with("shot_20"), "时间戳占位符没被替换：{name}");
+        assert_eq!(
+            PathBuf::from(&path),
+            save_dir.join(name),
+            "返回值就是落盘路径"
+        );
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > 12);
+        assert!(bytes.starts_with(b"\xFF\xD8\xFF"), "JPEG 文件头对味");
+        // content_type 与配置一致（读侧只信内容，不信后缀）
+        assert_eq!(util::sniff_content_type(&bytes), "image/jpeg");
+        assert_eq!(
+            util::sniff_content_type(&bytes),
+            util::EncodeFormat::Jpeg.content_type()
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn actionSave_nameCollision_appendsSuffixSameExt() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_dir = dir.path().join("out2");
+        let m = ScreenshotModule::new();
+        // 固定模板（不含 {ts}）：两次保存必然撞名，这才测得到冲突分支
+        *m.config.try_lock().unwrap() = ScreenshotConfig {
+            save_dir: save_dir.to_string_lossy().into_owned(),
+            filename_template: "dup".into(),
+            format: "jpeg".into(),
+            ..Default::default()
+        };
+        let rgba = vec![1u8, 2, 3, 255];
+        let first = m
+            .action_save(1, 1, &rgba, util::EncodeFormat::Jpeg, 80)
+            .unwrap();
+        let second = m
+            .action_save(1, 1, &rgba, util::EncodeFormat::Jpeg, 80)
+            .unwrap();
+        assert!(first.ends_with("dup.jpg"), "{first}");
+        // 红线：`_1` 加在主名后、扩展名只有一个（旧写法会产出 dup.png.jpg 这类两后缀）
+        assert!(second.ends_with("dup_1.jpg"), "{second}");
+        assert!(!second.contains(".png"), "冲突分支偷偷换了格式：{second}");
+        assert_ne!(first, second);
+        let files = std::fs::read_dir(&save_dir).unwrap().count();
+        assert_eq!(files, 2, "两次保存留两个文件");
+        // 正对照：同目录换 png 时主名相同也不撞车（后缀由格式决定，不是写死的）
+        let third = m
+            .action_save(1, 1, &rgba, util::EncodeFormat::Png, 80)
+            .unwrap();
+        assert!(third.ends_with("dup.png"), "{third}");
+        assert_eq!(std::fs::read_dir(&save_dir).unwrap().count(), 3);
+    }
+
+    /// 单向门（`file` 后缀不再恒 `.png`）的读侧红线：格式声明来自内容嗅探，后缀骗人不管用
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-7）字面测试名优先于 rustc 命名惯例
+    fn historyGet_formatSniffed_notFromSuffix() {
+        let dir = tempfile::tempdir().unwrap();
+        // 故意把 JPEG 字节存成 .png 后缀：任何"按后缀拼 data URL"的写法都会在这里露馅
+        let lie = dir.path().join("lie.png");
+        let (jpeg, _) =
+            util::encode_rgba(util::EncodeFormat::Jpeg, 70, 1, 1, &[1, 2, 3, 255]).unwrap();
+        std::fs::write(&lie, &jpeg).unwrap();
+        let m = ScreenshotModule::new();
+        let store = store_of(dir.path());
+        *m.store.write() = Some(store.clone());
+        store
+            .insert(&ShotItem {
+                id: "liar".into(),
+                created_ms: 1,
+                width: 1,
+                height: 1,
+                file: Some(lie.to_string_lossy().into_owned()),
+                ocr_text: None,
+            })
+            .unwrap();
+        let got = m.history_get("liar").unwrap();
+        assert_eq!(got.format, "image/jpeg", "必须嗅探出真格式");
+        assert!(
+            !got.format.contains("png"),
+            "后缀里的 png 不得泄漏成格式声明"
+        );
+        // 正对照：真 png 存成 .png 时同一函数报 image/png（否则可以是"永远报 jpeg"）
+        std::fs::write(&lie, b"\x89PNG\r\n\x1a\n body").unwrap();
+        assert_eq!(m.history_get("liar").unwrap().format, "image/png");
     }
 
     /// D-29 B0-2：历史字节出口错误路径三类可分辨（未就绪 / 记录不存在 / 文件丢失）

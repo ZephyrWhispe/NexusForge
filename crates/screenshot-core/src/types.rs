@@ -8,9 +8,17 @@ pub struct ScreenshotConfig {
     /// 保存目录；空字符串 = {appData}/screenshots
     #[serde(default)]
     pub save_dir: String,
-    /// 文件名模板；{ts} 占位符替换为 yyyy-MM-dd_HHmmss
+    /// 文件名模板；{ts} 占位符替换为 yyyy-MM-dd_HHmmss，{fmt} 替换为实际扩展名
     #[serde(default = "default_filename_template")]
     pub filename_template: String,
+    /// 导出格式：png | jpeg | webp（写侧唯一入口 `util::encode_rgba`，未知值点名拒）
+    #[serde(default = "default_format")]
+    pub format: String,
+    /// 编码质量 1..=100。**本代只有 JPEG 消费它**：`image` 0.25 的 WebP 编码器只有
+    /// VP8L 无损档，PNG 本身无质量概念——schema 的 description 与本键的 doc 都说实话，
+    /// 而不是摆一个只对三分之一格式生效却宣称通用的滑块
+    #[serde(default = "default_quality")]
+    pub quality: u8,
     /// 完成后自动复制到剪贴板
     #[serde(default = "default_true")]
     pub auto_copy: bool,
@@ -25,6 +33,12 @@ pub struct ScreenshotConfig {
 fn default_filename_template() -> String {
     "shot_{ts}".into()
 }
+fn default_format() -> String {
+    "png".into()
+}
+fn default_quality() -> u8 {
+    80
+}
 fn default_true() -> bool {
     true
 }
@@ -34,6 +48,8 @@ impl Default for ScreenshotConfig {
         Self {
             save_dir: String::new(),
             filename_template: default_filename_template(),
+            format: default_format(),
+            quality: default_quality(),
             auto_copy: true,
             auto_save: true,
             auto_pin: false,
@@ -143,6 +159,10 @@ pub struct FinishRequest {
     pub pin_y: Option<i32>,
     #[serde(default)]
     pub annotations: Vec<Annotation>,
+    /// 本次保存的导出格式（"png" | "jpeg" | "webp"，大小写不敏感）；
+    /// None = 用配置里的 `format`。未知值不回落默认，点名拒（`SCREENSHOT_FORMAT_001`）
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,14 +171,20 @@ pub struct FinishDto {
     pub pin_id: Option<String>,
 }
 
-/// 单条截图历史的 PNG 字节出口（D-29 B0-2：主面板缩略图/再复制；历史表只存路径）
+/// 单条截图历史的原始字节出口（D-29 B0-2：主面板缩略图/再复制；历史表只存路径）
 ///
 /// `annotations` 为当年入库的标注矢量（D-29 B4 T-B4-1"收即持久"）：旧行为 NULL，
 /// 读回空表而非报错——空标注与无标注在列上同为 NULL，因此历史列不必承担语义分裂。
+///
+/// `png_b64` 是历史命名，实为**文件原始字节**的 Base64：T-B4-7 之后编码由
+/// `format` 键声明（png/jpeg/webp），读侧一律按内容嗅探而不是信后缀。
 #[derive(Debug, Clone, Serialize)]
 pub struct ShotDataDto {
     pub id: String,
     pub png_b64: String,
+    /// 文件字节的 MIME（"image/png" | "image/jpeg" | "image/webp" | "unknown"），
+    /// 由读侧按魔数嗅探得出——前端据此拼 data URL，不靠后缀猜
+    pub format: String,
     pub annotations: Vec<Annotation>,
 }
 

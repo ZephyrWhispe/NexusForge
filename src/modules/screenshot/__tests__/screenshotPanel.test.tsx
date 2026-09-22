@@ -44,6 +44,8 @@ beforeEach(() => {
   vi.mocked(screenshotHistoryGet).mockImplementation(async (id) => ({
     id,
     png_b64: "QUJD",
+    // 宿主嗅探出的 MIME（T-B4-7）：这一枚夹具走 png，因此既有的 data:image/png 断言仍成立
+    format: "image/png",
     annotations: [],
   }));
 });

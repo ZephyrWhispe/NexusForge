@@ -47,6 +47,12 @@ import {
 } from "./overlay/annotations";
 import { applyBoxBlurPass } from "./overlay/pixel";
 import {
+  EXPORT_LABEL,
+  finishRequestBody,
+  nextExportFormat,
+  type ExportFormat,
+} from "./overlay/exportFormats";
+import {
   MAG_SIZE,
   drawMagnifier,
   magnifierHalf,
@@ -368,6 +374,11 @@ export default function OverlayShot() {
   const [error, setError] = useState<string | null>(null);
   /** 操作错误（复制/保存/OCR 等）：编辑页内错误条，不破坏界面 */
   const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * 本次"另存为"的格式覆盖（null = 跟随设置里的 format）。
+   * 只影响磁盘保存那一条路：复制恒走 CF_DIB、贴图恒走 PNG，两者与格式协商无关。
+   */
+  const [saveFormat, setSaveFormat] = useState<ExportFormat | null>(null);
   /** 动作执行中（防连点 + 处理中反馈） */
   const [busy, setBusy] = useState(false);
   const [ocrResult, setOcrResult] = useState<OcrResultDto | null>(null);
@@ -1252,13 +1263,15 @@ export default function OverlayShot() {
       const image = compositeB64();
       if (!image) return;
       try {
-        const result = await screenshotFinish(task.task_id, {
-          image_b64: image,
-          actions,
-          pin_x: null,
-          pin_y: null,
-          annotations: annsRef.current,
-        });
+        const result = await screenshotFinish(
+          task.task_id,
+          finishRequestBody({
+            image_b64: image,
+            actions,
+            annotations: annsRef.current,
+            format: saveFormat,
+          }),
+        );
         if (result.pin_id) {
           // 贴图窗口在主窗口恢复逻辑之外需要立即打开
           const { openPinWindow } = await import("./overlayController");
@@ -1601,6 +1614,15 @@ export default function OverlayShot() {
         </Button>
         <Button size="small" onClick={() => void finish(["copy"])} disabled={busy}>
           复制
+        </Button>
+        <Button
+          size="small"
+          appearance="subtle"
+          disabled={busy}
+          title="本次磁盘保存的格式（覆盖设置里的导出格式）；点击按 png → jpeg → webp 循环"
+          onClick={() => setSaveFormat(nextExportFormat(saveFormat))}
+        >
+          存为 {saveFormat ? EXPORT_LABEL[saveFormat] : "跟随设置"}
         </Button>
         <Button size="small" onClick={() => void finish(["save"])} disabled={busy}>
           保存

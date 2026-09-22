@@ -3,6 +3,12 @@ import {
   Badge,
   Button,
   Input,
+  Menu,
+  MenuButton,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
   makeStyles,
   Text,
   tokens,
@@ -17,6 +23,8 @@ import {
   type ShotItemDto,
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
+import { EXPORT_FORMATS, EXPORT_LABEL, type ExportFormat } from "../../windows/overlay/exportFormats";
+import { saveShotAs } from "./saveAs";
 import EmptyState from "../../components/EmptyState";
 import DeferredBadge from "../../components/DeferredBadge";
 
@@ -153,14 +161,30 @@ export default function ScreenshotPanel() {
   }, [reload]);
 
   // 缩略图逐张取字节（410 文件丢失 → null 显示占位，不打扰用户）
+  // MIME 取宿主嗅探出的 `format`（T-B4-7：磁盘后缀不再恒 .png，写死 image/png 会让
+  // jpeg/webp 的历史行在这里集体变成碎图）
   useEffect(() => {
     for (const it of items) {
       if (!it.file || thumbs[it.id] !== undefined) continue;
       screenshotHistoryGet(it.id)
-        .then((d) => setThumbs((prev) => ({ ...prev, [it.id]: d.png_b64 })))
+        .then((d) =>
+          setThumbs((prev) => ({
+            ...prev,
+            [it.id]: `data:${d.format};base64,${d.png_b64}`,
+          })),
+        )
         .catch(() => setThumbs((prev) => ({ ...prev, [it.id]: null })));
     }
   }, [items, thumbs]);
+
+  const saveAs = useCallback(async (id: string, file: string | null, fmt: ExportFormat) => {
+    try {
+      const name = await saveShotAs(id, file, fmt);
+      notify("success", "已交给浏览器下载", `${name} · 落点为浏览器下载目录（不是设置里的保存目录）`);
+    } catch (e) {
+      reportError(e, { context: "另存为失败", dedupeKey: `shot-saveas-${id}` });
+    }
+  }, []);
 
   const startCapture = useCallback(() => {
     void import("../../windows/overlayController")
@@ -237,17 +261,15 @@ export default function ScreenshotPanel() {
           <EmptyState text={`本页 ${items.length} 条中没有匹配「${filter}」的记录`} />
         ) : (
           <div className={styles.grid}>
-            {visible.map((it) => (
+            {visible.map((it) => {
+              const thumb = thumbs[it.id];
+              return (
               <div key={it.id} className={styles.card}>
-                {thumbs[it.id] ? (
-                  <img
-                    className={styles.thumb}
-                    src={`data:image/png;base64,${thumbs[it.id]}`}
-                    alt={`截图 ${it.width}x${it.height}`}
-                  />
+                {thumb ? (
+                  <img className={styles.thumb} src={thumb} alt={`截图 ${it.width}x${it.height}`} />
                 ) : (
                   <div className={styles.thumbMissing}>
-                    {it.file ? (thumbs[it.id] === null ? "文件已丢失" : "加载缩略图…") : "未保存文件"}
+                    {it.file ? (thumb === null ? "文件已丢失" : "加载缩略图…") : "未保存文件"}
                   </div>
                 )}
                 <div className={styles.meta}>
@@ -264,6 +286,24 @@ export default function ScreenshotPanel() {
                   >
                     复制图片
                   </Button>
+                  {/* 溢出菜单三枚（T-B4-7）：另存为哪一档由用户点出来，面板不替他猜。
+                      无未保存文件的行整只菜单禁用——没有字节可下载时给钮就是假可点。 */}
+                  <Menu>
+                    <MenuTrigger disableButtonEnhancement>
+                      <MenuButton size="small" appearance="subtle" disabled={!it.file}>
+                        另存为
+                      </MenuButton>
+                    </MenuTrigger>
+                    <MenuPopover>
+                      <MenuList>
+                        {EXPORT_FORMATS.map((f) => (
+                          <MenuItem key={f} onClick={() => void saveAs(it.id, it.file, f)}>
+                            {EXPORT_LABEL[f]}
+                          </MenuItem>
+                        ))}
+                      </MenuList>
+                    </MenuPopover>
+                  </Menu>
                   {it.ocr_text && (
                     <Button size="small" onClick={() => copyText(it.ocr_text ?? "")}>
                       复制文字
@@ -271,7 +311,8 @@ export default function ScreenshotPanel() {
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

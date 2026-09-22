@@ -377,6 +377,12 @@ export interface FinishRequestDto {
   pin_x?: number | null;
   pin_y?: number | null;
   annotations?: AnnotationDto[];
+  /**
+   * 本次保存的导出格式（"png" | "jpeg" | "webp"）。**不传 = 跟随设置里的 `format`**；
+   * 传未知值宿主点名报错而不是回落默认（由 `finishRequestBody` 单点组装，
+   * 见 src/windows/overlay/exportFormats.ts）。
+   */
+  format?: string;
 }
 
 export interface FinishDto {
@@ -414,10 +420,17 @@ export interface PinDataDto extends PinDto {
   png_b64: string;
 }
 
-/** 单条历史截图的 PNG 字节（D-29 B0-2 主面板缩略图）+ 当年入库的标注矢量（T-B4-1） */
+/**
+ * 单条截图历史的字节出口（D-29 B0-2 缩略图 / T-B4-1 标注 / T-B4-7 格式声明）。
+ *
+ * `png_b64` 是历史字段名，实为磁盘文件**原始字节**的 Base64：自 T-B4-7 起编码由
+ * `format` 声明（宿主按魔数嗅探），拼 data URL 用它而不是认后缀——后缀不再恒 `.png`。
+ */
 export interface ShotDataDto {
   id: string;
   png_b64: string;
+  /** 嗅探出的 MIME：image/png | image/jpeg | image/webp | unknown（坏文件） */
+  format: string;
   /** 旧行 NULL → 空表（不是报错）；次序为宿主侧 layer 升序 */
   annotations: AnnotationDto[];
 }
