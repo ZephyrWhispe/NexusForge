@@ -710,6 +710,46 @@ fn auxWindows_neverGrantClipboardHtmlGet() {
     assert_eq!(qp, 8, "quickpanel 权限面须停在 8 条，多一条即破 D-28 冻结");
 }
 
+/// T-B3-9 红线负例：导出=整库批量外发（口令面），导入=整库改写。
+/// 两枚都 main-only，辅助窗永不持有；quickpanel 八条冻结随批再钉一次。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-9）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantClipboardBackup() {
+    let caps = load_capabilities();
+    for ident in ["allow-clipboard-export", "allow-clipboard-import"] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（批量外发/整库改写是 main-only）"
+            );
+        }
+        assert!(main_granted, "正对照：main 必须持有 {ident}");
+    }
+    for window in ["quickpanel", "launcher", "notebar", "overlay", "pin"] {
+        assert!(
+            caps.iter().any(|(name, _)| name == window),
+            "负例须覆盖的辅助窗 {window} 不在册，本断言会空洞"
+        );
+    }
+    let qp = caps
+        .iter()
+        .find(|(name, _)| name == "quickpanel")
+        .map(|(_, cap)| cap["permissions"].as_array().unwrap().len())
+        .expect("quickpanel capability 在册");
+    assert_eq!(qp, 8, "quickpanel 权限面须停在 8 条，多一条即破 D-28 冻结");
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

@@ -778,6 +778,157 @@ impl ClipboardModule {
         self.require_store()?.get_html(id)
     }
 
+    /// 宿主 app_data 根目录（`start` 时记下）。导出目录是它的 `export/` 子目录——
+    /// 写盘白名单只有这一个，导入侧的路径 Input 只出现在**读**侧。
+    pub fn app_data_dir(&self) -> Option<std::path::PathBuf> {
+        self.db_dir.read().clone()
+    }
+
+    /// 加密导出（T-B3-9）。红线：**出文件的零明文**——敏感行在此解一次明文，
+    /// 那份明文只活在内存里的 `BackupRow.secret_b64`，随即被口令派生密钥的
+    /// AES-256-GCM 信封包住；`include_secrets` 只是范围开关，口令门在其为真时立起
+    /// （拒得干脆，而不是静默丢几行让用户以为备份是全的）。
+    pub fn export_backup(
+        &self,
+        passphrase: &str,
+        include_secrets: bool,
+    ) -> Result<(std::path::PathBuf, crate::backup::ExportMeta), AppError> {
+        crate::backup::check_export_passphrase(passphrase, include_secrets)?;
+        let store = self.require_store()?;
+        let crypto = self.crypto.read().clone().ok_or(AppError::module(
+            "CLIPBOARD_QUERY_001",
+            "CryptoPort 未就绪",
+            None,
+        ))?;
+        let dir = self.app_data_dir().ok_or_else(|| {
+            AppError::module(
+                "CLIPBOARD_QUERY_001",
+                "模块未就绪（无 app_data 目录）",
+                None,
+            )
+        })?;
+
+        let mut rows = Vec::new();
+        let mut meta = crate::backup::ExportMeta::default();
+        for src in store.all_for_export()? {
+            if src.blob_path.is_some() || src.content_type == "image" {
+                meta.images_skipped += 1;
+                continue;
+            }
+            let (text, secret_b64) = if !src.secret {
+                (src.content.clone(), None)
+            } else if !include_secrets {
+                // 用户明确不要敏感行：整行不出门（与"静默丢"的区别是这是所选范围）
+                continue;
+            } else {
+                let cipher = host_core::util::b64_decode(&src.content).ok_or_else(|| {
+                    AppError::module("CLIPBOARD_EXPORT_002", "敏感行密文列不是合法 base64", None)
+                })?;
+                let plain = crypto.unprotect(&cipher).map_err(|e| {
+                    AppError::module(
+                        "CLIPBOARD_EXPORT_002",
+                        format!("敏感行解密失败，导出中止而非跳过该行: {e}"),
+                        None,
+                    )
+                })?;
+                (String::new(), Some(host_core::util::b64_encode(&plain)))
+            };
+            if src.secret {
+                meta.secrets += 1;
+            }
+            rows.push(crate::backup::BackupRow {
+                content_type: src.content_type,
+                text,
+                html: src.html,
+                group_name: src.group_name,
+                secret: src.secret,
+                secret_b64,
+                source_app: src.source_app,
+                created_at: src.created_at,
+                pinned: src.pinned,
+            });
+        }
+        meta.entries = rows.len() as u32;
+        let now = crate::types::now_ms();
+        meta.exported_at_ms = now.max(0) as u64;
+
+        let json = serde_json::to_vec(&rows).map_err(|e| {
+            AppError::module("CLIPBOARD_EXPORT_003", format!("备份序列化失败: {e}"), None)
+        })?;
+        let mut env = crate::backup::encrypt_backup(&json, passphrase, meta.exported_at_ms)?;
+        env.meta = meta.clone();
+
+        let dir = dir.join("export");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            AppError::module("CLIPBOARD_EXPORT_004", format!("建导出目录失败: {e}"), None)
+        })?;
+        let path = dir.join(format!("clipboard-{now}.nfclip.json"));
+        // 先 .tmp 后 rename：中途失败留下的是 .tmp，不会有一份"看起来完整"的半个备份
+        let tmp = path.with_extension("nfclip.json.tmp");
+        let envelope = serde_json::to_vec_pretty(&env).map_err(|e| {
+            AppError::module("CLIPBOARD_EXPORT_003", format!("备份封装失败: {e}"), None)
+        })?;
+        std::fs::write(&tmp, envelope).map_err(|e| {
+            AppError::module("CLIPBOARD_EXPORT_004", format!("写备份失败: {e}"), None)
+        })?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            AppError::module(
+                "CLIPBOARD_EXPORT_004",
+                format!("备份改名落位失败: {e}"),
+                None,
+            )
+        })?;
+        tracing::info!(
+            entries = meta.entries,
+            secrets = meta.secrets,
+            "剪贴板备份已导出"
+        );
+        Ok((path, meta))
+    }
+
+    /// 加密导入（T-B3-9）。失败顺序即红线顺序：文件读不到 / 非本格式 / 口令错，
+    /// 三者的任何一路都在落库之前，故"导入失败"不会留下半套数据。
+    pub fn import_backup(
+        &self,
+        path: &std::path::Path,
+        passphrase: &str,
+    ) -> Result<crate::store::ImportReport, AppError> {
+        let raw = std::fs::read(path).map_err(|e| {
+            AppError::module(
+                "CLIPBOARD_IMPORT_002",
+                format!("读不到备份文件「{}」: {e}", path.display()),
+                None,
+            )
+        })?;
+        let env = crate::backup::decode_envelope(&raw)?;
+        let json = crate::backup::decrypt_backup(&env, passphrase)?;
+        let rows = crate::backup::parse_backup_rows(&json)?;
+        if env.meta.entries as usize != rows.len() {
+            return Err(AppError::module(
+                "CLIPBOARD_IMPORT_003",
+                format!(
+                    "备份清单声明 {} 行，实际 {} 行（文件被改过或写入未完成）",
+                    env.meta.entries,
+                    rows.len()
+                ),
+                None,
+            ));
+        }
+        let store = self.require_store()?;
+        let crypto = self.crypto.read().clone().ok_or(AppError::module(
+            "CLIPBOARD_QUERY_001",
+            "CryptoPort 未就绪",
+            None,
+        ))?;
+        let report = store.import_rows(&rows, crypto.as_ref())?;
+        tracing::info!(
+            imported = report.imported,
+            duplicates = report.duplicates,
+            "剪贴板备份已导入"
+        );
+        Ok(report)
+    }
+
     /// clipboard_paste(id, format) 的载荷解析（T-B3-8）。
     /// 请求 html 而行无 html → 回落纯文本并 `degraded = true`：投出去的是纯文本，
     /// 就不谎称带了格式（前端据此出「已降级」提示，而不是静默成功）。
@@ -1732,5 +1883,280 @@ mod tests {
             h.module.paste_content_format(&id, false).unwrap().content,
             ClipContent::Text { html: None, .. }
         ));
+    }
+
+    // ---------------- T-B3-9 加密导出/导入 ----------------
+
+    fn all_rows(h: &Harness) -> Vec<crate::types::ClipEntry> {
+        h.module
+            .store()
+            .unwrap()
+            .search(&crate::types::SearchQuery::default())
+            .unwrap()
+            .items
+    }
+
+    fn err_code(e: &AppError) -> String {
+        match e {
+            AppError::Module { code, .. } | AppError::Storage { code, .. } => code.clone(),
+            other => format!("其他: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-9）字面测试名优先于 rustc 命名惯例
+    async fn exportImport_roundtrip_underPassphrase_reencryptsSecrets() {
+        let h = harness("bk_roundtrip").await;
+        let plain = html_row(&h, "备份往返正文", "<p><b>备份往返正文</b></p>");
+        secret_row(&h, "sk-令牌-12345");
+        h.module.store().unwrap().pin(&plain, true).unwrap();
+
+        let (path, meta) = h
+            .module
+            .export_backup("十六字符以上的备份口令", true)
+            .unwrap();
+        assert_eq!(meta.entries, 2, "两行都在库内自持正文里，都该进备份");
+        assert_eq!(meta.secrets, 1);
+        assert_eq!(meta.images_skipped, 0);
+        assert!(path.exists(), "导出须真落盘");
+
+        h.module.store().unwrap().clear(false).unwrap();
+        assert_eq!(all_rows(&h).len(), 0, "清库后须真空，否则下面的断言会空洞");
+
+        let report = h
+            .module
+            .import_backup(&path, "十六字符以上的备份口令")
+            .unwrap();
+        assert_eq!(report.imported, 2);
+        assert_eq!(report.duplicates, 0);
+        assert_eq!(report.secrets, 1);
+
+        let rows = all_rows(&h);
+        let restored = rows
+            .iter()
+            .find(|e| e.preview == "备份往返正文")
+            .expect("普通行须按原文回来");
+        assert!(restored.pinned, "置顶是用户的显式意图，随备份回来");
+        assert!(
+            restored.has_html,
+            "T-B3-8 的 HTML 正文同在备份里，须一并回来"
+        );
+        let secret = rows.iter().find(|e| e.secret).expect("敏感行须回来");
+        assert_eq!(
+            secret.preview,
+            format!("[{}] 已加密存储", crate::types::SECRET_CATEGORY_LABEL),
+            "回来的是重新封信封的敏感行，不是一行普通明文（预览仍掩码）"
+        );
+        assert_eq!(
+            h.module.reveal_secret(&secret.id).unwrap(),
+            "sk-令牌-12345",
+            "重加密后揭示必须得回原明文"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn export_noPlaintextSecretInFileBytes() {
+        let h = harness("bk_no_plain").await;
+        secret_row(&h, "sk-超级机密-abcdef");
+        html_row(&h, "同批导出的普通正文", "<i>普通</i>");
+
+        let (path, _) = h.module.export_backup("口令十六字符以上OK", true).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&raw).to_lowercase();
+        // 明文与其 base64 变体都不许出现（后者正是"只换个编码当加密"的那种假安全）
+        for needle in [
+            "sk-超级机密-abcdef",
+            &host_core::util::b64_encode("sk-超级机密-abcdef".as_bytes()),
+            "同批导出的普通正文",
+        ] {
+            assert!(
+                !text.contains(&needle.to_lowercase()),
+                "导出文件字节里不得出现「{needle}」"
+            );
+        }
+        // 反空洞：同一份文件用正确口令能解出上面这些明文——grep 判绿是因为加密生效，
+        // 不是因为里面本来什么都没有。
+        let env = crate::backup::decode_envelope(&raw).unwrap();
+        assert_eq!(env.meta.secrets, 1, "敏感行确实被收进了这份备份");
+        let json = crate::backup::decrypt_backup(&env, "口令十六字符以上OK").unwrap();
+        let inner = String::from_utf8(json).unwrap();
+        // 内层明文里敏感行是 base64 形态（BackupRow::secret_b64），两种形态都要在：
+        // grep 判绿因此只可能是加密的功劳，而不是"什么都没导出"。
+        assert!(
+            inner.contains(&host_core::util::b64_encode(
+                "sk-超级机密-abcdef".as_bytes()
+            )),
+            "内层明文须含敏感原文的 base64 形态"
+        );
+        assert!(inner.contains("同批导出的普通正文"));
+        assert!(
+            crate::backup::decrypt_backup(&env, "错一个字符也不行").is_err(),
+            "口令错即解不开（正对照：上一条同一份文件用对口令解得开）"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn export_secretsWithoutPassphrase_rejected001() {
+        let h = harness("bk_gate").await;
+        secret_row(&h, "sk-需要口令才走");
+        let e = h
+            .module
+            .export_backup("", true)
+            .expect_err("含敏感行而口令为空须拒");
+        assert_eq!(err_code(&e), "CLIPBOARD_EXPORT_001");
+        assert!(
+            !h.dir.join("export").exists()
+                || std::fs::read_dir(h.dir.join("export"))
+                    .unwrap()
+                    .filter_map(|p| p.ok())
+                    .filter(|p| p.file_name().to_string_lossy().ends_with(".nfclip.json"))
+                    .count()
+                    == 0,
+            "拒就要拒在写盘之前，不许留下一份残缺备份"
+        );
+        // 正对照：同一模块不要敏感行时门不立（口径是"含敏感才要口令"，不是万能口令门）
+        let (path, meta) = h.module.export_backup("", false).unwrap();
+        assert_eq!(meta.entries, 0, "无敏感行请求时敏感行整行不出门");
+        assert_eq!(meta.secrets, 0);
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn import_wrongPassphrase_rejectedAndStoreUntouched() {
+        let h = harness("bk_wrong").await;
+        html_row(&h, "口令错一行都不落", "<b>x</b>");
+        let (path, _) = h
+            .module
+            .export_backup("正确口令十六字符以上", false)
+            .unwrap();
+        h.module.store().unwrap().clear(false).unwrap();
+
+        let e = h
+            .module
+            .import_backup(&path, "错误口令十六字符以上")
+            .expect_err("AEAD 失败须报错");
+        assert_eq!(err_code(&e), "CLIPBOARD_IMPORT_001");
+        assert_eq!(
+            all_rows(&h).len(),
+            0,
+            "认证失败前不得落任何一行（半套导入比不导入更坏）"
+        );
+        // 正对照：同一文件同一库，对口令能落
+        assert_eq!(
+            h.module
+                .import_backup(&path, "正确口令十六字符以上")
+                .unwrap()
+                .imported,
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn import_twice_isIdempotentByHash() {
+        let h = harness("bk_twice").await;
+        html_row(&h, "重导不产生第二份", "<i>a</i>");
+        html_row(&h, "另一行普通正文", "<i>b</i>");
+        secret_row(&h, "sk-重导会多出来");
+        let (path, _) = h.module.export_backup("口令十六字符以上!!", true).unwrap();
+        h.module.store().unwrap().clear(false).unwrap();
+
+        let first = h.module.import_backup(&path, "口令十六字符以上!!").unwrap();
+        assert_eq!(first.imported, 3);
+        assert_eq!(first.duplicates, 0);
+        let after_first = all_rows(&h).len();
+        assert_eq!(after_first, 3);
+
+        let second = h.module.import_backup(&path, "口令十六字符以上!!").unwrap();
+        assert_eq!(second.imported, 1, "只有敏感行会新增（见下）");
+        assert_eq!(second.duplicates, 2, "两行普通正文按 content_hash 命中");
+        assert_eq!(all_rows(&h).len(), 4);
+        // 如实记录一条语义而非掩盖它：库内敏感行的哈希是**密文**的哈希，
+        // 每次 protect 产出新密文，故 content_hash 去重在敏感行上结构性失效。
+        assert_eq!(
+            all_rows(&h).iter().filter(|e| e.secret).count(),
+            2,
+            "敏感行重导会各留一份——不是幂等漏洞，是密文哈希去重的必然"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn backup_truncatedOrForeignJson_rejected003() {
+        let h = harness("bk_format").await;
+        html_row(&h, "格式负例的正对照正文", "<p>x</p>");
+        let (good, _) = h.module.export_backup("口令十六字符以上!!", false).unwrap();
+        let good_bytes = std::fs::read(&good).unwrap();
+
+        let foreign = h.dir.join("foreign.json");
+        std::fs::write(&foreign, r#"{"proxies":["不是备份"]}"#).unwrap();
+        let e = h.module.import_backup(&foreign, "任意").unwrap_err();
+        assert_eq!(err_code(&e), "CLIPBOARD_IMPORT_003");
+
+        let truncated = h.dir.join("truncated.json");
+        std::fs::write(&truncated, &good_bytes[..good_bytes.len() / 3]).unwrap();
+        assert_eq!(
+            err_code(
+                &h.module
+                    .import_backup(&truncated, "口令十六字符以上!!")
+                    .expect_err("截断的信封须在解析外壳时就拒")
+            ),
+            "CLIPBOARD_IMPORT_003"
+        );
+
+        let newer: serde_json::Value = {
+            let mut v: serde_json::Value = serde_json::from_slice(&good_bytes).unwrap();
+            v["schema"] = serde_json::json!(99);
+            v
+        };
+        let future = h.dir.join("future.json");
+        std::fs::write(&future, serde_json::to_vec(&newer).unwrap()).unwrap();
+        let e = h
+            .module
+            .import_backup(&future, "口令十六字符以上!!")
+            .unwrap_err();
+        assert_eq!(err_code(&e), "CLIPBOARD_IMPORT_003");
+        match e {
+            AppError::Module { message, .. } => assert!(
+                message.contains("99"),
+                "版本不符须点名收到的版本号：{message}"
+            ),
+            other => panic!("预期 Module 型错误，得到 {other:?}"),
+        }
+
+        // 第四形：密文一格未动，只把密文之外的明文计数改掉 —— 口令仍然解得开，
+        // 故须由 entries 与行数的互校兜住（否则"少了几行"的备份会被当作导入成功）。
+        let miscounted: serde_json::Value = {
+            let mut v: serde_json::Value = serde_json::from_slice(&good_bytes).unwrap();
+            v["meta"]["entries"] = serde_json::json!(7);
+            v
+        };
+        let padded = h.dir.join("miscounted.json");
+        std::fs::write(&padded, serde_json::to_vec(&miscounted).unwrap()).unwrap();
+        let e = h
+            .module
+            .import_backup(&padded, "口令十六字符以上!!")
+            .expect_err("声明行数与实际不符须拒");
+        assert_eq!(err_code(&e), "CLIPBOARD_IMPORT_003");
+        match e {
+            AppError::Module { message, .. } => assert!(
+                message.contains("7") && message.contains("1"),
+                "须点名声明数与实际数两侧：{message}"
+            ),
+            other => panic!("预期 Module 型错误，得到 {other:?}"),
+        }
+
+        // 正对照：同一份未改动的文件走同一入口即成功（四枚拒的是格式，不是导入通路本身）
+        h.module.store().unwrap().clear(false).unwrap();
+        assert_eq!(
+            h.module
+                .import_backup(&good, "口令十六字符以上!!")
+                .unwrap()
+                .imported,
+            1
+        );
     }
 }

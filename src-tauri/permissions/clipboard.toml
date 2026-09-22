@@ -124,3 +124,13 @@ commands.allow = ["clipboard_stats"]
 identifier = "allow-clipboard-secret-reveal"
 description = "允许前端调用 clipboard_secret_reveal 命令（敏感条目按需揭示，main-only 且写审计日志）"
 commands.allow = ["clipboard_secret_reveal"]
+
+[[permission]]
+identifier = "allow-clipboard-export"
+description = "允许前端调用 clipboard_export 命令（口令加密备份导出，main-only：批量外发面，辅助窗永不持有）"
+commands.allow = ["clipboard_export"]
+
+[[permission]]
+identifier = "allow-clipboard-import"
+description = "允许前端调用 clipboard_import 命令（备份回灌，main-only：整库改写面，辅助窗永不持有）"
+commands.allow = ["clipboard_import"]

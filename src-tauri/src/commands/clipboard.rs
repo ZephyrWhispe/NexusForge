@@ -499,10 +499,81 @@ fn publish_group_counts(
     }
 }
 
+/// 加密导出（T-B3-9）：口令信封 + AES-256-GCM，落 `{app_data}/export/` 白名单目录。
+/// 敏感行只有 `include_secrets=true` 且口令够长时才出门，否则整口拒——
+/// 静默丢掉敏感行等于交出一份"看起来是全的"残缺备份。
+#[derive(Serialize)]
+pub struct ExportDto {
+    pub path: String,
+    pub entries: u32,
+    pub secrets: u32,
+    pub images_skipped: u32,
+}
+
+#[tauri::command]
+pub async fn clipboard_export(
+    passphrase: String,
+    include_secrets: bool,
+    state: State<'_, HostState>,
+) -> Result<ExportDto, AppError> {
+    let clipboard = state.clipboard.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (path, meta) = clipboard.export_backup(&passphrase, include_secrets)?;
+        Ok::<ExportDto, AppError>(ExportDto {
+            path: path.display().to_string(),
+            entries: meta.entries,
+            secrets: meta.secrets,
+            images_skipped: meta.images_skipped,
+        })
+    })
+    .await
+    .map_err(|e| AppError::module("CLIPBOARD_EXPORT_005", e.to_string(), None))?
+}
+
+/// 加密导入（T-B3-9）。路径来自前端 Input（全仓无 dialog/fs 插件，B1 editor 另存为同例），
+/// 且只走**读**侧；写侧路径由宿主自己拼（见 `clipboard_export`），故不存在"导入写到哪"的面。
+/// 回执即 `ImportReport` 本身：它的四个计数就是导入结果，不再套一层同形 DTO。
+#[tauri::command]
+pub async fn clipboard_import(
+    path: String,
+    passphrase: String,
+    state: State<'_, HostState>,
+) -> Result<clipboard_core::store::ImportReport, AppError> {
+    let clipboard = state.clipboard.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        clipboard.import_backup(std::path::Path::new(&path), &passphrase)
+    })
+    .await
+    .map_err(|e| AppError::module("CLIPBOARD_IMPORT_005", e.to_string(), None))??;
+    // 复用分组计数主题（零新事件通道）：导入改了整库，角标/左树/统计卡与历史页同一源刷新
+    publish_group_counts(&state.bus, &state.clipboard);
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use host_core::ports::RawInput;
+
+    /// KDF/AEAD 档位与 vault-core 同值。clipboard-core 不该依赖 vault-core（两个业务
+    /// 模块平级），而 src-tauri 是唯一同时看得见两者的层，故防分叉的钉打在这里。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-9）字面测试名优先于 rustc 命名惯例
+    fn derive_key_matchesVaultCoreKdfTier() {
+        use clipboard_core::backup as clip;
+        use vault_core::crypto as vault;
+        assert_eq!(clip::EXPORT_M_KIB, vault::DEFAULT_M_COST_KIB);
+        assert_eq!(clip::EXPORT_T_COST, vault::DEFAULT_T_COST);
+        assert_eq!(clip::EXPORT_P_COST, vault::DEFAULT_P_COST);
+        assert_eq!(clip::KEY_LEN, vault::KEY_LEN);
+        assert_eq!(clip::SALT_LEN, vault::SALT_LEN);
+        assert_eq!(clip::NONCE_LEN, vault::NONCE_LEN);
+        // 常量相等只证明"写得一样"，不证明"跑得通"：正式档位真派生一次
+        // （vault-core 同一纪律：正式参数仅冒烟一次，批量测试走低档）
+        let key = clip::derive_key("八个字符以上", &[3u8; clip::SALT_LEN]);
+        assert_eq!(key.len(), clip::KEY_LEN, "派生输出长度须等于 KEY_LEN");
+        assert!(key.iter().any(|b| *b != 0), "全零密钥＝派生没跑起来");
+    }
 
     #[test]
     #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-3）字面测试名优先于 rustc 命名惯例

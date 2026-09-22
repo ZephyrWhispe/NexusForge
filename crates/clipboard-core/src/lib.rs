@@ -4,6 +4,7 @@
 //! → C6 查询 → C7 IPC（命令在 src-tauri）→ C8 前端 → C9 清理。
 //! 当前：C1–C6 完成；图片捕获与快速面板在下一迭代。
 
+pub mod backup;
 pub mod classifier;
 pub mod module;
 pub mod pipeline;

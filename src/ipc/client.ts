@@ -258,6 +258,40 @@ export function clipboardStats(): Promise<ClipStats> {
   return invoke<ClipStats>("clipboard_stats");
 }
 
+// ---------------- 加密备份导出/导入（docs/impl/09 §8.2 T-B3-9）----------------
+
+/** 导出回执：path 由宿主拼在 `{appData}/export/` 白名单目录里，前端只能读不能选 */
+export interface ClipExportResult {
+  path: string;
+  entries: number;
+  secrets: number;
+  images_skipped: number;
+}
+
+/** 导入回执：duplicates 就是"合并"这件事的可见证据，不谎报成新增 */
+export interface ClipImportReport {
+  imported: number;
+  duplicates: number;
+  secrets: number;
+  images_skipped: number;
+}
+
+/** 口令加密导出（含敏感行时口令至少 8 字符，否则 CLIPBOARD_EXPORT_001 拒而非静默丢行） */
+export function clipboardExport(
+  passphrase: string,
+  includeSecrets: boolean,
+): Promise<ClipExportResult> {
+  return invoke<ClipExportResult>("clipboard_export", { passphrase, includeSecrets });
+}
+
+/** 口令解密导入：路径来自输入框（全仓无 dialog/fs 插件），任何一步失败都不落半套 */
+export function clipboardImport(
+  path: string,
+  passphrase: string,
+): Promise<ClipImportReport> {
+  return invoke<ClipImportReport>("clipboard_import", { path, passphrase });
+}
+
 // ---------------- 敏感库按需揭示（docs/impl/09 §8.2 T-B3-5）----------------
 
 /** 揭示结果：明文只活在这一次响应里，列表侧恒为掩码 */

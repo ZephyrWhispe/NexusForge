@@ -241,9 +241,16 @@ describe("暂停捕获（T-B3-2）", () => {
   it("captureSwitch_settingsSectionToggle_invokesAndReflectsPaused：开关即 clipboard_capture_set，显示返回的运行期真值", async () => {
     await mountView("settings");
     expect(clipboardCaptureGet).toHaveBeenCalledTimes(1);
-    // 单一写口：schema 里的 readOnly capture_paused 不得再被通用表单渲染成第二个开关
-    const boxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
-    expect(boxes).toHaveLength(1);
+    // 单一写口：schema 里的 readOnly capture_paused（title「暂停捕获」）不得再被通用表单渲染成第二个开关。
+    // 按标签文本认开关，不按全局 checkbox 计数——T-B3-9 起设置区另有「包含敏感条目」复选框，
+    // 计数断言会把合法的新控件误当成第二个写口。
+    const labels = [...container.querySelectorAll("label")];
+    expect(labels.filter((l) => l.textContent === "暂停捕获")).toHaveLength(0);
+    const pauseLabels = labels.filter((l) => l.textContent === "暂停");
+    expect(pauseLabels).toHaveLength(1);
+    const boxes = pauseLabels.map(
+      (l) => container.querySelector<HTMLInputElement>(`input[id="${l.htmlFor}"]`)!,
+    );
     expect(boxes[0].checked).toBe(false);
     expect(container.textContent).toContain("运行中");
     // 正对照：通用表单照常渲染非 readOnly 键

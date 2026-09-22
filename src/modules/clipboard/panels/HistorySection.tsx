@@ -413,10 +413,17 @@ export default function HistorySection({ search, group, onCounts }: Props) {
           load(0, false).catch((e) =>
             reportError(e, { context: "剪切板实时刷新失败", dedupeKey: "clip-event-refresh", toast: false }),
           );
+        // T-B3-9：备份导入成功后宿主广播同一 groups_changed（零新主题），
+        // 历史页因此在设置子面板里点完导入即回可见列表，不必切页重挂。
+        if (topic === "clipboard.groups_changed")
+          load(0, false).catch((e) =>
+            reportError(e, { context: "备份导入后刷新失败", dedupeKey: "clip-import-refresh", toast: false }),
+          );
         if (
           topic === "clipboard.deleted" ||
           topic === "clipboard.cleared" ||
-          topic === "clipboard.captured"
+          topic === "clipboard.captured" ||
+          topic === "clipboard.groups_changed"
         )
           refreshCounts();
         if (topic === "clipboard.capture_state") refreshCapture();

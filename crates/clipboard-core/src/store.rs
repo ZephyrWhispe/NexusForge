@@ -10,9 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use host_core::error::AppError;
+use host_core::ports::CryptoPort;
 use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
+use serde::Serialize;
 
+use crate::backup::BackupRow;
 use crate::types::{now_ms, ClipEntry, Page, SearchQuery, StatsDto, SuggestionDto, BLOB_THRESHOLD};
 
 pub struct ClipStore {
@@ -211,6 +214,31 @@ impl<'a> NewClip<'a> {
         self.html = Some(html);
         self
     }
+}
+
+/// [`ClipStore::all_for_export`] 的行原像（T-B3-9）。
+/// `blob_path` 有值 = 正文住在库外（图片、超 64KB 长文本），导出侧据此只计数不外发。
+#[derive(Debug)]
+pub struct ExportSourceRow {
+    pub content_type: String,
+    pub content: String,
+    pub html: Option<String>,
+    pub group_name: Option<String>,
+    pub secret: bool,
+    pub source_app: Option<String>,
+    pub created_at: i64,
+    pub pinned: bool,
+    pub blob_path: Option<String>,
+}
+
+/// [`ClipStore::import_rows`] 的回执：既是导入结果，也是「合并」这词的可见证据
+/// （`duplicates` 不说谎：用户要看得见重导没有凭空多出两份）。
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct ImportReport {
+    pub imported: u32,
+    pub duplicates: u32,
+    pub secrets: u32,
+    pub images_skipped: u32,
 }
 
 impl ClipStore {
@@ -1029,6 +1057,115 @@ impl ClipStore {
             top_source_apps,
             bytes_blob: inline_bytes.max(0) as u64 + blob_bytes,
         })
+    }
+
+    /// 导出取行（T-B3-9）：**只读库内自持的内容**，`blob_path` 有值的行不外发正文、
+    /// 只由调用方计数（导出文件因此不越界读盘，也不把 blob 目录结构写进备份）。
+    pub fn all_for_export(&self) -> Result<Vec<ExportSourceRow>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT content_type, content, html, group_name, secret, source_app,
+                        created_at, pinned, blob_path
+                 FROM clip_entries ORDER BY created_at DESC",
+            )
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ExportSourceRow {
+                    content_type: r.get(0)?,
+                    content: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    html: r.get(2)?,
+                    group_name: r.get(3)?,
+                    secret: r.get::<_, i64>(4)? == 1,
+                    source_app: r.get(5)?,
+                    created_at: r.get(6)?,
+                    pinned: r.get::<_, i64>(7)? != 0,
+                    blob_path: r.get(8)?,
+                })
+            })
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(rows)
+    }
+
+    /// 备份回灌（T-B3-9）：逐行入库，敏感行经 `protect` 重新封信封再落库。
+    ///
+    /// 「合并去重」在普通文本/文件行上就是 `content_hash` 命中（计 duplicates、
+    /// 由 insert 臂刷新鲜度）；敏感行**不可能**命中——库内哈希的是密文，
+    /// 而每次 `protect` 产出新密文，故重导一份含敏感行的备份会新增行。
+    /// 这一点由 `import_twice_isIdempotentByHash` 如实钉住而非掩盖。
+    pub fn import_rows(
+        &self,
+        rows: &[BackupRow],
+        protect: &dyn CryptoPort,
+    ) -> Result<ImportReport, AppError> {
+        let mut report = ImportReport::default();
+        for row in rows {
+            if row.content_type == "image" {
+                // 图片正文住在 blob 文件里、从不进备份，故这行在导入侧无物可落
+                report.images_skipped += 1;
+                continue;
+            }
+            let mut fresh = true;
+            let id = if row.secret {
+                let plain = host_core::util::b64_decode(
+                    row.secret_b64
+                        .as_deref()
+                        .ok_or_else(|| err("CLIPBOARD_IMPORT_003", "敏感行缺 secret_b64"))?,
+                )
+                .ok_or_else(|| err("CLIPBOARD_IMPORT_003", "敏感行 secret_b64 非法"))?;
+                let cipher = protect
+                    .protect(&plain)
+                    .map_err(|e| err("CLIPBOARD_IMPORT_004", e))?;
+                let b64 = host_core::util::b64_encode(&cipher);
+                self.insert_encrypted(
+                    &b64,
+                    row.group_name.as_deref(),
+                    None,
+                    row.source_app.as_deref(),
+                    "local",
+                )?
+            } else if row.content_type == "files" {
+                fresh = !self.content_hash_exists(&content_hash(&row.text))?;
+                if !fresh {
+                    report.duplicates += 1;
+                }
+                self.insert_typed(&row.text, "files", row.source_app.as_deref(), "local")?
+            } else {
+                fresh = !self.content_hash_exists(&content_hash(&row.text))?;
+                if !fresh {
+                    report.duplicates += 1;
+                }
+                let mut clip = NewClip::new(&row.text);
+                clip.group = row.group_name.as_deref();
+                clip.source_app = row.source_app.as_deref();
+                clip.html = row.html.as_deref();
+                self.insert_row(&clip)?
+            };
+            if fresh {
+                report.imported += 1;
+            }
+            if row.secret {
+                report.secrets += 1;
+            }
+            if row.pinned {
+                self.pin(&id, true)?;
+            }
+        }
+        Ok(report)
+    }
+
+    fn content_hash_exists(&self, hash: &str) -> Result<bool, AppError> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM clip_entries WHERE content_hash = ?1)",
+            params![hash],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n != 0)
+        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))
     }
 
     /// C9 清理：retention_days > 0 时按保留期，再按 max_entries 上限淘汰（置顶除外）。

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Button,
+  Checkbox,
+  Input,
   makeStyles,
   Switch,
   Text,
@@ -11,14 +13,18 @@ import SchemaForm from "../../../settings/SchemaForm";
 import {
   clipboardCaptureGet,
   clipboardCaptureSet,
+  clipboardExport,
+  clipboardImport,
   clipboardStats,
   hostConfigGet,
   hostConfigSet,
   parseAppError,
   type ClipCaptureState,
+  type ClipExportResult,
   type ClipStats,
 } from "../../../ipc/client";
 import { IN_TAURI } from "../../../ipc/env";
+import { confirmAction } from "../../../stores/confirm";
 import { notify } from "../../../stores/notifications";
 
 /**
@@ -29,6 +35,9 @@ import { notify } from "../../../stores/notifications";
  * 通用表单不渲染它，clipboard_capture_set 因此是唯一 UI 写口（真源单点，缺陷⑦ 同律）。
  * T-B3-7 增「内容屏蔽规则」卡：一行一条正则，保存走 host_config_set 的**读-改-写**——
  * 只提交这一个键会把它连同其余八键一起写成缺省值，故先取回盘上全量再合并。
+ * T-B3-9 增「备份导出」/「备份导入」两卡：口令信封在宿主侧，前端只递口令不碰明文；
+ * 勾选「包含敏感条目」时口令不足 8 字符即内联拦下（不发命令），与宿主的
+ * CLIPBOARD_EXPORT_001 是同一道门的两侧，不是两套标准。
  * 统计卡读 clipboard_stats（库内聚合，无估算）。
  */
 const useStyles = makeStyles({
@@ -58,7 +67,18 @@ const useStyles = makeStyles({
   },
   blockCol: { display: "flex", flexDirection: "column", gap: "6px" },
   ops: { display: "flex", gap: "6px" },
+  fieldCol: { display: "flex", flexDirection: "column", gap: "6px", maxWidth: "520px" },
+  fieldRow: { display: "flex", gap: "6px", alignItems: "flex-end" },
+  fieldError: { fontSize: tokens.fontSizeBase200, color: tokens.colorPaletteRedForeground1 },
+  resultPath: {
+    fontSize: tokens.fontSizeBase200,
+    fontFamily: tokens.fontFamilyMonospace,
+    wordBreak: "break-all",
+  },
 });
+
+/** 与宿主 `clipboard_core::backup::MIN_PASSPHRASE` 同值：内联拦的是同一道门 */
+const MIN_PASSPHRASE = 8;
 
 /** 一行一条 → 去空白去空行（保留输入顺序：规则按序短路，用户看得见的顺序就是生效的顺序） */
 function parseRuleLines(raw: string): string[] {
@@ -88,6 +108,13 @@ export default function SettingsSection() {
   const [clipCfg, setClipCfg] = useState<Record<string, unknown> | null>(null);
   const [ruleDraft, setRuleDraft] = useState("");
   const [ruleBusy, setRuleBusy] = useState(false);
+  const [expPass, setExpPass] = useState("");
+  const [expSecrets, setExpSecrets] = useState(false);
+  const [expBusy, setExpBusy] = useState(false);
+  const [expResult, setExpResult] = useState<ClipExportResult | null>(null);
+  const [impPath, setImpPath] = useState("");
+  const [impPass, setImpPass] = useState("");
+  const [impBusy, setImpBusy] = useState(false);
 
   useEffect(() => {
     if (!IN_TAURI) return;
@@ -167,6 +194,65 @@ export default function SettingsSection() {
     }
   };
 
+  // 按码点数长度（与宿主 chars().count() 同口径）：中文口令不该被 UTF-8 字节数虚高放行
+  const expChars = Array.from(expPass).length;
+  const expTooShort = expSecrets && expChars < MIN_PASSPHRASE;
+
+  const doExport = async () => {
+    if (expTooShort || expBusy) return;
+    setExpBusy(true);
+    try {
+      const res = await clipboardExport(expPass, expSecrets);
+      setExpResult(res);
+      notify(
+        "success",
+        "备份已导出",
+        `${res.entries} 条（含敏感 ${res.secrets} 条${res.images_skipped ? `，图片/blob 外置 ${res.images_skipped} 条未随文件` : ""}）`,
+      );
+    } catch (e) {
+      notify("error", "导出失败", parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      setExpBusy(false);
+    }
+  };
+
+  const copyPath = async () => {
+    if (!expResult) return;
+    try {
+      await navigator.clipboard.writeText(expResult.path);
+      notify("success", "已复制备份路径");
+    } catch (e) {
+      notify("error", "复制失败", parseAppError(e)?.data.message ?? String(e));
+    }
+  };
+
+  const doImport = async () => {
+    if (impBusy) return;
+    const ok = await confirmAction({
+      title: "导入备份",
+      impact: [`从「${impPath}」读入并与当前库合并`],
+      detail:
+        "口令错误或文件被篡改时一行都不落；已存在的条目按内容哈希去重，不会凭空多出第二份。",
+      confirmLabel: "导入",
+      danger: false,
+    });
+    if (!ok) return;
+    setImpBusy(true);
+    try {
+      const r = await clipboardImport(impPath, impPass);
+      notify(
+        "success",
+        "备份已导入",
+        `新增 ${r.imported} 条 · 重复 ${r.duplicates} 条 · 敏感 ${r.secrets} 条`,
+      );
+      refresh();
+    } catch (e) {
+      notify("error", "导入失败", parseAppError(e)?.data.message ?? String(e));
+    } finally {
+      setImpBusy(false);
+    }
+  };
+
   return (
     <div className={styles.root}>
       <div className={styles.card}>
@@ -242,6 +328,97 @@ export default function SettingsSection() {
               onClick={() => void saveRules()}
             >
               保存规则
+            </Button>
+          </div>
+        </div>
+      </div>
+      <div className={styles.card} style={{ alignItems: "flex-start" }}>
+        <div className={styles.blockCol}>
+          <div>
+            <Text className={styles.name} block>
+              备份导出
+            </Text>
+            <span className={styles.desc}>
+              口令派生密钥（argon2id）后整包 AES-256-GCM 加密，落在
+              {' {应用数据}/export/ '}
+              下；文件里既没有明文正文也没有明文口令，口令丢了这份备份就解不开（没有后门）。
+            </span>
+          </div>
+          <div className={styles.fieldRow}>
+            <span aria-hidden="true">🔒</span>
+            <Input
+              type="password"
+              appearance="underline"
+              aria-label="备份口令"
+              placeholder={`口令（含敏感条目时至少 ${MIN_PASSPHRASE} 字符）`}
+              value={expPass}
+              onChange={(_, d) => setExpPass(d.value)}
+              style={{ flex: 1 }}
+            />
+            <Button
+              size="small"
+              appearance="primary"
+              disabled={expBusy || !IN_TAURI || expTooShort}
+              onClick={() => void doExport()}
+            >
+              {expBusy ? "导出中…" : "导出备份"}
+            </Button>
+          </div>
+          <Checkbox
+            checked={expSecrets}
+            disabled={expBusy}
+            onChange={(_, d) => setExpSecrets(d.checked === true)}
+            label="包含敏感条目（解出后重新封入口令信封）"
+          />
+          {expTooShort && (
+            <span className={styles.fieldError}>
+              勾选了「包含敏感条目」，口令须至少 {MIN_PASSPHRASE} 字符——短口令等于把这道门让出去。
+            </span>
+          )}
+          {expResult && (
+            <div className={styles.fieldRow}>
+              <span className={styles.resultPath}>{expResult.path}</span>
+              <Button size="small" onClick={() => void copyPath()}>
+                复制路径
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+      <div className={styles.card} style={{ alignItems: "flex-start" }}>
+        <div className={styles.blockCol}>
+          <div>
+            <Text className={styles.name} block>
+              备份导入
+            </Text>
+            <span className={styles.desc}>
+              填本程序导出的 .nfclip.json 路径与口令：认证通过才逐行合并入库，
+              口令错/文件被改都在落库之前整口拒，不会留下半套数据。
+            </span>
+          </div>
+          <Input
+            aria-label="备份文件路径"
+            placeholder="C:\\Users\\...\\export\\clipboard-….nfclip.json"
+            value={impPath}
+            onChange={(_, d) => setImpPath(d.value)}
+          />
+          <div className={styles.fieldRow}>
+            <span aria-hidden="true">🔑</span>
+            <Input
+              type="password"
+              appearance="underline"
+              aria-label="导入口令"
+              placeholder="口令"
+              value={impPass}
+              onChange={(_, d) => setImpPass(d.value)}
+              style={{ flex: 1 }}
+            />
+            <Button
+              size="small"
+              disabled={impBusy || !IN_TAURI || impPath.trim().length === 0}
+              onClick={() => void doImport()}
+            >
+              {impBusy ? "导入中…" : "导入备份"}
             </Button>
           </div>
         </div>

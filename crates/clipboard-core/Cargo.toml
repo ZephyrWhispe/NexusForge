@@ -19,6 +19,10 @@ sha2.workspace = true
 base64.workspace = true
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
+# T-B3-9 加密备份：与 vault-core 同套 crypto 依赖（同许可族、纯 Rust、已在册），许可面零新增
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
 
 # D-27：§9.1 阈值断言（tests/perf_thresholds.rs）+ criterion 基准矩阵
 [dev-dependencies]
