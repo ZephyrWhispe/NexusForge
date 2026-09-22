@@ -23,6 +23,8 @@ import {
 } from "../../../ipc/client";
 
 vi.mock("../../../ipc/env", () => ({ IN_TAURI: true }));
+// 面板订阅 nf:event 才接得上"配置被模块拒收"那句话（T-B4-9）；jsdom 里真 listen 会炸
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("../../../stores/notifications", () => ({
   notify: vi.fn(),
   reportError: vi.fn(),
@@ -46,6 +48,8 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     screenshotPins: vi.fn(),
     screenshotPinGet: vi.fn(),
     screenshotWindows: vi.fn(),
+    screenshotUploadTargets: vi.fn(async () => []),
+    screenshotUpload: vi.fn(),
   };
 });
 

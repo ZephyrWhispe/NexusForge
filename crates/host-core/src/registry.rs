@@ -375,7 +375,19 @@ pub async fn run_config_feed(
         };
         match registry.apply_one(module, &config).await {
             None => tracing::debug!(module, "模块未注册或盘上无可派发配置，跳过本次派发"),
-            Some(Err(e)) => tracing::error!(module, error = %e, "配置派发到运行期模块失败"),
+            Some(Err(e)) => {
+                tracing::error!(module, error = %e, "配置派发到运行期模块失败");
+                // 值已经写进盘了（schema 校验在写侧、模块级校验在派发侧），只进日志
+                // 等于"设置看起来生效了、其实没有"——把同一句真因原样交给 UI 面
+                registry
+                    .bus
+                    .publish(Event::new(
+                        "host.config_rejected",
+                        "host",
+                        serde_json::json!({ "module": module, "error": e.to_string() }),
+                    ))
+                    .ok();
+            }
             Some(Ok(())) => {
                 // 派生式 schema 随运行态变（ocr 的引擎词表 enum 来自引擎注册表）：
                 // 派发成功后重刷一次，否则"启用第二引擎"后设置中心仍拿旧词表，

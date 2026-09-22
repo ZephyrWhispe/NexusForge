@@ -437,6 +437,12 @@ export interface FinishDto {
    * `screenshot_finish` 恒无此键——所以前端读取处一律按可选处理。
    */
   preview_b64?: string | null;
+  /**
+   * 链式上传（`post_actions` 里的 `upload`）拿到的直链（T-B4-9）。
+   * 没有该动作 / 目标未启用 / 上传失败时都是缺省——失败另有 `screenshot.upload_failed`
+   * 事件点名是哪一条、为什么，这里不做第二个报错口。
+   */
+  link?: string | null;
 }
 
 /**
@@ -497,6 +503,17 @@ export interface ShotDataDto {
   annotations: AnnotationDto[];
 }
 
+
+/**
+ * 一个已注册的上传目标（T-B4-9）。`endpoint_display` **已去掉 query/fragment**——
+ * 自建端点常把 token 挂在查询串上，原样回显等于把凭据印在设置界面上。
+ */
+export interface UploadTargetInfoDto {
+  id: string;
+  label: string;
+  endpoint_display: string;
+  enabled: boolean;
+}
 
 /** 启动截图：缺省抓全屏，给出 hwnd 则只截该窗（PrintWindow，被遮挡也抓得全） */
 export function screenshotStart(mode: "shot" | "ocr", hwnd?: number): Promise<TaskStartDto> {
@@ -565,6 +582,19 @@ export function screenshotBeautifyApply(
 /** 全部贴图（启动恢复） */
 export function screenshotPins(): Promise<PinDto[]> {
   return invoke("screenshot_pins");
+}
+/** 已注册的上传目标表（T-B4-9：纯读，一个字节都不发出去） */
+export function screenshotUploadTargets(): Promise<UploadTargetInfoDto[]> {
+  return invoke("screenshot_upload_targets");
+}
+/**
+ * 把某条历史截图传到已注册端点，换回一条直链（T-B4-9）。
+ *
+ * `headerValue` 是**这一次调用**的凭据值：它不进配置、不进日志，本次 invoke 结束即
+ * 无处可寻（§9.1-⑩ 红线）。端点没配请求头名时传 `null`——面板在这种档上根本不给输入框。
+ */
+export function screenshotUpload(id: string, headerValue: string | null): Promise<string> {
+  return invoke("screenshot_upload", { id, headerValue });
 }
 /** 贴图数据 */
 export function screenshotPinGet(id: string): Promise<PinDataDto> {

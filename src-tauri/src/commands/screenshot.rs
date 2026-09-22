@@ -71,9 +71,38 @@ pub async fn screenshot_finish(
     state: State<'_, HostState>,
 ) -> Result<screenshot_core::types::FinishDto, AppError> {
     let screenshot = state.screenshot.clone();
-    tauri::async_runtime::spawn_blocking(move || screenshot.finish(&task_id, &request))
-        .await
-        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+    let mut dto =
+        tauri::async_runtime::spawn_blocking(move || screenshot.finish(&task_id, &request))
+            .await
+            .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))??;
+    drain_upload(&state.screenshot, &mut dto).await;
+    Ok(dto)
+}
+
+/// 动作链里 `upload` 那一跳的落点（D-29 B4 T-B4-9）。
+///
+/// 同步核发不出网络请求（reqwest 是 async，且本模块不引 blocking feature），所以
+/// `run_actions` 只把"要传什么"攒成 `FinishDto::upload_ticket`（`#[serde(skip)]`，
+/// 这个字段因此**永远不会**跨 IPC），由这里在同一任务上 await 唯一一次上传。
+///
+/// 失败不把本次完成判红：文件和历史行都已经落地，重放一次 finish 会多出孤儿文件与
+/// 重复记录——那比"没传上去"糟得多。真因经 `screenshot.upload_failed` 事件回面板。
+async fn drain_upload(
+    screenshot: &screenshot_core::ScreenshotModule,
+    dto: &mut screenshot_core::types::FinishDto,
+) {
+    let Some(ticket) = dto.upload_ticket.take() else {
+        return;
+    };
+    // 链条上没有传凭据的通道（`FinishRequest` 里刻意没有任何凭据字段）：需要鉴权的
+    // 端点只能走面板那一行的上传钮，这条链只服务匿名/内网自建档
+    match screenshot.fulfill_upload(&ticket, None).await {
+        Ok(link) => dto.link = link,
+        Err(e) => {
+            tracing::warn!(error = %e, source = %ticket.source, "链式上传失败");
+            screenshot.publish_upload_failed(&ticket.source, &e);
+        }
+    }
 }
 
 // ---------------- 滚动截图（D-29 B4 T-B4-5，手动步进）----------------
@@ -111,9 +140,12 @@ pub async fn screenshot_scroll_finish(
     state: State<'_, HostState>,
 ) -> Result<screenshot_core::types::FinishDto, AppError> {
     let screenshot = state.screenshot.clone();
-    tauri::async_runtime::spawn_blocking(move || screenshot.scroll_finish(&id, &actions))
-        .await
-        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+    let mut dto =
+        tauri::async_runtime::spawn_blocking(move || screenshot.scroll_finish(&id, &actions))
+            .await
+            .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))??;
+    drain_upload(&state.screenshot, &mut dto).await;
+    Ok(dto)
 }
 
 /// 放弃会话：带子只住内存，用户点"放弃"就得立刻还内存，不等进程重启
@@ -181,9 +213,13 @@ pub async fn screenshot_beautify_apply(
     state: State<'_, HostState>,
 ) -> Result<screenshot_core::types::FinishDto, AppError> {
     let screenshot = state.screenshot.clone();
-    tauri::async_runtime::spawn_blocking(move || screenshot.beautify_apply(&id, &spec, &actions))
-        .await
-        .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+    let mut dto = tauri::async_runtime::spawn_blocking(move || {
+        screenshot.beautify_apply(&id, &spec, &actions)
+    })
+    .await
+    .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))??;
+    drain_upload(&state.screenshot, &mut dto).await;
+    Ok(dto)
 }
 
 /// 单个贴图数据（Pin 窗口加载用）
@@ -219,4 +255,37 @@ pub async fn screenshot_pin_close(id: String, state: State<'_, HostState>) -> Re
     tauri::async_runtime::spawn_blocking(move || screenshot.pin_close(&id))
         .await
         .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))?
+}
+
+// ---------------- 上传轨（D-29 B4 T-B4-9，§9.1-⑩）----------------
+// 数据出机面：只有主窗口拿得到这两条命令（overlay/pin/quickpanel 等一律不授权，
+// 见 src-tauri/tests/security_config.rs 的 auxWindows_neverGrantScreenshotUpload）。
+
+/// 已注册的上传目标表（供设置面板下拉与"未启用"徽标）。纯读，不发任何请求。
+#[tauri::command]
+pub fn screenshot_upload_targets(
+    state: State<'_, HostState>,
+) -> Vec<screenshot_core::upload::UploadTargetInfo> {
+    state.screenshot.upload_targets()
+}
+
+/// 上传历史里的某一行，换回一条直链。
+///
+/// `header_value` 是**这一次调用**的凭据值：它不进配置、不进日志、不进事件，
+/// 函数返回即无处可寻。端点没配请求头名时传 `None`（前端此时根本不给输入框）。
+#[tauri::command]
+pub async fn screenshot_upload(
+    id: String,
+    header_value: Option<String>,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
+    let screenshot = state.screenshot.clone();
+    let (filename, bytes) =
+        tauri::async_runtime::spawn_blocking(move || screenshot.upload_payload(&id))
+            .await
+            .map_err(|e| AppError::module("SCREENSHOT_STATE_003", e.to_string(), None))??;
+    state
+        .screenshot
+        .upload_now(&filename, &bytes, header_value)
+        .await
 }

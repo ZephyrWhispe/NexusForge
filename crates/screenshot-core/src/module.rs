@@ -32,6 +32,7 @@ use crate::types::{
     PinDto, ScreenshotConfig, ScrollStepDto, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
     WindowTargetDto, POST_ACTION_WHITELIST,
 };
+use crate::upload::{self, UploadRegistry, UploadTicket};
 use crate::util;
 
 use host_core::util::app_err as mod_err;
@@ -47,6 +48,9 @@ struct ActionOutcome {
     file: Option<String>,
     pin_id: Option<String>,
     request_ocr: bool,
+    /// 待上传的产物（T-B4-9）：这一层发不出网络请求（同步核跑在 spawn_blocking 里），
+    /// 只能把"要传什么"交出去，由命令层在同一运行时里 await 那一跳
+    upload: Option<UploadTicket>,
 }
 
 /// 一次后处理动作的入参包：像素 + 尺寸 + 动作 + 两个可选覆盖项。
@@ -60,6 +64,8 @@ struct ActionRun<'a> {
     fmt_override: Option<&'a str>,
     pin_x: Option<i32>,
     pin_y: Option<i32>,
+    /// 这次动作属于哪一条记录（任务 id / 历史 id）：`upload` 的失败点名与文件名都取它
+    source: &'a str,
 }
 
 /// 从 `ocr.completed` 事件解析历史回填载荷（纯函数便于测试）。
@@ -129,6 +135,9 @@ pub struct ScreenshotModule {
     scrolls: Mutex<HashMap<String, ScrollSession>>,
     pins: Mutex<Vec<PinRecord>>,
     config: Arc<AsyncMutex<ScreenshotConfig>>,
+    /// 上传目标注册表（D-29 B4 T-B4-9）：随 `apply_config` 整表重建。装 `Arc` 是为了
+    /// 让异步那一跳能在 `await` 之前把锁放掉——持锁跨 await 会把配置写入卡在网线上。
+    uploads: RwLock<Arc<UploadRegistry>>,
     state: ModuleStateCell,
     /// ocr.completed 历史回填协程的停机信道（S4 协作停机，同 automation-core）
     ocr_shutdown: RwLock<Option<watch::Sender<bool>>>,
@@ -146,6 +155,8 @@ impl ScreenshotModule {
             scrolls: Mutex::new(HashMap::new()),
             pins: Mutex::new(Vec::new()),
             config: Arc::new(AsyncMutex::new(ScreenshotConfig::default())),
+            // 空表 = "还没有任何一档目标"：端点一旦经 apply_config 落定就整表重建
+            uploads: RwLock::new(Arc::new(UploadRegistry::empty())),
             state: ModuleStateCell::new(),
             ocr_shutdown: RwLock::new(None),
         }
@@ -326,7 +337,36 @@ impl Module for ScreenshotModule {
                     "type": "array", "title": "完成后动作链",
                     "items": { "type": "string" },
                     "default": [],
-                    "description": "save/copy/pin/ocr/beautify 的有序子集；非空时上面三个「完成后…」开关全部失效（它们只在本键为空时决定动作链）。留空 = 沿用三开关"
+                    "description": "save/copy/pin/ocr/beautify/upload 的有序子集；非空时上面三个「完成后…」开关全部失效（它们只在本键为空时决定动作链）。留空 = 沿用三开关"
+                },
+                "upload_enabled": {
+                    "type": "boolean", "title": "启用上传",
+                    "description": "默认关闭：数据出机面必须是一次明确的开启", "default": false
+                },
+                "upload_target": {
+                    "type": "string", "title": "上传目标",
+                    "enum": ["http-form"], "default": "http-form",
+                    "description": "本代只有 HTTP 表单一档；WebDAV 归 B6（D-29 §9.1-⑩ 收窄）"
+                },
+                "upload_endpoint": {
+                    "type": "string", "title": "上传端点",
+                    "description": "仅 https，或明说本机的 http://127.0.0.1 · http://localhost · http://[::1]；凭据不要写在 URL 里"
+                },
+                "upload_field": {
+                    "type": "string", "title": "表单字段名",
+                    "description": "留空按 file 处理", "default": "file"
+                },
+                "upload_header_name": {
+                    "type": "string", "title": "凭据请求头名",
+                    "description": "只存头名（如 Authorization）。值**永不入库**：每次上传在面板里现填，随那一次调用一起消失（D-29 §9.1-⑩ 红线）"
+                },
+                "upload_link_template": {
+                    "type": "string", "title": "直链模板",
+                    "description": "留空 = 取响应体首行。可用占位符 {url}（响应首行）与 {id}（文件名去扩展名）"
+                },
+                "upload_copy_link": {
+                    "type": "boolean", "title": "上传后复制直链",
+                    "description": "动作链里没有「复制」这一环时，直链唯一的送达方式就是剪贴板", "default": true
                 }
             }
         })
@@ -360,9 +400,25 @@ impl Module for ScreenshotModule {
         }
         let cfg: ScreenshotConfig =
             serde_json::from_value(values).map_err(|e| ModuleError::Config(e.to_string()))?;
-        if let Ok(mut g) = self.config.try_lock() {
-            *g = cfg;
+        // 端点同样在落配置前裁（同上一条纪律）：明文 http 指向公网的端点一旦写下，
+        // 下一次截图就会把凭据和图片一起裸奔出去——这一格没有"先收下再说"的余地。
+        if !cfg.upload_endpoint.trim().is_empty() {
+            upload::validate_upload_endpoint(&cfg.upload_endpoint)
+                .map_err(|e| ModuleError::Config(e.to_string()))?;
         }
+        // 开了开关却没端点 = 一条注定失败的动作链（`upload` 臂会静默不做事）。
+        // 静默是这里最坏的结局：用户以为自己配好了上传。
+        if cfg.upload_enabled && cfg.upload_endpoint.trim().is_empty() {
+            return Err(ModuleError::Config(
+                "upload_enabled 为真时必须填写 upload_endpoint（仅 https，或本机 http://127.0.0.1 · http://localhost）"
+                    .to_owned(),
+            ));
+        }
+        if let Ok(mut g) = self.config.try_lock() {
+            *g = cfg.clone();
+        }
+        // 注册表整表重建：正在 await 的那一次上传持有旧 `Arc`，不受这次换档影响
+        *self.uploads.write() = Arc::new(upload::registry_from_config(&cfg));
         Ok(())
     }
 
@@ -688,7 +744,11 @@ impl ScreenshotModule {
         let actions = effective_actions(&cfg, actions);
         let mut file: Option<String> = None;
         let mut pin_id: Option<String> = None;
+        let mut upload: Option<UploadTicket> = None;
         for piece in &pieces {
+            // 历史行 id 先定：`upload` 的失败点名与文件名都要它，而"哪一段没传上去"
+            // 必须能被用户在那张缩略图附近对上号
+            let item_id = uuid::Uuid::now_v7().to_string();
             let outcome = self.run_actions(ActionRun {
                 actions: &actions,
                 w: piece.width,
@@ -697,11 +757,15 @@ impl ScreenshotModule {
                 fmt_override: None,
                 pin_x: None,
                 pin_y: None,
+                source: &item_id,
             })?;
             file = file.or(outcome.file.clone());
             pin_id = pin_id.or(outcome.pin_id.clone());
+            // 分段是降级路径：一次滚动只带第一段的待传产物（与"`file` 只报第一段"同一条
+            // 取舍——多段各传一次要的是 N 次点击或 N 条命令，那归 B6 的目标治理）
+            upload = upload.or(outcome.upload);
             let item = crate::types::ShotItem {
-                id: uuid::Uuid::now_v7().to_string(),
+                id: item_id,
                 created_ms: chrono::Utc::now().timestamp_millis(),
                 width: piece.width,
                 height: piece.height,
@@ -735,6 +799,8 @@ impl ScreenshotModule {
             // 多段时 `file` 只报第一段（另存为语义只在单段时有意义；分段本身是降级路径，
             // 步进条已经把"将分段各存一图"明说给用户了）
             preview_b64: None,
+            link: None,
+            upload_ticket: upload,
         })
     }
 
@@ -813,9 +879,11 @@ impl ScreenshotModule {
             fmt_override: req.format.as_deref(),
             pin_x: req.pin_x,
             pin_y: req.pin_y,
+            source: task_id,
         })?;
         let file = outcome.file;
         let pin_id = outcome.pin_id;
+        let upload_ticket = outcome.upload;
 
         // 入历史
         let item = crate::types::ShotItem {
@@ -871,6 +939,10 @@ impl ScreenshotModule {
             file,
             pin_id,
             preview_b64: None,
+            // 直链由命令层在同一任务上 await 之后回填：同步核发不出这一跳，
+            // 而 ticket 走 `#[serde(skip)]`，绝不会被当成响应体的一部分泄漏出去
+            link: None,
+            upload_ticket,
         })
     }
 
@@ -897,6 +969,8 @@ impl ScreenshotModule {
                 file: None,
                 pin_id: None,
                 preview_b64: Some(util::encode_png_b64(nw, nh, &nrgba)?),
+                link: None,
+                upload_ticket: None,
             });
         }
         // 格式跟随配置（fmt_override=None）：美化面板不重复覆盖层那颗格式钮的语义
@@ -908,6 +982,7 @@ impl ScreenshotModule {
             fmt_override: None,
             pin_x: None,
             pin_y: None,
+            source: id,
         })?;
         if outcome.request_ocr {
             if let Err(e) = self.dispatch_ocr_request(id, nw, nh, &nrgba) {
@@ -918,6 +993,8 @@ impl ScreenshotModule {
             file: outcome.file,
             pin_id: outcome.pin_id,
             preview_b64: None,
+            link: None,
+            upload_ticket: outcome.upload,
         })
     }
 
@@ -934,6 +1011,7 @@ impl ScreenshotModule {
             fmt_override,
             pin_x,
             pin_y,
+            source,
         } = run;
         let cfg = self
             .config
@@ -943,6 +1021,7 @@ impl ScreenshotModule {
         let mut file: Option<String> = None;
         let mut pin_id: Option<String> = None;
         let mut request_ocr = false;
+        let mut upload: Option<UploadTicket> = None;
         for action in actions {
             match action.as_str() {
                 "copy" => self.action_copy(w, h, rgba)?,
@@ -961,6 +1040,45 @@ impl ScreenshotModule {
                 // docs/impl/03 P5：Ocr 动作只转发事件，识别在 ocr-core 侧异步完成，
                 // 结果经 ocr.completed 回流（历史回填 + 截图 UI），此处登记待触发
                 "ocr" => request_ocr = true,
+                // 上传在这里只**取字节**、不发请求（`upload` 是 async，而本函数跑在
+                // spawn_blocking 的同步核里）。真正的网络那一跳由命令层 await，
+                // 见 `fulfill_upload`。"同一字节"是本臂的承重语义：save 已经跑过就直接
+                // 读回那个文件，而不是再编码一次——jpeg/webp 的编码在质量参数下不保证
+                // 逐字节可重放，另编一份就会产出"存的是这张、传的是那张"两张图。
+                "upload" => {
+                    if !self.uploads_enabled() {
+                        tracing::warn!("上传动作已忽略：没有启用中的上传目标（截图设置 · 上传）");
+                        continue;
+                    }
+                    let (bytes, filename) = match &file {
+                        Some(path) => {
+                            let p = std::path::Path::new(path);
+                            let name = p
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned();
+                            let bytes = std::fs::read(p).map_err(|e| {
+                                mod_err(
+                                    "SCREENSHOT_UPLOAD_002",
+                                    format!("读取刚保存的文件失败：{e}"),
+                                )
+                            })?;
+                            (bytes, name)
+                        }
+                        None => {
+                            let raw = fmt_override.unwrap_or(&cfg.format);
+                            let fmt = util::EncodeFormat::from_str_honest(raw)?;
+                            let (bytes, _) = util::encode_rgba(fmt, cfg.quality, w, h, rgba)?;
+                            (bytes, format!("shot_{source}.{}", fmt.ext()))
+                        }
+                    };
+                    upload = Some(UploadTicket {
+                        bytes,
+                        filename,
+                        source: source.to_owned(),
+                    });
+                }
                 // 美化在这里是**有意的空臂**：像素在两个调用侧都已于循环之前一次性作用于
                 // 最终图（`finish` 的 spec 决议 / `beautify_apply` 的入参），循环再改一次就是
                 // "复制的是原图、保存的是美化图"那类分叉的成因。列进白名单而不留空臂，
@@ -973,6 +1091,7 @@ impl ScreenshotModule {
             file,
             pin_id,
             request_ocr,
+            upload,
         })
     }
 
@@ -1286,6 +1405,132 @@ impl ScreenshotModule {
             height: item.height,
             bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
         })
+    }
+
+    // ---------------- 上传轨（D-29 B4 T-B4-9）----------------
+
+    /// 已注册目标表（`screenshot_upload_targets` 出口）：只读表，一个字节都不发出去
+    pub fn upload_targets(&self) -> Vec<upload::UploadTargetInfo> {
+        self.uploads.read().targets()
+    }
+
+    /// 有没有启用中的目标（`run_actions` 的 upload 臂据此决定要不要攒待传产物）
+    fn uploads_enabled(&self) -> bool {
+        self.uploads.read().is_enabled()
+    }
+
+    /// 直链要不要顺手复制（配置 `upload_copy_link`，默认开）
+    fn upload_copy_link(&self) -> bool {
+        self.config
+            .try_lock()
+            .map(|g| g.upload_copy_link)
+            .unwrap_or_default()
+    }
+
+    /// 面板某一行的显式上传：取那一行的字节与它在服务端的名字（同步读盘，命令层负责
+    /// 把它放进 `spawn_blocking`）。
+    ///
+    /// 拆成"取字节 / 发请求"两步而不是一个 async 方法，是为了让这一次磁盘读不落在异步
+    /// 执行器的线程上——本模块从 `init` 起就守这条（截图命令清一色 spawn_blocking）。
+    pub fn upload_payload(&self, id: &str) -> Result<(String, Vec<u8>), AppError> {
+        let (item, bytes) = self.history_raw(id)?;
+        let filename = std::path::Path::new(item.file.as_deref().unwrap_or_default())
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        Ok((filename, bytes))
+    }
+
+    /// 把一次上传真正发出去，返回直链。
+    ///
+    /// 凭据（`header_value`）**只活在这一次调用里**：它是参数、不是字段，函数返回即
+    /// 无处可寻（§9.1-⑩ 红线）。带鉴权的端点因此只能由人点那一行的钮——动作链
+    /// （`post_actions` 里的 `upload`）没有传凭据的通道，`FinishRequest` 里刻意没有。
+    pub async fn upload_now(
+        &self,
+        filename: &str,
+        bytes: &[u8],
+        header_value: Option<String>,
+    ) -> Result<String, AppError> {
+        // 取 Arc 之后立刻放锁：网络那一跳不能挂着读锁，否则换档的配置写入会被网线卡住
+        let registry = self.uploads.read().clone();
+        let link = registry
+            .upload(bytes, filename, header_value.as_deref())
+            .await?
+            .ok_or_else(|| {
+                mod_err(
+                    "SCREENSHOT_UPLOAD_003",
+                    "没有启用中的上传目标：请在「截图设置 · 上传」里勾选目标并填写端点",
+                )
+            })?;
+        self.maybe_copy_link(&link);
+        Ok(link)
+    }
+
+    /// 动作链的最后一跳（命令层在 `finish` 之后 await 一次）。
+    ///
+    /// `Ok(None)` = 这一次根本没有待传产物（名单里没有 upload，或上传目标未启用），
+    /// 不是失败；失败只有 `Err`。
+    pub async fn fulfill_upload(
+        &self,
+        ticket: &UploadTicket,
+        header_value: Option<String>,
+    ) -> Result<Option<String>, AppError> {
+        let registry = self.uploads.read().clone();
+        let link = registry
+            .upload(&ticket.bytes, &ticket.filename, header_value.as_deref())
+            .await?;
+        if let Some(link) = link.as_ref() {
+            self.maybe_copy_link(link);
+        }
+        Ok(link)
+    }
+
+    /// 拿到直链后按配置复制。复制失败**只告警**：图已经传上去了，链子已经在返回值里，
+    /// 让剪贴板的一次占用失败把整次上传判红是假失败。
+    fn maybe_copy_link(&self, link: &str) {
+        if !self.upload_copy_link() {
+            return;
+        }
+        if let Err(e) = self.action_copy_text(link) {
+            tracing::warn!(error = %e, "直链复制进剪贴板失败，链接本身已在返回值里");
+        }
+    }
+
+    fn action_copy_text(&self, text: &str) -> Result<(), AppError> {
+        let clipboard = self
+            .clipboard
+            .read()
+            .clone()
+            .ok_or_else(|| mod_err("SCREENSHOT_STATE_001", "ClipboardPort 未就绪"))?;
+        clipboard.write(&host_core::ports::ClipContent::Text {
+            text: text.to_owned(),
+            html: None,
+        })
+    }
+
+    /// 链式上传失败的可见面：不影响本次完成（图和记录都已落地），但必须让用户看得见
+    /// "这一条没传上去、以及为什么"——静默的上传失败等于用户以为东西已经 share 出去了。
+    pub fn publish_upload_failed(&self, source: &str, e: &AppError) {
+        if let Some(bus) = self.bus.read().clone() {
+            bus.publish(Event::new(
+                "screenshot.upload_failed",
+                "screenshot",
+                serde_json::json!({
+                    "source": source,
+                    "code": e.code(),
+                    "message": e.to_string(),
+                }),
+            ))
+            .ok();
+        }
+    }
+
+    /// 测试缝：换掉整张注册表（真实装配走 `apply_config`，那里读的是配置）
+    #[cfg(test)]
+    fn set_uploads_for_test(&self, registry: Arc<UploadRegistry>) {
+        *self.uploads.write() = registry;
     }
 }
 
@@ -2445,5 +2690,70 @@ mod tests {
             (4, 88),
             "21 帧首帧 8 行 + 每帧新增 4 行，一帧都没被丢弃"
         );
+    }
+
+    // ---------------- T-B4-9：上传动作与注册表接线 ----------------
+
+    fn finish_req(actions: Vec<String>) -> FinishRequest {
+        FinishRequest {
+            image_b64: util::encode_png_b64(2, 2, &[9u8; 16]).unwrap(),
+            actions,
+            pin_x: None,
+            pin_y: None,
+            annotations: vec![],
+            format: None,
+            beautify: None,
+        }
+    }
+
+    /// 红线判据：目标没启用时 `upload` 动作**一次都不碰 provider**。
+    /// "没报错"证明不了这件事——一个空实现同样不报错，而用户会以为图已经传出去了。
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-9）字面测试名优先于 rustc 命名惯例
+    async fn uploadDisabled_actionUpload_makesZeroProviderCalls() {
+        use crate::upload::test_support::CountingProvider;
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let m = ScreenshotModule::new();
+        *m.app_data_dir.write() = Some(dir.path().to_path_buf());
+        *m.config.try_lock().unwrap() = ScreenshotConfig {
+            save_dir: dir.path().join("out").to_string_lossy().into_owned(),
+            auto_save: false,
+            auto_copy: false,
+            ..Default::default()
+        };
+        let provider = Arc::new(CountingProvider::new("https://x.example/i/1"));
+        let calls = provider.calls.clone();
+        let reg = Arc::new(UploadRegistry::new(vec![provider]));
+        m.set_uploads_for_test(reg.clone());
+
+        // ① 注册了目标但没启用：连"待传产物"都不该攒下来
+        let dto = m
+            .finish("t-off", &finish_req(vec!["save".into(), "upload".into()]))
+            .unwrap();
+        assert!(dto.upload_ticket.is_none(), "未启用 = 不该有待传产物");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // ② 正对照：启用同一档之后，同一份动作名单必须真的攒出 ticket 并调用一次
+        reg.set_enabled(Some("counting")).unwrap();
+        let dto = m
+            .finish("t-on", &finish_req(vec!["save".into(), "upload".into()]))
+            .unwrap();
+        let ticket = dto.upload_ticket.expect("启用后应攒出待传产物");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "同步核只攒字节，不发请求");
+        // 红线"编码后的同一字节"：save 跑过了，上传的就是那个已落盘文件的原字节
+        assert_eq!(
+            ticket.bytes,
+            std::fs::read(dto.file.as_ref().unwrap()).unwrap(),
+            "上传字节必须等于落盘字节（另编一份会让存的和传的不是同一张图）"
+        );
+        let link = m
+            .fulfill_upload(&ticket, None)
+            .await
+            .unwrap()
+            .expect("启用后应拿到直链");
+        assert_eq!(link, "https://x.example/i/1");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

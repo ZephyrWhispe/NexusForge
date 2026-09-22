@@ -5,6 +5,7 @@ pub mod module;
 pub mod scroll;
 pub mod store;
 pub mod types;
+pub mod upload;
 pub mod util;
 
 pub use module::ScreenshotModule;

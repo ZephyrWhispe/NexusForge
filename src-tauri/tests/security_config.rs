@@ -978,3 +978,40 @@ fn auxWindows_neverGrantScreenshotScroll() {
         "正对照：overlay 必须四枚齐备（缺一枚则滚动条在那条通路上半路 BadState，本负例也变空洞）"
     );
 }
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-9）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantScreenshotUpload() {
+    // T-B4-9 红线（§9.1-⑩）：**数据出机面**。上传会把用户刚截的屏幕内容发到外部端点，
+    // 而贴图窗/快捷面板/启动器/便签条上没有任何"把它传出去"的入口——给它们这一枚，
+    // 等于给任何一个后来长在那些窗上的小按钮开了一条外发通道。
+    //
+    // 与 scroll 那枚的差别是刻意的：覆盖层**不**在本白名单里。上传发生在完成之后
+    // （覆盖层已经关掉），唯一的调用点是主窗口的截图面板那一行。
+    let caps = load_capabilities();
+    let idents = ["allow-screenshot-upload", "allow-screenshot-upload-targets"];
+    let mut main_granted = 0;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = idents.iter().filter(|i| perms.contains(i)).count();
+            continue;
+        }
+        for ident in idents {
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（数据出机面 main-only）"
+            );
+        }
+    }
+    assert_eq!(
+        main_granted,
+        idents.len(),
+        "正对照：main 必须两枚齐备，否则本负例对任何配置都成立=空洞"
+    );
+}

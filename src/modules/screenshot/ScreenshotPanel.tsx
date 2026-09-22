@@ -10,6 +10,7 @@ import {
   MenuPopover,
   MenuTrigger,
   makeStyles,
+  Switch,
   Text,
   tokens,
 } from "@fluentui/react-components";
@@ -22,9 +23,12 @@ import {
   screenshotHistoryList,
   screenshotPinGet,
   screenshotPins,
+  screenshotUpload,
+  screenshotUploadTargets,
   screenshotWindows,
   type PinDataDto,
   type ShotItemDto,
+  type UploadTargetInfoDto,
   type WindowTargetDto,
 } from "../../ipc/client";
 import { IN_TAURI } from "../../ipc/env";
@@ -34,6 +38,7 @@ import BeautifyPopover, { type BeautifyTarget } from "./BeautifyPopover";
 import { saveShotAs } from "./saveAs";
 import EmptyState from "../../components/EmptyState";
 import DeferredBadge from "../../components/DeferredBadge";
+import InlineError from "../../components/InlineError";
 
 /**
  * 截图与贴图主面板（D-29 B0/T-B0-2）：历史网格（真缩略图，screenshot_history_get 字节出口）
@@ -59,6 +64,12 @@ function readPostActions(cfg: Record<string, unknown>): string[] {
   return Array.isArray(cfg.post_actions)
     ? cfg.post_actions.filter((x): x is string => typeof x === "string")
     : [];
+}
+
+/** 读配置里的字符串键（未配置或手改成非字符串一律当空串：面板不该把 `[object Object]` 拼进端点） */
+function cfgStr(cfg: Record<string, unknown> | null, key: string): string {
+  const v = cfg?.[key];
+  return typeof v === "string" ? v : "";
 }
 
 const useStyles = makeStyles({
@@ -120,6 +131,7 @@ const useStyles = makeStyles({
   },
   ops: { display: "flex", gap: "6px", padding: "4px 10px 10px" },
   chipRow: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" },
+  uploadRow: { display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", padding: "4px 0" },
   hint: {
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground3,
@@ -173,6 +185,16 @@ export default function ScreenshotPanel() {
   const [wins, setWins] = useState<WindowTargetDto[] | null>(null);
   const [winsErr, setWinsErr] = useState<string | null>(null);
   const [winsOpen, setWinsOpen] = useState(false);
+  /** 已注册上传目标（`screenshot_upload_targets` 的读数；空表＝端点没配好，如实反映） */
+  const [targets, setTargets] = useState<UploadTargetInfoDto[]>([]);
+  /** 端点编辑框：初始跟随盘上的值，保存后由写回的快照对齐（不静默丢掉用户刚打的字） */
+  const [endpointDraft, setEndpointDraft] = useState<string | null>(null);
+  /** 本次会话的凭据值：只活在这一格 state 里，随组件卸载消失，永不写进配置 */
+  const [credValue, setCredValue] = useState("");
+  const [uploadBusy, setUploadBusy] = useState<string | null>(null);
+  const [lastLink, setLastLink] = useState<string | null>(null);
+  /** 后端 apply_config 拒收的那句话（面板原先看不见＝写了不生效也没人说明，T-B4-9 补上） */
+  const [cfgRejected, setCfgRejected] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -235,6 +257,53 @@ export default function ScreenshotPanel() {
       );
   }, []);
 
+  const reloadTargets = useCallback(() => {
+    screenshotUploadTargets()
+      .then(setTargets)
+      .catch((e) =>
+        reportError(e, {
+          context: "上传目标读取失败",
+          dedupeKey: "shot-upload-targets",
+          toast: false,
+        }),
+      );
+  }, []);
+
+  // 目标表随面板打开读一次（T-B4-9）：纯读，一个字节都不往外发
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    reloadTargets();
+  }, [reloadTargets]);
+
+  /**
+   * 配置被模块拒收 / 链式上传失败，都只存在于事件总线上（写盘本身是成功的）。
+   * 不接这两个事件，用户看到的就只是"我点了保存，什么都没发生"。
+   */
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<{ topic: string; payload: Record<string, unknown> }>("nf:event", (e) => {
+          const { topic, payload } = e.payload;
+          if (topic === "host.config_rejected" && payload.module === "screenshot") {
+            setCfgRejected(String(payload.error ?? ""));
+          } else if (topic === "screenshot.upload_failed") {
+            notify("error", "上传失败（截图本身已完成）", String(payload.message ?? ""));
+          }
+        }),
+      )
+      .then((u) => {
+        if (disposed) u();
+        else unlisten = u;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const applyPreset = useCallback(
     async (preset: { label: string; actions: string[] }) => {
       // 没读到配置就写 = 拿 {} 覆掉用户全部截图设置（host_config_set 是整份替换语义）：
@@ -256,7 +325,69 @@ export default function ScreenshotPanel() {
     [shotCfg],
   );
 
-  const saveAs = useCallback(async (id: string, file: string | null, fmt: ExportFormat) => {
+  /**
+   * 上传目标读数（T-B4-9）。`enabled` 来自后端注册表而不是配置位——端点坏成不可用时
+   * 注册表里就没有启用中的目标，面板跟着配置位显示"已启用"就是在骗用户。
+   */
+  const enabledTarget = useMemo(
+    () => targets.find((t) => t.enabled) ?? null,
+    [targets],
+  );
+  const uploadHeaderName = cfgStr(shotCfg, "upload_header_name").trim();
+  const uploadEnabled = shotCfg?.upload_enabled === true;
+  const uploadTargetId = cfgStr(shotCfg, "upload_target");
+  /** 输入框没被碰过时跟随盘上的值；碰过之后编辑权归用户（半截 URL 也要看得见自己打了什么） */
+  const endpointValue = endpointDraft ?? cfgStr(shotCfg, "upload_endpoint");
+
+  /**
+   * 整份展开写回（与 applyPreset 同一条纪律）：`host_config_set` 是替换语义，
+   * 配置快照没读到手时宁可不响应这次点击。
+   */
+  const writeCfg = useCallback(
+    async (patch: Record<string, unknown>) => {
+      if (!shotCfg) return false;
+      try {
+        const merged = { ...shotCfg, ...patch };
+        await hostConfigSet("screenshot", merged);
+        setShotCfg(merged);
+        // 上一轮的拒收话术不该顶着这一轮已改对的配置继续挂在屏幕上
+        setCfgRejected(null);
+        reloadTargets();
+        return true;
+      } catch (e) {
+        notify("error", "保存上传设置失败", parseAppError(e)?.data.message ?? String(e));
+        return false;
+      }
+    },
+    [shotCfg, reloadTargets],
+  );
+
+  const saveEndpoint = useCallback(async () => {
+    // 没碰过输入框就没有"新值"要存——在这种档上写盘等于把用户的端点清空
+    if (endpointDraft === null) return;
+    const value = endpointDraft.trim();
+    setEndpointDraft(null);
+    if (value === cfgStr(shotCfg, "upload_endpoint")) return;
+    await writeCfg({ upload_endpoint: value });
+  }, [endpointDraft, shotCfg, writeCfg]);
+
+  const uploadShot = useCallback(
+    async (id: string) => {
+      setUploadBusy(id);
+      try {
+        // 端点要求请求头时，凭据值只进这一次 invoke；不需要头就明确传 null
+        const link = await screenshotUpload(id, uploadHeaderName ? credValue : null);
+        setCredValue("");
+        setLastLink(link);
+        notify("success", "已上传", link);
+      } catch (e) {
+        notify("error", "上传失败", parseAppError(e)?.data.message ?? String(e));
+      } finally {
+        setUploadBusy(null);
+      }
+    },
+    [uploadHeaderName, credValue],
+  );  const saveAs = useCallback(async (id: string, file: string | null, fmt: ExportFormat) => {
     try {
       const name = await saveShotAs(id, file, fmt);
       notify("success", "已交给浏览器下载", `${name} · 落点为浏览器下载目录（不是设置里的保存目录）`);
@@ -408,6 +539,98 @@ export default function ScreenshotPanel() {
         <Text className={styles.hint}>
           名单非空时，设置中心里「完成后复制 / 完成后保存 / 完成后贴图」三个开关不再参与动作链（它们只在名单为空时决定）；覆盖层上当面点的复制 / 保存 / 贴图钮永远以那一次点击为准。
         </Text>
+        <Text className={styles.sectionTitle}>截图设置 · 上传</Text>
+        <div className={styles.uploadRow}>
+          <Switch
+            label="启用上传目标"
+            checked={uploadEnabled}
+            disabled={!shotCfg || targets.length === 0}
+            title={
+              targets.length === 0
+                ? "还没有可用的上传目标：先在下面填写端点"
+                : "关闭时动作链里的「上传」直接跳过，一个字节都不发出去"
+            }
+            onChange={(_, d) => {
+              const patch: Record<string, unknown> = { upload_enabled: d.checked };
+              // 只注册了一枚目标而配置里还没选：勾选即选定。否则这颗开关点下去
+              // 后端只会 warn 一句"未知的上传目标"，屏幕上什么也不会变
+              if (d.checked && uploadTargetId === "" && targets.length === 1) {
+                patch.upload_target = targets[0].id;
+              }
+              void writeCfg(patch);
+            }}
+          />
+          <Badge appearance="outline" size="small">
+            {enabledTarget
+              ? `启用中：${enabledTarget.label}`
+              : uploadEnabled
+                ? "已勾选但目标未选定（点下方目标名选定）"
+                : "未启用"}
+          </Badge>
+        </div>
+        <div className={styles.chipRow}>
+          {targets.map((t) => {
+            const active = cfgStr(shotCfg, "upload_target") === t.id;
+            return (
+              <Button
+                key={t.id}
+                size="small"
+                appearance={active && t.enabled ? "primary" : "secondary"}
+                aria-pressed={active}
+                disabled={!shotCfg}
+                onClick={() => void writeCfg({ upload_target: t.id })}
+              >
+                {t.label} · {t.endpoint_display}
+              </Button>
+            );
+          })}
+          {targets.length === 0 && (
+            // 空注册表要说清成因，否则看起来像功能被删了：唯一的可能是端点还没填
+            <Text className={styles.hint}>先填端点，目标表才会有内容</Text>
+          )}
+        </div>
+        <div className={styles.uploadRow}>
+          <Input
+            size="small"
+            style={{ width: "360px" }}
+            placeholder="上传端点（仅 https，或本机 http://127.0.0.1 · http://localhost）"
+            value={endpointValue}
+            onChange={(_, d) => setEndpointDraft(d.value)}
+          />
+          <Button
+            size="small"
+            disabled={!shotCfg || endpointDraft === null}
+            onClick={() => void saveEndpoint()}
+          >
+            保存端点
+          </Button>
+          {/* 凭据值：这一格输入框是它唯一的容身处，写配置的那几条通路里没有它 */}
+          {uploadHeaderName && (
+            <Input
+              size="small"
+              type="password"
+              style={{ width: "220px" }}
+              placeholder={`${uploadHeaderName} 的值（仅本次调用，不落盘）`}
+              value={credValue}
+              onChange={(_, d) => setCredValue(d.value)}
+            />
+          )}
+        </div>
+        <InlineError text={cfgRejected} />
+        {lastLink && (
+          <div className={styles.uploadRow}>
+            <Text className={styles.hint}>最近一次直链：{lastLink}</Text>
+            <Button size="small" appearance="subtle" onClick={() => copyText(lastLink)}>
+              复制直链
+            </Button>
+          </div>
+        )}
+        <Text className={styles.hint}>
+          动作链里的「上传」用的就是这里勾选的目标；端点要求请求头时，链式通路拿不到凭据值（值只活在面板这一格），那种端点请改用历史行的上传钮。明文 http 只允许本机，写往公网会被拒。
+        </Text>
+        <div className={styles.chipRow}>
+          <DeferredBadge label="WebDAV 上传目标" decisionRef="D-29 §9.1-⑩" />
+        </div>
         {pins.length > 0 && (
           <>
             <Text className={styles.sectionTitle}>当前贴图 · {pins.length}</Text>
@@ -455,6 +678,27 @@ export default function ScreenshotPanel() {
                   >
                     复制图片
                   </Button>
+                  {/* 上传钮只在"确有启用中的目标"时出现（T-B4-9）：默认关的通路不该
+                      在每一行占一个位置，点了只会得到一句"没有启用中的上传目标"。
+                      端点要求请求头而凭据值还没填时禁用——那一次点击注定失败。 */}
+                  {enabledTarget && (
+                    <Button
+                      size="small"
+                      disabled={
+                        !it.file ||
+                        uploadBusy !== null ||
+                        (uploadHeaderName !== "" && credValue.trim() === "")
+                      }
+                      title={
+                        uploadHeaderName && credValue.trim() === ""
+                          ? `该端点需要「${uploadHeaderName}」请求头，请先在上方填入本次凭据值`
+                          : `传到 ${enabledTarget.endpoint_display}`
+                      }
+                      onClick={() => void uploadShot(it.id)}
+                    >
+                      {uploadBusy === it.id ? "上传中…" : "上传"}
+                    </Button>
+                  )}
                   {/* 溢出菜单三枚（T-B4-7）：另存为哪一档由用户点出来，面板不替他猜。
                       无未保存文件的行整只菜单禁用——没有字节可下载时给钮就是假可点。 */}
                   <Menu>

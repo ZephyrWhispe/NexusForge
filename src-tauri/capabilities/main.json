@@ -166,6 +166,8 @@
     "allow-screenshot-scroll-finish",
     "allow-screenshot-start",
     "allow-screenshot-task",
+    "allow-screenshot-upload",
+    "allow-screenshot-upload-targets",
     "allow-screenshot-windows",
     "allow-sync-now",
     "allow-sync-peers",

@@ -34,11 +34,41 @@ pub struct ScreenshotConfig {
     /// 运行期（旧快照里残留的坏值）`effective_actions` warn 后丢。
     #[serde(default)]
     pub post_actions: Vec<String>,
+    /// 上传目标总开关（D-29 B4 T-B4-9，§9.1-⑩）：**默认关**。数据出机的通路一律
+    /// 要用户显式开一次，而不是"配了端点就自动开始发"。
+    #[serde(default)]
+    pub upload_enabled: bool,
+    /// 启用的 provider id（本代只有 `"http-form"`；WebDAV 归 B6，注册即多一档可选）
+    #[serde(default)]
+    pub upload_target: String,
+    /// 表单端点。合规性由 `upload::validate_upload_endpoint` 裁决：非 https 且非本机一律拒
+    #[serde(default)]
+    pub upload_endpoint: String,
+    /// 表单字段名（留空按 [`upload::DEFAULT_FORM_FIELD`] 走 "file"）
+    #[serde(default = "default_upload_field")]
+    pub upload_field: String,
+    /// 凭据所在**请求头名**（如 `Authorization`）。名字不是秘密，可以落盘；
+    /// 值永远由调用侧逐次传入（`screenshot_upload` 的第二参）——本结构体里不存在
+    /// 放值的字段，这一点由 upload.rs 里的同名红线源码断言钉住
+    #[serde(default)]
+    pub upload_header_name: String,
+    /// 直链模板：`{id}` = 文件名去扩展名，`{url}` = 响应首行；留空 = 直接用响应首行
+    #[serde(default)]
+    pub upload_link_template: String,
+    /// 上传成功后把直链写进剪贴板（§9.0 截图-⑦ 里"复制直链"那一半）。
+    /// 它会顶掉同一条动作链里 `copy` 刚放进去的图——想让链子留在剪贴板就把 `upload`
+    /// 排在 `copy` 之后，这个次序由用户写，不由这里替他决定。
+    #[serde(default = "default_true")]
+    pub upload_copy_link: bool,
+}
+
+fn default_upload_field() -> String {
+    crate::upload::DEFAULT_FORM_FIELD.to_owned()
 }
 
 /// `post_actions` 的合法元素集：写侧拒与运行期 warn 读同一份词表（两处各写一份，
 /// 加一个动作就会变成"设置里存得进、跑起来默默丢"）
-pub const POST_ACTION_WHITELIST: &[&str] = &["save", "copy", "pin", "ocr", "beautify"];
+pub const POST_ACTION_WHITELIST: &[&str] = &["save", "copy", "pin", "ocr", "beautify", "upload"];
 
 /// 三 bool 的派生序：save→copy→pin，与 T-B4-8 之前 `finish()` 里那段兜底的字面顺序一致，
 /// 旧快照因此在升级前后拿到同一份动作链——这就是"零迁移"的全部内容
@@ -114,6 +144,13 @@ impl Default for ScreenshotConfig {
             auto_save: true,
             auto_pin: false,
             post_actions: Vec::new(),
+            upload_enabled: false,
+            upload_target: String::new(),
+            upload_endpoint: String::new(),
+            upload_field: default_upload_field(),
+            upload_header_name: String::new(),
+            upload_link_template: String::new(),
+            upload_copy_link: true,
         }
     }
 }
@@ -264,9 +301,10 @@ pub struct ScrollStepDto {
 pub struct FinishRequest {
     /// 前端 canvas 合成后的最终图（PNG Base64）——预览即导出，保证一致性
     pub image_b64: String,
-    /// save | copy | pin | ocr | beautify（ocr 只发布 screenshot.ocr_requested 事件，
+    /// save | copy | pin | ocr | beautify | upload（ocr 只发布 screenshot.ocr_requested 事件，
     /// 识别结果经 ocr.completed 异步回流，见 D-09；beautify 不产副作用，像素在
-    /// 动作循环之前就已作用于最终图，见 T-B4-8）
+    /// 动作循环之前就已作用于最终图，见 T-B4-8；upload 只登记"要传"，网络那一跳在
+    /// 命令层的异步尾上，见 T-B4-9）
     #[serde(default)]
     pub actions: Vec<String>,
     /// Pin 初始位置（屏幕物理像素）
@@ -295,6 +333,16 @@ pub struct FinishDto {
     /// 正常完成动作一律 None（`skip_serializing_if` 让旧前端 DTO 形状零变化）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_b64: Option<String>,
+    /// 直链（D-29 B4 T-B4-9）：动作链含 `upload` 且真的传上去了才有值。
+    /// 由命令层的异步尾回填（同步核发不出网络请求），`None` 有两种读法且都该看得见：
+    /// 这次没有 upload 动作，或有 upload 而目标未启用（后者另有 warn 日志点名）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// 待上传的字节与它在服务端的名字：**同一次调用的出参信道**，`serde(skip)` 保证
+    /// 它绝不跨 IPC 出去（几十 MB 的图进不了事件转发，见 §9.1 的帧交接同一条理由）。
+    /// 命令层拿它去 `await` 那一跳网络，然后把 `link` 填进上面那格。
+    #[serde(skip)]
+    pub upload_ticket: Option<crate::upload::UploadTicket>,
 }
 
 /// 单条截图历史的原始字节出口（D-29 B0-2：主面板缩略图/再复制；历史表只存路径）
@@ -485,10 +533,11 @@ mod tests {
         // "notStored"：纯函数不改配置——过滤发生在读出侧，而不是顺手把用户配置改写了。
         // 真把坏值写回需要 &mut，而那条路会让设置页每次打开都静默吃掉一格用户的输入
         assert_eq!(strs(&cfg.post_actions), ["copy", "teleport", "save"]);
-        // 词表自身：五枚动作名一个不多一个不少（新增动作要连白名单一起改，这里先钉住形状）
+        // 词表自身：六枚动作名一个不多一个不少（新增动作要连白名单一起改，这里先钉住形状。
+        // upload 是 T-B4-9 加进来的第六枚——它与其余五枚的不同处在于要等命令层的那一跳网络）
         assert_eq!(
             POST_ACTION_WHITELIST,
-            ["save", "copy", "pin", "ocr", "beautify"]
+            ["save", "copy", "pin", "ocr", "beautify", "upload"]
         );
     }
 }

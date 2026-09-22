@@ -13,6 +13,7 @@ export const POST_ACTION_LABELS: Record<string, string> = {
   pin: "贴图",
   ocr: "识别",
   beautify: "美化",
+  upload: "上传",
 };
 
 /**

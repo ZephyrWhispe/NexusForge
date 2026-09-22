@@ -179,6 +179,8 @@ pub fn run() {
             commands::screenshot_pin_get,
             commands::screenshot_pin_update,
             commands::screenshot_pin_close,
+            commands::screenshot_upload_targets,
+            commands::screenshot_upload,
             commands::ocr_recognize,
             commands::ocr_engine_status,
             commands::ocr_copy_text,
