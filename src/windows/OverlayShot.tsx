@@ -23,6 +23,8 @@ import {
   ANN_KIND_NAME,
   HIGHLIGHT_WIDTH_SCALE,
   LAYER_OP_LABEL,
+  PICKER_LABEL,
+  PICKER_TOOL,
   TOOL_ABBR,
   TOOL_KINDS,
   boundsOf,
@@ -44,6 +46,15 @@ import {
   type Tool,
 } from "./overlay/annotations";
 import { applyBoxBlurPass } from "./overlay/pixel";
+import {
+  MAG_SIZE,
+  drawMagnifier,
+  magnifierHalf,
+  magnifierSrc,
+  pickIndexAt,
+  pixelHexAt,
+  pixelReadout,
+} from "./overlay/pick";
 
 /**
  * 截图覆盖层（docs/impl/03 P3 选区 + P4 标注 + P5 动作 + docs/impl/04 O7 结果面板）。
@@ -263,12 +274,45 @@ const useStyles = makeStyles({
     alignItems: "center",
     width: "120px",
   },
+  /** 取色放大镜：右下角浮层（跟着光标走会把要看的像素本身挡住） */
+  magnifierBox: {
+    position: "absolute",
+    right: "12px",
+    bottom: "12px",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "2px",
+    padding: "4px",
+    borderRadius: tokens.borderRadiusMedium,
+    border: `1px solid ${tokens.colorBrandStroke1}`,
+    backgroundColor: tokens.colorNeutralBackground1,
+  },
+  magnifier: {
+    width: "120px",
+    height: "120px",
+    imageRendering: "pixelated",
+  },
+  magnifierReadout: {
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: "11px",
+    color: tokens.colorNeutralForeground1,
+    whiteSpace: "nowrap",
+  },
 });
 
 type Stage = "select" | "edit";
 
 const COLORS = ["#ff4d4f", "#ffb020", "#52c41a", "#1677ff", "#ffffff"];
 const WIDTHS = [2, 4, 8];
+
+/** 取色悬停读数：坐标给放大镜，色值给读数与当前色 */
+interface Picked {
+  x: number;
+  y: number;
+  hex: string;
+  readout: string;
+}
 
 /** CSS 坐标 → 抓帧物理坐标（窗口铺满虚拟桌面，比例恒定） */
 function cssToPhysical(css: number, physical: number, view: number): number {
@@ -344,6 +388,11 @@ export default function OverlayShot() {
   const textDraftRef = useRef<TextDraft | null>(null);
   /** 内联编辑中：Esc/Enter 归输入框，全局快捷键让位（判据只看"有没有草稿"，与内容无关） */
   const textEditing = textDraft !== null;
+  /** 取色悬停读数（canvas 像素坐标 + 色值）：null=尚未在图上停过（放大镜因此不凭空出现） */
+  const [picked, setPicked] = useState<Picked | null>(null);
+  /** 快捷键要读的镜像：进依赖表会让每挪一次鼠标就重挂一次全局监听，行为不变代价却是真的 */
+  const pickedRef = useRef<Picked | null>(null);
+  const magnifierRef = useRef<HTMLCanvasElement | null>(null);
 
   // 选区（CSS 像素）
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -387,6 +436,8 @@ export default function OverlayShot() {
       setSelectedIdx(null);
       textDraftRef.current = null;
       setTextDraft(null);
+      pickedRef.current = null;
+      setPicked(null);
       setStackCounts({ undo: 0, redo: 0 });
       setError(null);
       setActionError(null);
@@ -490,6 +541,8 @@ export default function OverlayShot() {
     setSelectedIdx(null);
     textDraftRef.current = null;
     setTextDraft(null);
+    pickedRef.current = null;
+    setPicked(null);
     setStackCounts({ undo: 0, redo: 0 });
     setStage("select");
     setRect(null);
@@ -521,6 +574,11 @@ export default function OverlayShot() {
         if (mod && e.key.toLowerCase() === "y") {
           e.preventDefault();
           redo();
+        }
+        // 取色态的 Ctrl/C 复制的是色值，不是图片（其余 Ctrl 组合不归本处）
+        if (mod && e.key.toLowerCase() === "c" && tool === PICKER_TOOL && pickedRef.current) {
+          e.preventDefault();
+          void copyPickedColor();
         }
       }
     };
@@ -582,6 +640,8 @@ export default function OverlayShot() {
       setSelectedIdx(null);
       textDraftRef.current = null;
       setTextDraft(null);
+      pickedRef.current = null;
+      setPicked(null);
       setStackCounts({ undo: 0, redo: 0 });
     };
     img.src = b64ToUrl(c.png_b64);
@@ -590,6 +650,60 @@ export default function OverlayShot() {
   useEffect(() => {
     if (crop && stage === "edit") setupCanvas(crop);
   }, [crop, stage, setupCanvas]);
+
+  /** 读一个像素：真源是离屏合成（与导出同源），可见画布上的进行中预览不算数 */
+  const readPixel = (x: number, y: number): { hex: string; readout: string } | null => {
+    const canvas = canvasRef.current;
+    const committed = committedRef.current;
+    const cctx = canvas && committed ? committed.getContext("2d") : null;
+    if (!canvas || !cctx) return null;
+    const px = Math.floor(x);
+    const py = Math.floor(y);
+    if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) return null;
+    const d = cctx.getImageData(px, py, 1, 1).data;
+    const index = pickIndexAt(0, 0, 1);
+    return { hex: pixelHexAt(d, index), readout: pixelReadout(d, index) };
+  };
+
+  const rememberPicked = (next: Picked | null) => {
+    pickedRef.current = next;
+    setPicked(next);
+  };
+
+  /** 取色单击：唯一的副作用是改当前色（零标注 / 零撤销栈 / 零 IPC） */
+  const pickAt = (p: { x: number; y: number }) => {
+    const hit = readPixel(p.x, p.y);
+    if (!hit) return;
+    setColor(hit.hex);
+    rememberPicked({ x: p.x, y: p.y, hex: hit.hex, readout: hit.readout });
+  };
+
+  /** 复制色值走浏览器剪贴板：色值不是截图内容，不值得也不该新增一条后端命令 */
+  const copyPickedColor = async () => {
+    const hit = pickedRef.current;
+    if (!hit) return;
+    try {
+      await navigator.clipboard.writeText(hit.hex);
+    } catch (e) {
+      setActionError(`复制色值失败：${fmtErr(e)}`);
+    }
+  };
+
+  // 放大镜重绘：每次悬停位置变化重算源矩形（最近邻的取舍单点在 drawMagnifier 内）
+  useEffect(() => {
+    if (tool !== PICKER_TOOL || !picked) return;
+    const canvas = canvasRef.current;
+    const committed = committedRef.current;
+    const mag = magnifierRef.current;
+    if (!canvas || !committed || !mag) return;
+    const mctx = mag.getContext("2d");
+    if (!mctx) return;
+    drawMagnifier(
+      mctx,
+      committed,
+      magnifierSrc(picked.x, picked.y, canvas.width, canvas.height, magnifierHalf()),
+    );
+  }, [tool, picked]);
 
   /** CSS → canvas 像素坐标 */
   const toCanvas = (e: { clientX: number; clientY: number }) => {
@@ -924,6 +1038,12 @@ export default function OverlayShot() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const p = toCanvas(e);
+
+    if (tool === PICKER_TOOL) {
+      // 取色不参与绘制状态机：样式定格都省了，免得看起来"开始了一笔"
+      pickAt(p);
+      return;
+    }
     strokeStyle.current = { color, width: strokeWidth, alpha: strokeAlpha, fill: fillShape };
 
     if (tool === "select") {
@@ -984,6 +1104,13 @@ export default function OverlayShot() {
   };
 
   const onCanvasMouseMove = (e: React.MouseEvent) => {
+    if (tool === PICKER_TOOL) {
+      // 悬停读数：不碰 drawing/dragBase 两条状态机，鼠标移动因此永远攒不出笔画
+      const p = toCanvas(e);
+      const hit = readPixel(p.x, p.y);
+      rememberPicked(hit ? { x: p.x, y: p.y, hex: hit.hex, readout: hit.readout } : null);
+      return;
+    }
     const base = dragBase.current;
     if (base) {
       // 拖动位移：每帧从按下时的基线重算（不在当前坐标上累加，否则误差会随帧累积）
@@ -1289,6 +1416,14 @@ export default function OverlayShot() {
             {TOOL_ABBR[t]}
           </Button>
         ))}
+        <Button
+          className={tool === PICKER_TOOL ? styles.activeTool : styles.tool}
+          size="small"
+          title={PICKER_LABEL}
+          onClick={() => setTool(PICKER_TOOL)}
+        >
+          取
+        </Button>
         <span style={{ width: 8 }} />
         {COLORS.map((c) => (
           <button
@@ -1380,6 +1515,20 @@ export default function OverlayShot() {
               }}
               onBlur={() => settleText("commit")}
             />
+          )}
+          {tool === PICKER_TOOL && picked && (
+            <div className={styles.magnifierBox} data-magnifier="">
+              <canvas
+                ref={magnifierRef}
+                width={MAG_SIZE}
+                height={MAG_SIZE}
+                className={styles.magnifier}
+              />
+              <span className={styles.magnifierReadout}>{picked.readout}</span>
+              <Button size="small" onClick={() => void copyPickedColor()}>
+                复制色值
+              </Button>
+            </div>
           )}
         </div>
         {/* 图层面板（T-B4-1）：行模型出自纯模块 layerRows，本处只按行铺四钮 */}

@@ -24,7 +24,14 @@ export type AnnKind = AnnotationDto["kind"];
  * `select` 只把 mousedown 交给图层命中测试（T-B4-1）；伪工具不进 `TOOL_KINDS`，
  * 因此也不会出现在 `ANN_KIND_NAME` / `RENDERERS` 两张按标注类型穷举的表里。
  */
-export type Tool = AnnKind | "select";
+export type Tool = AnnKind | "select" | "picker";
+
+/**
+ * 取色伪工具名单列（红线：不进 `TOOL_KINDS`/`ANN_KIND_NAME`/`RENDERERS`——拾色不产生标注）。
+ * 三个"都不含它"由 `overlayPicker_notAnAnnotationKind` 钉住，见 T-B4-3。
+ */
+export const PICKER_TOOL = "picker" as const;
+export const PICKER_LABEL = "取色器";
 
 export interface Box {
   x: number;
@@ -95,8 +102,8 @@ export const RENDERERS: Record<AnnKind, Renderer> = {
 /** 只有形状类工具消费"填充"开关（画笔/高亮/模糊上放一个失效开关是噪声） */
 export const SHAPE_TOOLS: readonly AnnKind[] = ["rect", "ellipse"];
 
-/** 工具（含伪工具 `select`）是否可用填充开关：形状类以外恒 false */
-export function honoursFill(tool: AnnKind | "select"): boolean {
+/** 工具（含伪工具 `select`/`picker`）是否可用填充开关：形状类以外恒 false */
+export function honoursFill(tool: Tool): boolean {
   return (SHAPE_TOOLS as readonly string[]).includes(tool);
 }
 
