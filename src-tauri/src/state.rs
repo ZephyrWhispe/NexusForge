@@ -312,6 +312,14 @@ impl HostState {
                 tracing::error!(module = %id, error = %e, "模块 init 失败");
             }
         }
+        // 动态 schema 重刷：register_schema 发生在构造期（init 之前），而 ocr 的引擎词表
+        // enum 只有注册表建好才是真值——写侧校验与设置中心必须读同一份词表，否则
+        // "配置里可选的引擎"与"运行期真实存在的引擎"会各说一套。
+        for info in self.registry.infos() {
+            if let Some(m) = self.registry.get(info.id) {
+                self.config.register_schema(info.id, m.config_schema());
+            }
+        }
         for (id, r) in self.registry.start_all().await {
             if let Err(e) = r {
                 tracing::error!(module = %id, error = %e, "模块 start 失败");

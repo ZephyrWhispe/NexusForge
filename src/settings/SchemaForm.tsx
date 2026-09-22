@@ -7,6 +7,8 @@ import {
   Input,
   Textarea,
   Text,
+  Dropdown,
+  Option,
 } from "@fluentui/react-components";
 import { hostConfigGet, hostConfigSchema, hostConfigSet } from "../ipc/client";
 import { IN_TAURI } from "../ipc/env";
@@ -15,7 +17,8 @@ import { IN_TAURI } from "../ipc/env";
  * SchemaForm（docs/UI-PLAN.md U6-1/U6-3）：
  * 模块 config_schema（JSON Schema）→ Fluent 控件自动渲染；
  * 修改即校验即保存（Rust 侧 schema 校验失败回显错误）。
- * 支持：boolean→Switch；integer(min/max)→SpinButton；string→Input；array(string)→Textarea(逗号分隔)。
+ * 支持：boolean→Switch；integer(min/max)→SpinButton；string→Input（带 enum 则 Dropdown）；
+ * array(string)→Textarea(逗号分隔)。
  */
 const useStyles = makeStyles({
   root: { flex: 1, overflowY: "auto", padding: "8px 24px 30px", maxWidth: "760px" },
@@ -49,6 +52,8 @@ interface JsonSchemaProp {
   minimum?: number;
   maximum?: number;
   items?: { type: string };
+  /** 有限词表（如 OCR 引擎 id，由后端按注册表动态给出）：有则渲染下拉，杜绝手打字面 */
+  enum?: string[];
   /** JSON Schema 2020-12 注解：Rust 侧仍校验该键，但通用表单不渲染，留给专用写口（如捕获暂停开关卡） */
   readOnly?: boolean;
 }
@@ -77,6 +82,15 @@ export function mergeDefaults(
 export function toFiniteNum(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+/** string 键何时升级为下拉：必须给出**非空且全为非空串**的词表，否则退回自由文本 Input
+ *  （空 enum 在 JSON Schema 里是"恒不合法"，不是"随便填"） */
+export function enumChoices(prop: JsonSchemaProp): string[] | null {
+  if (prop.type !== "string" || !Array.isArray(prop.enum)) return null;
+  return prop.enum.length > 0 && prop.enum.every((v) => typeof v === "string" && v.length > 0)
+    ? prop.enum
+    : null;
 }
 
 export default function SchemaForm({ moduleId }: { moduleId: string }) {
@@ -120,56 +134,74 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
   return (
     <div className={styles.root}>
       {error && <Text className={styles.err}>{error}</Text>}
-      {visibleProps(schema).map(([key, prop]) => (
-        <div className={styles.row} key={key}>
-          <div className={styles.info}>
-            <span className={styles.name}>{prop.title ?? key}</span>
-            <span className={styles.desc}>{prop.description ?? ""}</span>
+      {visibleProps(schema).map(([key, prop]) => {
+        const choices = enumChoices(prop);
+        return (
+          <div className={styles.row} key={key}>
+            <div className={styles.info}>
+              <span className={styles.name}>{prop.title ?? key}</span>
+              <span className={styles.desc}>{prop.description ?? ""}</span>
+            </div>
+            {prop.type === "boolean" && (
+              <Switch
+                checked={Boolean(values[key])}
+                onChange={(_, d) => save({ ...values, [key]: d.checked })}
+              />
+            )}
+            {prop.type === "integer" && (
+              <SpinButton
+                value={toFiniteNum(values[key])}
+                min={prop.minimum}
+                max={prop.maximum}
+                step={Math.max(1, Math.round(((prop.maximum ?? 100) - (prop.minimum ?? 0)) / 100))}
+                onChange={(_, d) => {
+                  save({ ...values, [key]: d.value ?? toFiniteNum(values[key]) });
+                }}
+                appearance="outline"
+              />
+            )}
+            {choices && (
+              <Dropdown
+                size="small"
+                style={{ minWidth: "240px" }}
+                value={String(values[key] ?? "")}
+                selectedOptions={[String(values[key] ?? "")]}
+                onOptionSelect={(_, d) => save({ ...values, [key]: d.optionValue })}
+              >
+                {choices.map((v) => (
+                  <Option key={v} value={v} text={v}>
+                    {v}
+                  </Option>
+                ))}
+              </Dropdown>
+            )}
+            {prop.type === "string" && !choices && (
+              <Input
+                value={String(values[key] ?? "")}
+                onChange={(_, d) => save({ ...values, [key]: d.value })}
+                style={{ width: "240px" }}
+              />
+            )}
+            {prop.type === "array" && prop.items?.type === "string" && (
+              <Textarea
+                value={Array.isArray(values[key]) ? (values[key] as string[]).join(",") : ""}
+                placeholder="逗号分隔"
+                resize="vertical"
+                style={{ width: "280px", minHeight: "40px" }}
+                onChange={(_, d) =>
+                  save({
+                    ...values,
+                    [key]: d.value
+                      .split(/[,\n]/)
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            )}
           </div>
-          {prop.type === "boolean" && (
-            <Switch
-              checked={Boolean(values[key])}
-              onChange={(_, d) => save({ ...values, [key]: d.checked })}
-            />
-          )}
-          {prop.type === "integer" && (
-            <SpinButton
-              value={toFiniteNum(values[key])}
-              min={prop.minimum}
-              max={prop.maximum}
-              step={Math.max(1, Math.round(((prop.maximum ?? 100) - (prop.minimum ?? 0)) / 100))}
-              onChange={(_, d) => {
-                save({ ...values, [key]: d.value ?? toFiniteNum(values[key]) });
-              }}
-              appearance="outline"
-            />
-          )}
-          {prop.type === "string" && (
-            <Input
-              value={String(values[key] ?? "")}
-              onChange={(_, d) => save({ ...values, [key]: d.value })}
-              style={{ width: "240px" }}
-            />
-          )}
-          {prop.type === "array" && prop.items?.type === "string" && (
-            <Textarea
-              value={Array.isArray(values[key]) ? (values[key] as string[]).join(",") : ""}
-              placeholder="逗号分隔"
-              resize="vertical"
-              style={{ width: "280px", minHeight: "40px" }}
-              onChange={(_, d) =>
-                save({
-                  ...values,
-                  [key]: d.value
-                    .split(/[,\n]/)
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

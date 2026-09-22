@@ -176,6 +176,7 @@ pub fn run() {
             commands::ocr_recognize,
             commands::ocr_engine_status,
             commands::ocr_copy_text,
+            commands::ocr_config_get,
             commands::kvm_issue_pair_code,
             commands::kvm_pair_with,
             commands::kvm_unpair,

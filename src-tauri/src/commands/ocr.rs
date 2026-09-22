@@ -6,6 +6,9 @@ use crate::state::HostState;
 // ---------------- OCR 命令（docs/impl/04 O7）----------------
 
 /// 识别（PNG Base64 输入；spawn_blocking + 30s 超时）
+///
+/// `request.langs` 是本次的显式覆盖：传空数组 **不是**"无偏好"，而是"跟随设置里的
+/// 偏好语言"（由 `EngineRegistry::resolve_langs` 单点解析），覆盖层取字即走此臂。
 #[tauri::command]
 pub async fn ocr_recognize(
     request: ocr_core::types::OcrRequest,
@@ -23,6 +26,13 @@ pub async fn ocr_recognize(
     })
     .await
     .map_err(|e| AppError::module("OCR_RUN_004", e.to_string(), None))?
+}
+
+/// 运行态 OCR 配置快照（T-B4-10：面板占位文案显示"设置里的默认"，读的是模块内存态；
+/// 写侧仍只有 host_config_set 一个口）
+#[tauri::command]
+pub fn ocr_config_get(state: State<'_, HostState>) -> ocr_core::types::OcrConfigDto {
+    state.ocr.config()
 }
 
 /// 引擎可用性与语言列表（docs/impl/04 O8）

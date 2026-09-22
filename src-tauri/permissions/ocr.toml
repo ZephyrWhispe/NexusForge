@@ -14,3 +14,8 @@ commands.allow = ["ocr_engine_status"]
 identifier = "allow-ocr-copy-text"
 description = "允许前端调用 ocr_copy_text 命令（D-28 按窗最小授权）"
 commands.allow = ["ocr_copy_text"]
+
+[[permission]]
+identifier = "allow-ocr-config-get"
+description = "允许前端调用 ocr_config_get 命令（T-B4-10 运行态配置快照，main-only）"
+commands.allow = ["ocr_config_get"]

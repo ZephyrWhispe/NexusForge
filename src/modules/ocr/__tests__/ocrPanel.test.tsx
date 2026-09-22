@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import OcrPanel, { engineBadge, fmtConfidence, stripDataPrefix } from "../OcrPanel";
 import {
+  ocrConfigGet,
   ocrCopyText,
   ocrEngineStatus,
   ocrRecognize,
@@ -20,6 +21,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     ocrEngineStatus: vi.fn(),
     ocrRecognize: vi.fn(),
     ocrCopyText: vi.fn(),
+    ocrConfigGet: vi.fn(),
   };
 });
 
@@ -39,6 +41,8 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   vi.mocked(ocrEngineStatus).mockResolvedValue(STATUS);
+  // 设置里确有持久语言：若前端把配置塞进请求（第二真源），下面 langs: [] 的断言即红
+  vi.mocked(ocrConfigGet).mockResolvedValue({ langs: ["zh-Hans"], preferred_engine: "win-ocr" });
 });
 
 afterEach(() => {

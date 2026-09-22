@@ -55,6 +55,18 @@ pub struct EngineRegistry {
     engines: Vec<Arc<dyn OcrEngine>>,
     /// 用户可配置优先级（DESIGN §4.3）：经模块 config `preferred_engine` 写入
     preferred: RwLock<String>,
+    /// 用户配置的偏好语言：与 `preferred` 同处，语言选择与引擎选择由同一个对象说了算
+    config_langs: RwLock<Vec<String>>,
+}
+
+/// 语言择优的单一决策点：请求内联非空 = 本次显式覆盖，否则取用户配置，
+/// 两者皆空 = 空表（引擎按系统语言自选，即现网语义）。
+pub fn resolve_langs(req: &[String], cfg: &[String]) -> Vec<String> {
+    if req.is_empty() {
+        cfg.to_vec()
+    } else {
+        req.to_vec()
+    }
 }
 
 impl EngineRegistry {
@@ -66,7 +78,16 @@ impl EngineRegistry {
         Self {
             engines,
             preferred: RwLock::new(preferred),
+            config_langs: RwLock::new(Vec::new()),
         }
+    }
+
+    pub fn set_config_langs(&self, langs: &[String]) {
+        *self.config_langs.write() = langs.to_vec();
+    }
+
+    pub fn config_langs(&self) -> Vec<String> {
+        self.config_langs.read().clone()
     }
 
     pub fn contains(&self, id: &str) -> bool {
@@ -90,9 +111,11 @@ impl EngineRegistry {
     }
 
     /// O1 选引擎算法：preferred 优先，其后按注册顺序，取首个 available 的引擎；
-    /// 语言 = 偏好列表中该引擎支持的首个，无匹配（或无偏好）→ 空串（引擎自选用户语言）。
+    /// 语言 = [`resolve_langs`]（请求覆盖 → 用户配置 → 空）中该引擎支持的首个，
+    /// 无匹配（或无偏好）→ 空串（引擎按系统语言自选）。
     /// 全部不可用 → `OCR_ENGINE_001` + 可操作提示（各引擎错误并入 message）。
     pub fn pick(&self, langs: &[String]) -> Result<(Arc<dyn OcrEngine>, String), AppError> {
+        let wanted = resolve_langs(langs, &self.config_langs.read());
         let preferred = self.preferred();
         let mut ordered: Vec<&Arc<dyn OcrEngine>> = Vec::with_capacity(self.engines.len());
         let mut rest = Vec::with_capacity(self.engines.len());
@@ -113,7 +136,7 @@ impl EngineRegistry {
                     continue;
                 }
             };
-            let lang = langs
+            let lang = wanted
                 .iter()
                 .find(|want| available.iter().any(|a| a.eq_ignore_ascii_case(want)))
                 .cloned()
@@ -302,6 +325,57 @@ mod tests {
         assert_eq!(
             reg.languages(),
             vec!["zh-CN".to_string(), "en-US".to_string()]
+        );
+    }
+
+    // ---- T-B4-10（09 §9.2）：语言择优单一决策点 ----
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
+    fn resolveLangs_precedence_pinned() {
+        let req = vec!["en-US".to_string()];
+        let cfg = vec!["zh-CN".to_string()];
+        assert_eq!(
+            resolve_langs(&req, &cfg),
+            req,
+            "请求内联非空 = 本次显式覆盖"
+        );
+        assert_eq!(resolve_langs(&[], &cfg), cfg, "无覆盖时取用户配置");
+        assert!(
+            resolve_langs(&[], &[]).is_empty(),
+            "两者皆空 = 引擎自选（现语义不变）"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
+    fn ocrConfig_langs_usedWhenRequestOmits() {
+        let reg = EngineRegistry::new(vec![engine("a", Ok(vec!["zh-CN".into(), "en-US".into()]))]);
+        reg.set_config_langs(&["zh-CN".into()]);
+        let (_, lang) = reg.pick(&[]).unwrap();
+        assert_eq!(lang, "zh-CN", "请求未选语言时引擎收到配置里的偏好语言");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
+    fn ocrConfig_requestLangsOverrideConfig() {
+        let reg = EngineRegistry::new(vec![engine("a", Ok(vec!["zh-CN".into(), "en-US".into()]))]);
+        reg.set_config_langs(&["zh-CN".into()]);
+        let (_, lang) = reg.pick(&["en-US".into()]).unwrap();
+        assert_eq!(
+            lang, "en-US",
+            "面板本次手选优先于持久配置（两臂齐备才算数）"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
+    fn ocrConfig_bothEmpty_engineAutoSelectEmptyString() {
+        let reg = EngineRegistry::new(vec![engine("a", Ok(vec!["zh-CN".into()]))]);
+        let (_, lang) = reg.pick(&[]).unwrap();
+        assert_eq!(
+            lang, "",
+            "未配置且未手选 = 空串（引擎按系统语言自选），不得凭空造偏好"
         );
     }
 

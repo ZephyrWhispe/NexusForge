@@ -750,6 +750,38 @@ fn auxWindows_neverGrantClipboardBackup() {
     assert_eq!(qp, 8, "quickpanel 权限面须停在 8 条，多一条即破 D-28 冻结");
 }
 
+/// T-B4-10 红线负例：`ocr_config_get` 读的是用户偏好语言/引擎（设置内容）。
+/// 覆盖层要语言由后端在请求路径内按配置解析（engine::resolve_langs），不读设置 →
+/// overlay 等六窗永不持有，main 正对照防空洞。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantOcrConfigGet() {
+    let caps = load_capabilities();
+    let ident = "allow-ocr-config-get";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（设置读面是 main-only）"
+        );
+    }
+    assert!(
+        caps.iter().any(|(name, _)| name == "overlay"),
+        "负例须覆盖 overlay，否则本断言空洞"
+    );
+    assert!(main_granted, "正对照：main 必须持有 {ident}");
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

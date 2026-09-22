@@ -872,6 +872,7 @@ export default function OverlayShot() {
     try {
       const result = await ocrRecognize({
         image_b64: target.png_b64,
+        // 空数组 = 跟随设置里的偏好语言（后端 resolve_langs 单点解析），非"无偏好"
         langs: [],
         source_task_id: task.task_id,
       });

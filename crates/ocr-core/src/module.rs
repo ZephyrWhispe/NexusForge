@@ -23,7 +23,7 @@ use tokio::sync::watch;
 
 use crate::engine::{EngineRegistry, WinOcrEngine};
 use crate::pipeline::OcrPipeline;
-use crate::types::{EngineStatusDto, OcrRequest, OcrResultDto};
+use crate::types::{EngineStatusDto, OcrConfig, OcrRequest, OcrResultDto};
 
 use host_core::util::app_err as mod_err;
 
@@ -77,9 +77,24 @@ impl OcrModule {
             },
         }
     }
+
+    /// 运行态配置快照（`ocr_config_get` 读口：设置中心显示的是模块真正在用的值，
+    /// 写侧仍只有 host_config_set 一个入口）
+    pub fn config(&self) -> OcrConfig {
+        match self.engines.read().clone() {
+            Some(registry) => OcrConfig {
+                langs: registry.config_langs(),
+                preferred_engine: registry.preferred(),
+            },
+            None => OcrConfig::default(),
+        }
+    }
 }
 
 /// 共享识别核心：图像字节（PNG 等）→ 预处理 → 管线（直接 IPC 与事件联动两条路径共用）
+///
+/// `langs` 是**本次请求的显式覆盖**；空表不是"无偏好"，而是交注册表按用户配置解析
+/// （单一决策点 engine::resolve_langs）——联动路径传 `&[]` 即"跟随设置"。
 pub(crate) fn run_engine(
     registry: &EngineRegistry,
     bytes: &[u8],
@@ -264,29 +279,52 @@ impl Module for OcrModule {
         Ok(())
     }
 
+    /// 引擎词表来自注册表实际 id（不手写字面表）：T-B4-11 的第二引擎落地即自动出现在
+    /// 设置中心，无需再改本文件。构造期（init 前）注册表尚不存在，此时**不给 enum**
+    /// 而非给一个假词表——bootstrap_modules 在 init 之后重刷一遍 schema。
     fn config_schema(&self) -> serde_json::Value {
+        let ids: Vec<String> = self
+            .engines
+            .read()
+            .clone()
+            .map(|registry| registry.status().into_iter().map(|e| e.id).collect())
+            .unwrap_or_default();
+        let mut engine_prop = serde_json::json!({
+            "type": "string", "title": "优先 OCR 引擎",
+            "description": "识别时优先尝试的引擎；不可用自动降级到其余引擎"
+        });
+        if !ids.is_empty() {
+            engine_prop["enum"] = serde_json::json!(ids);
+            engine_prop["default"] = serde_json::json!(self.config().preferred_engine);
+        }
         serde_json::json!({
             "type": "object",
             "properties": {
-                "preferred_engine": {
-                    "type": "string", "title": "优先 OCR 引擎",
-                    "description": "识别时优先尝试的引擎；不可用自动降级到其余引擎（v1 仅系统引擎）",
-                    "enum": ["win-ocr"],
-                    "default": "win-ocr"
+                "preferred_engine": engine_prop,
+                "langs": {
+                    "type": "array", "items": { "type": "string" },
+                    "title": "偏好语言（BCP-47，逗号分隔）",
+                    "description": "识别时优先尝试的语言，按序取引擎支持的首个；留空 = 由系统语言决定（单次请求里手选的语言优先于本设置）",
+                    "default": []
                 }
             }
         })
     }
 
     fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError> {
-        let Some(id) = values.get("preferred_engine").and_then(|v| v.as_str()) else {
-            return Ok(()); // 缺省 = 不动注册表（首引擎即 win-ocr）
+        let cfg: OcrConfig = serde_json::from_value(values.clone())
+            .map_err(|e| ModuleError::Config(format!("ocr 配置无效: {e}")))?;
+        let Some(registry) = self.engines.read().clone() else {
+            return Err(ModuleError::Config("引擎注册表未初始化".into()));
         };
-        match self.engines.read().clone() {
-            Some(registry) => registry
-                .set_preferred(id)
-                .map_err(|e| ModuleError::Config(e.to_string()))?,
-            None => return Err(ModuleError::Config("引擎注册表未初始化".into())),
+        // 缺键 = 不动运行态：serde default 把"未提供"与"提供默认值"混为一谈，故按原始键判定
+        if values.get("preferred_engine").is_some() {
+            registry
+                .set_preferred(&cfg.preferred_engine)
+                .map_err(|e| ModuleError::Config(e.to_string()))?;
+        }
+        if values.get("langs").is_some() {
+            registry.set_config_langs(&cfg.langs);
         }
         Ok(())
     }
@@ -538,5 +576,89 @@ mod tests {
         // 缺省字段 = 不动优先级
         m.apply_config(json!({})).unwrap();
         assert_eq!(reg2.preferred(), "mock");
+    }
+
+    struct NamedEngine {
+        id: &'static str,
+    }
+    impl OcrEngine for NamedEngine {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn display_name(&self) -> &'static str {
+            self.id
+        }
+        fn available(&self) -> Result<Vec<String>, AppError> {
+            Ok(vec!["zh-CN".into()])
+        }
+        fn recognize(&self, _frame: &Frame, _lang: &str) -> Result<Vec<OcrLine>, AppError> {
+            Ok(vec![])
+        }
+    }
+
+    /// T-B4-10 红线：设置中心可选引擎的词表来自注册表实际 id，不是手写字面表
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
+    fn configSchema_engineEnumFollowsRegistryNotHardcoded() {
+        let m = OcrModule::new();
+        assert!(
+            m.config_schema()["properties"]["preferred_engine"]
+                .get("enum")
+                .is_none(),
+            "init 前注册表不存在：宁可不给 enum（设置中心退化为自由文本），也不给一份手写假词表"
+        );
+        *m.engines.write() = Some(Arc::new(EngineRegistry::new(vec![
+            Arc::new(NamedEngine { id: "alpha" }),
+            Arc::new(NamedEngine { id: "beta" }),
+        ])));
+        let schema = m.config_schema();
+        let ids: Vec<&str> = schema["properties"]["preferred_engine"]["enum"]
+            .as_array()
+            .expect("注册表已建，enum 应在")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["alpha", "beta"], "enum 恰等于注册表 id 列表");
+        assert_eq!(schema["properties"]["preferred_engine"]["default"], "alpha");
+        assert!(
+            !schema.to_string().contains("win-ocr"),
+            "注册表里没有 win-ocr 时 schema 也不得出现它：{schema}"
+        );
+        // langs 必须落在 SchemaForm 四形内（09 §8.1-⑪ 设置面约束）
+        assert_eq!(schema["properties"]["langs"]["type"], "array");
+        assert_eq!(schema["properties"]["langs"]["items"]["type"], "string");
+    }
+
+    /// T-B4-10：langs 经配置通道落运行态；坏引擎值仍按既有 003 拒且不留半写状态
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-10）字面测试名优先于 rustc 命名惯例
+    fn applyConfig_langsPersistAndUnknownEngineStillRejects() {
+        let m = OcrModule::new();
+        let (registry, _) = test_registry();
+        let reg2 = registry.clone();
+        *m.engines.write() = Some(registry);
+        m.apply_config(json!({"langs": ["zh-CN", "en-US"], "preferred_engine": "mock"}))
+            .unwrap();
+        assert_eq!(
+            reg2.config_langs(),
+            vec!["zh-CN".to_string(), "en-US".to_string()]
+        );
+        assert_eq!(m.config().langs, reg2.config_langs(), "读口即运行态本身");
+        assert_eq!(m.config().preferred_engine, "mock");
+        let err = m
+            .apply_config(json!({"langs": ["fr-FR"], "preferred_engine": "nope"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("未知引擎"), "{err}");
+        assert_eq!(
+            reg2.config_langs(),
+            vec!["zh-CN".to_string(), "en-US".to_string()],
+            "整次派发被拒 ⇒ 同批的 langs 也不得半写"
+        );
+        m.apply_config(json!({})).unwrap();
+        assert_eq!(
+            reg2.config_langs(),
+            vec!["zh-CN".to_string(), "en-US".to_string()],
+            "缺键 = 不动运行态（与 preferred_engine 同纪律）"
+        );
     }
 }

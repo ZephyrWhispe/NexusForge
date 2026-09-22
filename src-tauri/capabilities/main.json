@@ -118,6 +118,7 @@
     "allow-notes-review-queue",
     "allow-notes-sync",
     "allow-notes-write",
+    "allow-ocr-config-get",
     "allow-ocr-copy-text",
     "allow-ocr-engine-status",
     "allow-ocr-recognize",

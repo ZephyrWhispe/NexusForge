@@ -10,6 +10,7 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  ocrConfigGet,
   ocrCopyText,
   ocrEngineStatus,
   ocrRecognize,
@@ -25,6 +26,8 @@ import DeferredBadge from "../../components/DeferredBadge";
  * OCR 识别主面板（D-29 B0/T-B0-3）：引擎状态卡 + 选图识别 + 分行结果 + 复制全部。
  * ocr_recognize 走 request 对象实签（commands/ocr.rs:10）；手选图片无 source_task_id，
  * 截图联动帧回填仍由覆盖层/事件通路负责，本面板不抢该语义。
+ * 语言（T-B4-10）：面板多选只是**本次覆盖**，请求里留空即"跟随设置"——
+ * 持久值经 ocr_config_get 只读显示，不在前端二次写入（单一真源）。
  */
 
 const useStyles = makeStyles({
@@ -111,6 +114,14 @@ export function engineBadge(s: EngineStatusDto | null): string {
   return `${ok}/${s.engines.length} 引擎可用`;
 }
 
+/** 语言下拉占位：显示设置里的持久偏好（面板多选只是本次覆盖，纯函数供测试） */
+export function langPlaceholder(cfgLangs: string[] | null): string {
+  if (cfgLangs === null) return "语言：读取设置中…";
+  return cfgLangs.length
+    ? `语言：跟随设置（${cfgLangs.join(" · ")}）`
+    : "语言：跟随设置（未设 · 引擎按系统语言自选）";
+}
+
 async function readFileB64(file: File): Promise<string> {
   const url = await new Promise<string>((res, rej) => {
     const r = new FileReader();
@@ -125,6 +136,7 @@ export default function OcrPanel() {
   const styles = useStyles();
   const fileRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<EngineStatusDto | null>(null);
+  const [cfgLangs, setCfgLangs] = useState<string[] | null>(null);
   const [langs, setLangs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<(OcrResultDto & { srcName: string }) | null>(null);
@@ -140,6 +152,10 @@ export default function OcrPanel() {
 
   useEffect(() => {
     void reloadStatus();
+    // 运行态配置快照读失败不影响识别（只是占位文案退化为"未读取到设置"）
+    void ocrConfigGet()
+      .then((c) => setCfgLangs(c.langs))
+      .catch((e) => reportError(e, { context: "OCR 设置读取失败", dedupeKey: "ocr-config" }));
   }, [reloadStatus]);
 
   const recognize = useCallback(
@@ -207,7 +223,7 @@ export default function OcrPanel() {
         <Dropdown
           size="small"
           style={{ minWidth: "140px" }}
-          placeholder="语言：自动"
+          placeholder={langPlaceholder(cfgLangs)}
           multiselect
           value={langs.join(", ")}
           selectedOptions={langs}

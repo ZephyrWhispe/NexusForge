@@ -454,9 +454,15 @@ export function screenshotPinClose(id: string): Promise<void> {
 
 export interface OcrRequestDto {
   image_b64: string;
-  /** 偏好语言（BCP-47），空 = 系统默认 */
+  /** 本次的显式覆盖语言（BCP-47）；空 = 跟随设置里的偏好语言（非"无偏好"） */
   langs?: string[];
   source_task_id?: string | null;
+}
+
+/** 运行态 OCR 配置快照（ocr_config_get 只读；写侧唯一入口仍是 host_config_set） */
+export interface OcrConfigDto {
+  langs: string[];
+  preferred_engine: string;
 }
 
 export interface OcrLineDto {
@@ -488,6 +494,10 @@ export function ocrEngineStatus(): Promise<EngineStatusDto> {
 /** OCR 文本复制到剪贴板（进入剪贴板历史） */
 export function ocrCopyText(text: string): Promise<void> {
   return invoke("ocr_copy_text", { text });
+}
+/** 运行态配置快照（T-B4-10：面板显示"设置里的默认"，读模块内存态，不开第二写口） */
+export function ocrConfigGet(): Promise<OcrConfigDto> {
+  return invoke("ocr_config_get");
 }
 
 // ---------------- KVM 键鼠共享 IPC（docs/impl/05 K8）----------------
