@@ -596,6 +596,44 @@ fn auxWindows_neverGrantClipboardStack() {
     }
 }
 
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §8.2）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantClipboardGroupsAndSuggestions() {
+    // T-B3-4 红线负例：分组写口会改用户自己起的组名并驱动「采纳」落库，
+    // 六命令全为 main-only（辅助窗只读事件流，不持写面）
+    let caps = load_capabilities();
+    for ident in [
+        "allow-clipboard-entry-set-group",
+        "allow-clipboard-group-rename",
+        "allow-clipboard-group-delete",
+        "allow-clipboard-suggestions",
+        "allow-clipboard-suggestion-apply",
+        "allow-clipboard-stats",
+    ] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（分组与建议写面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}
+
 /// html,body 基底块是否同时携带 background:transparent 与 margin:0（纯函数，自带负例）。
 fn transparent_base_ok(css: &str) -> bool {
     let norm: String = css.split_whitespace().collect::<Vec<_>>().join(" ");

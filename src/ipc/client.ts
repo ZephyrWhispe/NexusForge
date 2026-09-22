@@ -196,6 +196,53 @@ export function clipboardStackPasteNext(): Promise<ClipStackPaste | null> {
 export function clipboardStackPasteAll(intervalMs: number): Promise<ClipStackReport> {
   return invoke<ClipStackReport>("clipboard_stack_paste_all", { intervalMs });
 }
+
+// ---------------- 分组数据面 + 智能建议 + 统计（docs/impl/09 §8.2 T-B3-4）----------------
+
+/** 待采纳的分组建议：preview 已遮蔽敏感项，confidence 为分类器原值 */
+export interface ClipSuggestion {
+  entry_id: string;
+  preview: string;
+  suggested_group: string;
+  confidence: number;
+}
+
+/** 统计卡：by_content_type / by_group 为「名 → 条数」映射，未分组桶名为 "未分组" */
+export interface ClipStats {
+  total: number;
+  by_content_type: Record<string, number>;
+  by_group: Record<string, number>;
+  top_source_apps: [string, number][];
+  bytes_blob: number;
+}
+
+/** 改单条目分组：group=null 表示取消分组 */
+export function clipboardEntrySetGroup(id: string, group: string | null): Promise<void> {
+  return invoke("clipboard_entry_set_group", { id, group });
+}
+
+/** 整组重命名，返回影响行数（组名可为任意 Unicode，含空格与逗号） */
+export function clipboardGroupRename(from: string, to: string): Promise<number> {
+  return invoke<number>("clipboard_group_rename", { from, to });
+}
+
+/** 删除分组：组内条目回到未分组，历史记录保留 */
+export function clipboardGroupDelete(name: string): Promise<number> {
+  return invoke<number>("clipboard_group_delete", { name });
+}
+
+export function clipboardSuggestions(limit?: number): Promise<ClipSuggestion[]> {
+  return invoke<ClipSuggestion[]>("clipboard_suggestions", { limit });
+}
+
+/** 采纳=写入分组；忽略=永久静默（两者语义不同，忽略绝不改分组） */
+export function clipboardSuggestionApply(ids: string[], accept: boolean): Promise<number> {
+  return invoke<number>("clipboard_suggestion_apply", { ids, accept });
+}
+
+export function clipboardStats(): Promise<ClipStats> {
+  return invoke<ClipStats>("clipboard_stats");
+}
 /** 读模块配置 schema（设置中心自动渲染） */
 export function hostConfigSchema(module: string): Promise<Record<string, unknown>> {
   return invoke("host_config_schema", { module });

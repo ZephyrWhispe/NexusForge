@@ -13,7 +13,7 @@ use host_core::error::AppError;
 use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
 
-use crate::types::{now_ms, ClipEntry, Page, SearchQuery, BLOB_THRESHOLD};
+use crate::types::{now_ms, ClipEntry, Page, SearchQuery, StatsDto, SuggestionDto, BLOB_THRESHOLD};
 
 pub struct ClipStore {
     conn: Arc<Mutex<Connection>>,
@@ -28,8 +28,9 @@ fn err(code: &str, e: impl std::fmt::Display) -> AppError {
 }
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(
-        r#"CREATE TABLE clip_entries (
+    Migrations::new(vec![
+        M::up(
+            r#"CREATE TABLE clip_entries (
                 id TEXT PRIMARY KEY,
                 content_type TEXT NOT NULL,
                 content TEXT,
@@ -60,7 +61,46 @@ fn migrations() -> Migrations<'static> {
                 position INTEGER NOT NULL,
                 FOREIGN KEY (entry_id) REFERENCES clip_entries(id) ON DELETE CASCADE
             );"#,
-    )])
+        ),
+        // T-B3-4 智能分组建议（01§5-1 建议制）：旧行 suggested_group/confidence 为 NULL、
+        // suggestion_dismissed 走 DEFAULT 0，零回填零迁移。
+        M::up(
+            r#"ALTER TABLE clip_entries ADD COLUMN suggested_group TEXT;
+           ALTER TABLE clip_entries ADD COLUMN suggested_confidence REAL;
+           ALTER TABLE clip_entries ADD COLUMN suggestion_dismissed INTEGER NOT NULL DEFAULT 0;"#,
+        ),
+    ])
+}
+
+const SUGGESTED_COLUMNS: [(&str, &str); 3] = [
+    ("suggested_group", "TEXT"),
+    ("suggested_confidence", "REAL"),
+    ("suggestion_dismissed", "INTEGER NOT NULL DEFAULT 0"),
+];
+
+/// 幂等补列守卫：schema_version 已记账而列缺失的库（备份还原、手工修表、跨版本文件复制）
+/// 单靠 `M::up` 不会再跑 ALTER，`open()` 必须在返回前补齐，否则后续每条 SELECT 都炸。
+fn ensure_suggested_columns(conn: &Connection) -> Result<(), AppError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(clip_entries)")
+        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+    let have: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    for (name, decl) in SUGGESTED_COLUMNS {
+        if have.iter().any(|c| c == name) {
+            continue;
+        }
+        conn.execute(
+            &format!("ALTER TABLE clip_entries ADD COLUMN {name} {decl}"),
+            [],
+        )
+        .map_err(|e| err("CLIPBOARD_STORAGE_003", e))?;
+    }
+    Ok(())
 }
 
 /// 行 → ClipEntry 的唯一映射：列序契约 id, content_type, content, blob_path, origin,
@@ -70,7 +110,6 @@ fn entry_from_row(r: &rusqlite::Row) -> rusqlite::Result<ClipEntry> {
     let content: Option<String> = r.get(2)?;
     let content_type: String = r.get(1)?;
     let secret: i64 = r.get(8)?;
-    let group: Option<String> = r.get(7)?;
     let blob_path: Option<String> = r.get(3)?;
     let preview = match content_type.as_str() {
         "image" => match content.as_deref() {
@@ -89,7 +128,7 @@ fn entry_from_row(r: &rusqlite::Row) -> rusqlite::Result<ClipEntry> {
     };
     Ok(ClipEntry {
         id: r.get(0)?,
-        content_type: content_type.leak() as &'static str,
+        content_type,
         preview,
         blob_path,
         // D-25：真读 origin 列；'remote' 之外一律兜底 local（兼容旧库/脏值）
@@ -100,11 +139,63 @@ fn entry_from_row(r: &rusqlite::Row) -> rusqlite::Result<ClipEntry> {
         },
         source_app: r.get(5)?,
         pinned: r.get::<_, i64>(6)? != 0,
-        group: group.map(|g| leak_group(&g)),
+        // 组名是用户输入（任意 Unicode），按列名取值且不再泄漏为 'static
+        group: r.get::<_, Option<String>>("group_name")?,
         secret: secret == 1,
         created_at: r.get(9)?,
         usage_count: r.get::<_, i64>(10)? as u32,
     })
+}
+
+/// 一行文本入库的全部输入（T-B3-4 收口：消多参位置漂移 + 承 suggested 两列 +
+/// 为 T-B3-8 的 html 列预留零 churn 扩展位）。
+pub struct NewClip<'a> {
+    pub text: &'a str,
+    /// 写定分组（auto_group 开且有分类结果）；None = 不分组
+    pub group: Option<&'a str>,
+    /// 分类器建议 (组名, 置信度)：与 group 分开存，采纳流可复算
+    pub suggested: Option<(&'a str, f32)>,
+    pub secret: bool,
+    pub source_app: Option<&'a str>,
+    pub origin: &'a str,
+}
+
+impl<'a> NewClip<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            group: None,
+            suggested: None,
+            secret: false,
+            source_app: None,
+            origin: "local",
+        }
+    }
+
+    pub fn group(mut self, group: &'a str) -> Self {
+        self.group = Some(group);
+        self
+    }
+
+    pub fn suggested(mut self, suggested: (&'a str, f32)) -> Self {
+        self.suggested = Some(suggested);
+        self
+    }
+
+    pub fn secret(mut self) -> Self {
+        self.secret = true;
+        self
+    }
+
+    pub fn from_app(mut self, source_app: &'a str) -> Self {
+        self.source_app = Some(source_app);
+        self
+    }
+
+    pub fn origin(mut self, origin: &'a str) -> Self {
+        self.origin = origin;
+        self
+    }
 }
 
 impl ClipStore {
@@ -122,6 +213,7 @@ impl ClipStore {
         migrations()
             .to_latest(&mut conn)
             .map_err(|e| err("CLIPBOARD_STORAGE_003", e))?;
+        ensure_suggested_columns(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             blob_dir,
@@ -131,15 +223,10 @@ impl ClipStore {
     /// 去重插入（docs/impl/02 C2 算法）；命中 hash → 置顶并返回既有 id。
     /// origin：local|remote（D-25）；dedup 命中且新事件为 local → 晋升 'local'，
     /// remote 事件不得改写既有归属（只收紧不放松）。
-    pub fn insert(
-        &self,
-        text: &str,
-        group: Option<&'static str>,
-        secret: bool,
-        source_app: Option<&str>,
-        origin: &str,
-    ) -> Result<String, AppError> {
-        let hash = content_hash(text);
+    /// dedup 命中只刷新鲜度/计数/归属——分组、建议与 pinned 一律不动
+    /// （用户手工组名与已忽略的建议都不因重复复制而复活或覆写）。
+    pub fn insert_row(&self, c: &NewClip) -> Result<String, AppError> {
+        let hash = content_hash(c.text);
         let now = now_ms();
         let conn = self.conn.lock();
         let existing: Option<String> = conn
@@ -157,28 +244,41 @@ impl ClipStore {
             conn.execute(
                 "UPDATE clip_entries SET created_at = ?2, usage_count = usage_count + 1,
                  origin = CASE WHEN ?3 = 'local' THEN 'local' ELSE origin END WHERE id = ?1",
-                params![id, now, origin],
+                params![id, now, c.origin],
             )
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             return Ok(id);
         }
 
         let id = uuid::Uuid::now_v7().to_string();
-        let (content_col, blob_path): (String, Option<String>) = if text.len() > BLOB_THRESHOLD {
+        let (content_col, blob_path): (String, Option<String>) = if c.text.len() > BLOB_THRESHOLD {
             let name = format!("{}.txt", hash);
             let blob = self.blob_dir.join(&name);
-            std::fs::write(&blob, text).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
+            std::fs::write(&blob, c.text).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
             (String::new(), Some(name))
-        } else if secret {
+        } else if c.secret {
             (String::new(), None) // 密文由管线层写入前替换 content
         } else {
-            (text.to_string(), None)
+            (c.text.to_string(), None)
         };
+        let (sugg_group, sugg_conf) = split_suggestion(c.suggested);
         conn.execute(
             r#"INSERT INTO clip_entries
-               (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at)
-               VALUES (?1, 'text', ?2, ?3, ?4, ?9, ?5, 0, ?6, ?7, ?8)"#,
-            params![id, content_col, hash, blob_path, source_app, group, secret as i64, now, origin],
+               (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at, suggested_group, suggested_confidence)
+               VALUES (?1, 'text', ?2, ?3, ?4, ?9, ?5, 0, ?6, ?7, ?8, ?10, ?11)"#,
+            params![
+                id,
+                content_col,
+                hash,
+                blob_path,
+                c.source_app,
+                c.group,
+                c.secret as i64,
+                now,
+                c.origin,
+                sugg_group,
+                sugg_conf
+            ],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(id)
@@ -188,18 +288,30 @@ impl ClipStore {
     pub fn insert_encrypted(
         &self,
         encrypted_b64: &str,
-        group: Option<&'static str>,
+        group: Option<&str>,
+        suggested: Option<(&str, f32)>,
         source_app: Option<&str>,
         origin: &str,
     ) -> Result<String, AppError> {
         let hash = content_hash(encrypted_b64);
         let id = uuid::Uuid::now_v7().to_string();
+        let (sugg_group, sugg_conf) = split_suggestion(suggested);
         let conn = self.conn.lock();
         conn.execute(
             r#"INSERT INTO clip_entries
-               (id, content_type, content, content_hash, origin, source_app, pinned, group_name, secret, created_at)
-               VALUES (?1, 'text', ?2, ?3, ?7, ?4, 0, ?5, 1, ?6)"#,
-            params![id, encrypted_b64, hash, source_app, group, now_ms(), origin],
+               (id, content_type, content, content_hash, origin, source_app, pinned, group_name, secret, created_at, suggested_group, suggested_confidence)
+               VALUES (?1, 'text', ?2, ?3, ?7, ?4, 0, ?5, 1, ?6, ?8, ?9)"#,
+            params![
+                id,
+                encrypted_b64,
+                hash,
+                source_app,
+                group,
+                now_ms(),
+                origin,
+                sugg_group,
+                sugg_conf
+            ],
         )
         .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(id)
@@ -244,68 +356,59 @@ impl ClipStore {
         let page = q.page.unwrap_or(0) as i64;
         let conn = self.conn.lock();
 
-        let where_parts = build_filters(q);
-        let where_sql = if where_parts.is_empty() {
-            String::new()
+        // 条件与绑定值同源（build_filters）：占位符按 args 出现序编号，
+        // 追加 FTS MATCH 时接在其后，两分支共用同一条查询路径。
+        let (filters, mut args) = build_filters(q);
+        let mut conds: Vec<String> = if filters.is_empty() {
+            Vec::new()
         } else {
-            format!("WHERE {}", where_parts.join(" AND "))
+            vec![filters]
         };
-
         let use_fts = q
             .text
             .as_deref()
             .map(|t| !t.trim().is_empty())
             .unwrap_or(false);
-        let (sql, fts_query) = if use_fts {
-            let fts_query = fts_escape(q.text.as_deref().unwrap());
-            (
-                format!(
-                    r#"SELECT e.id, e.content_type, e.content, e.blob_path, e.origin, e.source_app,
-                              e.pinned, e.group_name, e.secret, e.created_at, e.usage_count
-                       FROM clip_fts f JOIN clip_entries e ON e.rowid = f.rowid
-                       {where_sql} AND clip_fts MATCH ?1
-                       ORDER BY rank, e.created_at DESC LIMIT {size} OFFSET {}"#,
-                    page * size
-                ),
-                fts_query,
+        if use_fts {
+            conds.push(format!("clip_fts MATCH ?{}", args.len() + 1));
+            args.push(Box::new(fts_escape(
+                q.text.as_deref().expect("use_fts 已判非空"),
+            )));
+        }
+        let where_sql = if conds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conds.join(" AND "))
+        };
+
+        let sql = if use_fts {
+            format!(
+                r#"SELECT e.id, e.content_type, e.content, e.blob_path, e.origin, e.source_app,
+                          e.pinned, e.group_name, e.secret, e.created_at, e.usage_count
+                   FROM clip_fts f JOIN clip_entries e ON e.rowid = f.rowid
+                   {where_sql}
+                   ORDER BY rank, e.created_at DESC LIMIT {size} OFFSET {}"#,
+                page * size
             )
         } else {
-            (
-                format!(
-                    r#"SELECT id, content_type, content, blob_path, origin, source_app,
-                              pinned, group_name, secret, created_at, usage_count
-                       FROM clip_entries {where_sql}
-                       ORDER BY pinned DESC, created_at DESC LIMIT {size} OFFSET {}"#,
-                    page * size
-                ),
-                String::new(),
+            format!(
+                r#"SELECT e.id, e.content_type, e.content, e.blob_path, e.origin, e.source_app,
+                          e.pinned, e.group_name, e.secret, e.created_at, e.usage_count
+                   FROM clip_entries AS e {where_sql}
+                   ORDER BY e.pinned DESC, e.created_at DESC LIMIT {size} OFFSET {}"#,
+                page * size
             )
         };
 
-        let mapper = entry_from_row;
-
-        let items: Vec<ClipEntry> = if use_fts {
+        let items: Vec<ClipEntry> = {
             let mut stmt = conn
                 .prepare(&sql)
                 .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             let rows = stmt
-                .query_map(params![fts_query], mapper)
-                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else if let Some(g) = &q.group {
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-            let rows = stmt
-                .query_map(params![g], mapper)
-                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else {
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
-            let rows = stmt
-                .query_map([], mapper)
+                .query_map(
+                    rusqlite::params_from_iter(args.iter().map(|b| &**b)),
+                    entry_from_row,
+                )
                 .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -675,7 +778,7 @@ impl ClipStore {
         counts.insert("text".into(), serde_json::json!(text));
         total += text as u32;
 
-        // 有分组（url/json/code/color…）与 secret
+        // 真实组名（分类器给出的 url/json/code/color 与用户自建名）与 secret 标记行
         let rows = conn
             .prepare(
                 "SELECT COALESCE(group_name, CASE WHEN secret = 1 THEN 'secret' END) AS g,
@@ -690,10 +793,11 @@ impl ClipStore {
             })
             .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         for (g, n) in rows {
-            if let Some(g) = g.split(',').next() {
-                counts.insert(g.to_string(), serde_json::json!(n));
-                total += n as u32;
-            }
+            // 组名是用户输入，可含逗号/空格/Unicode：整名计数（旧实现按 ',' 截首段，
+            // 等于把 "a,b" 显示成 "a"）。伪键 text/files/secret/all 与同名用户组会并入
+            // 同一计数桶，属既有展示语义，不做静默改名。
+            counts.insert(g, serde_json::json!(n));
+            total += n as u32;
         }
 
         // files
@@ -709,6 +813,172 @@ impl ClipStore {
 
         counts.insert("all".into(), serde_json::json!(total));
         Ok(serde_json::Value::Object(counts))
+    }
+
+    // ---- 分组数据面（docs/impl/09 §8.2 T-B3-4）----
+
+    /// 手工设定单条目分组（`None` = 取消分组）。手工组名优先级最高：分类器只在插入
+    /// 新行时写 group_name，此后任何去重命中都不覆写它。
+    pub fn set_entry_group(&self, id: &str, group: Option<&str>) -> Result<(), AppError> {
+        let group = group.map(sanitize_group_name).transpose()?;
+        let conn = self.conn.lock();
+        let n = conn
+            .execute(
+                "UPDATE clip_entries SET group_name = ?2 WHERE id = ?1",
+                params![id, group],
+            )
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        if n == 0 {
+            return Err(AppError::module(
+                "CLIPBOARD_GROUP_001",
+                "条目不存在，未改分组",
+                None,
+            ));
+        }
+        Ok(())
+    }
+
+    /// 组名整体重命名，返影响行数。空名/超长在写库前拒（脏组名会以徽标形式长期驻留）。
+    pub fn rename_group(&self, from: &str, to: &str) -> Result<u32, AppError> {
+        let to = sanitize_group_name(to)?;
+        let conn = self.conn.lock();
+        let n = conn
+            .execute(
+                "UPDATE clip_entries SET group_name = ?2 WHERE group_name = ?1",
+                params![from, to],
+            )
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(n as u32)
+    }
+
+    /// 删除分组：组内条目回到未分组（记录本身不删），返影响行数
+    pub fn delete_group(&self, name: &str) -> Result<u32, AppError> {
+        let conn = self.conn.lock();
+        let n = conn
+            .execute(
+                "UPDATE clip_entries SET group_name = NULL WHERE group_name = ?1",
+                params![name],
+            )
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(n as u32)
+    }
+
+    /// 待采纳的分组建议（01§5-1：只列建议，永不自动落库）。
+    /// 谓词三条件缺一不可：有建议 / 用户还没手工归组 / 没被忽略过。
+    /// 敏感行走同一路径但 preview 由 secret 位遮蔽，密文与类别特征都不外泄。
+    pub fn suggestions(&self, limit: u32) -> Result<Vec<SuggestionDto>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, secret, suggested_group, suggested_confidence
+                 FROM clip_entries
+                 WHERE suggested_group IS NOT NULL AND group_name IS NULL
+                   AND suggestion_dismissed = 0
+                 ORDER BY suggested_confidence DESC LIMIT ?1",
+            )
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        let rows = stmt
+            .query_map(params![limit.min(500) as i64], |r| {
+                let content: Option<String> = r.get(1)?;
+                let secret: i64 = r.get(2)?;
+                Ok(SuggestionDto {
+                    entry_id: r.get(0)?,
+                    preview: build_preview(&content.unwrap_or_default(), secret == 1),
+                    suggested_group: r.get(3)?,
+                    confidence: r.get::<_, Option<f64>>(4)?.unwrap_or_default() as f32,
+                })
+            })
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 采纳/忽略一条建议，返实际改动行数（幂等：重复采纳第二次不计数）。
+    /// 采纳保留 suggested_group 供反悔与统计复算；忽略置位即永久静默。
+    pub fn apply_suggestion(&self, ids: &[String], accept: bool) -> Result<u32, AppError> {
+        let conn = self.conn.lock();
+        let sql = if accept {
+            "UPDATE clip_entries SET group_name = suggested_group
+             WHERE id = ?1 AND suggested_group IS NOT NULL AND group_name IS NULL"
+        } else {
+            "UPDATE clip_entries SET suggestion_dismissed = 1 WHERE id = ?1"
+        };
+        let mut n = 0u32;
+        for id in ids {
+            n += conn
+                .execute(sql, params![id])
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))? as u32;
+        }
+        Ok(n)
+    }
+
+    /// 统计卡：全部为库内聚合，blob 字节按文件实际大小累加（主表只存引用名）
+    pub fn stats(&self) -> Result<StatsDto, AppError> {
+        let conn = self.conn.lock();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clip_entries", [], |r| r.get(0))
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        let group_by = |sql: &str| -> Result<serde_json::Map<String, serde_json::Value>, AppError> {
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let mut m = serde_json::Map::new();
+            for (k, v) in rows.filter_map(|r| r.ok()) {
+                m.insert(k, serde_json::json!(v));
+            }
+            Ok(m)
+        };
+        let by_content_type = serde_json::Value::Object(group_by(
+            "SELECT content_type, COUNT(*) FROM clip_entries GROUP BY content_type",
+        )?);
+        let by_group = serde_json::Value::Object(group_by(
+            "SELECT COALESCE(group_name, '未分组'), COUNT(*) FROM clip_entries GROUP BY 1",
+        )?);
+        let top_source_apps = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_app, COUNT(*) FROM clip_entries
+                     WHERE source_app IS NOT NULL AND source_app <> ''
+                     GROUP BY source_app ORDER BY COUNT(*) DESC, source_app LIMIT 8",
+                )
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
+                })
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
+        };
+        let inline_bytes: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM clip_entries",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+        let blob_names: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT blob_path FROM clip_entries WHERE blob_path IS NOT NULL")
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let blob_bytes: u64 = blob_names
+            .iter()
+            .filter_map(|n| std::fs::metadata(self.blob_dir.join(n)).ok())
+            .map(|m| m.len())
+            .sum();
+        Ok(StatsDto {
+            total: total as u32,
+            by_content_type,
+            by_group,
+            top_source_apps,
+            bytes_blob: inline_bytes.max(0) as u64 + blob_bytes,
+        })
     }
 
     /// C9 清理：retention_days > 0 时按保留期，再按 max_entries 上限淘汰（置顶除外）。
@@ -853,6 +1123,11 @@ fn content_hash(text: &str) -> String {
     content_hash_bytes(text.as_bytes())
 }
 
+/// 建议两列写入拆分：无建议时两列皆 NULL（NULL 与置信度 0.0 语义不同）
+fn split_suggestion(s: Option<(&str, f32)>) -> (Option<&str>, Option<f32>) {
+    s.map(|(g, c)| (Some(g), Some(c))).unwrap_or((None, None))
+}
+
 fn content_hash_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -870,20 +1145,49 @@ fn fts_escape(q: &str) -> String {
         .join(" AND ")
 }
 
-fn build_filters(q: &SearchQuery) -> Vec<String> {
-    let mut parts = Vec::new();
-    if let Some(g) = &q.group {
-        if g != "all" {
-            if g == "secret" {
-                parts.push("e.secret = 1".into());
-            } else if g == "files" {
-                parts.push("e.content_type = 'files'".into());
-            } else {
-                parts.push(format!("e.group_name = '{}'", g.replace('\'', "")));
-            }
-        }
+/// 分组过滤条件 →（SQL 片段, 绑定值）。红线：值一律走绑定——组名从 T-B3-4 起是
+/// 用户可自取的任意 Unicode 文本，拼串等于把 SQL 语法交给一条被复制的字符串。
+/// 片段内占位符按 `args` 的出现顺序编号（?1..?n），调用方追加条件时续号。
+fn build_filters(q: &SearchQuery) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let Some(group) = q.group.as_deref().filter(|g| *g != "all") else {
+        return (String::new(), Vec::new());
+    };
+    // 伪分组键与 group_counts 的桶语义一一对应（"text" = 未分组且非敏感的文本）；
+    // 其余一律按真实组名匹配。旧实现把这两个桶的条件写成 `group_name = 'text'`，
+    // 于是「文本」筛选永远筛不到它计数的那批行。
+    match group {
+        "secret" => ("e.secret = 1".to_string(), Vec::new()),
+        "files" => ("e.content_type = 'files'".to_string(), Vec::new()),
+        "text" => (
+            "e.group_name IS NULL AND e.secret = 0 AND e.content_type = 'text'".to_string(),
+            Vec::new(),
+        ),
+        name => (
+            "e.group_name = ?1".to_string(),
+            vec![Box::new(name.to_string()) as Box<dyn rusqlite::types::ToSql>],
+        ),
     }
-    parts
+}
+
+/// 组名边界校验：去首尾空白后非空且不超过 64 字符——组名会作为徽标长期展示，
+/// 脏名比脏内容更难事后清理（空名尤其会在 SubNav 造出一个无法点选的幽灵分组）。
+fn sanitize_group_name(name: &str) -> Result<String, AppError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::module(
+            "CLIPBOARD_GROUP_002",
+            "分组名不能为空",
+            Some("要取消分组请用删除分组或清空条目分组"),
+        ));
+    }
+    if trimmed.chars().count() > 64 {
+        return Err(AppError::module(
+            "CLIPBOARD_GROUP_002",
+            "分组名过长",
+            Some("请缩短到 64 字符以内"),
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn build_preview(content: &str, secret: bool) -> String {
@@ -895,18 +1199,6 @@ fn build_preview(content: &str, secret: bool) -> String {
         s.push('…');
     }
     s
-}
-
-fn leak_group(g: &str) -> &'static str {
-    // 分组名来自固定枚举（url/json/code/color/secret），安全泄漏为 'static
-    match g {
-        "url" => "url",
-        "json" => "json",
-        "code" => "code",
-        "color" => "color",
-        "secret" => "secret",
-        other => Box::leak(other.to_string().into_boxed_str()),
-    }
 }
 
 #[cfg(test)]
@@ -922,8 +1214,8 @@ mod tests {
     #[test]
     fn insert_dedup_pins_and_bumps_usage() {
         let s = open_temp("dedup");
-        let id1 = s.insert("第一条内容", None, false, None, "local").unwrap();
-        let id2 = s.insert("第一条内容", None, false, None, "local").unwrap();
+        let id1 = s.insert_row(&NewClip::new("第一条内容")).unwrap();
+        let id2 = s.insert_row(&NewClip::new("第一条内容")).unwrap();
         assert_eq!(id1, id2, "相同内容应去重返回同一 id");
         let page = s.search(&SearchQuery::default()).unwrap();
         assert_eq!(page.items.len(), 1);
@@ -936,7 +1228,7 @@ mod tests {
     fn dedup_hit_keepsPinnedAndRefreshesRecency() {
         let s = open_temp("dedup_pin");
         let id = s
-            .insert("置顶后又被复制", None, false, Some("app"), "local")
+            .insert_row(&NewClip::new("置顶后又被复制").from_app("app"))
             .unwrap();
         s.pin(&id, true).unwrap();
         let before = s
@@ -951,7 +1243,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         let again = s
-            .insert("置顶后又被复制", None, false, Some("app"), "local")
+            .insert_row(&NewClip::new("置顶后又被复制").from_app("app"))
             .unwrap();
         assert_eq!(again, id, "去重命中不得新增行");
 
@@ -971,9 +1263,9 @@ mod tests {
     #[test]
     fn fts_search_finds_text() {
         let s = open_temp("fts");
-        s.insert("设计原则：Windows 原生优先", None, false, None, "local")
+        s.insert_row(&NewClip::new("设计原则：Windows 原生优先"))
             .unwrap();
-        s.insert("cargo build --release", Some("code"), false, None, "local")
+        s.insert_row(&NewClip::new("cargo build --release").group("code"))
             .unwrap();
         let q = SearchQuery {
             text: Some("原生".into()),
@@ -993,8 +1285,8 @@ mod tests {
     #[test]
     fn pin_clear_and_delete() {
         let s = open_temp("ops");
-        let a = s.insert("A", None, false, None, "local").unwrap();
-        let _ = s.insert("B", None, false, None, "local").unwrap();
+        let a = s.insert_row(&NewClip::new("A")).unwrap();
+        let _ = s.insert_row(&NewClip::new("B")).unwrap();
         s.pin(&a, true).unwrap();
         let removed = s.clear(true).unwrap();
         assert_eq!(removed, 1);
@@ -1007,7 +1299,7 @@ mod tests {
     fn big_content_goes_to_blob() {
         let s = open_temp("blob");
         let big = "x".repeat(BLOB_THRESHOLD + 10);
-        let id = s.insert(&big, None, false, None, "local").unwrap();
+        let id = s.insert_row(&NewClip::new(&big)).unwrap();
         let entry = &s.search(&SearchQuery::default()).unwrap().items[0];
         assert!(entry.blob_path.is_some(), ">64KB 内容应转 blob");
         let back = s.get_content(&id, |c| Ok(c.to_vec())).unwrap().unwrap();
@@ -1043,9 +1335,7 @@ mod tests {
     #[test]
     fn delete_entry_removes_blob_file() {
         let (s, blobs) = open_temp_dir("d05_del");
-        let id = s
-            .insert(&big("payload"), None, false, None, "local")
-            .unwrap();
+        let id = s.insert_row(&NewClip::new(&big("payload"))).unwrap();
         assert_eq!(blob_files(&blobs).len(), 1, "入库应写出 blob");
         s.delete(&id).unwrap();
         assert!(
@@ -1057,8 +1347,8 @@ mod tests {
     #[test]
     fn clear_removes_all_blobs_and_keeps_pinned_blob() {
         let (s, blobs) = open_temp_dir("d05_clear");
-        let a = s.insert(&big("a"), None, false, None, "local").unwrap();
-        let _b = s.insert(&big("b"), None, false, None, "local").unwrap();
+        let a = s.insert_row(&NewClip::new(&big("a"))).unwrap();
+        let _b = s.insert_row(&NewClip::new(&big("b"))).unwrap();
         s.pin(&a, true).unwrap();
         let removed = s.clear(true).unwrap();
         assert_eq!(removed, 1);
@@ -1079,7 +1369,7 @@ mod tests {
     #[test]
     fn startup_gc_removes_orphans_only() {
         let (s, blobs) = open_temp_dir("d05_gc");
-        let _live = s.insert(&big("live"), None, false, None, "local").unwrap();
+        let _live = s.insert_row(&NewClip::new(&big("live"))).unwrap();
         let live_file = blob_files(&blobs)[0].clone();
         std::fs::write(blobs.join("orphan-deadbeef.txt"), b"residual plaintext").unwrap();
         std::fs::write(blobs.join("orphan-image.dib"), b"residual image").unwrap();
@@ -1094,8 +1384,7 @@ mod tests {
     fn purge_max_entries_removes_blobs() {
         let (s, blobs) = open_temp_dir("d05_purge");
         for i in 0..5 {
-            s.insert(&big(&format!("e{i}")), None, false, None, "local")
-                .unwrap();
+            s.insert_row(&NewClip::new(&big(&format!("e{i}")))).unwrap();
         }
         assert_eq!(blob_files(&blobs).len(), 5);
         let n = s.purge(0, 2).unwrap();
@@ -1118,10 +1407,8 @@ mod tests {
         let payload = big("重开载荷");
         let (text_id, blob_id) = {
             let s = ClipStore::open(&db, blobs.clone()).unwrap();
-            let t = s
-                .insert("重开验证文本", None, false, None, "local")
-                .unwrap();
-            let b = s.insert(&payload, None, false, None, "local").unwrap();
+            let t = s.insert_row(&NewClip::new("重开验证文本")).unwrap();
+            let b = s.insert_row(&NewClip::new(&payload)).unwrap();
             (t, b)
         };
         let s = ClipStore::open(&db, blobs.clone()).unwrap();
@@ -1171,9 +1458,13 @@ mod tests {
     fn origin_roundtrip_local_and_remote() {
         let s = open_temp("origin_rt");
         let rid = s
-            .insert("remote-row", None, false, Some("kvm:dev-x"), "remote")
+            .insert_row(
+                &NewClip::new("remote-row")
+                    .from_app("kvm:dev-x")
+                    .origin("remote"),
+            )
             .unwrap();
-        s.insert("local-row", None, false, None, "local").unwrap();
+        s.insert_row(&NewClip::new("local-row")).unwrap();
         let page = s.search(&SearchQuery::default()).unwrap();
         assert_eq!(page.items.len(), 2);
         let remote = page.items.iter().find(|e| e.id == rid).unwrap();
@@ -1189,8 +1480,9 @@ mod tests {
     fn dedup_promotes_local_only_never_remote_overwrite() {
         let s = open_temp("origin_promote");
         // 远端先入：origin=remote；本地重拷同内容 → 晋升 local
-        s.insert("dup-text", None, false, None, "remote").unwrap();
-        s.insert("dup-text", None, false, None, "local").unwrap();
+        s.insert_row(&NewClip::new("dup-text").origin("remote"))
+            .unwrap();
+        s.insert_row(&NewClip::new("dup-text")).unwrap();
         assert_eq!(
             s.search(&SearchQuery::default()).unwrap().items[0].origin,
             "local"
@@ -1200,8 +1492,8 @@ mod tests {
             std::env::temp_dir().join(format!("nf_clip_origin_demix_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&s2dir);
         let s2 = ClipStore::open(&s2dir.join("clipboard.db"), s2dir.join("blobs")).unwrap();
-        let lid = s2.insert("keep-local", None, false, None, "local").unwrap();
-        s2.insert("keep-local", None, false, None, "remote")
+        let lid = s2.insert_row(&NewClip::new("keep-local")).unwrap();
+        s2.insert_row(&NewClip::new("keep-local").origin("remote"))
             .unwrap();
         let row = s2
             .search(&SearchQuery::default())
@@ -1219,7 +1511,7 @@ mod tests {
         // 验收⑤：旧库无值/脏值一律兜底为合法枚举 'local'（前端 DTO 只有 local|remote）
         let (s, db) = open_temp_with_db("origin_dirty");
         let id = s
-            .insert("dirty-origin", None, false, None, "remote")
+            .insert_row(&NewClip::new("dirty-origin").origin("remote"))
             .unwrap();
         {
             let raw = Connection::open(&db).unwrap();
@@ -1241,9 +1533,9 @@ mod tests {
     #[allow(non_snake_case)]
     fn stack_takeNext_isFifoInPushOrder() {
         let s = open_temp("stack_fifo");
-        let a = s.insert("stk-a", None, false, None, "local").unwrap();
-        let b = s.insert("stk-b", None, false, None, "local").unwrap();
-        let c = s.insert("stk-c", None, false, None, "local").unwrap();
+        let a = s.insert_row(&NewClip::new("stk-a")).unwrap();
+        let b = s.insert_row(&NewClip::new("stk-b")).unwrap();
+        let c = s.insert_row(&NewClip::new("stk-c")).unwrap();
         for id in [&a, &b, &c] {
             s.stack_push(id).unwrap();
         }
@@ -1263,9 +1555,9 @@ mod tests {
     #[allow(non_snake_case)]
     fn stack_pushListMoveRemoveClear_roundtrip() {
         let s = open_temp("stack_rt");
-        let a = s.insert("mv-a", None, false, None, "local").unwrap();
-        let b = s.insert("mv-b", None, false, None, "local").unwrap();
-        let c = s.insert("mv-c", None, false, None, "local").unwrap();
+        let a = s.insert_row(&NewClip::new("mv-a")).unwrap();
+        let b = s.insert_row(&NewClip::new("mv-b")).unwrap();
+        let c = s.insert_row(&NewClip::new("mv-c")).unwrap();
         assert_eq!(s.stack_push(&a).unwrap(), 1);
         assert_eq!(s.stack_push(&b).unwrap(), 2);
         assert_eq!(s.stack_push(&c).unwrap(), 3);
@@ -1304,9 +1596,9 @@ mod tests {
     #[allow(non_snake_case)]
     fn stack_list_skipsDeletedEntryWithoutLosingOrder() {
         let s = open_temp("stack_cascade");
-        let a = s.insert("cas-a", None, false, None, "local").unwrap();
-        let b = s.insert("cas-b", None, false, None, "local").unwrap();
-        let c = s.insert("cas-c", None, false, None, "local").unwrap();
+        let a = s.insert_row(&NewClip::new("cas-a")).unwrap();
+        let b = s.insert_row(&NewClip::new("cas-b")).unwrap();
+        let c = s.insert_row(&NewClip::new("cas-c")).unwrap();
         for id in [&a, &b, &c] {
             s.stack_push(id).unwrap();
         }
@@ -1321,5 +1613,437 @@ mod tests {
         );
         // 已删 id 直接进 entries_in_order：静默少一行，不报错不占位
         assert_eq!(s.entries_in_order(&[a, b, c]).unwrap().len(), 2);
+    }
+
+    // ---- T-B3-4 分组数据面（建议制 + 全绑定过滤 + 统计，docs/impl/09 §8.2）----
+
+    fn group_of(s: &ClipStore, id: &str) -> Option<String> {
+        s.search(&SearchQuery::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.group)
+    }
+
+    fn row_count(s: &ClipStore) -> usize {
+        s.search(&SearchQuery::default()).unwrap().items.len()
+    }
+
+    /// 重命名与删除都是"整组重定向"：条目永不随之消失，只改指向
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-4）字面测试名优先于 rustc 命名惯例
+    fn groupRename_andDelete_retargetRows() {
+        let s = open_temp("grp_rename");
+        let a = s
+            .insert_row(&NewClip::new("rn-a").group("工作 项目"))
+            .unwrap();
+        let b = s
+            .insert_row(&NewClip::new("rn-b").group("工作 项目"))
+            .unwrap();
+        let c = s.insert_row(&NewClip::new("rn-c")).unwrap();
+
+        assert_eq!(
+            s.rename_group("工作 项目", "私人 项目").unwrap(),
+            2,
+            "重命名作用于整组"
+        );
+        assert_eq!(group_of(&s, &a).as_deref(), Some("私人 项目"));
+        assert_eq!(group_of(&s, &b).as_deref(), Some("私人 项目"));
+        assert_eq!(group_of(&s, &c), None, "组外条目不得被波及");
+        assert_eq!(
+            s.rename_group("无人用的组", "y").unwrap(),
+            0,
+            "零命中如实返 0"
+        );
+        assert_eq!(s.delete_group("y").unwrap(), 0, "不存在的组删除影响 0 行");
+
+        assert_eq!(s.rename_group("私人 项目", "合并目标").unwrap(), 2);
+        assert_eq!(
+            s.delete_group("合并目标").unwrap(),
+            2,
+            "删除分组只解除归属，返影响行数"
+        );
+        assert_eq!(row_count(&s), 3, "记录不随分组消失");
+        assert_eq!(group_of(&s, &a), None);
+        assert_eq!(group_of(&s, &c), None);
+
+        // 脏名在写库前拒：空/纯空白会让 SubNav 长出点不动的幽灵分组
+        assert_eq!(
+            s.rename_group("合并目标", "   ").unwrap_err().code(),
+            "CLIPBOARD_GROUP_002"
+        );
+        assert_eq!(row_count(&s), 3, "被拒的重命名不得改动任何行");
+    }
+
+    /// 组名是用户输入：Unicode、空格、逗号都要能原名往返（旧实现按 ',' 截首段显示）
+    #[test]
+    #[allow(non_snake_case)]
+    fn entrySetGroup_userName_withUnicodeAndSpaces_roundtrip() {
+        let s = open_temp("grp_rt");
+        let id = s.insert_row(&NewClip::new("uni-payload")).unwrap();
+        let name = "前端, UI 组件 · v2（临时）";
+        s.set_entry_group(&id, Some(&format!("  {name}  ")))
+            .expect("首尾空白应被裁掉而非拒绝");
+        assert_eq!(group_of(&s, &id).as_deref(), Some(name));
+        assert_eq!(
+            s.group_counts().unwrap()[name].as_i64(),
+            Some(1),
+            "徽标按整名计数，逗号后不得截断"
+        );
+
+        s.set_entry_group(&id, None).unwrap();
+        assert_eq!(group_of(&s, &id), None, "None = 取消分组");
+
+        assert_eq!(
+            s.set_entry_group("不存在", Some("g")).unwrap_err().code(),
+            "CLIPBOARD_GROUP_001"
+        );
+        assert_eq!(
+            s.set_entry_group(&id, Some("")).unwrap_err().code(),
+            "CLIPBOARD_GROUP_002"
+        );
+        let too_long = "组".repeat(65);
+        assert_eq!(
+            s.set_entry_group(&id, Some(&too_long)).unwrap_err().code(),
+            "CLIPBOARD_GROUP_002"
+        );
+        assert_eq!(group_of(&s, &id), None, "被拒的写不得留下半改状态");
+    }
+
+    /// 红线：组名走绑定后，SQL 注入串只是一个"匹配不到东西的普通组名"——
+    /// 既不报错、也不吞行、表行数不变（拼串实现下这条查询要么语法错要么端出全表）
+    #[test]
+    #[allow(non_snake_case)]
+    fn searchSyntax_groupInjection_matchesNothingAndTableIntact() {
+        let s = open_temp("grp_inject");
+        let plain = s.insert_row(&NewClip::new("inj-plain")).unwrap();
+        s.insert_row(&NewClip::new("inj-grouped").group("正常组"))
+            .unwrap();
+        s.insert_encrypted("aW5qLXNlY3JldA==", None, None, None, "local")
+            .unwrap();
+        s.insert_files(
+            &[std::path::PathBuf::from("C:/inj/a.txt")],
+            Some("explorer.exe"),
+            "local",
+        )
+        .unwrap();
+        let before = row_count(&s);
+        assert_eq!(before, 4);
+
+        for evil in [
+            "a' OR 1=1--",
+            "\"; DROP TABLE clip_entries;--",
+            "a' --",
+            "1=1 OR group_name IS NOT NULL",
+        ] {
+            let page = s
+                .search(&SearchQuery {
+                    group: Some(evil.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(
+                page.items.is_empty(),
+                "注入串 {evil:?} 被当作组名匹配时不得命中任何行"
+            );
+        }
+        assert_eq!(row_count(&s), before, "表与行数在注入尝试后完好");
+        let fresh = s.insert_row(&NewClip::new("inj-after-attempt")).unwrap();
+        assert_eq!(row_count(&s), before + 1, "库仍可写");
+        s.delete(&fresh).unwrap();
+
+        // 正对照：合法组名与四个伪键都命中它该命中的行（防"永远返回空"式假安全）
+        let grouped = s
+            .search(&SearchQuery {
+                group: Some("正常组".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items;
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].group.as_deref(), Some("正常组"));
+        for (key, want) in [("all", 4), ("text", 1), ("secret", 1), ("files", 1)] {
+            let n = s
+                .search(&SearchQuery {
+                    group: Some(key.into()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .items
+                .len();
+            assert_eq!(n, want, "伪键 {key} 的筛选须与 group_counts 计数同语义");
+        }
+        assert_eq!(
+            s.search(&SearchQuery {
+                group: Some("text".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items[0]
+                .id,
+            plain,
+            "「文本」桶 = 未分组且非敏感的文本"
+        );
+    }
+
+    /// 采纳：写入分组 + 离开队列 + 保留 suggested_group（供反悔与统计复算）
+    #[test]
+    #[allow(non_snake_case)]
+    fn suggestionAccept_writesGroupAndClearsQueue() {
+        let (s, db) = open_temp_with_db("sugg_accept");
+        let id = s
+            .insert_row(&NewClip::new("https://example.com/a").suggested(("url", 0.95)))
+            .unwrap();
+        let list = s.suggestions(50).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].entry_id, id);
+        assert_eq!(list[0].suggested_group, "url");
+        assert!((list[0].confidence - 0.95).abs() < 1e-6);
+        assert!(list[0].preview.contains("example.com"));
+
+        assert_eq!(
+            s.apply_suggestion(std::slice::from_ref(&id), true).unwrap(),
+            1
+        );
+        assert_eq!(group_of(&s, &id).as_deref(), Some("url"));
+        assert!(
+            s.suggestions(50).unwrap().is_empty(),
+            "采纳后必须离开建议队列"
+        );
+        assert_eq!(
+            s.apply_suggestion(std::slice::from_ref(&id), true).unwrap(),
+            0,
+            "重复采纳幂等，不谎报第二行"
+        );
+
+        let kept: Option<String> = {
+            let raw = Connection::open(&db).unwrap();
+            raw.query_row(
+                "SELECT suggested_group FROM clip_entries WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            kept.as_deref(),
+            Some("url"),
+            "采纳只写 group_name，suggested_* 保留"
+        );
+    }
+
+    /// 忽略 = 永久静默且不改分组；去重命中也不得让被忽略的建议复活
+    #[test]
+    #[allow(non_snake_case)]
+    fn suggestionIgnore_dismissedSticky() {
+        let s = open_temp("sugg_ignore");
+        let id = s
+            .insert_row(&NewClip::new("{\"a\": 1}").suggested(("json", 0.9)))
+            .unwrap();
+        assert_eq!(
+            s.apply_suggestion(std::slice::from_ref(&id), false)
+                .unwrap(),
+            1
+        );
+        assert!(s.suggestions(50).unwrap().is_empty());
+        assert_eq!(group_of(&s, &id), None, "红线：忽略不改分组");
+
+        // 再次复制同内容 = 分类器重跑（带建议的去重命中）
+        let again = s
+            .insert_row(&NewClip::new("{\"a\": 1}").suggested(("json", 0.9)))
+            .unwrap();
+        assert_eq!(again, id, "去重命中同一行");
+        assert!(
+            s.suggestions(50).unwrap().is_empty(),
+            "去重命中不得重置 suggestion_dismissed"
+        );
+
+        // 正对照：新条目照样进队列（证明这不是"队列永久关死"）
+        s.insert_row(&NewClip::new("https://other.example").suggested(("url", 0.95)))
+            .unwrap();
+        assert_eq!(s.suggestions(50).unwrap().len(), 1);
+    }
+
+    /// 手工组名优先级最高：任何后续分类/去重都不覆写它
+    #[test]
+    #[allow(non_snake_case)]
+    fn userGroup_survivesClassifierRerun() {
+        let s = open_temp("grp_sticky");
+        let text = "let handle = tokio::spawn(f());";
+        let id = s.insert_row(&NewClip::new(text)).unwrap();
+        s.set_entry_group(&id, Some("我的草稿")).unwrap();
+
+        // 模拟 auto_group 开启后的重跑：group 与 suggested 都带着分类结果再来一遍
+        s.insert_row(&NewClip {
+            text,
+            group: Some("code"),
+            suggested: Some(("code", 0.9)),
+            ..NewClip::new(text)
+        })
+        .unwrap();
+        assert_eq!(
+            group_of(&s, &id).as_deref(),
+            Some("我的草稿"),
+            "手工分组永不被分类器覆写"
+        );
+        assert_eq!(row_count(&s), 1, "同内容仍走去重");
+
+        // 未手工分组的行才吃自动分组
+        let other = s
+            .insert_row(&NewClip::new("https://auto.example").group("url"))
+            .unwrap();
+        assert_eq!(group_of(&s, &other).as_deref(), Some("url"));
+    }
+
+    /// 统计卡：类型/分组/来源三向聚合 + 字节数（内联与 blob 分列同源）
+    #[test]
+    #[allow(non_snake_case)]
+    fn stats_countsByTypeGroupAndSource() {
+        let s = open_temp("stats");
+        s.insert_row(&NewClip::new("st-a").group("A组").from_app("notepad.exe"))
+            .unwrap();
+        s.insert_row(&NewClip::new("st-b").from_app("notepad.exe"))
+            .unwrap();
+        s.insert_row(&NewClip::new("st-c").group("B组").from_app("chrome.exe"))
+            .unwrap();
+        s.insert_row(&NewClip::new("st-d")).unwrap();
+        s.insert_files(
+            &[
+                std::path::PathBuf::from("C:/x.txt"),
+                std::path::PathBuf::from("C:/y.txt"),
+            ],
+            Some("explorer.exe"),
+            "local",
+        )
+        .unwrap();
+
+        let st = s.stats().unwrap();
+        assert_eq!(st.total, 5);
+        let bt = &st.by_content_type;
+        assert_eq!(bt["text"].as_i64(), Some(4));
+        assert_eq!(bt["files"].as_i64(), Some(1));
+        let bg = &st.by_group;
+        assert_eq!(bg["A组"].as_i64(), Some(1));
+        assert_eq!(bg["B组"].as_i64(), Some(1));
+        assert_eq!(bg["未分组"].as_i64(), Some(3), "NULL 分组归未分组桶");
+
+        assert!(
+            st.top_source_apps
+                .contains(&("notepad.exe".to_string(), 2u32)),
+            "Top 来源按计数聚合：{:?}",
+            st.top_source_apps
+        );
+        assert!(
+            st.top_source_apps
+                .iter()
+                .all(|(app, _)| !app.trim().is_empty()),
+            "无来源的行不进气味桶：{:?}",
+            st.top_source_apps
+        );
+
+        let inline = 4 * 4 + "C:/x.txt\nC:/y.txt".len() as u64;
+        assert_eq!(
+            st.bytes_blob, inline,
+            "无 blob 时字节数 = 内联 content 长度"
+        );
+
+        let big = "x".repeat(BLOB_THRESHOLD + 10);
+        s.insert_row(&NewClip::new(&big)).unwrap();
+        let st2 = s.stats().unwrap();
+        assert_eq!(st2.total, 6);
+        assert!(
+            st2.bytes_blob >= inline + big.len() as u64,
+            "blob 行按文件实际大小计入：{}",
+            st2.bytes_blob
+        );
+    }
+
+    /// 旧库重开幂等：三新列缺失时 PRAGMA 守卫补齐（schema_version 已记账，M::up 不会再跑），
+    /// 旧行建议列为 NULL、dismissed 落默认 0，零回填零丢失
+    #[test]
+    #[allow(non_snake_case)]
+    fn reopen_legacyDb_fillsSuggestedColumnsWithDefaults() {
+        let dir = std::env::temp_dir().join(format!("nf_clip_legacy_sugg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("clipboard.db");
+        let blobs = dir.join("blobs");
+
+        let id = {
+            let s = ClipStore::open(&db, blobs.clone()).unwrap();
+            s.insert_row(&NewClip::new("legacy-row").group("旧组"))
+                .unwrap()
+        };
+        // 合成 T-B3-4 之前的库形：列存在但 schema_version 已记满两版
+        {
+            let raw = Connection::open(&db).unwrap();
+            for col in [
+                "suggested_group",
+                "suggested_confidence",
+                "suggestion_dismissed",
+            ] {
+                raw.execute(&format!("ALTER TABLE clip_entries DROP COLUMN {col}"), [])
+                    .unwrap();
+            }
+            let have: Vec<String> = raw
+                .prepare("PRAGMA table_info(clip_entries)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            assert!(
+                !have.iter().any(|c| c == "suggested_group"),
+                "前置条件不成立：旧列没删掉"
+            );
+        }
+
+        let s = ClipStore::open(&db, blobs.clone()).unwrap();
+        assert_eq!(
+            group_of(&s, &id).as_deref(),
+            Some("旧组"),
+            "重开不得丢历史分组"
+        );
+        assert!(
+            s.suggestions(50).unwrap().is_empty(),
+            "旧行无建议：NULL 谓词生效而非报错"
+        );
+        let raw = Connection::open(&db).unwrap();
+        let have: Vec<String> = raw
+            .prepare("PRAGMA table_info(clip_entries)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for col in [
+            "suggested_group",
+            "suggested_confidence",
+            "suggestion_dismissed",
+        ] {
+            assert!(have.iter().any(|c| c == col), "{col} 未补齐");
+        }
+        let dismissed: i64 = raw
+            .query_row(
+                "SELECT suggestion_dismissed FROM clip_entries WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dismissed, 0, "旧行按 DEFAULT 0 兜底，不回填不报错");
+        drop(raw);
+
+        // 补齐后写口可用 + 再重开一次仍幂等（守卫不重复 ALTER）
+        let new = s
+            .insert_row(&NewClip::new("post-legacy").suggested(("url", 0.95)))
+            .unwrap();
+        assert_eq!(s.suggestions(50).unwrap()[0].entry_id, new);
+        drop(s);
+        let s = ClipStore::open(&db, blobs).unwrap();
+        assert_eq!(
+            s.suggestions(50).unwrap().len(),
+            1,
+            "二次重开不得因重复 ALTER 报错"
+        );
     }
 }

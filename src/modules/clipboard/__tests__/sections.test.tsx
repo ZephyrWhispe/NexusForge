@@ -9,6 +9,12 @@ import {
   clipboardCaptureSet,
   clipboardGet,
   clipboardGroupCounts,
+  clipboardGroupDelete,
+  clipboardGroupRename,
+  clipboardEntrySetGroup,
+  clipboardStats,
+  clipboardSuggestionApply,
+  clipboardSuggestions,
   clipboardSearch,
   clipboardStackList,
   hostConfigGet,
@@ -32,6 +38,12 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     clipboardPin: vi.fn(),
     clipboardDelete: vi.fn(),
     clipboardGroupCounts: vi.fn(),
+    clipboardSuggestions: vi.fn(),
+    clipboardSuggestionApply: vi.fn(),
+    clipboardGroupRename: vi.fn(),
+    clipboardGroupDelete: vi.fn(),
+    clipboardEntrySetGroup: vi.fn(),
+    clipboardStats: vi.fn(),
     clipboardCaptureGet: vi.fn(),
     clipboardCaptureSet: vi.fn(),
     clipboardStackList: vi.fn(),
@@ -92,6 +104,19 @@ beforeEach(() => {
     total: null,
   });
   vi.mocked(clipboardGroupCounts).mockResolvedValue({ text: 3, code: 1 });
+  // T-B3-4：分组视图挂载即拉建议，设置视图挂载即拉统计（不 mock 会打到真 invoke）
+  vi.mocked(clipboardSuggestions).mockResolvedValue([]);
+  vi.mocked(clipboardSuggestionApply).mockResolvedValue(0);
+  vi.mocked(clipboardGroupRename).mockResolvedValue(0);
+  vi.mocked(clipboardGroupDelete).mockResolvedValue(0);
+  vi.mocked(clipboardEntrySetGroup).mockResolvedValue(undefined);
+  vi.mocked(clipboardStats).mockResolvedValue({
+    total: 4,
+    by_content_type: { text: 4 },
+    by_group: { 未分组: 4 },
+    top_source_apps: [],
+    bytes_blob: 128,
+  });
   vi.mocked(clipboardGet).mockResolvedValue("");
   vi.mocked(clipboardClear).mockResolvedValue(0);
   vi.mocked(hostConfigSchema).mockResolvedValue({

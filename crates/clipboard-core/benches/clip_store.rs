@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use clipboard_core::store::ClipStore;
+use clipboard_core::store::{ClipStore, NewClip};
 use clipboard_core::types::SearchQuery;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
@@ -36,10 +36,7 @@ fn bench_scale(c: &mut Criterion, n: usize) {
         return;
     };
     for i in 0..n {
-        if store
-            .insert(&sample_row(i), None, false, None, "local")
-            .is_err()
-        {
+        if store.insert_row(&NewClip::new(&sample_row(i))).is_err() {
             eprintln!("bench 跳过（种子写入失败）tag={tag}");
             return;
         }
@@ -72,25 +69,13 @@ fn bench_scale(c: &mut Criterion, n: usize) {
         b.iter(|| {
             let i = counter.fetch_add(1, Ordering::Relaxed);
             let id = store
-                .insert(
-                    &format!("基准独占载荷 {i} bench payload"),
-                    None,
-                    false,
-                    None,
-                    "local",
-                )
+                .insert_row(&NewClip::new(&format!("基准独占载荷 {i} bench payload")))
                 .unwrap();
             black_box(id)
         })
     });
     c.bench_function(&format!("clip_store/insert_dedup/{n}"), |b| {
-        b.iter(|| {
-            black_box(
-                store
-                    .insert(&sample_row(0), None, false, None, "local")
-                    .unwrap(),
-            )
-        })
+        b.iter(|| black_box(store.insert_row(&NewClip::new(&sample_row(0))).unwrap()))
     });
 
     let _ = std::fs::remove_dir_all(temp_root(&tag));

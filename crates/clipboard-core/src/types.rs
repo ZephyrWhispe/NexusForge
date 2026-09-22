@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize)]
 pub struct ClipEntry {
     pub id: String,
-    pub content_type: &'static str, // "text" | "files"
+    pub content_type: String, // "text" | "files" | "image"
     /// 列表预览：文本前 200 字符 / 敏感遮蔽
     pub preview: String,
     /// >64KB 内容走 blob 时的引用路径
@@ -15,11 +15,32 @@ pub struct ClipEntry {
     pub origin: &'static str,
     pub source_app: Option<String>,
     pub pinned: bool,
-    pub group: Option<&'static str>,
+    /// 用户分组名（T-B3-4：组名来自用户/分类器，可为任意 Unicode，不再是固定枚举）
+    pub group: Option<String>,
     /// 命中敏感规则（内容加密存储）
     pub secret: bool,
     pub created_at: i64,
     pub usage_count: u32,
+}
+
+/// 智能分组建议（01§5-1：建议制非自动改，采纳/忽略都由用户点）
+#[derive(Debug, Serialize)]
+pub struct SuggestionDto {
+    pub entry_id: String,
+    pub preview: String,
+    pub suggested_group: String,
+    pub confidence: f32,
+}
+
+/// 统计卡（SettingsSection）：全部为库内聚合，无估算
+#[derive(Debug, Serialize)]
+pub struct StatsDto {
+    pub total: u32,
+    pub by_content_type: serde_json::Value,
+    pub by_group: serde_json::Value,
+    pub top_source_apps: Vec<(String, u32)>,
+    /// 内联 content 字节 + blob 文件实际字节
+    pub bytes_blob: u64,
 }
 
 /// 搜索查询（C6）

@@ -17,7 +17,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::classifier::Classifier;
 use crate::secrets::{global as secrets, SecretKind};
-use crate::store::ClipStore;
+use crate::store::{ClipStore, NewClip};
 use crate::types::ClipboardConfig;
 
 /// 回写防循环窗口（docs/impl/02 C3 ③）
@@ -287,12 +287,10 @@ impl CapturePipeline {
         } else {
             None
         };
-        // ④ 分类
-        let group = if config.auto_group {
-            Classifier::classify(&text).map(|(g, _)| g)
-        } else {
-            None
-        };
+        // ④ 分类：建议与落库分组同源。auto_group 关时只记 suggested_*，
+        // group_name 恒 NULL（01§5-1 建议制非自动改）；开时两者同时写，采纳流可复算。
+        let sugg = Classifier::classify(&text);
+        let group = config.auto_group.then(|| sugg.map(|(g, _)| g)).flatten();
 
         // ⑤ 入库
         let result = match kind {
@@ -306,11 +304,16 @@ impl CapturePipeline {
                 };
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&cipher);
                 self.store
-                    .insert_encrypted(&b64, group, source_app.as_deref(), origin)
+                    .insert_encrypted(&b64, group, sugg, source_app.as_deref(), origin)
             }
-            None => self
-                .store
-                .insert(&text, group, false, source_app.as_deref(), origin),
+            None => self.store.insert_row(&NewClip {
+                text: &text,
+                group,
+                suggested: sugg,
+                source_app: source_app.as_deref(),
+                origin,
+                ..NewClip::new(&text)
+            }),
         };
         let Ok(id) = result else {
             return;
@@ -547,6 +550,19 @@ mod tests {
         Arc<FakeClipboard>,
         Arc<EventBus>,
     ) {
+        start_with_fake_cfg(tag, paused, ClipboardConfig::default())
+    }
+
+    fn start_with_fake_cfg(
+        tag: &str,
+        paused: Arc<AtomicBool>,
+        cfg: ClipboardConfig,
+    ) -> (
+        PipelineHandle,
+        Arc<ClipStore>,
+        Arc<FakeClipboard>,
+        Arc<EventBus>,
+    ) {
         let store = temp_store(tag);
         let bus = Arc::new(EventBus::new());
         let port = Arc::new(FakeClipboard {
@@ -556,7 +572,7 @@ mod tests {
             log: Arc::new(Mutex::new(Vec::new())),
         });
         let crypto = Arc::new(FakeCrypto);
-        let config = Arc::new(AsyncMutex::new(ClipboardConfig::default()));
+        let config = Arc::new(AsyncMutex::new(cfg));
         let write_back = Arc::new(Mutex::new(None));
         let handle = CapturePipeline::start(
             port.clone(),
@@ -934,5 +950,69 @@ mod tests {
         );
         handle.shutdown();
         assert!(handle.wait_idle(Duration::from_secs(3)));
+    }
+
+    /// 01§5-1「建议制非自动改」红线：auto_group=false 时分类结果只进 suggested_*，
+    /// group_name 恒 NULL——用户看不到"未经同意的自动分组"，但采纳流仍可复算。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §8.2 T-B3-4）字面测试名优先于 rustc 命名惯例
+    fn classifierSuggestion_notAutoAppliedWhenAutoGroupOff() {
+        let payload = r#"{"a": 1, "b": [2, 3]}"#;
+        let cfg = ClipboardConfig {
+            auto_group: false,
+            ..Default::default()
+        };
+        let (handle, store, port, _bus) =
+            start_with_fake_cfg("sugg_off", Arc::new(AtomicBool::new(false)), cfg);
+        fire(&port, payload);
+        assert!(
+            wait_until(
+                || store
+                    .search(&crate::types::SearchQuery::default())
+                    .unwrap()
+                    .items
+                    .len()
+                    == 1,
+                Duration::from_secs(2)
+            ),
+            "auto_group 关闭不得阻断捕获入库"
+        );
+        let sugg = store.suggestions(50).unwrap();
+        assert_eq!(sugg.len(), 1, "建议列仍须落库，否则采纳流无物可列");
+        assert_eq!(sugg[0].suggested_group, "json");
+        assert!(
+            sugg[0].confidence >= 0.85,
+            "置信度须原样入库（阈值内才进队列）"
+        );
+        let row = first_row(&store).expect("条目可读");
+        assert!(
+            row.group.is_none(),
+            "auto_group=false 时 group_name 必须为 NULL，实际 {:?}",
+            row.group
+        );
+        handle.shutdown();
+
+        // 正对照：默认开时同一载荷直接落组（防"永远不分组"的假安全断言）
+        let (on, store_on, port_on, _bus) = start_with_fake("sugg_on");
+        fire(&port_on, payload);
+        assert!(
+            wait_until(
+                || store_on
+                    .search(&crate::types::SearchQuery::default())
+                    .unwrap()
+                    .items
+                    .first()
+                    .and_then(|e| e.group.as_deref())
+                    == Some("json"),
+                Duration::from_secs(2)
+            ),
+            "auto_group=true 时分类结果应写入 group_name"
+        );
+        assert_eq!(
+            store_on.suggestions(50).unwrap().len(),
+            0,
+            "已自动落组的条目不重复出现在建议队列（谓词含 group_name IS NULL）"
+        );
+        on.shutdown();
     }
 }

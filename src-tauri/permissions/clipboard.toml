@@ -84,3 +84,33 @@ commands.allow = ["clipboard_stack_paste_next"]
 identifier = "allow-clipboard-stack-paste-all"
 description = "允许前端调用 clipboard_stack_paste_all 命令（逐条写剪贴板并连续注入，main-only）"
 commands.allow = ["clipboard_stack_paste_all"]
+
+[[permission]]
+identifier = "allow-clipboard-entry-set-group"
+description = "允许前端调用 clipboard_entry_set_group 命令（改单条目分组名，main-only）"
+commands.allow = ["clipboard_entry_set_group"]
+
+[[permission]]
+identifier = "allow-clipboard-group-rename"
+description = "允许前端调用 clipboard_group_rename 命令（整组重命名，main-only）"
+commands.allow = ["clipboard_group_rename"]
+
+[[permission]]
+identifier = "allow-clipboard-group-delete"
+description = "允许前端调用 clipboard_group_delete 命令（整组解除归属，条目保留，main-only）"
+commands.allow = ["clipboard_group_delete"]
+
+[[permission]]
+identifier = "allow-clipboard-suggestions"
+description = "允许前端调用 clipboard_suggestions 命令（只读建议队列，不落库分组）"
+commands.allow = ["clipboard_suggestions"]
+
+[[permission]]
+identifier = "allow-clipboard-suggestion-apply"
+description = "允许前端调用 clipboard_suggestion_apply 命令（采纳/忽略分组建议，main-only）"
+commands.allow = ["clipboard_suggestion_apply"]
+
+[[permission]]
+identifier = "allow-clipboard-stats"
+description = "允许前端调用 clipboard_stats 命令（库内聚合统计，只读）"
+commands.allow = ["clipboard_stats"]

@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use clipboard_core::store::ClipStore;
+use clipboard_core::store::{ClipStore, NewClip};
 use clipboard_core::types::SearchQuery;
 
 /// §9.1 字面阈值（毫秒，不放宽）
@@ -33,13 +33,9 @@ fn temp_store(tag: &str) -> ClipStore {
 fn seed(store: &ClipStore, n: usize) {
     for i in 0..n {
         store
-            .insert(
-                &format!("条目 {i} 剪贴板 样本 内容 clip sample entry {i} cargo build 记录"),
-                None,
-                false,
-                None,
-                "local",
-            )
+            .insert_row(&NewClip::new(&format!(
+                "条目 {i} 剪贴板 样本 内容 clip sample entry {i} cargo build 记录"
+            )))
             .expect("种子写入");
     }
 }
@@ -91,29 +87,19 @@ fn capture_insert_p95_below_100ms_unique_and_dedup() {
     for i in 0..50 {
         let t = Instant::now();
         store
-            .insert(
-                &format!("捕获唯一载荷 {i} capture unique payload"),
-                None,
-                false,
-                None,
-                "local",
-            )
+            .insert_row(&NewClip::new(&format!(
+                "捕获唯一载荷 {i} capture unique payload"
+            )))
             .expect("唯一插入");
         samples.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     for i in 0..50 {
         let t = Instant::now();
         store
-            .insert(
-                &format!(
-                    "条目 {} 剪贴板 样本 内容 clip sample entry {} cargo build 记录",
-                    i, i
-                ),
-                None,
-                false,
-                None,
-                "local",
-            )
+            .insert_row(&NewClip::new(&format!(
+                "条目 {} 剪贴板 样本 内容 clip sample entry {} cargo build 记录",
+                i, i
+            )))
             .expect("去重命中插入");
         samples.push(t.elapsed().as_secs_f64() * 1000.0);
     }

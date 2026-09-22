@@ -8,6 +8,7 @@ import {
   DialogContent,
   DialogSurface,
   DialogTitle,
+  Input,
   makeStyles,
   Text,
   tokens,
@@ -22,6 +23,7 @@ import {
   clipboardClear,
   clipboardGet,
   clipboardGroupCounts,
+  clipboardEntrySetGroup,
   clipboardCaptureGet,
   clipboardStackPush,
   parseAppError,
@@ -187,6 +189,8 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   const [detail, setDetail] = useState<{ entry: ClipEntry; text: string | null; failed: string | null } | null>(
     null,
   );
+  // T-B3-4 详情内的手工分组草稿（打开详情时以条目现值播种）
+  const [groupDraft, setGroupDraft] = useState("");
   // T-B3-2 暂停捕获横幅：读运行态（与设置卡/托盘同源），只在真跳过过内容时出现
   const [capture, setCapture] = useState<ClipCaptureState | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -329,6 +333,7 @@ export default function HistorySection({ search, group, onCounts }: Props) {
 
   const openDetail = (e: ClipEntry) => {
     setDetail({ entry: e, text: null, failed: null });
+    setGroupDraft(e.group ?? "");
     if (e.content_type === "image") return;
     clipboardGet(e.id)
       .then((t) => setDetail((d) => (d && d.entry.id === e.id ? { ...d, text: t } : d)))
@@ -339,6 +344,19 @@ export default function HistorySection({ search, group, onCounts }: Props) {
             : d,
         ),
       );
+  };
+
+  /** T-B3-4 手工分组：留空 = 取消分组（写口 clipboard_entry_set_group 单点） */
+  const saveGroup = async (id: string) => {
+    const name = groupDraft.trim();
+    try {
+      await clipboardEntrySetGroup(id, name === "" ? null : name);
+      setDetail((d) => (d ? { ...d, entry: { ...d.entry, group: name === "" ? null : name } } : d));
+      notify("success", "分组已更新", name === "" ? "该条目回到未分组" : `「${name}」`);
+      refreshCounts();
+    } catch (err) {
+      notify("error", "改分组失败", parseAppError(err)?.data.message ?? String(err));
+    }
   };
 
   return (
@@ -541,6 +559,24 @@ export default function HistorySection({ search, group, onCounts }: Props) {
                   ) : (
                     <pre className={styles.fullText}>{detail.text}</pre>
                   )}
+                  {/* T-B3-4 手工分组：组名任意 Unicode；留空保存即取消分组 */}
+                  <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
+                    <Input
+                      size="small"
+                      aria-label="分组名"
+                      placeholder={GROUP_LABEL[detail.entry.group ?? ""] ?? "未分组"}
+                      value={groupDraft}
+                      onChange={(_, d) => setGroupDraft(d.value)}
+                      style={{ flex: 1, minWidth: 0 }}
+                    />
+                    <Button
+                      size="small"
+                      disabled={groupDraft.trim() === (detail.entry.group ?? "")}
+                      onClick={() => void saveGroup(detail.entry.id)}
+                    >
+                      保存分组
+                    </Button>
+                  </div>
                 </>
               )}
             </DialogContent>

@@ -348,6 +348,104 @@ pub async fn clipboard_stack_paste_all(
     Ok(report)
 }
 
+// ---------------- 分组数据面 + 智能建议 + 统计（docs/impl/09 §8.2 T-B3-4）----------------
+// 建议制：分类器只写 suggested_*，落库分组要么 auto_group 开、要么用户在建议卡上点采纳。
+
+#[tauri::command]
+pub async fn clipboard_entry_set_group(
+    id: String,
+    group: Option<String>,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let clipboard = state.clipboard.clone();
+    tauri::async_runtime::spawn_blocking(move || clipboard.set_entry_group(&id, group.as_deref()))
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))??;
+    publish_group_counts(&state.bus, &state.clipboard);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clipboard_group_rename(
+    from: String,
+    to: String,
+    state: State<'_, HostState>,
+) -> Result<u32, AppError> {
+    let clipboard = state.clipboard.clone();
+    let n = tauri::async_runtime::spawn_blocking(move || clipboard.rename_group(&from, &to))
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))??;
+    publish_group_counts(&state.bus, &state.clipboard);
+    Ok(n)
+}
+
+#[tauri::command]
+pub async fn clipboard_group_delete(
+    name: String,
+    state: State<'_, HostState>,
+) -> Result<u32, AppError> {
+    let clipboard = state.clipboard.clone();
+    let n = tauri::async_runtime::spawn_blocking(move || clipboard.delete_group(&name))
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))??;
+    publish_group_counts(&state.bus, &state.clipboard);
+    Ok(n)
+}
+
+#[tauri::command]
+pub async fn clipboard_suggestions(
+    limit: Option<u32>,
+    state: State<'_, HostState>,
+) -> Result<Vec<clipboard_core::types::SuggestionDto>, AppError> {
+    let clipboard = state.clipboard.clone();
+    let limit = limit.unwrap_or(100);
+    tauri::async_runtime::spawn_blocking(move || clipboard.suggestions(limit))
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
+}
+
+/// 采纳/忽略建议：两路都只动建议位，忽略不改分组（01§5-1 用户点才算数）
+#[tauri::command]
+pub async fn clipboard_suggestion_apply(
+    ids: Vec<String>,
+    accept: bool,
+    state: State<'_, HostState>,
+) -> Result<u32, AppError> {
+    let clipboard = state.clipboard.clone();
+    let n = tauri::async_runtime::spawn_blocking(move || clipboard.apply_suggestion(&ids, accept))
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))??;
+    if accept {
+        publish_group_counts(&state.bus, &state.clipboard);
+    }
+    Ok(n)
+}
+
+#[tauri::command]
+pub async fn clipboard_stats(
+    state: State<'_, HostState>,
+) -> Result<clipboard_core::types::StatsDto, AppError> {
+    let clipboard = state.clipboard.clone();
+    tauri::async_runtime::spawn_blocking(move || clipboard.stats())
+        .await
+        .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?
+}
+
+/// 分组写口成功后广播一次计数（SubNav 角标与左树同源，前端不必各自重拉）
+fn publish_group_counts(
+    bus: &host_core::events::EventBus,
+    clipboard: &clipboard_core::module::ClipboardModule,
+) {
+    if let Ok(counts) = clipboard.group_counts() {
+        bus.publish(host_core::events::Event::new(
+            "clipboard.groups_changed",
+            "clipboard",
+            counts,
+        ))
+        .ok();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

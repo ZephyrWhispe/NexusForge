@@ -483,6 +483,32 @@ impl ClipboardModule {
             .group_counts()
     }
 
+    /// 分组数据面门面（T-B3-4）：以下六项都是 store 的直通，未就绪时统一
+    /// CLIPBOARD_QUERY_001，错误码语义由 store 侧给出。
+    pub fn set_entry_group(&self, id: &str, group: Option<&str>) -> Result<(), AppError> {
+        self.require_store()?.set_entry_group(id, group)
+    }
+
+    pub fn rename_group(&self, from: &str, to: &str) -> Result<u32, AppError> {
+        self.require_store()?.rename_group(from, to)
+    }
+
+    pub fn delete_group(&self, name: &str) -> Result<u32, AppError> {
+        self.require_store()?.delete_group(name)
+    }
+
+    pub fn suggestions(&self, limit: u32) -> Result<Vec<crate::types::SuggestionDto>, AppError> {
+        self.require_store()?.suggestions(limit)
+    }
+
+    pub fn apply_suggestion(&self, ids: &[String], accept: bool) -> Result<u32, AppError> {
+        self.require_store()?.apply_suggestion(ids, accept)
+    }
+
+    pub fn stats(&self) -> Result<crate::types::StatsDto, AppError> {
+        self.require_store()?.stats()
+    }
+
     /// 查询入口（C7 IPC 调用）
     pub fn search(
         &self,
@@ -742,6 +768,7 @@ impl TrayProvider for ClipboardModule {
 mod tests {
     use super::*;
     use crate::pipeline::{CallLog, FakeClipboard, FakeCrypto, FakeInjector};
+    use crate::store::NewClip;
     use host_core::ports::Ports;
     use host_core::registry::ModuleRegistry;
     use parking_lot::Mutex;
@@ -1172,9 +1199,7 @@ mod tests {
     async fn stack_pasteNext_writesThenInjectsCtrlV() {
         let h = harness("stk_deliver").await;
         let store = h.module.store().unwrap();
-        let id = store
-            .insert("stack-first", None, false, None, "local")
-            .unwrap();
+        let id = store.insert_row(&NewClip::new("stack-first")).unwrap();
         assert_eq!(h.module.stack_push(&id).unwrap(), 1);
 
         let dto = h
@@ -1202,7 +1227,7 @@ mod tests {
         let h = harness("stk_secret").await;
         let store = h.module.store().unwrap();
         let id = store
-            .insert_encrypted("aGVsbG8tY2lwaGVy", None, None, "local")
+            .insert_encrypted("aGVsbG8tY2lwaGVy", None, None, None, "local")
             .unwrap();
         h.module.stack_push(&id).unwrap();
 
@@ -1221,9 +1246,7 @@ mod tests {
         assert_eq!(stacked_ids(&h), vec![id.clone()], "未投递的项必须仍在栈上");
 
         // 对照臂：明文项走同一路径正常投递，证明上一条拒的是内容语义而非端口没通
-        let plain = store
-            .insert("stack-not-secret", None, false, None, "local")
-            .unwrap();
+        let plain = store.insert_row(&NewClip::new("stack-not-secret")).unwrap();
         h.module.stack_push(&plain).unwrap();
         assert!(
             !h.module
@@ -1251,7 +1274,7 @@ mod tests {
         let store = h.module.store().unwrap();
         let ids: Vec<String> = ["stk-1", "stk-2", "stk-3"]
             .iter()
-            .map(|t| store.insert(t, None, false, None, "local").unwrap())
+            .map(|t| store.insert_row(&NewClip::new(t)).unwrap())
             .collect();
         for id in &ids {
             h.module.stack_push(id).unwrap();
