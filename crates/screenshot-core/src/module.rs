@@ -28,8 +28,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::store::ShotStore;
 use crate::types::{
-    Annotation, ConfirmRect, CropDto, FinishDto, FinishRequest, PinDataDto, PinDto,
-    ScreenshotConfig, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
+    effective_actions, Annotation, ConfirmRect, CropDto, FinishDto, FinishRequest, PinDataDto,
+    PinDto, ScreenshotConfig, ShotDataDto, ShotItem, TaskInfoDto, TaskStartDto,
+    POST_ACTION_WHITELIST,
 };
 use crate::util;
 
@@ -298,6 +299,12 @@ impl Module for ScreenshotModule {
                 "auto_pin": {
                     "type": "boolean", "title": "完成后贴图",
                     "description": "截图完成后自动创建贴图窗口", "default": false
+                },
+                "post_actions": {
+                    "type": "array", "title": "完成后动作链",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "save/copy/pin/ocr/beautify 的有序子集；非空时上面三个「完成后…」开关全部失效（它们只在本键为空时决定动作链）。留空 = 沿用三开关"
                 }
             }
         })
@@ -309,6 +316,25 @@ impl Module for ScreenshotModule {
         if let Some(raw) = values.get("format").and_then(|v| v.as_str()) {
             util::EncodeFormat::from_str_honest(raw)
                 .map_err(|e| ModuleError::Config(e.to_string()))?;
+        }
+        // 动作链同样在落配置前校验：收下一个拼错的 "cpo" 等于让下一次截图默默少一个动作。
+        // 非字符串元素一并点名（serde 的类型错只说 "invalid type"，说不出是哪一格坏）
+        if let Some(arr) = values.get("post_actions").and_then(|v| v.as_array()) {
+            let bad: Vec<String> = arr
+                .iter()
+                .filter_map(|v| match v.as_str() {
+                    Some(s) if POST_ACTION_WHITELIST.contains(&s) => None,
+                    Some(s) => Some(s.to_owned()),
+                    None => Some(v.to_string()),
+                })
+                .collect();
+            if !bad.is_empty() {
+                return Err(ModuleError::Config(format!(
+                    "post_actions 含未知动作「{}」，白名单：{}",
+                    bad.join("」「"),
+                    POST_ACTION_WHITELIST.join("、")
+                )));
+            }
         }
         let cfg: ScreenshotConfig =
             serde_json::from_value(values).map_err(|e| ModuleError::Config(e.to_string()))?;
@@ -400,6 +426,15 @@ impl ScreenshotModule {
             y: vy,
             width: vw,
             height: vh,
+            // 配置真源直达覆盖层：这里是它读偏好的唯一途径（§9.1-⑪ 不给覆盖层开 config_get）
+            default_actions: effective_actions(
+                &self
+                    .config
+                    .try_lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_default(),
+                &[],
+            ),
         })
     }
 
@@ -461,31 +496,34 @@ impl ScreenshotModule {
     ///
     /// 美化（D-29 B4 T-B4-6）放在动作循环**之前**而不是各臂里各做一次：分叉的下游
     /// 就是"预览是原图、保存是美化图"这类报告，一次决议四面同源是唯一不收口就说不清的位置
+    ///
+    /// 动作链（D-29 B4 T-B4-8）经 `effective_actions` 一处决议：请求里显式带的动作 >
+    /// 配置的 `post_actions` > 三 bool 派生。链条要能在像素决议之前读到，
+    /// 所以 `beautify` 这个"只改像素、不产副作用"的动作先扫一遍名单、把美化一次做完，
+    /// 循环里的 `"beautify"` 臂随之退化为 documented no-op（见 `run_actions`）。
     pub fn finish(&self, task_id: &str, req: &FinishRequest) -> Result<FinishDto, AppError> {
-        let (raw_w, raw_h, raw_rgba) = util::decode_png_b64(&req.image_b64)?;
-        let (w, h, rgba) = match req.beautify.as_ref() {
-            Some(spec) => crate::beautify::beautify(&raw_rgba, raw_w, raw_h, spec)?,
-            None => (raw_w, raw_h, raw_rgba),
-        };
-
-        // 配置动作 = 显式 actions + auto_* 兜底（前端总是显式传；auto_* 用于面板默认行为）
-        let mut actions = req.actions.clone();
         let cfg = self
             .config
             .try_lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        if actions.is_empty() {
-            if cfg.auto_save {
-                actions.push("save".into());
+        let actions = effective_actions(&cfg, &req.actions);
+        let (raw_w, raw_h, raw_rgba) = util::decode_png_b64(&req.image_b64)?;
+        let spec = match req.beautify.as_ref() {
+            Some(s) => Some(s.clone()),
+            // 名单里有 beautify 而请求没带参数 = 恒等预设（`BeautifySpec::default()` 逐字节
+            // 不动图，见 beautify.rs 的 `beautify_allZeroSpec_isByteIdentical`）。
+            // 这一档不是"顺手补个默认"：它让 `post_actions: ["save","beautify"]` 这种
+            // 纯配置动作链在没有覆盖层参与时也成立，语义是"这条链走美化通路但这次不装饰"。
+            None if actions.iter().any(|a| a == "beautify") => {
+                Some(crate::beautify::BeautifySpec::default())
             }
-            if cfg.auto_copy {
-                actions.push("copy".into());
-            }
-            if cfg.auto_pin {
-                actions.push("pin".into());
-            }
-        }
+            None => None,
+        };
+        let (w, h, rgba) = match spec.as_ref() {
+            Some(spec) => crate::beautify::beautify(&raw_rgba, raw_w, raw_h, spec)?,
+            None => (raw_w, raw_h, raw_rgba),
+        };
 
         let outcome = self.run_actions(ActionRun {
             actions: &actions,
@@ -643,6 +681,11 @@ impl ScreenshotModule {
                 // docs/impl/03 P5：Ocr 动作只转发事件，识别在 ocr-core 侧异步完成，
                 // 结果经 ocr.completed 回流（历史回填 + 截图 UI），此处登记待触发
                 "ocr" => request_ocr = true,
+                // 美化在这里是**有意的空臂**：像素在两个调用侧都已于循环之前一次性作用于
+                // 最终图（`finish` 的 spec 决议 / `beautify_apply` 的入参），循环再改一次就是
+                // "复制的是原图、保存的是美化图"那类分叉的成因。列进白名单而不留空臂，
+                // 用户点的动作会被下面的 warn 吞掉——名字看得见、效果看不见，比空臂更坏。
+                "beautify" => {}
                 other => tracing::warn!(action = other, "未知截图后处理动作，已忽略"),
             }
         }
@@ -1427,6 +1470,149 @@ mod tests {
         m.finish("t2", &plain).unwrap();
         let imgs = clip.images.lock().unwrap();
         assert_eq!((imgs[1].0, imgs[1].1), (2, 2), "无 beautify 时尺寸不变");
+    }
+
+    /// 写侧拒（D-29 B4 T-B4-8 红线）：拼错的动作名进不了配置。
+    /// 运行期那臂（`effective_actions` warn 后丢）测的是手改 JSON 的残留，两者各测一次：
+    /// 只留运行期 warn，用户永远看不到自己写坏了什么；只留写侧拒，坏值一旦来自
+    /// 旧版本/手工编辑就会在截图时才炸——那时没人会想起去翻设置。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-8）字面测试名优先于 rustc 命名惯例
+    fn applyConfig_unknownPostAction_rejectsNamingValue() {
+        let m = ScreenshotModule::new();
+        let e = match m.apply_config(json!({ "post_actions": ["copy", "teleport"] })) {
+            Err(e @ ModuleError::Config(_)) => e,
+            other => panic!("越界动作必须走 Config 拒绝，实得 {other:?}"),
+        };
+        // 点名违规值本身（只说"配置错误"等于让用户自己一条条试）
+        let msg = e.to_string();
+        assert!(msg.contains("teleport"), "{msg}");
+        // 白名单同样进消息：用户看得见有哪些合法值可填
+        assert!(msg.contains("beautify"), "{msg}");
+        // 拒后状态不变：坏 payload 一个键都不落地（不是"先收下再报错"）
+        let cfg = m.config.try_lock().unwrap().clone();
+        assert!(cfg.post_actions.is_empty());
+        assert!(cfg.auto_save, "三 bool 保持默认，未被半写覆盖");
+        // 正对照：同一形状的合法值真能写进去（否则上面三条对任何输入都绿）
+        m.apply_config(json!({ "post_actions": ["copy", "ocr"], "auto_save": false }))
+            .unwrap();
+        let cfg = m.config.try_lock().unwrap().clone();
+        assert_eq!(cfg.post_actions, ["copy", "ocr"]);
+        assert!(!cfg.auto_save);
+        // 非字符串元素也点名（serde 的类型错只会说 invalid type，指不出是哪一格）
+        let e = m
+            .apply_config(json!({ "post_actions": [42] }))
+            .expect_err("数字动作必须拒");
+        assert!(e.to_string().contains("42"), "{e}");
+    }
+
+    /// `beautify` 进动作链但不改像素（D-29 B4 T-B4-8）：请求没带 spec 时走恒等预设。
+    /// 这一条钉的是"名单里有这个名字就足以让链路走美化通路，而通路本身是零副作用的"。
+    #[test]
+    #[allow(non_snake_case)]
+    fn finish_beautifyDefaultSpec_isNoOp() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = ScreenshotModule::new();
+        let clip = Arc::new(CaptureClipboard::default());
+        *m.clipboard.write() = Some(clip.clone());
+        let store = store_of(dir.path());
+        *m.store.write() = Some(store);
+        *m.app_data_dir.write() = Some(dir.path().to_path_buf());
+        *m.config.try_lock().unwrap() = ScreenshotConfig {
+            save_dir: dir.path().join("out").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let src: Vec<u8> = vec![
+            10, 11, 12, 255, 20, 21, 22, 255, 30, 31, 32, 255, 40, 41, 42, 255,
+        ];
+        let png = util::encode_png_b64(2, 2, &src).unwrap();
+
+        // ① 只 save：基线字节
+        let base = m
+            .finish(
+                "t1",
+                &FinishRequest {
+                    image_b64: png.clone(),
+                    actions: vec!["save".into()],
+                    pin_x: None,
+                    pin_y: None,
+                    annotations: vec![],
+                    format: None,
+                    beautify: None,
+                },
+            )
+            .unwrap()
+            .file
+            .unwrap();
+        // ② save + beautify（无 spec）：字节与历史尺寸须与基线逐字节相同
+        let with_action = m
+            .finish(
+                "t2",
+                &FinishRequest {
+                    image_b64: png,
+                    actions: vec!["save".into(), "beautify".into()],
+                    pin_x: None,
+                    pin_y: None,
+                    annotations: vec![],
+                    format: None,
+                    beautify: None,
+                },
+            )
+            .unwrap();
+        let f2 = with_action
+            .file
+            .clone()
+            .expect("beautify 不得吞掉同批 save");
+        assert_eq!(
+            std::fs::read(&f2).unwrap(),
+            std::fs::read(&base).unwrap(),
+            "恒等预设必须逐字节不动图"
+        );
+        let item = m.history_store().unwrap().get("t2").unwrap().unwrap();
+        assert_eq!((item.width, item.height), (2, 2), "历史行记的仍是原尺寸");
+        // ③ 动作链不被空臂打断：beautify 之后的 copy 照常执行（原样进剪贴板）
+        m.finish(
+            "t3",
+            &FinishRequest {
+                image_b64: util::encode_png_b64(2, 2, &src).unwrap(),
+                actions: vec!["beautify".into(), "copy".into()],
+                pin_x: None,
+                pin_y: None,
+                annotations: vec![],
+                format: None,
+                beautify: None,
+            },
+        )
+        .unwrap();
+        {
+            let images = clip.images.lock().unwrap();
+            assert_eq!(images.len(), 1, "beautify 空臂不能让后续动作漏掉");
+            assert_eq!((images[0].0, images[0].1), (2, 2));
+        }
+        // ④ 正对照（防空洞）：同一枚动作名配上真 spec 时像素确实变了——
+        // 说明 ② 的"不变"来自恒等预设而不是 beautify 被整个忽略
+        let spec = crate::beautify::BeautifySpec {
+            padding: 2,
+            ..Default::default()
+        };
+        let big = m
+            .finish(
+                "t4",
+                &FinishRequest {
+                    image_b64: util::encode_png_b64(2, 2, &src).unwrap(),
+                    actions: vec!["save".into(), "beautify".into()],
+                    pin_x: None,
+                    pin_y: None,
+                    annotations: vec![],
+                    format: None,
+                    beautify: Some(spec),
+                },
+            )
+            .unwrap()
+            .file
+            .unwrap();
+        let (w, h, _) = util::decode_rgba_bytes(&std::fs::read(&big).unwrap()).unwrap();
+        assert_eq!((w, h), (6, 6), "带 spec 时 padding=2 应外扩成 6×6");
     }
 
     /// 预览臂（行字面 `actions: []` = 只预览不落盘）：零磁盘写、零剪贴板写、零历史新增

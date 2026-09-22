@@ -52,6 +52,7 @@ import {
   nextExportFormat,
   type ExportFormat,
 } from "./overlay/exportFormats";
+import { completeActions, completeLabel } from "./overlay/postActions";
 import {
   MAG_SIZE,
   drawMagnifier,
@@ -368,6 +369,8 @@ function fmtErr(e: unknown): string {
 export default function OverlayShot() {
   const styles = useStyles();
   const [task, setTask] = useState<TaskInfoDto | null>(null);
+  /** 本次任务的「完成」动作链（T-B4-8：宿主随 TaskStartDto 带下来的配置真源，覆盖层不读设置） */
+  const [defaultActions, setDefaultActions] = useState<string[]>([]);
   const [stage, setStage] = useState<Stage>("select");
   const [crop, setCrop] = useState<CropDto | null>(null);
   /** 致命错误（任务加载失败）：替换整页 */
@@ -450,6 +453,8 @@ export default function OverlayShot() {
       pickedRef.current = null;
       setPicked(null);
       setStackCounts({ undo: 0, redo: 0 });
+      // 动作链跟着任务走：预热窗口复用，上一任务的偏好不能顶着新截图的脸生效
+      setDefaultActions(completeActions(info.default_actions));
       setError(null);
       setActionError(null);
       setOcrResult(null);
@@ -1609,8 +1614,13 @@ export default function OverlayShot() {
       )}
 
       <div className={styles.toolbar}>
-        <Button size="small" appearance="primary" onClick={() => void finish([])} disabled={busy}>
-          {busy ? "处理中…" : "完成"}
+        <Button
+          size="small"
+          appearance="primary"
+          onClick={() => void finish(defaultActions)}
+          disabled={busy}
+        >
+          {busy ? "处理中…" : completeLabel(defaultActions)}
         </Button>
         <Button size="small" onClick={() => void finish(["copy"])} disabled={busy}>
           复制

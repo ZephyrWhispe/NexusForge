@@ -318,6 +318,12 @@ export interface TaskStartDto {
   y: number;
   width: number;
   height: number;
+  /**
+   * 完成后动作链（T-B4-8）：= 宿主侧 `effective_actions(cfg, [])`，覆盖层「完成」钮按它传动作。
+   * 覆盖层因此不需要读设置命令（§9.1-⑪）。运行时可能是 `undefined`（升级前的旧载荷、
+   * URL 参数直进的覆盖层），读取处一律过 `completeActions()` 的 `?? []` 兼容臂。
+   */
+  default_actions: string[];
 }
 
 export interface TaskInfoDto {

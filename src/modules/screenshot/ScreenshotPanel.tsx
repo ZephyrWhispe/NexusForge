@@ -14,6 +14,9 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  hostConfigGet,
+  hostConfigSet,
+  parseAppError,
   screenshotHistoryCopy,
   screenshotHistoryGet,
   screenshotHistoryList,
@@ -22,6 +25,7 @@ import {
   type PinDataDto,
   type ShotItemDto,
 } from "../../ipc/client";
+import { IN_TAURI } from "../../ipc/env";
 import { notify, reportError } from "../../stores/notifications";
 import { EXPORT_FORMATS, EXPORT_LABEL, type ExportFormat } from "../../windows/overlay/exportFormats";
 import BeautifyPopover, { type BeautifyTarget } from "./BeautifyPopover";
@@ -36,6 +40,24 @@ import DeferredBadge from "../../components/DeferredBadge";
  */
 
 const PAGE_SIZE = 30;
+
+/**
+ * 「完成后动作链」四枚预设（D-29 B4 T-B4-8）：写入的就是名单本身，
+ * 面板不替用户重排顺序——覆盖层「完成」钮按这个次序逐个执行。
+ */
+export const POST_ACTION_PRESETS: { label: string; actions: string[] }[] = [
+  { label: "保存+复制", actions: ["save", "copy"] },
+  { label: "仅保存", actions: ["save"] },
+  { label: "复制+OCR", actions: ["copy", "ocr"] },
+  { label: "贴图+复制", actions: ["pin", "copy"] },
+];
+
+/** 盘上的动作名单（坏元素逐个滤掉而不是整份丢弃：一格手打的坏值不该清空其余偏好） */
+function readPostActions(cfg: Record<string, unknown>): string[] {
+  return Array.isArray(cfg.post_actions)
+    ? cfg.post_actions.filter((x): x is string => typeof x === "string")
+    : [];
+}
 
 const useStyles = makeStyles({
   root: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 },
@@ -95,6 +117,13 @@ const useStyles = makeStyles({
     textOverflow: "ellipsis",
   },
   ops: { display: "flex", gap: "6px", padding: "4px 10px 10px" },
+  chipRow: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" },
+  hint: {
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
+    display: "block",
+    padding: "6px 0 0",
+  },
   pinRow: { display: "flex", gap: "10px", flexWrap: "wrap" },
   pinImg: {
     height: "72px",
@@ -130,6 +159,10 @@ export default function ScreenshotPanel() {
   const [thumbs, setThumbs] = useState<Record<string, string | null>>({});
   const [pins, setPins] = useState<PinDataDto[]>([]);
   const [beautify, setBeautify] = useState<BeautifyTarget | null>(null);
+  /** 截图配置的整份快照：写回必须是"展开它、只覆一枚键"（host_config_set 整份替换语义） */
+  const [shotCfg, setShotCfg] = useState<Record<string, unknown> | null>(null);
+  const [postActions, setPostActions] = useState<string[]>([]);
+  const [presetBusy, setPresetBusy] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -178,6 +211,40 @@ export default function ScreenshotPanel() {
         .catch(() => setThumbs((prev) => ({ ...prev, [it.id]: null })));
     }
   }, [items, thumbs]);
+
+  // 配置真源读一次（T-B4-8）：既给预设区高亮"当前是哪枚"，也是写回时的展开基底
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    hostConfigGet("screenshot")
+      .then((cfg) => {
+        setShotCfg(cfg);
+        setPostActions(readPostActions(cfg));
+      })
+      .catch((e) =>
+        reportError(e, { context: "截图设置读取失败", dedupeKey: "shot-settings" }),
+      );
+  }, []);
+
+  const applyPreset = useCallback(
+    async (preset: { label: string; actions: string[] }) => {
+      // 没读到配置就写 = 拿 {} 覆掉用户全部截图设置（host_config_set 是整份替换语义）：
+      // 宁可不响应这一次点击
+      if (!shotCfg) return;
+      setPresetBusy(preset.label);
+      try {
+        const merged = { ...shotCfg, post_actions: preset.actions };
+        await hostConfigSet("screenshot", merged);
+        setShotCfg(merged);
+        setPostActions(preset.actions);
+        notify("success", `完成后动作链：${preset.label}`, "覆盖层「完成」钮下一次截图即按此执行");
+      } catch (e) {
+        notify("error", "保存动作链失败", parseAppError(e)?.data.message ?? String(e));
+      } finally {
+        setPresetBusy(null);
+      }
+    },
+    [shotCfg],
+  );
 
   const saveAs = useCallback(async (id: string, file: string | null, fmt: ExportFormat) => {
     try {
@@ -249,6 +316,30 @@ export default function ScreenshotPanel() {
             onClose={() => setBeautify(null)}
           />
         )}
+        <Text className={styles.sectionTitle}>截图设置 · 完成后动作链</Text>
+        <div className={styles.chipRow}>
+          {POST_ACTION_PRESETS.map((p) => {
+            const active = p.actions.join(",") === postActions.join(",");
+            return (
+              <Button
+                key={p.label}
+                size="small"
+                appearance={active ? "primary" : "secondary"}
+                aria-pressed={active}
+                disabled={!shotCfg || presetBusy !== null}
+                onClick={() => void applyPreset(p)}
+              >
+                {presetBusy === p.label ? "保存中…" : p.label}
+              </Button>
+            );
+          })}
+          <Badge appearance="outline" size="small">
+            {postActions.length > 0 ? `当前：${postActions.join(" → ")}` : "当前：沿用「完成后…」三开关"}
+          </Badge>
+        </div>
+        <Text className={styles.hint}>
+          名单非空时，设置中心里「完成后复制 / 完成后保存 / 完成后贴图」三个开关不再参与动作链（它们只在名单为空时决定）；覆盖层上当面点的复制 / 保存 / 贴图钮永远以那一次点击为准。
+        </Text>
         {pins.length > 0 && (
           <>
             <Text className={styles.sectionTitle}>当前贴图 · {pins.length}</Text>

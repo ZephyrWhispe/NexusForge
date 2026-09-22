@@ -28,6 +28,66 @@ pub struct ScreenshotConfig {
     /// 完成后进入贴图（与 auto_save 共存，保存仍执行）
     #[serde(default)]
     pub auto_pin: bool,
+    /// 完成后动作链（D-29 B4 T-B4-8）：`auto_*` 三 bool 的**替代真源**——非空时三 bool
+    /// 全被忽略（它们只在新键缺席时参与派生，见 `effective_actions`）。
+    /// 元素须在 [`POST_ACTION_WHITELIST`] 内：写侧 `apply_config` 点名拒，
+    /// 运行期（旧快照里残留的坏值）`effective_actions` warn 后丢。
+    #[serde(default)]
+    pub post_actions: Vec<String>,
+}
+
+/// `post_actions` 的合法元素集：写侧拒与运行期 warn 读同一份词表（两处各写一份，
+/// 加一个动作就会变成"设置里存得进、跑起来默默丢"）
+pub const POST_ACTION_WHITELIST: &[&str] = &["save", "copy", "pin", "ocr", "beautify"];
+
+/// 三 bool 的派生序：save→copy→pin，与 T-B4-8 之前 `finish()` 里那段兜底的字面顺序一致，
+/// 旧快照因此在升级前后拿到同一份动作链——这就是"零迁移"的全部内容
+fn actions_from_bools(cfg: &ScreenshotConfig) -> Vec<String> {
+    let mut out = Vec::with_capacity(3);
+    if cfg.auto_save {
+        out.push("save".into());
+    }
+    if cfg.auto_copy {
+        out.push("copy".into());
+    }
+    if cfg.auto_pin {
+        out.push("pin".into());
+    }
+    out
+}
+
+/// 完成后动作链的**唯一决策点**（纯函数：只读 cfg 与 req，不改任何东西、也不落盘）
+///
+/// 三级优先，次序即语义：
+/// 1. `req` 非空 → 原样交出。用户在覆盖层当面点的那颗钮大于任何全局偏好。
+/// 2. `cfg.post_actions` 非空 → 白名单过滤后的它。**过滤后为空也是空**，
+///    不回落三 bool：回落等于同时承认两个真源，"设置里选了不保存、却仍在写盘"
+///    就是这么漂出来的。
+/// 3. 否则由三 bool 派生（旧快照零迁移臂）。
+pub fn effective_actions(cfg: &ScreenshotConfig, req: &[String]) -> Vec<String> {
+    if !req.is_empty() {
+        return req.to_vec();
+    }
+    if !cfg.post_actions.is_empty() {
+        return cfg
+            .post_actions
+            .iter()
+            .filter(|a| {
+                let known = POST_ACTION_WHITELIST.contains(&a.as_str());
+                if !known {
+                    // 运行期兜底：写侧已拒，坏值只可能来自手改 JSON 或升级前残留
+                    tracing::warn!(
+                        action = %a,
+                        whitelist = POST_ACTION_WHITELIST.join("、"),
+                        "post_actions 含未知动作，本次忽略（不影响同批其余动作）"
+                    );
+                }
+                known
+            })
+            .cloned()
+            .collect();
+    }
+    actions_from_bools(cfg)
 }
 
 fn default_filename_template() -> String {
@@ -53,6 +113,7 @@ impl Default for ScreenshotConfig {
             auto_copy: true,
             auto_save: true,
             auto_pin: false,
+            post_actions: Vec::new(),
         }
     }
 }
@@ -116,6 +177,11 @@ pub struct TaskStartDto {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// 配置真源直达覆盖层（D-29 B4 T-B4-8）：= `effective_actions(cfg, &[])`，
+    /// 覆盖层"完成"钮按它传动作。**不给 overlay 开读设置的口子**（§9.1-⑪）——
+    /// 偏好要出现在覆盖层上，就得经过这里，否则覆盖层要么自己 invoke 一次 config_get
+    /// （多一条 ACL 面），要么写死一套动作（和设置漂移）。
+    pub default_actions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,8 +214,9 @@ pub struct CropDto {
 pub struct FinishRequest {
     /// 前端 canvas 合成后的最终图（PNG Base64）——预览即导出，保证一致性
     pub image_b64: String,
-    /// save | copy | pin | ocr（ocr 只发布 screenshot.ocr_requested 事件，
-    /// 识别结果经 ocr.completed 异步回流，见 D-09）
+    /// save | copy | pin | ocr | beautify（ocr 只发布 screenshot.ocr_requested 事件，
+    /// 识别结果经 ocr.completed 异步回流，见 D-09；beautify 不产副作用，像素在
+    /// 动作循环之前就已作用于最终图，见 T-B4-8）
     #[serde(default)]
     pub actions: Vec<String>,
     /// Pin 初始位置（屏幕物理像素）
@@ -289,5 +356,89 @@ mod tests {
         ] {
             assert!(json.contains(key), "序列化缺 {key}：{json}");
         }
+    }
+
+    fn cfg_with(post_actions: &[&str], save: bool, copy: bool, pin: bool) -> ScreenshotConfig {
+        ScreenshotConfig {
+            post_actions: post_actions.iter().map(|s| (*s).to_owned()).collect(),
+            auto_save: save,
+            auto_copy: copy,
+            auto_pin: pin,
+            ..Default::default()
+        }
+    }
+
+    fn strs(v: &[String]) -> Vec<&str> {
+        v.iter().map(|s| s.as_str()).collect()
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-8）字面测试名优先于 rustc 命名惯例
+    fn effectiveActions_explicitRequest_winsOverConfig() {
+        // 用户在覆盖层当面点的钮 > 全局偏好：配置写"保存"而这次点"复制"，就得只复制
+        let cfg = cfg_with(&["save"], true, true, true);
+        let got = effective_actions(&cfg, &["copy".to_owned()]);
+        assert_eq!(strs(&got), ["copy"]);
+        // 正对照：空请求才轮到配置（否则本测试可以是"req 永远原样返回"的空洞实现）
+        assert_eq!(strs(&effective_actions(&cfg, &[])), ["save"]);
+        // 第二级胜过第三级：请求为空时 post_actions 顶掉三 bool
+        let cfg2 = cfg_with(&["ocr"], true, true, true);
+        assert_eq!(strs(&effective_actions(&cfg2, &[])), ["ocr"]);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn effectiveActions_legacyBools_deriveInStableOrder() {
+        // 旧快照零迁移臂：只有三 bool 的配置（post_actions 缺席）→ 升级前的字面顺序
+        let cfg = cfg_with(&[], true, true, true);
+        assert_eq!(strs(&effective_actions(&cfg, &[])), ["save", "copy", "pin"]);
+        // 顺序判据不是集合判据：save→copy→pin 与 T-B4-8 之前 finish() 里那三段 push 逐字对齐
+        let cfg = cfg_with(&[], false, true, true);
+        assert_eq!(strs(&effective_actions(&cfg, &[])), ["copy", "pin"]);
+        // 全负：三开关全关就是真的没事做（不是回落某个"默认动作"）
+        let cfg = cfg_with(&[], false, false, false);
+        assert!(effective_actions(&cfg, &[]).is_empty());
+        // 默认配置（首次运行、没写过设置）：auto_save+auto_copy 开、auto_pin 关
+        assert_eq!(
+            strs(&effective_actions(&ScreenshotConfig::default(), &[])),
+            ["save", "copy"]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn effectiveActions_postActionsEmptyWithBools_prefersConfigKey() {
+        // 单一真源：post_actions 在场（非空）时三 bool 全被忽略——两处都可写就会漂出
+        // "设置里选了不保存、却仍在写盘"。auto_pin=true 而新键里没有 pin，pin 就不该出现。
+        let cfg = cfg_with(&["copy", "ocr"], true, false, true);
+        assert_eq!(strs(&effective_actions(&cfg, &[])), ["copy", "ocr"]);
+        // 新键**为空**时三 bool 重新生效（本名的另一臂：空名单 = 未配置，不是"关掉一切"）
+        let cfg = cfg_with(&[], true, false, true);
+        assert_eq!(strs(&effective_actions(&cfg, &[])), ["save", "pin"]);
+        // 边界如实登记：新键非空但全是不认识的名称时**不**回落三 bool（见下一个测试）
+        let cfg = cfg_with(&["teleport"], true, true, true);
+        assert!(effective_actions(&cfg, &[]).is_empty());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn effectiveActions_unknownName_droppedWithWarn_notStored() {
+        // 运行期兜底臂（写侧 apply_config 已拒，坏值只能来自手改 JSON）：坏值丢、好值留
+        let cfg = cfg_with(&["copy", "teleport", "save"], true, true, true);
+        let got = effective_actions(&cfg, &[]);
+        assert_eq!(
+            strs(&got),
+            ["copy", "save"],
+            "越界项丢掉后其余动作照常按原序执行"
+        );
+        assert!(!got.iter().any(|a| a == "teleport"));
+        // "notStored"：纯函数不改配置——过滤发生在读出侧，而不是顺手把用户配置改写了。
+        // 真把坏值写回需要 &mut，而那条路会让设置页每次打开都静默吃掉一格用户的输入
+        assert_eq!(strs(&cfg.post_actions), ["copy", "teleport", "save"]);
+        // 词表自身：五枚动作名一个不多一个不少（新增动作要连白名单一起改，这里先钉住形状）
+        assert_eq!(
+            POST_ACTION_WHITELIST,
+            ["save", "copy", "pin", "ocr", "beautify"]
+        );
     }
 }
