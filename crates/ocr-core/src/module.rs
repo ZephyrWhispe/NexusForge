@@ -26,6 +26,7 @@ use crate::pipeline::OcrPipeline;
 use crate::tesseract::{
     CommandRunner, SystemRunner, TesseractEngine, TesseractSettings, TESSERACT_ID,
 };
+use crate::translate::TranslateRegistry;
 use crate::types::{EngineStatusDto, OcrConfig, OcrConfigPatch, OcrRequest, OcrResultDto};
 
 use host_core::util::app_err as mod_err;
@@ -42,6 +43,10 @@ pub struct OcrModule {
     runner: Arc<dyn CommandRunner>,
     /// {app_data}：TesseractEngine 的一次性临时帧目录落点
     app_data: RwLock<Option<PathBuf>>,
+    /// 翻译槽（T-B4-13）：provider 集 + "启用哪个"；v1 只有 NullTranslateProvider
+    translate: Arc<TranslateRegistry>,
+    /// 设置键 `translate_target_lang` 的运行态镜像（空 = 不译，与 `translate` 的启用态同批写）
+    translate_lang: RwLock<String>,
 }
 
 impl OcrModule {
@@ -54,6 +59,8 @@ impl OcrModule {
             tess: RwLock::new(TesseractSettings::default()),
             runner: Arc::new(SystemRunner),
             app_data: RwLock::new(None),
+            translate: Arc::new(TranslateRegistry::default()),
+            translate_lang: RwLock::new(String::new()),
         }
     }
 
@@ -69,11 +76,30 @@ impl OcrModule {
         let registry = self.registry()?;
         let bytes = host_core::util::b64_decode(req.image_b64.trim())
             .ok_or_else(|| mod_err("OCR_INPUT_002", "Base64 解码失败"))?;
-        let result = run_engine(&registry, &bytes, &req.langs)?;
+        let mut result = run_engine(&registry, &bytes, &req.langs)?;
+        self.fill_translate(&mut result);
         if let Some(bus) = self.bus.read().clone() {
             publish_completed(&bus, req.source_task_id.as_deref(), &result);
         }
         Ok(result)
+    }
+
+    /// 翻译槽消费（设置里目标语言非空才发调用）：
+    /// 成功填 `translate`，失败填 `translate_error` —— **识别本身不因附加功能失败而失败**，
+    /// 但错误必须原样到得了前端（吞成"没有译文"就是谎报）。
+    fn fill_translate(&self, result: &mut OcrResultDto) {
+        let lang = self.translate_lang.read().clone();
+        if lang.trim().is_empty() {
+            return;
+        }
+        match self.translate.translate(&result.text, &lang) {
+            Ok(Some(text)) => result.translate = Some(text),
+            Ok(None) => {
+                result.translate_error =
+                    Some("已设译文目标语言，但翻译槽未启用（内部状态不一致，请反馈）".to_owned());
+            }
+            Err(e) => result.translate_error = Some(e.to_string()),
+        }
     }
 
     /// 引擎状态（O8：注册表逐引擎探测，无硬编码项）
@@ -103,6 +129,7 @@ impl OcrModule {
         cfg.tesseract_exe = tess.exe.clone();
         cfg.tesseract_data_dir = tess.data_dir.clone();
         cfg.tesseract_timeout_ms = tess.timeout_ms;
+        cfg.translate_target_lang = self.translate_lang.read().clone();
         cfg
     }
 
@@ -392,6 +419,14 @@ impl Module for OcrModule {
                     "minimum": 1000,
                     "maximum": 120000,
                     "default": 20000
+                },
+                // 翻译槽（T-B4-13）：留空 = 不译。填了值在本版本会**如实报错**（结果里
+                // translate_error 显出 D-08 原因），不做静默降级——设置就该说到做到。
+                "translate_target_lang": {
+                    "type": "string",
+                    "title": "译文目标语言（留空 = 不译）",
+                    "description": "识别完成后把全文翻成该语言（BCP-47，如 en-US）。本版本未接入任何翻译服务（依据 D-08），填了会在识别结果里给出失败原因而不是假装没这回事；接口位已在，Provider 注册即得",
+                    "default": ""
                 }
             }
         })
@@ -433,6 +468,14 @@ impl Module for OcrModule {
             .map_err(|e| ModuleError::Config(e.to_string()))?;
         *self.tess.write() = tess;
         *self.engines.write() = Some(rebuilt);
+        // 翻译槽与目标语言同批改写（两者不一致时 fill_translate 会如实报错，不留静默臂）
+        let want_translate = !next.translate_target_lang.trim().is_empty();
+        self.translate.set_enabled(want_translate.then(|| {
+            self.translate
+                .default_provider()
+                .unwrap_or_else(|| "（无已注册 provider）".to_owned())
+        }));
+        *self.translate_lang.write() = next.translate_target_lang.clone();
         self.rewire_consumer();
         Ok(())
     }
@@ -773,5 +816,91 @@ mod tests {
             vec!["zh-CN".to_string(), "en-US".to_string()],
             "缺键 = 不动运行态（与 preferred_engine 同纪律）"
         );
+    }
+
+    // ---- T-B4-13（09 §9.2）：翻译槽消费面（识别成功不因附加功能失败而失败）----
+
+    fn module_with_mock_engine() -> (OcrModule, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let m = OcrModule::new();
+        let (registry, _) = test_registry();
+        *m.engines.write() = Some(registry);
+        *m.app_data.write() = Some(dir.path().to_path_buf());
+        (m, dir)
+    }
+
+    fn png_request() -> OcrRequest {
+        OcrRequest {
+            image_b64: host_core::util::b64_encode(&png_bytes()),
+            langs: vec![],
+            source_task_id: None,
+        }
+    }
+
+    /// 设置键走配置通道：目标语言持久化，且清空即停用槽（provider 一次都不被调）
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-13）字面测试名优先于 rustc 命名惯例
+    fn applyConfig_translateTargetLang_togglesSlotAndPersists() {
+        let (m, _dir) = module_with_mock_engine();
+        m.apply_config(json!({ "translate_target_lang": "en-US" }))
+            .unwrap();
+        assert_eq!(m.config().translate_target_lang, "en-US");
+        assert_eq!(
+            m.translate.enabled(),
+            Some(crate::translate::NULL_PROVIDER_ID.into()),
+            "填了目标语言 = 启用槽"
+        );
+        // 缺键 = 不动（与其余键同纪律）
+        m.apply_config(json!({})).unwrap();
+        assert_eq!(m.config().translate_target_lang, "en-US");
+        m.apply_config(json!({ "translate_target_lang": "" }))
+            .unwrap();
+        assert_eq!(m.config().translate_target_lang, "");
+        assert_eq!(m.translate.enabled(), None, "清空 = 停用槽");
+    }
+
+    /// 红线：槽失败时识别结果照常交出，失败原因走 `translate_error` 到前端（不吞、也不误杀主功能）
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-13）字面测试名优先于 rustc 命名惯例
+    fn recognize_translateProviderErr_surfacesReasonKeepsResult() {
+        let (mut m, _dir) = module_with_mock_engine();
+        m.apply_config(json!({ "translate_target_lang": "en-US" }))
+            .unwrap();
+        let r = m.recognize(&png_request()).unwrap();
+        assert_eq!(r.text, "你好", "识别本身成功：附加功能不得劫持主通路");
+        assert_eq!(r.translate, None);
+        let err = r.translate_error.unwrap_or_default();
+        assert!(err.contains("D-08"), "失败原因原样可见，实际：{err}");
+
+        // 清空后走"零调用"臂：两字段都留空（JSON 里连键都不出），不是空串假装有值
+        m.apply_config(json!({ "translate_target_lang": "" }))
+            .unwrap();
+        let r = m.recognize(&png_request()).unwrap();
+        assert!(r.translate.is_none() && r.translate_error.is_none());
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("translate"), "{json}");
+
+        // 正对照：注册一个真 provider 即出译值——槽不是死码，消费通路无需改动
+        struct Working;
+        impl crate::translate::TranslateProvider for Working {
+            fn id(&self) -> &'static str {
+                "working"
+            }
+            fn translate(
+                &self,
+                text: &str,
+                to: &str,
+            ) -> Result<String, host_core::error::AppError> {
+                Ok(format!("[{to}]{text}"))
+            }
+        }
+        m.translate = Arc::new(crate::translate::TranslateRegistry::new(vec![Arc::new(
+            Working,
+        )]));
+        m.apply_config(json!({ "translate_target_lang": "en-US" }))
+            .unwrap();
+        let r = m.recognize(&png_request()).unwrap();
+        assert_eq!(r.translate.as_deref(), Some("[en-US]你好"));
+        assert!(r.translate_error.is_none(), "成功时不该有错误位");
     }
 }

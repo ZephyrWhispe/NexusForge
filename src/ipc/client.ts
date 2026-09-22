@@ -468,6 +468,8 @@ export interface OcrConfigDto {
   tesseract_exe: string;
   tesseract_data_dir: string | null;
   tesseract_timeout_ms: number;
+  /** 译文目标语言（T-B4-13 槽位）：空串 = 不译 */
+  translate_target_lang: string;
 }
 
 export interface OcrLineDto {
@@ -481,6 +483,13 @@ export interface OcrResultDto {
   text: string;
   lang: string;
   engine: string;
+  /** 本次实际所用引擎是否真的报置信度：false 时 lines[].confidence 是"未知"的占位值，
+   *  面板据此显示"未提供"而不是把 1.0 渲染成 100.0%（T-B4-13 / §9.1-⑫(b)） */
+  engines_report_confidence: boolean;
+  /** 译文（后端 skip null：未设目标语言/未启用时这两个键根本不存在） */
+  translate?: string | null;
+  /** 翻译失败原因（识别照常成功，原因照常可见——T-B4-13 不吞错面） */
+  translate_error?: string | null;
 }
 
 export interface EngineStatusDto {

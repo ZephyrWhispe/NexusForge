@@ -24,6 +24,11 @@ pub trait OcrEngine: Send + Sync {
     fn available(&self) -> Result<Vec<String>, AppError>;
     /// 阻塞识别；lang 空串 = 引擎按用户配置语言自选
     fn recognize(&self, frame: &Frame, lang: &str) -> Result<Vec<OcrLine>, AppError>;
+    /// 本引擎**是否真的**输出置信度（T-B4-13 §9.1-⑫(b)）：诚实性由引擎自己表态，
+    /// 管线不猜、也不改写数值（原值照抄 + 一位布尔），否则"未知"会被显示成"100.0%"。
+    fn reports_confidence(&self) -> bool {
+        true
+    }
 }
 
 /// v1 内置引擎：win-integration [`OcrPort`]（Windows.Media.Ocr）适配器
@@ -49,6 +54,11 @@ impl OcrEngine for WinOcrEngine {
     }
     fn recognize(&self, frame: &Frame, lang: &str) -> Result<Vec<OcrLine>, AppError> {
         self.port.recognize(frame, lang)
+    }
+    /// Windows.Media.Ocr 无置信度输出（win-integration 恒交 1.0，见其 ocr.rs:126 码内自认），
+    /// 故此处表态 false：结果里那个 1.0 是"未知"的占位，不是"很有把握"。
+    fn reports_confidence(&self) -> bool {
+        false
     }
 }
 
@@ -93,6 +103,15 @@ impl EngineRegistry {
 
     pub fn contains(&self, id: &str) -> bool {
         self.engines.iter().any(|e| e.id() == id)
+    }
+
+    /// 按 id 取引擎的置信度表态（结果级 `engines_report_confidence` 的唯一来源）：
+    /// 查不到该 id 时答 false —— 认不出的引擎没有资格被标成"置信度可信"。
+    pub fn reports_confidence(&self, id: &str) -> bool {
+        self.engines
+            .iter()
+            .find(|e| e.id() == id)
+            .is_some_and(|e| e.reports_confidence())
     }
 
     /// 除指定 id 外的引擎项（设置面增删 TesseractEngine 时"其余照抄"的口）
@@ -420,5 +439,82 @@ mod tests {
             "zh-CN",
             "识别调用透传到 OcrPort"
         );
+    }
+
+    // ---- T-B4-13（09 §9.2）：置信度表态归引擎自己，结果位随 pick 到的引擎走 ----
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-13）字面测试名优先于 rustc 命名惯例
+    fn ocrResult_winOcr_reportsConfidenceFalse_tesseractTrue() {
+        use crate::tesseract::{CmdOutput, CommandRunner, TesseractEngine, TesseractSettings};
+        use std::ffi::{OsStr, OsString};
+        use std::path::{Path, PathBuf};
+
+        struct StubPort;
+        impl OcrPort for StubPort {
+            fn available_languages(&self) -> Result<Vec<String>, AppError> {
+                Ok(vec!["zh-CN".into()])
+            }
+            fn recognize(&self, _frame: &Frame, _lang: &str) -> Result<Vec<OcrLine>, AppError> {
+                Ok(vec![])
+            }
+        }
+
+        /// 只够让 `--list-langs` 成功：本测不碰识别通路
+        struct StubRunner;
+        impl CommandRunner for StubRunner {
+            fn run(
+                &self,
+                _exe: &OsStr,
+                _args: &[OsString],
+                _cwd: &Path,
+                _timeout_ms: u64,
+            ) -> Result<CmdOutput, AppError> {
+                Ok(CmdOutput {
+                    ok: true,
+                    stdout: b"List of available languages in \"C:/tess\" (2):\neng\nchi_sim\n"
+                        .to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        // exe 用仓内真实存在的文件：available() 只校验"绝对路径 + 是文件"，与装没装 tesseract 无关
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let tess = TesseractEngine::new(
+            Arc::new(RwLock::new(TesseractSettings {
+                enabled: true,
+                exe: exe.to_string_lossy().into_owned(),
+                data_dir: None,
+                timeout_ms: 5_000,
+            })),
+            Arc::new(StubRunner),
+            PathBuf::from("."),
+        );
+        let reg = EngineRegistry::new(vec![
+            Arc::new(WinOcrEngine::new(Arc::new(StubPort))),
+            Arc::new(tess),
+        ]);
+        assert!(
+            !reg.reports_confidence("win-ocr"),
+            "win-ocr 恒交 1.0 占位，必须自己表态 false"
+        );
+        assert!(
+            reg.reports_confidence("tesseract"),
+            "TSV 有词级 conf，默认为 true（第二引擎不必改码即得正确表态）"
+        );
+        assert!(
+            !reg.reports_confidence("no-such-engine"),
+            "认不出的引擎没资格被标成可信"
+        );
+        // 结果位跟着 pick 到的引擎走，不是"注册表里有任何一个报置信度就算有"
+        reg.set_preferred("tesseract").unwrap();
+        let (picked, _) = reg.pick(&[]).unwrap();
+        assert_eq!(picked.id(), "tesseract");
+        assert!(reg.reports_confidence(picked.id()));
+        reg.set_preferred("win-ocr").unwrap();
+        let (picked, _) = reg.pick(&[]).unwrap();
+        assert_eq!(picked.id(), "win-ocr");
+        assert!(!reg.reports_confidence(picked.id()));
     }
 }

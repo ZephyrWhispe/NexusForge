@@ -28,6 +28,8 @@ import DeferredBadge from "../../components/DeferredBadge";
  * 截图联动帧回填仍由覆盖层/事件通路负责，本面板不抢该语义。
  * 语言（T-B4-10）：面板多选只是**本次覆盖**，请求里留空即"跟随设置"——
  * 持久值经 ocr_config_get 只读显示，不在前端二次写入（单一真源）。
+ * 结果诚实化（T-B4-13）：置信度列读 `engines_report_confidence`（引擎不报就显"未提供"），
+ * 行末 [复制此块] 逐行走既有 ocr_copy_text；译文区有值才出现，失败原因摊开显示。
  */
 
 const useStyles = makeStyles({
@@ -92,7 +94,13 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorPaletteDarkOrangeForeground1,
   },
-  copyRow: { display: "flex", gap: "8px", padding: "8px 0" },
+  copyRow: { display: "flex", alignItems: "center", gap: "8px", padding: "8px 0" },
+  note: {
+    display: "block",
+    padding: "4px 0 10px",
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorPaletteDarkOrangeForeground1,
+  },
 });
 
 /** data URL → 纯 base64（去掉 "data:…;base64," 前缀；纯函数供测试） */
@@ -112,6 +120,12 @@ export function engineBadge(s: EngineStatusDto | null): string {
   if (!s) return "引擎状态加载中…";
   const ok = s.engines.filter((e) => e.available).length;
   return `${ok}/${s.engines.length} 引擎可用`;
+}
+
+/** 置信度列文本（T-B4-13 红线）：引擎不报置信度时显示"未提供"，
+ *  绝不把 win-ocr 的 1.0 占位渲染成"100.0%"——那是把"未知"说成"很有把握"。 */
+export function confidence_reported(reported: boolean, conf: number): string {
+  return reported ? fmtConfidence(conf) : "未提供";
 }
 
 /** 语言下拉占位：显示设置里的持久偏好（面板多选只是本次覆盖，纯函数供测试） */
@@ -189,15 +203,20 @@ export default function OcrPanel() {
     [recognize],
   );
 
-  const copyAll = useCallback(async () => {
-    if (!result) return;
+  /** 走既有 ocr_copy_text（剪贴板回写窗口，不产生新历史条目）：全文与单行共用一入口 */
+  const copy = useCallback(async (text: string) => {
     try {
-      await ocrCopyText(result.text);
+      await ocrCopyText(text);
       notify("success", "已复制到剪贴板", "经剪贴板回写窗口写入，不会产生新历史条目");
     } catch (e) {
       reportError(e, { context: "复制失败", dedupeKey: "ocr-copy" });
     }
-  }, [result]);
+  }, []);
+
+  const copyAll = useCallback(async () => {
+    if (!result) return;
+    await copy(result.text);
+  }, [result, copy]);
 
   return (
     <div className={styles.root}>
@@ -287,19 +306,39 @@ export default function OcrPanel() {
             {result.lines.map((l, i) => (
               <div key={i} className={styles.lineRow}>
                 <Text className={styles.lineText}>{l.text}</Text>
-                <Text className={styles.lineConf}>{fmtConfidence(l.confidence)}</Text>
+                <Text className={styles.lineConf}>
+                  {confidence_reported(result.engines_report_confidence, l.confidence)}
+                </Text>
+                <Button
+                  size="small"
+                  onClick={() => void copy(l.text)}
+                  title="只复制本行文本（逐行各调一次 ocr_copy_text，不带邻行）"
+                >
+                  复制此块
+                </Button>
               </div>
             ))}
             <div className={styles.copyRow}>
               <Button size="small" appearance="primary" onClick={() => void copyAll()}>
                 复制全部
               </Button>
+              <span className={styles.spacer} />
+              <DeferredBadge label="翻译" decisionRef="D-08" />
             </div>
             <Textarea
               rows={6}
               value={result.text}
               onChange={(_, d) => setResult((p) => (p ? { ...p, text: d.value } : p))}
             />
+            {/* 译文区：有值才渲染整节（null 时零空节），失败则把原因摊开而非静默 */}
+            {result.translate ? (
+              <>
+                <Text className={styles.sectionTitle}>译文</Text>
+                <Textarea rows={4} readOnly value={result.translate} />
+              </>
+            ) : result.translate_error ? (
+              <Text className={styles.note}>译文未完成：{result.translate_error}</Text>
+            ) : null}
           </>
         )}
       </div>

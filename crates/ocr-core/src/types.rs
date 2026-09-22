@@ -15,7 +15,7 @@ pub struct OcrRequest {
     pub source_task_id: Option<String>,
 }
 
-/// 模块配置（写侧唯一入口仍是 `host_config_set`；本结构是 schema 六键的强类型投影）
+/// 模块配置（写侧唯一入口仍是 `host_config_set`；本结构是 schema 各键的强类型投影）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrConfig {
     /// 偏好语言（BCP-47，按序）；空 = 引擎按系统语言自选
@@ -33,6 +33,9 @@ pub struct OcrConfig {
     pub tesseract_data_dir: Option<String>,
     #[serde(default = "default_tess_timeout")]
     pub tesseract_timeout_ms: u64,
+    /// 译文目标语言（BCP-47）；空 = 不译（T-B4-13 槽位，v1 无在线 provider）
+    #[serde(default)]
+    pub translate_target_lang: String,
 }
 
 fn default_preferred() -> String {
@@ -52,6 +55,7 @@ impl Default for OcrConfig {
             tesseract_exe: String::new(),
             tesseract_data_dir: None,
             tesseract_timeout_ms: default_tess_timeout(),
+            translate_target_lang: String::new(),
         }
     }
 }
@@ -66,6 +70,7 @@ pub struct OcrConfigPatch {
     pub tesseract_exe: Option<String>,
     pub tesseract_data_dir: Option<String>,
     pub tesseract_timeout_ms: Option<u64>,
+    pub translate_target_lang: Option<String>,
 }
 
 impl OcrConfig {
@@ -89,6 +94,10 @@ impl OcrConfig {
             tesseract_timeout_ms: patch
                 .tesseract_timeout_ms
                 .unwrap_or(self.tesseract_timeout_ms),
+            translate_target_lang: patch
+                .translate_target_lang
+                .clone()
+                .unwrap_or_else(|| self.translate_target_lang.clone()),
         }
     }
 
@@ -116,6 +125,16 @@ pub struct OcrResultDto {
     pub lang: String,
     /// 实际使用的引擎 id
     pub engine: String,
+    /// 本次实际所用引擎是否真的输出置信度（**结果级**而非行级：一次识别只走一个引擎，
+    /// 行级布尔只是 N 份相同字节）。false 时 `lines[].confidence` 是"未知"的占位值，
+    /// 前端据此显示"未提供"而不是把 1.0 渲染成 100.0%（T-B4-13 / §9.1-⑫(b)）
+    pub engines_report_confidence: bool,
+    /// 译文（T-B4-13 槽位：设置里未设目标语言或槽未启用 ⇒ 字段整个不出现在 JSON 里）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translate: Option<String>,
+    /// 翻译失败原因（与 `translate` 互斥的诚实面：错误必须看得见，但不至于让识别失败）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translate_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

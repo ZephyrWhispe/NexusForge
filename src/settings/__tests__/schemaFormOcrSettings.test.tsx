@@ -48,6 +48,7 @@ beforeEach(() => {
     tesseract_exe: "",
     tesseract_data_dir: null,
     tesseract_timeout_ms: 20000,
+    translate_target_lang: "",
   });
   vi.mocked(hostConfigSet).mockResolvedValue(undefined);
   vi.mocked(ocrEngineStatus).mockResolvedValue({
@@ -192,6 +193,7 @@ describe("OcrPanel 语言持久化显示（T-B4-10）", () => {
       text: "",
       lang: "en-US",
       engine: "win-ocr",
+      engines_report_confidence: true,
     });
     await mount(<OcrPanel />);
     await clickOptionByText("en-US");
@@ -202,7 +204,13 @@ describe("OcrPanel 语言持久化显示（T-B4-10）", () => {
   });
 
   it("ocrPanel 未手选时请求仍交空数组（配置由后端解析，前端不越位塞值）", async () => {
-    vi.mocked(ocrRecognize).mockResolvedValue({ lines: [], text: "", lang: "", engine: "win-ocr" });
+    vi.mocked(ocrRecognize).mockResolvedValue({
+      lines: [],
+      text: "",
+      lang: "",
+      engine: "win-ocr",
+      engines_report_confidence: true,
+    });
     await mount(<OcrPanel />);
     await pickFile();
     expect(ocrRecognize).toHaveBeenCalledWith(expect.objectContaining({ langs: [] }));
@@ -229,7 +237,7 @@ async function remount(jsx: ReactElement) {
   await mount(jsx);
 }
 
-/** ocr 模块的实时 schema 形状（六键；enum 由后端按引擎注册表给出） */
+/** ocr 模块的实时 schema 形状（七键；enum 由后端按引擎注册表给出） */
 const OCR_SCHEMA = {
   preferred_engine: {
     type: "string",
@@ -247,6 +255,11 @@ const OCR_SCHEMA = {
     minimum: 1000,
     maximum: 120000,
     default: 20000,
+  },
+  translate_target_lang: {
+    type: "string",
+    title: "译文目标语言（留空 = 不译）",
+    default: "",
   },
 };
 

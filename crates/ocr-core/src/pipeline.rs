@@ -58,6 +58,12 @@ impl<'a> OcrPipeline<'a> {
             text,
             lang,
             engine: engine.id().into(),
+            // 置信度诚实位（T-B4-13）：由本次实际所用引擎自己表态；**数值一律照抄**，
+            // 不做 false→改 0.0 之类的粉饰，"未知"由这一位说清楚。
+            engines_report_confidence: self.engines.reports_confidence(engine.id()),
+            // 翻译槽由模块层填（它才持有设置与 provider 注册表）
+            translate: None,
+            translate_error: None,
         })
     }
 }
@@ -164,6 +170,7 @@ pub fn merge_text(lines: &[OcrLine]) -> String {
 mod tests {
     use super::*;
     use host_core::ports::Rect;
+    use std::sync::Arc;
 
     fn line(text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrLine {
         OcrLine {
@@ -227,5 +234,99 @@ mod tests {
             line("second", 0.1, 0.5, 0.2, 0.05),
         ];
         assert_eq!(merge_text(&lines), "第一段\nsecond");
+    }
+
+    // ---- T-B4-13（09 §9.2）：结果诚实化的两处钉（1:1 透传 + false 时不粉饰数值）----
+
+    /// 表态可控的三行引擎：rect/confidence 逐值不同，才能证明"透传"而非"重算"
+    struct TransportEngine {
+        conf: f32,
+        reports: bool,
+    }
+    impl crate::engine::OcrEngine for TransportEngine {
+        fn id(&self) -> &'static str {
+            "transport"
+        }
+        fn display_name(&self) -> &'static str {
+            "transport"
+        }
+        fn available(&self) -> Result<Vec<String>, AppError> {
+            Ok(vec!["zh-CN".into()])
+        }
+        fn recognize(&self, _frame: &Frame, _lang: &str) -> Result<Vec<OcrLine>, AppError> {
+            let row = |text: &str, x: f32, y: f32, w: f32, h: f32| OcrLine {
+                text: text.into(),
+                rect: Rect { x, y, w, h },
+                confidence: self.conf,
+            };
+            Ok(vec![
+                row("第一行", 0.10, 0.10, 0.30, 0.04),
+                row("第二行", 0.15, 0.40, 0.20, 0.06),
+                row("第三行", 0.20, 0.70, 0.10, 0.08),
+            ])
+        }
+        fn reports_confidence(&self) -> bool {
+            self.reports
+        }
+    }
+
+    fn tiny_frame() -> Frame {
+        Frame {
+            width: 2,
+            height: 2,
+            bgra: Arc::from(vec![0u8; 16]),
+            dpi_scale: 1.0,
+            monitor_id: 0,
+        }
+    }
+
+    fn pipeline_engine(reports: bool) -> EngineRegistry {
+        EngineRegistry::new(vec![Arc::new(TransportEngine {
+            conf: 0.42,
+            reports,
+        })])
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-13）字面测试名优先于 rustc 命名惯例
+    fn ocrLineRectAndConfidence_alreadyTransported_1to1() {
+        // §9.1-⑫(b) 的正面钉：DTO 侧 rect/confidence 早已 1:1 透传，本行不改这个形状
+        let reg = pipeline_engine(true);
+        let out = OcrPipeline::new(&reg).run(&tiny_frame(), &[]).unwrap();
+        assert_eq!(out.lines.len(), 3, "三行进三行出：聚类/重建不得吞行");
+        let want = [
+            ("第一行", 0.10f32, 0.10f32, 0.30f32, 0.04f32),
+            ("第二行", 0.15, 0.40, 0.20, 0.06),
+            ("第三行", 0.20, 0.70, 0.10, 0.08),
+        ];
+        for (got, (text, x, y, w, h)) in out.lines.iter().zip(want.iter()) {
+            assert_eq!(got.text, *text);
+            assert_eq!(
+                (got.rect.x, got.rect.y, got.rect.w, got.rect.h),
+                (*x, *y, *w, *h)
+            );
+            assert_eq!(got.confidence, 0.42, "引擎给的数值原样交出");
+        }
+        assert!(out.engines_report_confidence, "表态 true 时结果位为 true");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §9.2 T-B4-13）字面测试名优先于 rustc 命名惯例
+    fn confidenceFalse_neverClaimedAsHundred() {
+        // 引擎不报置信度时，管线交出的仍是引擎给的那个值 + false 一位：
+        // 把占位值改写成 0.0 是第二层谎（"既然未知那就显个低的"），前端读的是那一位
+        let reg = pipeline_engine(false);
+        let out = OcrPipeline::new(&reg).run(&tiny_frame(), &[]).unwrap();
+        assert!(!out.engines_report_confidence);
+        assert!(
+            out.lines.iter().all(|l| l.confidence == 0.42),
+            "数值未被改写：{:?}",
+            out.lines.iter().map(|l| l.confidence).collect::<Vec<_>>()
+        );
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(
+            json.contains("\"engines_report_confidence\":false"),
+            "{json}"
+        );
     }
 }

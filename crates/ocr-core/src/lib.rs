@@ -4,8 +4,12 @@ pub mod engine;
 pub mod module;
 pub mod pipeline;
 pub mod tesseract;
+pub mod translate;
 pub mod types;
 
 pub use engine::{resolve_langs, EngineRegistry, OcrEngine, WinOcrEngine};
 pub use module::OcrModule;
 pub use tesseract::{CmdOutput, CommandRunner, SystemRunner, TesseractEngine, TesseractSettings};
+pub use translate::{
+    NullTranslateProvider, TranslateProvider, TranslateRegistry, NULL_PROVIDER_ID,
+};
