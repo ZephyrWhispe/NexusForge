@@ -160,4 +160,51 @@ describe("同步 · 冲突历史（T-B5-2）", () => {
     expect(vi.mocked(syncConflictsGet).mock.calls.length).toBe(2);
     expect(bodyText()).toContain("已以本机副本重新生效");
   });
+
+  it("syncConflictRow_restoreConfirmCancelZeroInvoke", async () => {
+    // 取消臂单独钉一枚：确认框答"否"之后，既不发恢复命令，也不该顺手重取列表——
+    // 什么都没变，屏幕就停在用户离开的那一帧（多余的刷新会把用户正在看的行序打乱）。
+    vi.mocked(confirmAction).mockImplementation(async () => false);
+    await mount();
+    const btn = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === "以本地副本重新生效并推送",
+    ) as HTMLButtonElement;
+    expect(btn, "行内没有恢复钮").toBeTruthy();
+
+    await act(async () => {
+      btn.click();
+    });
+    expect(confirmAction).toHaveBeenCalledTimes(1);
+    expect(syncConflictRestore).not.toHaveBeenCalled();
+    expect(vi.mocked(syncConflictsGet).mock.calls.length).toBe(1);
+    expect(bodyText()).not.toContain("已以本机副本重新生效");
+  });
+
+  it("syncConflictSnapshotViewer_isReadOnly", async () => {
+    // §5-4 红线：快照查看是**只读**的——渲染树里不存在复制/导出/下载任何一键。
+    // 败方内容是别台写过又被 LWW 判负的字句，做成一键外流就是给"已丢弃的记录"
+    // 新开一个泄漏面；要拿回去只有「以本地副本重新生效」那条有账可查的路。
+    await mount();
+    const viewerBtn = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === "查看快照",
+    ) as HTMLButtonElement;
+    expect(viewerBtn, "行内没有查看快照入口").toBeTruthy();
+    await act(async () => {
+      viewerBtn.click();
+    });
+    await act(async () => {});
+
+    const surface = document.querySelector<HTMLElement>('[role="dialog"], .fui-DialogSurface');
+    if (!surface) throw new Error("快照 Dialog 未打开");
+    // 看得到全文（行内预览只给首行，Dialog 给整份）
+    expect(surface.textContent ?? "").toContain("这一版只在远端改过");
+    expect(surface.textContent ?? "").toContain("第二段");
+    // 只读机检面：Dialog 内的按钮只有「关闭」，且没有输入面
+    const labels = [...surface.querySelectorAll("button")].map(
+      (b) => b.textContent?.trim() ?? "",
+    );
+    expect(labels).toEqual(["关闭"]);
+    expect(surface.querySelector("input, textarea")).toBeNull();
+    expect(surface.textContent ?? "").not.toMatch(/复制|导出|下载/);
+  });
 });

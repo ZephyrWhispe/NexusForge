@@ -18,6 +18,8 @@ import EmptyState from "../../components/EmptyState";
  * tracing 日志与一次性广播里，重启即焚 ⇒ 面板说不清"上次到底同步了没"。
  * 承重④的对称面：`role` 区分本机发起 / 对端发起，被动侧供数结果同表可查。
  * 红线是"失败不静默"：错误行照常渲染并标红，一个都不过滤掉。
+ * `refreshKey`（T-B5-8）是根面板的事件节流入口：它变化只**触发重读**，本视图
+ * 从不把事件负载当成一行——数据的真源始终是那张表。
  */
 const useStyles = makeStyles({
   item: {
@@ -53,7 +55,7 @@ export function peerLabel(peer: string): string {
   return peer.includes(":") ? `地址 ${peer}（未完成握手）` : peer.slice(0, 8);
 }
 
-export default function ActivitySection() {
+export default function ActivitySection({ refreshKey = 0 }: { refreshKey?: number }) {
   const styles = useStyles();
   const [rows, setRows] = useState<SyncRunDto[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -70,9 +72,11 @@ export default function ActivitySection() {
     }
   }, []);
 
+  // refreshKey 变化 = 重新读表：新会话自然是列表首行（表按 ts 倒序），
+  // 但那是读回来的结果，不是把事件负载插进 state——后者一旦丢事件就永久失踪。
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, refreshKey]);
 
   return (
     <Section

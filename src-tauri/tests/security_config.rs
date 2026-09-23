@@ -1140,3 +1140,34 @@ fn auxWindows_neverGrantSyncSetPaused() {
         "正对照：main 必须持有 {ident}，否则本负例是空洞"
     );
 }
+
+/// T-B5-8 负例：`sync_datasets_get` 只读白名单，但它是**同步的可见面**——六个辅助窗
+/// 一个同步入口都没有，多一处声明就多一处要人记的例外（快速面板 capability 的冻结断言
+/// 因此必须一次未改）。这一枚要守的不是"谁能读"，而是"读到的那份清单不许散落到别处"。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §10.2 T-B5-8）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantSyncDatasetsGet() {
+    let caps = load_capabilities();
+    let ident = "allow-sync-datasets-get";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（数据集在册表 main-only）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 {ident}，否则本负例是空洞"
+    );
+}

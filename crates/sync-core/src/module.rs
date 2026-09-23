@@ -81,6 +81,20 @@ pub fn sync_entity_ids() -> Vec<&'static str> {
     SYNC_ENTITIES.iter().map(|s| s.id).collect()
 }
 
+/// 数据集在册行（T-B5-8 数据集页的唯一读面）
+///
+/// 两维必须并排：**白名单**（允许进门）与**当前装了应用器**（此刻在服）。只读白名单
+/// 会让"名单加了一行、宿主忘了装 applier"这种半成品状态在面板上一切正常——而那正是
+/// `require_appliers` 要挡的事；只读 appliers 则反过来说不出"允许但还没装"。
+/// `attached: false` 那一行如实留白，不隐藏也不美化成"已就绪"。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DatasetStatus {
+    pub id: String,
+    pub label: String,
+    /// 宿主是否为本数据集装了变更应用器
+    pub attached: bool,
+}
+
 /// 准入守卫：两道**门**（宿主装配 applier、事件层认领数据集）过这一条查表。
 ///
 /// 会话内部的分派（`SyncCtx::applier_for`）刻意不看白名单、只看注册表：
@@ -962,6 +976,21 @@ impl SyncModule {
         self.port.store(port, Ordering::SeqCst);
     }
 
+    /// 数据集在册表（T-B5-8）：白名单成员逐行配"此刻有没有人接活"
+    ///
+    /// 顺序即 `SYNC_ENTITIES` 的声明序（面板不再自己排序，两处排序迟早排出不一样）。
+    pub fn datasets(&self) -> Vec<DatasetStatus> {
+        let appliers = self.appliers.read();
+        SYNC_ENTITIES
+            .iter()
+            .map(|s| DatasetStatus {
+                id: s.id.to_string(),
+                label: s.label.to_string(),
+                attached: appliers.contains_key(s.id),
+            })
+            .collect()
+    }
+
     /// 本机 sync 监听端口现值（T-B5-7：宿主装配时读，注入 KVM 心跳宣告）
     ///
     /// 读现值而不是用常量 `DEFAULT_SYNC_PORT`：端口一旦经 `set_port`/配置改过，
@@ -1537,6 +1566,36 @@ mod tests {
             self.data.lock().remove(id);
             Ok(())
         }
+    }
+
+    /// T-B5-8 数据集在册表：白名单成员与"是否装了应用器"两维并陈，顺序即声明序
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §10.2 T-B5-8）字面测试名优先于 rustc 命名惯例
+    fn datasets_attachedReflectsApplierRegistry() {
+        let dir = temp_appdata("datasets");
+        let m = SyncModule::new(&dir);
+
+        // 一枚 applier 都没装：行还在、attached 全 false。这一维必须看得见，
+        // 否则"名单里加了一行、宿主忘了装应用器"在面板上呈现为一切正常
+        // ——而那正是 `require_appliers` 要挡的半成品态。
+        let before = m.datasets();
+        assert_eq!(before.len(), SYNC_ENTITIES.len());
+        assert!(before.iter().all(|d| !d.attached));
+        assert_eq!(before[0].id, ENTITY_NOTE);
+        assert_eq!(before[0].label, "笔记库");
+
+        m.attach_applier(ENTITY_NOTE, Arc::new(MemStore::default()))
+            .expect("note 在白名单内，装配必须成功");
+        let after = m.datasets();
+        assert!(after.iter().any(|d| d.id == ENTITY_NOTE && d.attached));
+
+        // 红线：vault 连"未启用"这一行都不该有。把它渲染成一行带开关的条目，
+        // 等于把"永不"演成"暂时没开"——用户会去那颗开关上找它。
+        assert!(!after.iter().any(|d| d.id == "vault"));
+        assert!(m
+            .attach_applier("vault", Arc::new(MemStore::default()))
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 一整套会话上下文（身份 + 空 PairStore + 真 op_log + 真总线）：

@@ -2036,3 +2036,20 @@ export interface SyncRunDto {
 export function syncRunsGet(limit: number): Promise<SyncRunDto[]> {
   return invoke("sync_runs_get", { limit });
 }
+
+/**
+ * 数据集在册行（09 §10.2 T-B5-8）：与 `sync_core::DatasetStatus` 逐字段镜像。
+ * 两维各说各的事——`id/label` 是**编译期白名单**（谁被允许进门），`attached` 是
+ * **运行期注册表**（此刻谁在服）。前端不自己抄一份数据集清单：那份清单的真源
+ * 在 Rust 常量里，抄一次就开始漂移，而 T-B5-5 一整行消灭的就是这种"两处各写一份"。
+ */
+export interface SyncDatasetDto {
+  id: string;
+  label: string;
+  /** 宿主是否为本数据集装了变更应用器（false ⇒ 在册但无人接活） */
+  attached: boolean;
+}
+
+export function syncDatasetsGet(): Promise<SyncDatasetDto[]> {
+  return invoke("sync_datasets_get");
+}

@@ -14,6 +14,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import SyncPanel from "../SyncPanel";
+import { useSession } from "../../../stores/session";
 import {
   syncConflictsGet,
   syncPeers,
@@ -23,6 +24,11 @@ import {
   type SyncPeerStatusDto,
   type SyncStatusDto,
 } from "../../../ipc/client";
+
+// 面板订 nf:event（T-B5-8）：jsdom 无 Tauri 事件环，桩成"注册成功、永不触发"
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -98,6 +104,7 @@ afterEach(() => {
   act(() => {
     root?.unmount();
   });
+  useSession.getState().setSyncSubPanel("overview");
   container.remove();
   while (document.body.firstChild) document.body.removeChild(document.body.firstChild);
   vi.clearAllMocks();
@@ -166,6 +173,8 @@ describe("同步 · 状态读面（T-B5-4）", () => {
   });
 
   it("syncDeviceRow_lagShowsPendingOps", async () => {
+    // T-B5-8：设备行住在「设备」档（进度警示是行级事实，不再挤在概览那一屏）
+    useSession.getState().setSyncSubPanel("devices");
     await mountWith(status({ peers: [peerStatus({ pending_ops: 3 })] }));
     expect(bodyText()).toContain("未出账 3 条");
     expect(warnClassDiffers("未出账 3 条")).toBe(true);

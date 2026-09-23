@@ -130,16 +130,30 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
   term: [],
   sys: [],
   automation: [],
-  sync: [],
+  // T-B5-8（09 §10.2）：同步五子面板入口，id 与 session store syncSubPanel 一一对应
+  // （14-sync §2 五档；设置档不占子面板——它走设置中心，这里写文案指路）
+  sync: [
+    {
+      group: "同步",
+      items: [
+        { id: "overview", label: "概览" },
+        { id: "devices", label: "设备" },
+        { id: "datasets", label: "数据集" },
+        { id: "conflicts", label: "冲突" },
+        { id: "activity", label: "活动" },
+      ],
+    },
+  ],
 };
 
 /** 二级导航选择态的 session 键（MainWorkbench 的唯一派发目标，禁止再按模块写三元） */
-export type SubnavStateKey = "clipView" | "clipGroup" | "proxySubPanel";
+export type SubnavStateKey = "clipView" | "clipGroup" | "proxySubPanel" | "syncSubPanel";
 
 /** 模块 × 维度 → session 键（09 §8.1-⑩ 红线：分组筛选与子面板切换两种语义不得互污，故分键） */
 const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavStateKey>>>> = {
   clipboard: { view: "clipView", filter: "clipGroup" },
   proxy: { filter: "proxySubPanel" },
+  sync: { filter: "syncSubPanel" },
 };
 
 /** 读选择态所需的最小会话快照（不依赖 store 类型，便于纯函数直测） */
@@ -147,6 +161,7 @@ export interface SubnavSelections {
   clipView: string;
   clipGroup: string;
   proxySub: string;
+  syncSub: string;
 }
 
 /** 该模块该维度当前高亮项 id；模块未在该维度注册选择态则 undefined */
@@ -159,6 +174,7 @@ export function subnavActive(
   if (key === "clipView") return st.clipView;
   if (key === "clipGroup") return st.clipGroup;
   if (key === "proxySubPanel") return st.proxySub;
+  if (key === "syncSubPanel") return st.syncSub;
   return undefined;
 }
 

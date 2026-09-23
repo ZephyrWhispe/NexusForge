@@ -108,7 +108,12 @@ export const PANELS: Record<ModuleId, PanelDef> = {
     panel: RulesPanel,
     subtitle: "事件/定时规则 · 受限条件求值 · 死信重放 · 防风暴冷却",
   },
-  sync: { panel: SyncPanel, subtitle: "局域网 P2P · 复用配对信任根 · E2E 加密 · LWW 冲突" },
+  sync: {
+    panel: SyncPanel,
+    // T-B5-8 翻正：游标/冲突/流水都已落盘可查，副标题说的是读面而不是"v1 概念"
+    subtitle:
+      "局域网 P2P · 复用配对信任根 · E2E 加密 · 游标可见 · 冲突可查可回滚 · 五子面板",
+  },
 };
 
 /** 穷尽性判定的纯函数（正例对 PANELS 恒空；负例测试靠它证明断言可红） */

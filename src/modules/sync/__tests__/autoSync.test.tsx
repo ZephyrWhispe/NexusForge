@@ -20,19 +20,27 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import SyncPanel from "../SyncPanel";
+import { useSession } from "../../../stores/session";
 import {
   hostConfigGet,
   hostConfigSet,
   syncConflictsGet,
+  syncDatasetsGet,
   syncNow,
   syncPeers,
   syncRunsGet,
   syncSetPaused,
   syncStatus,
   type PairedPeerDto,
+  type SyncDatasetDto,
   type SyncPeerStatusDto,
   type SyncStatusDto,
 } from "../../../ipc/client";
+
+// 面板订 nf:event（T-B5-8）：jsdom 下没有 Tauri 事件环，桩成"注册成功、永不触发"
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -42,6 +50,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     syncStatus: vi.fn(),
     syncRunsGet: vi.fn(),
     syncConflictsGet: vi.fn(),
+    syncDatasetsGet: vi.fn(),
     syncNow: vi.fn(),
     hostConfigGet: vi.fn(),
     hostConfigSet: vi.fn(),
@@ -118,6 +127,10 @@ beforeEach(() => {
   vi.mocked(syncPeers).mockResolvedValue([peer()]);
   vi.mocked(syncRunsGet).mockResolvedValue([]);
   vi.mocked(syncConflictsGet).mockResolvedValue([]);
+  vi.mocked(syncDatasetsGet).mockResolvedValue([
+    { id: "note", label: "笔记库", attached: true },
+    { id: "future", label: "在册未接线样例", attached: false },
+  ] satisfies SyncDatasetDto[]);
   vi.mocked(syncNow).mockResolvedValue({
     pushed: 0,
     pulled_applied: 0,
@@ -152,6 +165,7 @@ afterEach(() => {
     }
   });
   root = null;
+  useSession.getState().setSyncSubPanel("overview");
   container.remove();
   vi.clearAllMocks();
 });
@@ -298,6 +312,9 @@ describe("同步 · 两枚出账开关（T-B5-6）", () => {
   });
 
   it("syncScopeText_noRawMarkdownAsterisks", async () => {
+    // T-B5-8：范围红线搬到「数据集」页——它是"名单里有谁、谁永不进门"的事实，
+    // 跟出账开关不在同一张卡上
+    useSession.getState().setSyncSubPanel("datasets");
     await mount();
     const text = bodyText();
     // 修前：密码库那句的强调是 markdown 星号，被当字面量渲染了出来

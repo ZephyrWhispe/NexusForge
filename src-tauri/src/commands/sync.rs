@@ -144,3 +144,21 @@ pub async fn sync_set_paused(paused: bool, state: State<'_, HostState>) -> Resul
     state.sync.set_paused(paused);
     Ok(())
 }
+
+/// 数据集在册行 DTO（09 §10.2 T-B5-8）：同 `SyncRunDto` 的取舍——透出 sync-core 那份结构，
+/// 命令层不另立形状（两处声明同形靠人记，是本批一路在收的那类漂移）。
+pub type SyncDatasetDto = sync_core::DatasetStatus;
+
+/// 数据集在册表（只读，09 §10.2 T-B5-8）
+///
+/// **为什么不许前端自己写一份清单**：可同步数据集的唯一真源是 `sync-core::SYNC_ENTITIES`
+/// 那枚编译期白名单（"密码库永不流动"的结构事实就住在里面）。面板抄一份
+/// "笔记库 ✓ / 密码库 ✗" 看起来一模一样，等到注册表加第二行时它就成了假的——
+/// T-B5-5 一整行消灭的正是这种"两处各写一份"。
+///
+/// 不进 `spawn_blocking`：只读一枚内存 `RwLock` 与一个常量数组，零磁盘零网络
+/// （与 `sync_set_paused` 同判据；⑬ 的适用面是"确有阻塞 IO 的命令"）。
+#[tauri::command]
+pub fn sync_datasets_get(state: State<'_, HostState>) -> Vec<SyncDatasetDto> {
+    state.sync.datasets()
+}

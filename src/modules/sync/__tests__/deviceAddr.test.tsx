@@ -18,6 +18,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import SyncPanel from "../SyncPanel";
+import { useSession } from "../../../stores/session";
 import {
   syncConflictsGet,
   syncNow,
@@ -28,6 +29,11 @@ import {
   type SyncPeerStatusDto,
   type SyncStatusDto,
 } from "../../../ipc/client";
+
+// 面板订 nf:event（T-B5-8）：jsdom 无 Tauri 事件环，桩成"注册成功、永不触发"
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -98,6 +104,8 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
+  // T-B5-8：本文件测的是**设备行**上的地址读面，那一档住在「设备」子面板里
+  useSession.getState().setSyncSubPanel("devices");
   vi.mocked(syncPeers).mockResolvedValue([peer(ONLINE_ID, "笔记本-B"), peer(OFFLINE_ID, "客厅手机")]);
   vi.mocked(syncRunsGet).mockResolvedValue([]);
   vi.mocked(syncConflictsGet).mockResolvedValue([]);
@@ -117,6 +125,7 @@ afterEach(() => {
     });
   }
   root = null;
+  useSession.getState().setSyncSubPanel("overview");
   container.remove();
   while (document.body.firstChild) document.body.removeChild(document.body.firstChild);
   vi.clearAllMocks();

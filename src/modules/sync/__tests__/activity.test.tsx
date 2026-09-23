@@ -121,6 +121,43 @@ describe("同步 · 活动流水（T-B5-3）", () => {
     expect(bodyText()).not.toContain("暂无同步流水");
   });
 
+  it("syncActivity_errorRowRedBadge", async () => {
+    // "标红"的机检面不是文本：失败徽标的类名必须与成功徽标不同色（同一条 CSS 通道 =
+    // 根本没分色，只是文案换了字），且错误原文那一行与普通计数行分属两类——
+    // 与 status.test 的 warnClassDiffers 同一手法：只比样式分野，不猜 Fluent 的哈希类名。
+    vi.mocked(syncRunsGet).mockResolvedValue([run({ error: "连接被拒绝" })]);
+    await mount();
+    const badgeClass = (text: string) =>
+      [...container.querySelectorAll(".fui-Badge")].find(
+        (b) => b.textContent?.trim() === text,
+      )?.className;
+    const failClass = badgeClass("失败");
+    expect(failClass, "失败行没有徽标").toBeTruthy();
+    expect(bodyText()).toContain("连接被拒绝");
+
+    // 错误原文与相邻计数行分属两类样式（红字 vs muted）
+    const errLine = [...container.querySelectorAll("div")].find(
+      (d) => d.textContent === "连接被拒绝" && d.children.length === 0,
+    );
+    const mutedLine = [...container.querySelectorAll("span")].find((s) =>
+      s.textContent?.startsWith("推送 "),
+    );
+    expect(errLine, "错误原文未单独成行").toBeTruthy();
+    expect(mutedLine, "计数行未渲染").toBeTruthy();
+    expect(errLine!.className).not.toBe(mutedLine!.className);
+
+    // 正对照：同一读口换回一条成功行 ⇒ 徽标换色。取的是**类名字符串**而非节点引用——
+    // React 复用同一 DOM 节点，握着旧节点比等于自己跟自己比（第一轮就栽在这里）。
+    vi.mocked(syncRunsGet).mockResolvedValue([run({ error: null })]);
+    await act(async () => {
+      refreshButton().click();
+    });
+    await act(async () => {});
+    const okClass = badgeClass("成功");
+    if (!okClass) throw new Error("成功行没有徽标");
+    expect(okClass).not.toBe(failClass);
+  });
+
   it("syncActivityRow_preHandshakePeerShowsAddress", () => {
     // 握手前的失败行只有 socket 地址：如实贴地址，不编"未知设备"
     expect(peerLabel("127.0.0.1:49899")).toBe("地址 127.0.0.1:49899（未完成握手）");

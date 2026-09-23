@@ -31,6 +31,11 @@ description = "允许前端调用 sync_runs_get 命令（同步活动流水读�
 commands.allow = ["sync_runs_get"]
 
 [[permission]]
+identifier = "allow-sync-datasets-get"
+description = "允许前端调用 sync_datasets_get 命令（数据集在册表只读：白名单成员 + 是否已装应用器；D-28 按窗最小授权）"
+commands.allow = ["sync_datasets_get"]
+
+[[permission]]
 identifier = "allow-sync-set-paused"
 description = "允许前端调用 sync_set_paused 命令（暂停/恢复自动出账，写的是内核那一枚暂停位；D-28 按窗最小授权）"
 commands.allow = ["sync_set_paused"]

@@ -172,6 +172,7 @@
     "allow-screenshot-windows",
     "allow-sync-conflict-restore",
     "allow-sync-conflicts-get",
+    "allow-sync-datasets-get",
     "allow-sync-now",
     "allow-sync-peers",
     "allow-sync-runs-get",

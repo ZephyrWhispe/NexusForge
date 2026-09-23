@@ -28,6 +28,22 @@ export function isProxySubPanel(v: string): v is ProxySubPanel {
   return PROXY_SUB_PANEL_IDS.includes(v);
 }
 
+/** 同步子面板 id（T-B5-8，09 §10.2）：与 SUBNAV[sync] 五项一一对应
+ *  （14-sync §2 五档：概览/设备/数据集/冲突/活动；设置档走设置中心不占子面板） */
+export type SyncSubPanel = "overview" | "devices" | "datasets" | "conflicts" | "activity";
+
+const SYNC_SUB_PANEL_IDS: readonly string[] = [
+  "overview",
+  "devices",
+  "datasets",
+  "conflicts",
+  "activity",
+];
+
+export function isSyncSubPanel(v: string): v is SyncSubPanel {
+  return SYNC_SUB_PANEL_IDS.includes(v);
+}
+
 /** 剪切板子面板 id（T-B3-1，09 §8.2）：与 SUBNAV[clipboard] 「视图」五项一一对应
  *  （细案 01§2 IA：历史/收藏与分组/粘贴堆栈/敏感库/统计与设置） */
 export type ClipView = "history" | "groups" | "stack" | "secret" | "settings";
@@ -57,6 +73,8 @@ interface SessionState {
   proxySubPanel: ProxySubPanel;
   /** 剪切板子面板选择态（T-B3-1）：与 clipGroup 同为分键红线延续，旧快照缺键回退 history */
   clipView: ClipView;
+  /** 同步子面板选择态（T-B5-8）：第三枚分键，旧快照缺键回退 overview */
+  syncSubPanel: SyncSubPanel;
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
@@ -64,6 +82,7 @@ interface SessionState {
   setSysCleanSelected: (ids: string[]) => void;
   setProxySubPanel: (id: string) => void;
   setClipView: (id: string) => void;
+  setSyncSubPanel: (id: string) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -77,6 +96,7 @@ export const useSession = create<SessionState>()(
       sysCleanSelected: [],
       proxySubPanel: "overview",
       clipView: "history",
+      syncSubPanel: "overview",
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
@@ -87,6 +107,8 @@ export const useSession = create<SessionState>()(
       setProxySubPanel: (id) => set(isProxySubPanel(id) ? { proxySubPanel: id } : {}),
       // 同上（T-B3-1）：野值不落，面板渲染侧再经 isClipView 收窄兜 history
       setClipView: (id) => set(isClipView(id) ? { clipView: id } : {}),
+      // 同上（T-B5-8）：第三枚分键——同步的五档与代理/剪切板的选择态互不覆写
+      setSyncSubPanel: (id) => set(isSyncSubPanel(id) ? { syncSubPanel: id } : {}),
     }),
     {
       name: "nf-session",
@@ -98,6 +120,7 @@ export const useSession = create<SessionState>()(
         sysCleanSelected: s.sysCleanSelected,
         proxySubPanel: s.proxySubPanel,
         clipView: s.clipView,
+        syncSubPanel: s.syncSubPanel,
       }),
     },
   ),

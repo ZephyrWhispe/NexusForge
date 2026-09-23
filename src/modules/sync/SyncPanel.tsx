@@ -1,18 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
-import {
-  makeStyles,
-  tokens,
-  Text,
-  Badge,
-  Button,
-  Input,
-  Spinner,
-  Switch,
-} from "@fluentui/react-components";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { makeStyles } from "@fluentui/react-components";
 import {
   hostConfigGet,
   hostConfigSet,
   parseAppError,
+  syncConflictsGet,
   syncNow,
   syncPeers,
   syncSetPaused,
@@ -20,26 +12,31 @@ import {
   type PairedPeerDto,
   type SyncStatusDto,
 } from "../../ipc/client";
-import Section from "../../components/Section";
+import { isSyncSubPanel, useSession } from "../../stores/session";
 import InlineError from "../../components/InlineError";
-import EmptyState from "../../components/EmptyState";
 import ActivitySection from "./ActivitySection";
 import ConflictsSection from "./ConflictsSection";
+import DatasetsSection from "./DatasetsSection";
+import DevicesSection from "./DevicesSection";
+import OverviewSection from "./OverviewSection";
+import { reportError } from "../../stores/notifications";
 
 /**
- * 跨设备同步面板（docs/impl/07 SYNC1–SYNC4，M15 v1）：
- * - 拓扑：局域网 P2P（信任根复用 KVM 配对；端到端加密）
- * - 数据集 v1 = 笔记库；密码库永不自动同步
- * - 冲突：LWW 自动解 + sync.conflict 事件通知
- * - 监听真态来自 `status.listening`（T-B5-4）：**不是**端口号在场的同义词。修前
- *   `start()` 无条件置 Running、面板直读 `status.port` ⇒ 端口被占时照样显示"监听 :49820"。
- * - 地址不再手输（T-B5-7）：对端 sync 端口由心跳宣告，内核按"发现层 → 最近一次成功地址"
- *   解析；面板每行显示在线态与拨号地址，手输降级为行内「高级」。
- *   但 `addr_source=false`（本机没接发现层解析器）时这两列**整列不渲染**——那时
- *   `online:false` 的含义是"没查过"，把它显示成"离线"就是撒谎（与 T-B5-4 同一纪律）。
- * - 两枚出账开关（T-B5-6）：`auto_sync` 是配置（走 `host_config_*` 真源，静默窗到期自动
- *   出账），`paused` 是运行态位（走 `sync_set_paused`）。两者都**写完回读内核**再显示，
- *   面板不按"我刚写了什么"下结论——被拒的配置值进得了盘也进不了运行态。
+ * 跨设备同步面板（09 §10.2 T-B5-8，细案 14-sync §2）：子面板化后的数据枢纽——
+ * 五档（概览/设备/数据集/冲突/活动）按 session store 的 `syncSubPanel` 键一次只渲染
+ * 一档，选择入口在 SubNav；形制照 `src/modules/proxy/ProxyPanel.tsx`，不另造分派范式。
+ * 设置档不占子面板（走设置中心），这里只在概览文案里指路。
+ *
+ * 拓扑与真态口径（各行的设计理由写在各读面处，此处只记面板级的两条）：
+ * - 数据集 v1 = 笔记库白名单（`sync_datasets_get` 读出，见 DatasetsSection）；
+ *   密码库永不自动同步是内核红线，不是面板上的开关；
+ * - 监听 `nf:event` 的 `sync.state_changed` / `sync.conflict`：**只作提示，不作数据源**。
+ *   事件到达 = 再读一遍表（`sync_status`/`sync_peers`/`sync_conflicts_get` + 各子页
+ *   经 `refreshKey` 重读）。修前该模块零事件监听、且冲突只活在一次性广播里，
+ *   于是"错过事件即永久失踪"（承重⑥）。反过来把负载直接插进列表也是错的：
+ *   事件丢一枚，界面就永远少一行，而那行数据其实一直在盘上。
+ * - 立即同步的目的地由内核解析（T-B5-7），手输只在设备页「高级」里；
+ *   两枚出账开关写完一律回读内核（T-B5-6），面板不按"我刚写了什么"下结论。
  * 面板内无删除/解绑类操作（解除配对只在「键鼠共享」面板做，D-18 已在那里加确认）。
  */
 const useStyles = makeStyles({
@@ -52,19 +49,6 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: "16px",
   },
-  row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
-  item: {
-    padding: "6px 8px",
-    borderRadius: tokens.borderRadiusMedium,
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-  },
-  itemBody: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "2px" },
-  muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
-  /** 未出账提示（T-B5-4）：黄字而非红字——落后不是故障，谎报才是 */
-  warn: { color: tokens.colorPaletteDarkOrangeForeground1, fontSize: tokens.fontSizeBase200 },
 });
 
 /**
@@ -76,38 +60,84 @@ const useStyles = makeStyles({
 const REREAD_BUDGET = 5;
 const REREAD_MS = 100;
 
+/** 冲突计数的读数上限：与冲突页同一页宽，超出部分按"留存 ≥ 此数"如实说 */
+const CONFLICT_PAGE = 50;
+
 export default function SyncPanel() {
   const styles = useStyles();
   const [peers, setPeers] = useState<PairedPeerDto[]>([]);
   const [status, setStatus] = useState<SyncStatusDto | null>(null);
-  /** 行内「高级」手输的地址（按设备分桶：一台填错不该污染另一台） */
-  const [manualAddr, setManualAddr] = useState<Record<string, string>>({});
-  /** 哪一行的手输框展开着（null = 全收起；默认收起＝手输是例外不是常规路径） */
-  const [advancedId, setAdvancedId] = useState<string | null>(null);
+  const [conflictCount, setConflictCount] = useState(0);
+  /** 读满一页 ⇒ 后面还有没读到的，徽标要说"N+"而不是"N"（一页长度不是总数） */
+  const [conflictMore, setConflictMore] = useState(false);
   const [busy, setBusy] = useState(false);
   const [autoBusy, setAutoBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   // 首轮加载是否落定：未落定前空列表渲染加载态而非引导文案（D-18 假空态修正）
   const [loaded, setLoaded] = useState(false);
+  // 事件节流计数：子页（冲突/活动）只看它"变没变"，变了就去读表，事件内容一概不进 state
+  const [refreshKey, setRefreshKey] = useState(0);
+  const mounted = useRef(true);
+
+  // 子面板选择态：session store 键 syncSubPanel，旧快照缺键由 zustand 浅合并回退
+  // 初始值 overview；渲染侧再经 isSyncSubPanel 收窄防野值。
+  const storedSub = useSession((s) => s.syncSubPanel);
+  const view = isSyncSubPanel(storedSub) ? storedSub : "overview";
 
   const load = useCallback(async (): Promise<SyncStatusDto | null> => {
     try {
-      const [p, s] = await Promise.all([syncPeers(), syncStatus()]);
+      const [p, s, c] = await Promise.all([
+        syncPeers(),
+        syncStatus(),
+        syncConflictsGet(CONFLICT_PAGE, 0),
+      ]);
+      if (!mounted.current) return null;
       setPeers(p);
       setStatus(s);
+      setConflictCount(c.length);
+      setConflictMore(c.length >= CONFLICT_PAGE);
       setError("");
       return s;
     } catch (e) {
-      setError(parseAppError(e)?.data.message ?? String(e));
+      if (mounted.current) setError(parseAppError(e)?.data.message ?? String(e));
     } finally {
-      setLoaded(true);
+      if (mounted.current) setLoaded(true);
     }
     return null;
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void load();
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen("nf:event", (e) => {
+          const topic = (e.payload as { topic?: string }).topic ?? "";
+          if (topic === "sync.state_changed" || topic === "sync.conflict") {
+            // 只当"该重读了"的门铃：数据一律从表里读回来
+            setRefreshKey((k) => k + 1);
+            void load();
+          }
+        }),
+      )
+      .then((u) => {
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      })
+      .catch((err) =>
+        reportError(err, { context: "同步面板事件监听注册失败", toast: false }),
+      );
+    return () => {
+      cancelled = true;
+      mounted.current = false;
+      unlisten?.();
+    };
   }, [load]);
 
   /** 回读到 `settled` 或预算用尽，返回最后一次读数（null = 读本身失败，错误已在 load 里落）。 */
@@ -129,13 +159,12 @@ export default function SyncPanel() {
    * 成功文案只报这次会话的账，不报"发到了哪个地址"：`SyncSummary` 里没有这一项，
    * 面板要显示就得自己再解析一遍，那就是把内核的决定在前端重做（两处会漂移）。
    */
-  const sync = async (deviceId: string) => {
+  const sync = async (deviceId: string, manual: string | null) => {
     setBusy(true);
     setError("");
     setNotice("");
     try {
-      const manual = manualAddr[deviceId]?.trim();
-      const s = await syncNow(deviceId, manual ? manual : null);
+      const s = await syncNow(deviceId, manual);
       setNotice(
         `同步完成：推送 ${s.pushed} · 拉取应用 ${s.pulled_applied} · 丢弃 ${s.pulled_lost} · 冲突 ${s.conflicts}`,
       );
@@ -143,24 +172,7 @@ export default function SyncPanel() {
     } catch (e) {
       setError(parseAppError(e)?.data.message ?? String(e));
     } finally {
-      setBusy(false);
-    }
-  };
-
-  /**
-   * 行内「高级」开关：收起时**一并撤销**该行手输的地址。
-   * 一个看不见却仍在生效的地址比没有地址更难查——收起后就该回到"由内核解析"那个状态。
-   */
-  const toggleAdvanced = (deviceId: string) => {
-    if (advancedId === deviceId) {
-      setAdvancedId(null);
-      setManualAddr((m) => {
-        const next = { ...m };
-        delete next[deviceId];
-        return next;
-      });
-    } else {
-      setAdvancedId(deviceId);
+      if (mounted.current) setBusy(false);
     }
   };
 
@@ -179,6 +191,7 @@ export default function SyncPanel() {
       const cfg = await hostConfigGet("sync");
       await hostConfigSet("sync", { ...cfg, auto_sync: on });
       const s = await rereadStatus((x) => x.auto_sync === on);
+      if (!mounted.current) return;
       if (s?.auto_sync === on) {
         setNotice(
           on
@@ -192,9 +205,9 @@ export default function SyncPanel() {
         );
       }
     } catch (e) {
-      setError(parseAppError(e)?.data.message ?? String(e));
+      if (mounted.current) setError(parseAppError(e)?.data.message ?? String(e));
     } finally {
-      setAutoBusy(false);
+      if (mounted.current) setAutoBusy(false);
     }
   };
 
@@ -210,6 +223,7 @@ export default function SyncPanel() {
     try {
       await syncSetPaused(next);
       const s = await rereadStatus((x) => x.paused === next);
+      if (!mounted.current) return;
       if (s?.paused === next) {
         setNotice(
           next
@@ -222,9 +236,9 @@ export default function SyncPanel() {
         );
       }
     } catch (e) {
-      setError(parseAppError(e)?.data.message ?? String(e));
+      if (mounted.current) setError(parseAppError(e)?.data.message ?? String(e));
     } finally {
-      setAutoBusy(false);
+      if (mounted.current) setAutoBusy(false);
     }
   };
 
@@ -233,172 +247,29 @@ export default function SyncPanel() {
       <InlineError text={error} />
       {!error && <InlineError text={notice} tone="success" />}
 
-      <Section
-        title="同步状态"
-        actions={
-          <>
-            {status && (
-              <>
-                <Badge appearance="outline">变更记录 {status.op_count} 条</Badge>
-                <Badge
-                  appearance="tint"
-                  color={status.listening ? "success" : "danger"}
-                >
-                  {status.listening ? `监听 :${status.port}` : `未监听 :${status.port}`}
-                </Badge>
-                {/* 暂停位是运行态真值（T-B5-6）：只说"暂停/未暂停"，不据 auto_sync 推断——
-                    总开关关着时暂停位同样是 false，那是两个独立事实。 */}
-                <Badge
-                  appearance="tint"
-                  color={status.paused ? "warning" : "brand"}
-                >
-                  {status.paused ? "已暂停自动出账" : "未暂停自动出账"}
-                </Badge>
-              </>
-            )}
-            {(busy || autoBusy) && <Spinner size="tiny" />}
-          </>
-        }
-      >
-        <InlineError
-          text={
-            status && !status.listening
-              ? status.last_bind_error ??
-                `监听未就绪（端口 ${status.port}）——本机仍可主动发起同步，但对端连不进来`
-              : ""
-          }
+      {view === "overview" && (
+        <OverviewSection
+          status={status}
+          conflictCount={conflictCount}
+          conflictMore={conflictMore}
+          autoBusy={autoBusy}
+          onAutoSync={(on) => void setAutoSync(on)}
+          onTogglePaused={() => void togglePaused()}
         />
-        <div className={styles.row}>
-          <Switch
-            label="自动同步"
-            checked={status?.auto_sync ?? false}
-            disabled={!status || autoBusy}
-            onChange={(_, d) => void setAutoSync(d.checked)}
-          />
-          <Text className={styles.muted}>
-            开启后：本地变更入流即排静默窗，窗口内的连续编辑合并成一轮自动出账。
-          </Text>
-          <Button size="small" disabled={!status || autoBusy} onClick={() => void togglePaused()}>
-            {status?.paused ? "恢复自动出账" : "暂停自动出账"}
-          </Button>
-        </div>
-        <Text className={styles.muted}>
-          对端地址由局域网发现层给出（心跳宣告各自的同步端口），无需手输；两端须已通过
-          「键鼠共享」配对。个别设备不在同一网段时，在该设备行展开「高级」手输 host:port。
-        </Text>
-      </Section>
-
-      <Section
-        title={`配对设备（${peers.length}）`}
-        actions={
-          <>
-            <Badge appearance="outline">E2E 加密 · LWW 冲突自动解</Badge>
-            <Button size="small" onClick={() => void load()}>
-              刷新
-            </Button>
-          </>
-        }
-      >
-        {peers.length === 0 ? (
-          <EmptyState
-            text="暂无配对设备——先在「键鼠共享」模块完成配对（同步复用其信任根，无需二次配对）。"
-            loading={!loaded}
-          />
-        ) : (
-          peers.map((p) => {
-            // 进度来自 status.peers（现读自三张表），设备清单来自 sync_peers（带 paired_at）：
-            // 按 device_id 关联，两个来源各说各的事实，互不覆写。
-            const prog = status?.peers.find((x) => x.device_id === p.device_id);
-            return (
-              <div key={p.device_id} className={styles.item}>
-                <div className={styles.itemBody}>
-                  <div className={styles.row}>
-                    <Text weight="semibold" size={300}>
-                      {p.device_name}
-                    </Text>
-                    <Text className={styles.mono}>{p.fingerprint}</Text>
-                    {/* `addr_source` 是这一列的总闸：解析器没接线时 online=false 的意思是
-                        "本机没查过"，渲染成"离线"就是无中生有——整列直接不出现。 */}
-                    {status?.addr_source &&
-                      (prog?.sync_addr ? (
-                        <Badge appearance="tint" color="success">
-                          在线
-                        </Badge>
-                      ) : (
-                        <Badge appearance="outline" color="subtle">
-                          离线
-                        </Badge>
-                      ))}
-                  </div>
-                  {status?.addr_source && !!prog?.sync_addr && (
-                    <Text className={styles.mono}>拨号地址 {prog.sync_addr}</Text>
-                  )}
-                  <Text className={styles.muted}>
-                    配对于 {new Date(p.paired_at).toLocaleString()}
-                    {prog &&
-                      (prog.last_sync_ms > 0
-                        ? ` · 上次同步 ${new Date(prog.last_sync_ms).toLocaleString()}`
-                        : " · 从未同步")}
-                  </Text>
-                  {!!prog && prog.pending_ops > 0 && (
-                    <Text className={styles.warn}>未出账 {prog.pending_ops} 条</Text>
-                  )}
-                  {prog?.last_error && (
-                    <InlineError text={`上次同步失败：${prog.last_error}`} />
-                  )}
-                  {advancedId === p.device_id && (
-                    <div className={styles.row}>
-                      <Input
-                        size="small"
-                        value={manualAddr[p.device_id] ?? ""}
-                        onChange={(_, d) =>
-                          setManualAddr((m) => ({ ...m, [p.device_id]: d.value }))
-                        }
-                        placeholder={prog?.sync_addr ?? "host:port"}
-                        style={{ minWidth: "220px" }}
-                      />
-                      <Text className={styles.muted}>
-                        手输仅在跨网段/发现层看不到对端时才需要；填了就以这里为准，
-                        留空则仍由内核解析。
-                      </Text>
-                    </div>
-                  )}
-                </div>
-                <div className={styles.row}>
-                  <Button
-                    size="small"
-                    appearance="primary"
-                    disabled={busy}
-                    onClick={() => void sync(p.device_id)}
-                  >
-                    立即同步
-                  </Button>
-                  <Button
-                    size="small"
-                    appearance="subtle"
-                    onClick={() => toggleAdvanced(p.device_id)}
-                  >
-                    {advancedId === p.device_id ? "收起高级" : "高级"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })
-        )}
-      </Section>
-
-      <ActivitySection />
-
-      <ConflictsSection />
-
-      <Section title="同步范围">
-        <Text className={styles.muted}>
-          v1 数据集：笔记库（新建/修改/删除实时入变更流）。密码库条目
-          <Text weight="semibold">永不</Text>
-          自动同步（仅手动导出加密包）。
-          冲突策略：同一笔记双向修改按时间戳取最新（LWW），被覆盖一侧以 sync.conflict 事件提示。
-        </Text>
-      </Section>
+      )}
+      {view === "devices" && (
+        <DevicesSection
+          peers={peers}
+          status={status}
+          busy={busy}
+          loaded={loaded}
+          onSync={(id, manual) => void sync(id, manual)}
+          onRefresh={() => void load()}
+        />
+      )}
+      {view === "datasets" && <DatasetsSection />}
+      {view === "conflicts" && <ConflictsSection refreshKey={refreshKey} />}
+      {view === "activity" && <ActivitySection refreshKey={refreshKey} />}
     </div>
   );
 }
