@@ -50,6 +50,31 @@ pub enum AuthKind {
     SessionPassword,
 }
 
+/// 凭据**来源**（T-B6-8）：`file_remote_drivers` 返回体的一列——只说来源不说值
+/// （对齐 B5 `addr_source` 单源纪律；值一列都不出连接面）。`Typed` = 每次连接
+/// 现打的凭据（PromptEachTime），`Session` = 本会话口令（SessionPassword）——
+/// 两档的值都只在进程内逐次过手，永不落盘。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthSource {
+    Anonymous,
+    KeyFile,
+    VaultEntry,
+    Session,
+    Typed,
+}
+
+/// 档案 → 来源（纯函数唯一投影口：`RemoteDriverInfo::auth_source` 列的算式）
+pub fn auth_source_of(p: &RemoteProfile) -> AuthSource {
+    match &p.auth {
+        AuthKind::Anonymous => AuthSource::Anonymous,
+        AuthKind::SshKey { .. } => AuthSource::KeyFile,
+        AuthKind::VaultEntry { .. } => AuthSource::VaultEntry,
+        AuthKind::SessionPassword => AuthSource::Session,
+        AuthKind::PromptEachTime => AuthSource::Typed,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RemoteProfile {
@@ -477,5 +502,64 @@ mod tests {
         );
         assert!(!store.delete("remote:never").unwrap());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-8）字面测试名优先于 rustc 命名惯例
+    fn authKind_serializedHasNoSecretKeys() {
+        // 各臂序列化键集 == 声明键集（承重⑪ 的机检面：auth 是 tag enum，
+        // 任何一臂都不可能带出凭据位）。两枚指针臂是正对照重点。
+        let cases: Vec<(AuthKind, &[&str])> = vec![
+            (AuthKind::Anonymous, &["kind"]),
+            (
+                AuthKind::SshKey {
+                    key_path: "C:/keys/id_ed25519".into(),
+                },
+                &["kind", "key_path"],
+            ),
+            (
+                AuthKind::VaultEntry {
+                    entry_id: "0198f2c7-3a4e-7a10-9b6a-2f1c8d5e4b3a".into(),
+                },
+                &["kind", "entry_id"],
+            ),
+            (AuthKind::PromptEachTime, &["kind"]),
+            (AuthKind::SessionPassword, &["kind"]),
+        ];
+        for (kind, want_keys) in cases {
+            let json = serde_json::to_value(&kind).unwrap();
+            let obj = json.as_object().unwrap();
+            let mut got: Vec<&str> = obj.keys().map(String::as_str).collect();
+            got.sort_unstable();
+            let mut want = want_keys.to_vec();
+            want.sort_unstable();
+            assert_eq!(got, want, "臂 {kind:?} 的序列化键集须恰等声明键集");
+            // 禁词扫在"键名 + kind 位之外的值"上：tag 判别值 "session_password"
+            // 是档位名不是凭据位（键集恰等声明集已排除凭据键，这里排除的只有
+            // 声明内的 tag 字符串本身——判据不放宽，口径说清楚）
+            for (k, v) in obj {
+                for word in ["password", "secret", "token", "header"] {
+                    assert!(!k.contains(word), "auth 序列化键名泄露禁词 {word}: {k}");
+                    if k != "kind" {
+                        let text = v.to_string();
+                        assert!(
+                            !text.to_lowercase().contains(word),
+                            "auth 值面不得携带禁词 {word}: {text}"
+                        );
+                    }
+                }
+            }
+        }
+        // 指针形状断言（vault_entry_pointer 红线的档案侧一半）：entry_id 是
+        // 条目 id 的形状（uuid 主体、无 base64 填充位），不是密文容器的把手
+        let id = "0198f2c7-3a4e-7a10-9b6a-2f1c8d5e4b3a";
+        assert!(
+            uuid::Uuid::parse_str(id).is_ok(),
+            "夹具须是合法条目 id 形状"
+        );
+        assert!(
+            !id.contains('=') && id.len() <= 64,
+            "指针不得是 base64 blob 形状"
+        );
     }
 }

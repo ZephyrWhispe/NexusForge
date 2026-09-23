@@ -292,6 +292,33 @@ describe("截图面板 · 上传目标（T-B4-9）", () => {
     expect(bodyText()).toContain("先填端点");
     expect(uploadRowButtons()).toHaveLength(0);
   });
+
+  it("uploadRow_webdavProvider_showsEndpointNotCredential", async () => {
+    // D-29 T-B6-8 第二枚 vitest：provider 行的呈现面**结构性**只有
+    // label · endpoint_display——塞进野字段（模拟后端回退带出脏包）也
+    // 一个字都不许上 DOM：凭据不进显示面不是运气，是渲染式只读这两枚。
+    const junky = {
+      id: "webdav",
+      label: "WebDAV 共享",
+      endpoint_display: "https://dav.example.org/share",
+      enabled: true,
+      password: "JUNK-NEVER-SHOW",
+      token: "JUNK-TOKEN-NEVER-SHOW",
+    } as unknown as UploadTargetInfoDto;
+    cfgFixture = baseCfg({ upload_enabled: true, upload_target: "webdav" });
+    vi.mocked(screenshotUploadTargets).mockResolvedValue([junky]);
+    await mount();
+    expect(bodyText()).toContain("WebDAV 共享 · https://dav.example.org/share");
+    expect(bodyText()).toContain("启用中：WebDAV 共享");
+    expect(bodyText()).not.toContain("JUNK-");
+    expect(document.body.innerHTML).not.toContain("JUNK-");
+    expect(uploadRowButtons().length).toBeGreaterThan(0);
+    // 钮的 title 也只报端点（悬停提示是第二张脸，同样不露凭据）
+    for (const b of uploadRowButtons()) {
+      expect(b.title ?? "").not.toContain("JUNK-");
+      expect(b.title ?? "").toContain("https://dav.example.org/share");
+    }
+  });
 });
 
 function unmount() {

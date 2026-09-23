@@ -16,7 +16,7 @@ use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp, ResumeDto, XferStatusDt
 use crate::preset::PresetStore;
 use crate::preview::{preview_file, Preview};
 use crate::profile::{ProfileStore, RemoteProtocol};
-use crate::remote::ftp::{ftp_plaintext_guard, FtpDriver};
+use crate::remote::ftp::{ftp_confirm_gate, ftp_plaintext_guard, FtpDriver};
 use crate::remote::ssh::{
     load_known_hosts, sftp_auth_for, tofu_guard, KnownHostsFile, RusshBackend, SftpDriver,
     SshBackend,
@@ -50,6 +50,7 @@ impl ConnectedDriver {
                     port: p.port,
                     base_path: p.base_path.clone(),
                     roots: vec![d.base_path()],
+                    auth_source: crate::profile::auth_source_of(p),
                 }
             }
             ConnectedDriver::Https(d) => {
@@ -62,6 +63,7 @@ impl ConnectedDriver {
                     port: p.port,
                     base_path: p.base_path.clone(),
                     roots: vec![d.base_path()],
+                    auth_source: crate::profile::auth_source_of(p),
                 }
             }
             ConnectedDriver::Sftp(d) => {
@@ -74,6 +76,7 @@ impl ConnectedDriver {
                     port: p.port,
                     base_path: p.base_path.clone(),
                     roots: vec![d.base_path()],
+                    auth_source: crate::profile::auth_source_of(p),
                 }
             }
             ConnectedDriver::Ftp(d) => {
@@ -86,6 +89,7 @@ impl ConnectedDriver {
                     port: p.port,
                     base_path: p.base_path.clone(),
                     roots: vec![d.base_path()],
+                    auth_source: crate::profile::auth_source_of(p),
                 }
             }
         }
@@ -391,10 +395,13 @@ impl FileService {
     /// WebDAV（T-B6-3）、HTTPS 下载腿（T-B6-4）、SFTP（T-B6-5）、FTP 明文腿
     /// （T-B6-6，入表前先过 [`ftp_plaintext_guard`] 三闸）。SFTP 臂的 TOFU
     /// 守卫同样在**入表之前**：未受信主机键连"存在一条连接"这一事实都不该留下。
+    /// `allow_plaintext_once`（T-B6-8 第三闸）：非回环明文连接的**逐次**用户明示，
+    /// 不带即 `Err(FILE_REMOTE_008)` 拒在建连之前；对本函数无副作用记忆。
     pub fn connect(
         &self,
         profile_id: &str,
         secret: Option<AuthSecret>,
+        allow_plaintext_once: bool,
     ) -> Result<RemoteDriverInfo, FileError> {
         let profile = self
             .profiles
@@ -445,8 +452,10 @@ impl FileService {
             }
             RemoteProtocol::Ftp => {
                 // 明文总闸在建驱动之前裁决（惰建连：驱动 new 零网络，
-                // 被拒的明文档案不可能留下半条连接的事实源）
+                // 被拒的明文档案不可能留下半条连接的事实源）；第三闸（逐次
+                // 确认，T-B6-8）同点位——两闸都在入表前，拒了就是没连
                 ftp_plaintext_guard(&profile, self.config().insecure_plaintext)?;
+                ftp_confirm_gate(&profile, allow_plaintext_once)?;
                 ConnectedDriver::Ftp(Arc::new(FtpDriver::new(profile.clone(), secret)))
             }
         };
@@ -669,21 +678,23 @@ mod tests {
         let mut p = remote_sample("remote:ftp-pub", crate::profile::RemoteProtocol::Ftp);
         p.host = "ftp.example.org".into();
         svc.profiles().save(p).unwrap();
-        let e = svc.connect("remote:ftp-pub", None).unwrap_err();
+        let e = svc.connect("remote:ftp-pub", None, false).unwrap_err();
         assert!(
             matches!(&e, FileError::Remote { code, msg } if *code == crate::error::FILE_REMOTE_PLAINTEXT && msg.contains("insecure_plaintext")),
             "非回环 FTP 未开闸须报 006 点名总闸，实得 {e}"
         );
         // 正对照：用户显式开闸后同站点放行——明文是用户的决定，不是假就绪
+        // （第三闸随 T-B6-8：逐次确认参数一并给出 true；其单独判据见
+        // `plaintextNonLoopback_requiresExplicitConfirm_eachConnection`）
         svc.set_config(crate::module::FileConfig {
             insecure_plaintext: true,
             ..Default::default()
         });
-        let info = svc.connect("remote:ftp-pub", None).unwrap();
+        let info = svc.connect("remote:ftp-pub", None, true).unwrap();
         assert_eq!(info.protocol, "ftp");
         assert!(svc.detach("remote:ftp-pub"), "开闸连接须真实入表");
         // 档案不存在同样拒（凭据不喂给野地址）——004 退役后此臂仍在
-        let e = svc.connect("remote:ghost", None).unwrap_err();
+        let e = svc.connect("remote:ghost", None, false).unwrap_err();
         assert!(
             matches!(&e, FileError::Remote { code, .. } if *code == FILE_REMOTE_MISSING),
             "未建档站点须报 001，实得 {e}"
@@ -703,7 +714,7 @@ mod tests {
                 crate::profile::RemoteProtocol::WebDav,
             ))
             .unwrap();
-        let info = svc.connect("remote:dav1", None).unwrap();
+        let info = svc.connect("remote:dav1", None, false).unwrap();
         assert_eq!(info.driver_id, "remote:dav1");
         assert_eq!(info.protocol, "webdav");
         assert_eq!(info.roots, vec!["/dav".to_owned()]);
@@ -713,7 +724,7 @@ mod tests {
         assert!(svc.driver("remote:dav1").is_some(), "远端按动态键可寻址");
         assert_eq!(svc.drivers().len(), 2);
         // 重连替换：同档案两连不产生第二条注册项
-        svc.connect("remote:dav1", None).unwrap();
+        svc.connect("remote:dav1", None, false).unwrap();
         assert_eq!(svc.remote_drivers().len(), 1);
         assert_eq!(svc.drivers().len(), 2);
         // 断线两侧同步退役，local 依然屹立
@@ -723,6 +734,149 @@ mod tests {
         assert!(svc.driver("local").is_some());
         // last_used 已 touch（连接只留时刻，不留凭据）
         assert!(svc.profiles().get("remote:dav1").unwrap().last_used_ms > 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-8）字面测试名优先于 rustc 命名惯例
+    fn plaintextNonLoopback_requiresExplicitConfirm_eachConnection() {
+        // 第三闸两臂：带确认参 → 放行；不带 → Err(FILE_REMOTE_008) 且消息含
+        // "需用户明示"。"FakeBackend 零出站包"的可观测形态：假 FTP 站（绑
+        // 0.0.0.0 的监听器，档案 host 用 127.0.0.2 —— looks_like_loopback 按
+        // 精确名单判，非名单内即走逐次确认，fail-closed 方向）在整场测试里
+        // accept 计数恒零：拒绝发生在建连之前，连"拨号"这个动作都不曾发生。
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stream.is_ok() {
+                    let _ = tx.send(());
+                }
+            }
+        });
+        let dial_probe = |label: &str| {
+            assert!(
+                rx.try_recv().is_err(),
+                "{label}：假 FTP 站收到了入站连接——拒绝必须发生在出网之前"
+            );
+        };
+        let (svc, root) = svc_fixture("plainconfirm");
+        let mut p = remote_sample("remote:ftp-conf", crate::profile::RemoteProtocol::Ftp);
+        p.host = "127.0.0.2".into();
+        p.port = port;
+        svc.profiles().save(p).unwrap();
+        svc.set_config(crate::module::FileConfig {
+            insecure_plaintext: true, // 总闸开——本闸测的是逐次确认，不测 006
+            ..Default::default()
+        });
+        // 臂一：不带确认参 → 008 且消息含"需用户明示"；表里不留半条连接
+        let e = svc.connect("remote:ftp-conf", None, false).unwrap_err();
+        assert!(
+            matches!(&e, FileError::Remote { code, msg }
+                if *code == crate::error::FILE_REMOTE_PLAIN_CONFIRM && msg.contains("需用户明示")),
+            "非回环明文未确认须报 008 含\"需用户明示\"，实得 {e}"
+        );
+        assert!(svc.remote_drivers().is_empty(), "被拒连接不得入表");
+        assert!(
+            svc.remote_list("remote:ftp-conf", "/").is_err(),
+            "拒后浏览须诚实报未连接"
+        );
+        dial_probe("拒绝臂");
+        // 臂二：带确认参 → 放行（惰性驱动，仍零出站）
+        let info = svc.connect("remote:ftp-conf", None, true).unwrap();
+        assert_eq!(info.protocol, "ftp");
+        dial_probe("放行臂（connect 本身不出网）");
+        // "每次连接"：确认不被记忆——同档案再连不带参仍是 008（无记住这档的出路）
+        let e = svc.connect("remote:ftp-conf", None, false).unwrap_err();
+        assert!(
+            matches!(&e, FileError::Remote { code, .. } if *code == crate::error::FILE_REMOTE_PLAIN_CONFIRM),
+            "第三闸逐次生效，第二次不带参必须仍拒，实得 {e}"
+        );
+        dial_probe("逐次臂");
+        // 正对照：回环豁免本闸（联调形状不带确认参也放行）
+        let mut lp = remote_sample("remote:ftp-loop", crate::profile::RemoteProtocol::Ftp);
+        lp.host = "127.0.0.1".into();
+        lp.port = port;
+        svc.profiles().save(lp).unwrap();
+        svc.connect("remote:ftp-loop", None, false).unwrap();
+        // 正对照二：非明文腿不受本闸约束（webdav 档案 host 非回环，无确认参放行）
+        let mut wp = remote_sample("remote:dav-conf", crate::profile::RemoteProtocol::WebDav);
+        wp.host = "dav.example.com".into();
+        svc.profiles().save(wp).unwrap();
+        svc.connect("remote:dav-conf", None, false).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        // 收尾再探一次：全程零出站（含 webdav/回环这些"放行"臂——connect 惰性）
+        dial_probe("终局");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-8）字面测试名优先于 rustc 命名惯例
+    fn authSource_columnReportsSourceNotValue() {
+        // auth_source 是"来源列"：五档各报其位，凭据值绝不出现在列里
+        // （夹具口令 SUPER_SECRET_VALUE 若在返回体任何一处，序列化文本比对即红）。
+        use crate::profile::AuthSource;
+        use crate::remote::ssh::FakeSsh;
+        let (svc, root) = svc_fixture("authcol");
+        let mut p = remote_sample("remote:sftp-col", crate::profile::RemoteProtocol::Sftp);
+        p.host = "sftp.example.invalid".into();
+        p.port = 2222;
+        p.auth = crate::profile::AuthKind::VaultEntry {
+            entry_id: "0198f2c7-3a4e-7a10-9b6a-2f1c8d5e4b3a".into(),
+        };
+        svc.profiles().save(p).unwrap();
+        let fp = "ssh-ed25519 SHA256:COLfpxxxxxxxxxxxxxx";
+        let fake = Arc::new(FakeSsh::new(fp));
+        svc.set_ssh_backend_for_test(fake.clone());
+        svc.fingerprint_ack("remote:sftp-col", fp).unwrap();
+        let secret = Some(crate::remote::AuthSecret {
+            header: None,
+            password: Some(zeroize::Zeroizing::new("SUPER_SECRET_VALUE".into())),
+        });
+        let info = svc.connect("remote:sftp-col", secret, false).unwrap();
+        assert_eq!(info.auth_source, AuthSource::VaultEntry);
+        let text = serde_json::to_string(&info).unwrap();
+        assert!(
+            text.contains("\"auth_source\":\"vault_entry\""),
+            "列须序列化，实得 {text}"
+        );
+        assert!(
+            !text.contains("SUPER_SECRET"),
+            "凭据值绝不出现在列里: {text}"
+        );
+        assert!(
+            !text.contains("entry_id"),
+            "指针值也不入返回体——来源列只到档位: {text}"
+        );
+        // 五档全序：逐个档案投影 auth_source_of（键名逐字钉住 wire 形状）
+        let arms: Vec<(crate::profile::AuthKind, &str)> = vec![
+            (crate::profile::AuthKind::Anonymous, "\"anonymous\""),
+            (
+                crate::profile::AuthKind::SshKey {
+                    key_path: "C:/keys/id".into(),
+                },
+                "\"key_file\"",
+            ),
+            (
+                crate::profile::AuthKind::VaultEntry {
+                    entry_id: "e1".into(),
+                },
+                "\"vault_entry\"",
+            ),
+            (crate::profile::AuthKind::SessionPassword, "\"session\""),
+            (crate::profile::AuthKind::PromptEachTime, "\"typed\""),
+        ];
+        for (kind, want) in arms {
+            let mut q = remote_sample("remote:col-x", crate::profile::RemoteProtocol::WebDav);
+            q.auth = kind;
+            let got = serde_json::to_value(crate::profile::auth_source_of(&q)).unwrap();
+            assert_eq!(got.as_str().unwrap(), want.trim_matches('"'));
+        }
+        // 默认档案（PromptEachTime）投影 typed 且 remote_drivers 列表同样带列
+        let listed = svc.remote_drivers();
+        assert_eq!(listed[0].auth_source, AuthSource::VaultEntry);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -751,7 +905,7 @@ mod tests {
                 crate::profile::RemoteProtocol::Https,
             ))
             .unwrap();
-        let info = svc.connect("remote:hs1", None).unwrap();
+        let info = svc.connect("remote:hs1", None, false).unwrap();
         assert_eq!(info.protocol, "https");
         assert_eq!(svc.remote_drivers().len(), 1);
         let e = svc.remote_list("remote:hs1", "/").unwrap_err();

@@ -1125,6 +1125,101 @@ export function fileRenameApply(plans: RenamePlanDto[]): Promise<number> {
   return invoke("file_rename_apply", { plans });
 }
 
+// ======================== B6 远程连接面（docs/impl/09 §6.2） ========================
+// 档案 = 站点清单（auth 只有指针与标记，零凭据字段）；口令走 fileRemoteConnect
+// 的逐次入参——该类型只进不出（Rust 侧无 Serialize，返回值不可能带出凭据）。
+
+export type RemoteProtocolDto = "web_dav" | "https" | "sftp" | "ftp";
+/** 凭据来源列（T-B6-8）：只说来源不说值，镜像 B5 addr_source 单源纪律 */
+export type AuthSourceDto = "anonymous" | "key_file" | "vault_entry" | "session" | "typed";
+
+export type AuthKindDto =
+  | { kind: "anonymous" }
+  | { kind: "ssh_key"; key_path: string }
+  | { kind: "vault_entry"; entry_id: string }
+  | { kind: "prompt_each_time" }
+  | { kind: "session_password" };
+
+export interface RemoteProfileDto {
+  id: string;
+  label: string;
+  protocol: RemoteProtocolDto;
+  host: string;
+  port: number;
+  user: string;
+  base_path: string;
+  auth: AuthKindDto;
+  preset_id?: string | null;
+  last_used_ms: number;
+}
+
+export interface RemotePresetDto {
+  id: string;
+  label: string;
+  protocol: RemoteProtocolDto;
+  default_host: string;
+  port: number;
+  base_path: string;
+  auth_kind: "anonymous" | "prompt_each_time";
+  notes: string;
+}
+
+export interface RemoteDriverDto {
+  driver_id: string;
+  label: string;
+  /** 展示态协议名（"webdav" 等，与档案的 snake_case 档位分列） */
+  protocol: string;
+  host: string;
+  port: number;
+  base_path: string;
+  roots: string[];
+  auth_source: AuthSourceDto;
+}
+
+export interface RemoteEntryDto {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified_ms: number;
+}
+
+export type AuthSecretDto = { header?: string | null; password?: string | null };
+
+export function fileRemoteProfiles(): Promise<RemoteProfileDto[]> {
+  return invoke("file_remote_profiles");
+}
+export function fileRemoteProfileSave(profile: RemoteProfileDto): Promise<RemoteProfileDto> {
+  return invoke("file_remote_profile_save", { profile });
+}
+export function fileRemoteProfileDelete(id: string): Promise<boolean> {
+  return invoke("file_remote_profile_delete", { id });
+}
+export function fileRemotePresets(): Promise<RemotePresetDto[]> {
+  return invoke("file_remote_presets");
+}
+export function fileRemoteDrivers(): Promise<RemoteDriverDto[]> {
+  return invoke("file_remote_drivers");
+}
+export function fileRemoteBrowse(driverId: string, path: string): Promise<RemoteEntryDto[]> {
+  return invoke("file_remote_browse", { driverId, path });
+}
+/** 连接：凭据走逐次入参（只进不出）；allowPlaintextOnce 是明文第三闸的逐次明示
+ *  ——缺省不传即拒（Rust 侧 unwrap_or(false)），确认不落任何记忆位 */
+export function fileRemoteConnect(
+  profileId: string,
+  secret?: AuthSecretDto | null,
+  allowPlaintextOnce?: boolean | null,
+): Promise<RemoteDriverDto> {
+  return invoke("file_remote_connect", { profileId, secret, allowPlaintextOnce });
+}
+export function fileRemoteFingerprintAck(profileId: string, fingerprint: string): Promise<void> {
+  return invoke("file_remote_fingerprint_ack", { profileId, fingerprint });
+}
+export function fileRemoteDisconnect(driverId: string): Promise<boolean> {
+  return invoke("file_remote_disconnect", { driverId });
+}
+
 // ======================== 代理（M7 PR，docs/impl/05） ========================
 
 export interface ProxyKernelCapsDto {

@@ -11,6 +11,8 @@ pub const FILE_REMOTE_FIELD: &str = "FILE_REMOTE_005";
 pub const FILE_REMOTE_PLAINTEXT: &str = "FILE_REMOTE_006";
 /// 明文档拒绝携带存管/会话口令——"只进不出"纪律在明文链路上根本不该被触发（T-B6-6）
 pub const FILE_REMOTE_PLAIN_AUTH: &str = "FILE_REMOTE_007";
+/// 非回环明文连接的逐次确认闸（T-B6-8 第三闸）：未带用户明示确认参数 ⇒ 拒在出网之前
+pub const FILE_REMOTE_PLAIN_CONFIRM: &str = "FILE_REMOTE_008";
 
 /// 本批远端面固定码表（判据：新码须先入表再使用，禁散落字面量）
 pub const FILE_REMOTE_CODES: &[&str] = &[
@@ -21,6 +23,7 @@ pub const FILE_REMOTE_CODES: &[&str] = &[
     FILE_REMOTE_FIELD,
     FILE_REMOTE_PLAINTEXT,
     FILE_REMOTE_PLAIN_AUTH,
+    FILE_REMOTE_PLAIN_CONFIRM,
 ];
 
 #[derive(Debug, thiserror::Error)]

@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use crate::error::{
     FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING, FILE_REMOTE_PLAINTEXT,
-    FILE_REMOTE_PLAIN_AUTH,
+    FILE_REMOTE_PLAIN_AUTH, FILE_REMOTE_PLAIN_CONFIRM,
 };
 use crate::profile::{looks_like_loopback, AuthKind, RemoteProfile};
 use crate::remote::webdav::{days_from_civil, percent_decode};
@@ -342,6 +342,34 @@ pub fn ftp_plaintext_guard(
         msg: format!(
             "未授权明文传输：档案 {:?} 走 FTP（明文过网），需先在设置中打开 insecure_plaintext 总闸（码 FILE_REMOTE_006；回环联调不受此闸约束）",
             profile.id
+        ),
+    })
+}
+
+/// 明文三闸的第三闸（T-B6-8，09 §6.2）：非回环明文连接的**逐次确认**——
+/// 总闸（006）是"这类链路允许存在"的用户决定，本闸是"这一次连接"的用户明示。
+/// 无记忆是设计而非缺陷：每次连接都重新过手，不存在"记住这次决定"的档位
+/// （面板复述目标地址后经 `confirmAction` 取得明示，再带参数重试）。
+/// 回环豁免与 [`ftp_plaintext_guard`] 同口径；非明文的三协议恒 `Ok`（本闸
+/// 只管明文腿，SFTP 的对应物是 TOFU，HTTPS/WebDAV 恒 TLS——WebDAV 非回环
+/// 只有 https 形制，见 webdav.rs 的 scheme 裁决臂）。
+pub fn ftp_confirm_gate(
+    profile: &RemoteProfile,
+    allow_plaintext_once: bool,
+) -> Result<(), FileError> {
+    if !profile.protocol.is_plaintext() || looks_like_loopback(&profile.host) {
+        return Ok(());
+    }
+    if allow_plaintext_once {
+        return Ok(());
+    }
+    Err(FileError::Remote {
+        code: FILE_REMOTE_PLAIN_CONFIRM,
+        msg: format!(
+            "明文连接需用户明示（逐次）：档案 {:?} 到 {}:{} 的 FTP 控制连接是非回环明文，\
+             本次连接未携带确认参数，已在建连之前拒绝（码 FILE_REMOTE_008）。请面板复述目标\
+             地址取得用户明示后重试；本闸每次连接独立生效，不存在一次确认永久放行的出路",
+            profile.id, profile.host, profile.port
         ),
     })
 }

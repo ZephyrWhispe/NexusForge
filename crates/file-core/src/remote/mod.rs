@@ -106,7 +106,9 @@ impl fmt::Debug for AuthSecret {
 }
 
 /// 已连接远端驱动的对外描述（命令返回体：键集恒等于本结构字段集，
-/// 凭据字段在类型层面就不存在 ⇒ `webdavAuth_secretNeverSerialized` 的判据面）
+/// 凭据字段在类型层面就不存在 ⇒ `webdavAuth_secretNeverSerialized` 的判据面）。
+/// `auth_source`（T-B6-8）只报凭据**来源**不报值——B5 `addr_source` 单源纪律的
+/// 连接面对镜像。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RemoteDriverInfo {
@@ -118,6 +120,7 @@ pub struct RemoteDriverInfo {
     pub base_path: String,
     /// 远端根（String 形状——承重⑮ 的另一份事实源来自 profile.base_path）
     pub roots: Vec<String>,
+    pub auth_source: crate::profile::AuthSource,
 }
 
 // 专用多线程小 runtime：StorageDriver trait 是同步的（worker 线程直接调用），
@@ -416,6 +419,7 @@ mod tests {
             port: 443,
             base_path: "/dav".into(),
             roots: vec!["/dav".into()],
+            auth_source: crate::profile::AuthSource::Typed,
         };
         let json: serde_json::Value = serde_json::to_value(&info).unwrap();
         let mut keys: Vec<&str> = json
@@ -428,6 +432,7 @@ mod tests {
         assert_eq!(
             keys,
             vec![
+                "auth_source",
                 "base_path",
                 "driver_id",
                 "host",

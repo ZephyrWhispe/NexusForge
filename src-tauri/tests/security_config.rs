@@ -1338,3 +1338,186 @@ fn auxWindows_neverGrantRemoteFingerprintAck() {
         );
     }
 }
+
+// ---------------- B6 T-B6-8（09 §6.2）凭据只进不出：三枚持久化/装配面负例 ----------------
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-8）字面测试名优先于 rustc 命名惯例
+fn sessionStore_persistWhitelistExcludesSecrets() {
+    // 会话 store 是前端唯一落盘位（localStorage `nf-session`）：partialize 白名单
+    // 一旦混进凭据字样，密码就随主题偏好一起进磁盘。三道同谱：白名单块本身、
+    // stores/ 全目录不得出现凭据类型名、client.ts 的 AuthSecret 只许两形状。
+    let src = read("../src/stores/session.ts");
+    let block = src
+        .split_once("partialize: (s) => ({")
+        .and_then(|(_, rest)| rest.split_once("}),"))
+        .map(|(body, _)| body)
+        .expect("session store 应有 partialize 白名单块（判据以其为准）");
+    for word in [
+        "secret",
+        "password",
+        "token",
+        "credential",
+        "AuthSecret",
+        "fingerprint",
+    ] {
+        assert!(
+            !block.contains(word),
+            "partialize 白名单不得出现 {word:?}（凭据字样落盘即越界）"
+        );
+    }
+
+    let stores = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/stores");
+    let mut scanned = 0usize;
+    for entry in std::fs::read_dir(&stores).expect("src/stores 应可读") {
+        let path = entry.expect("store 目录项").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ts") {
+            continue;
+        }
+        scanned += 1;
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("AuthSecret"),
+            "{:?} 不得出现 AuthSecret 类型名（持久 store 永不持凭据形状）",
+            path.file_name().unwrap()
+        );
+    }
+    assert!(
+        scanned >= 3,
+        "正对照：stores/ 扫描须真实覆盖文件，实得 {scanned}"
+    );
+
+    let client = read("../src/ipc/client.ts");
+    assert!(
+        client.contains("export type AuthSecretDto = {"),
+        "正对照：client.ts 必须已声明 AuthSecretDto（本负例不空洞）"
+    );
+    for line in client.lines().filter(|l| l.contains("AuthSecret")) {
+        assert!(
+            line.contains("export type AuthSecretDto = {")
+                || line.contains("secret?: AuthSecretDto | null"),
+            "client.ts 中 AuthSecret 只许两形状（类型定义 / connect 逐次入参），实得行: {line}"
+        );
+    }
+}
+
+#[test]
+fn vault_entry_pointer_never_duplicated_into_file_domain() {
+    // B6 T-B6-8 红线：vault 是**指针**不是密文——file-core 永不自带第二套加解密/
+    // 字段模型（它收到的只是端口解出的值）。按依赖级词汇扫（`VaultService` 这类
+    // 纯文档提及不算复制，import/依赖/密文列名才算）。
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("目录应可读") {
+            let path = entry.expect("目录项").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/file-core/src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    assert!(
+        files.len() >= 15,
+        "正对照：file-core 源文件应成规模，实得 {}",
+        files.len()
+    );
+    for word in [
+        "argon2",
+        "aes_gcm",
+        "seal_field",
+        "open_field",
+        "fields_ct",
+        "totp_ct",
+        "vault_core",
+        "vault.db",
+    ] {
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(
+                !text.contains(word),
+                "{:?} 出现 vault 域词汇 {word:?}——指针语义不许长成第二套密文实现",
+                path.file_name().unwrap()
+            );
+        }
+    }
+    // 依赖级双保险：Cargo.toml 不挂 vault-core
+    let cargo = read("../crates/file-core/Cargo.toml");
+    assert!(
+        !cargo.contains("vault"),
+        "file-core 的 Cargo.toml 不得依赖 vault（装配臂归 src-tauri）"
+    );
+    // 装配层同谱：resolve_auth 只读 password 字段，totp 面整体不进文件命令
+    assert!(
+        !read("src/commands/file.rs").contains("totp"),
+        "file 命令面不得触碰 totp（条目字段的最小说取面）"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-8）字面测试名优先于 rustc 命名惯例
+fn allowPlaintextOnce_failClosed() {
+    // 第三闸的缺省语义 = 拒：命令面 `unwrap_or(false)` 是唯一合法缺省——
+    // "参数没传"必须长成"没确认"，不能长成"当它确认过"。
+    let cmd = read("src/commands/file.rs");
+    // 判定收在 connect 命令自身函数体（同文件他处 unwrap_or(true) 是排序等 innocuous 默认）
+    let connect_body = cmd
+        .split_once("pub async fn file_remote_connect")
+        .map(|(_, rest)| {
+            rest.split_once("#[tauri::command]")
+                .map(|(b, _)| b)
+                .unwrap_or(rest)
+        })
+        .expect("file_remote_connect 命令应在位");
+    assert!(
+        connect_body.contains("allow_plaintext_once.unwrap_or(false)"),
+        "connect 命令须以 unwrap_or(false) 消费确认参数"
+    );
+    assert!(
+        !connect_body.contains("unwrap_or(true)"),
+        "connect 命令体内任何 unwrap_or(true) 都会把缺省翻成放行（fail-open），不得存在"
+    );
+    // 闸的骨架在 file-core：码表先注册、两闸先于建驱动
+    let err = read("../crates/file-core/src/error.rs");
+    assert!(
+        err.contains("FILE_REMOTE_008") && err.contains("FILE_REMOTE_PLAIN_CONFIRM"),
+        "008 须点名常量并入 FILE_REMOTE_CODES 码表"
+    );
+    let gate = read("../crates/file-core/src/remote/ftp.rs");
+    assert!(
+        gate.contains("allow_plaintext_once") && gate.contains("FILE_REMOTE_PLAIN_CONFIRM"),
+        "确认闸本体须消费逐次参数并报 008"
+    );
+    let svc = read("../crates/file-core/src/service.rs");
+    let new_at = svc
+        .find("FtpDriver::new")
+        .expect("FTP 臂应在 service.rs 建驱动");
+    let guard_at = svc
+        .find("ftp_plaintext_guard")
+        .expect("总闸须在 connect 臂内");
+    let confirm_at = svc
+        .find("ftp_confirm_gate")
+        .expect("第三闸须在 connect 臂内");
+    assert!(
+        guard_at < new_at && confirm_at < new_at,
+        "两闸都必须先于建驱动：拒在出网之前（guard {guard_at} / confirm {confirm_at} / new {new_at}）"
+    );
+    // 无记忆语义：闸侧只有"本次入参"一条路——禁一切进程内记忆原语
+    // （'static 生命周期等正常 Rust 写法不在此列，记忆位指的是可写字节的容器）
+    for (name, text) in [("service.rs", svc.clone()), ("ftp.rs", gate.clone())] {
+        for word in [
+            "OnceLock",
+            "LazyLock",
+            "lazy_static",
+            "thread_local",
+            "last_plaintext_confirm",
+        ] {
+            assert!(
+                !text.contains(word),
+                "{name} 出现记忆位容器 {word:?}——明文确认必须逐次，不得有'上次确认过'的出路"
+            );
+        }
+    }
+}

@@ -1250,7 +1250,9 @@ mod tests {
             header: None,
             password: Some(Zeroizing::new("sesame".into())),
         };
-        let e = svc.connect("remote:first", Some(mk_secret())).unwrap_err();
+        let e = svc
+            .connect("remote:first", Some(mk_secret()), false)
+            .unwrap_err();
         assert!(e.to_string().contains(fp), "分派口须点名指纹，实得 {e}");
         assert!(svc.remote_drivers().is_empty(), "被拒的连接不得入账");
         assert_eq!(
@@ -1259,7 +1261,9 @@ mod tests {
             "分派口也止步于探测"
         );
         svc.fingerprint_ack("remote:first", fp).unwrap();
-        let info = svc.connect("remote:first", Some(mk_secret())).unwrap();
+        let info = svc
+            .connect("remote:first", Some(mk_secret()), false)
+            .unwrap();
         assert_eq!(info.protocol, "sftp");
         assert_eq!(svc.remote_drivers().len(), 1);
         // 确认写盘：盘上记录逐字等于核对过的描述符

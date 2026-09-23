@@ -318,18 +318,146 @@ pub type AuthSecretDto = file_core::AuthSecret;
 /// 已连接驱动的对外描述（键集恒等 RemoteDriverInfo 字段集，无凭据位）
 pub type RemoteDriverDto = file_core::RemoteDriverInfo;
 
-/// 连接档案（本行只认 webdav；其余协议 FILE_REMOTE_004 点名后续行，禁假就绪）
+// ---------------- B6 凭据解析装配（09 §6.2 T-B6-8）----------------
+// VaultEntry 指针的解析在这一层装配（src-tauri 是唯一同时看得见 vault-core 与
+// file-core 的层）：file-core 不 import vault-core，它收到的永远是已解出的值。
+// 接口偏离任务书⑪的 `Ports` 路线，理由随提交说明登记（Ports 未注册 vault，
+// 加注册会牵 state.rs/main.rs 面）。四态消息两两不同串、禁回落"请输入口令"。
+
+/// 解析后的连接凭据（Debug 面手写脱敏——值只在装配层内存区活到协议腿）
+pub struct ResolvedAuth {
+    pub user: String,
+    pub secret: Option<file_core::AuthSecret>,
+}
+
+impl std::fmt::Debug for ResolvedAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedAuth")
+            .field("user", &self.user)
+            .field(
+                "secret",
+                &match &self.secret {
+                    Some(_) => "<present, redacted>",
+                    None => "<absent>",
+                },
+            )
+            .finish()
+    }
+}
+
+/// 档案 → 凭据（唯一装配口）：typed 是面板逐次送入的凭据（PromptEachTime/
+/// SessionPassword/SshKey 短语走它）；VaultEntry 经真 [`VaultService`] 解指针，
+/// 只取 `kind==password` 字段值。Anonymous 与 HTTPS 同谱：typed 若在场就地退役。
+pub fn resolve_auth(
+    profile: &file_core::RemoteProfile,
+    vault: Option<&vault_core::vault::VaultService>,
+    typed: Option<file_core::AuthSecret>,
+) -> Result<ResolvedAuth, file_core::FileError> {
+    use file_core::{AuthKind, FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING};
+    use vault_core::model::FieldKind;
+    use vault_core::vault::VaultState;
+    use zeroize::Zeroizing;
+    let secret = match &profile.auth {
+        AuthKind::Anonymous => {
+            drop(typed); // 匿名档不伸手要值，也不留半份副本
+            None
+        }
+        AuthKind::SshKey { .. } | AuthKind::PromptEachTime | AuthKind::SessionPassword => typed,
+        AuthKind::VaultEntry { entry_id } => {
+            drop(typed); // 指针档以 vault 为唯一真源：逐次 typed 不覆写指针
+            let svc = vault.ok_or_else(|| FileError::Remote {
+                code: FILE_REMOTE_FIELD,
+                msg: format!(
+                    "vault 服务未装配：条目 {entry_id} 无法经指针解析（缺端口态——与未解锁/条目不存在两态分列，禁混因）"
+                ),
+            })?;
+            match svc.state() {
+                VaultState::Unlocked => {}
+                VaultState::Locked => {
+                    return Err(FileError::Remote {
+                        code: FILE_REMOTE_FIELD,
+                        msg: format!(
+                            "vault 处于未解锁状态：条目 {entry_id} 无法经指针解析（未解锁态点名状态本身\
+                             ——与缺端口/条目不存在两态分列；连接永不反向索取口令）"
+                        ),
+                    })
+                }
+                VaultState::Uninitialized => {
+                    return Err(FileError::Remote {
+                        code: FILE_REMOTE_FIELD,
+                        msg: format!("vault 尚未初始化：条目 {entry_id} 无法经指针解析（未初始化态）"),
+                    })
+                }
+            }
+            let entry = svc
+                .get_entry(entry_id)
+                .map_err(|e| {
+                    FileError::Remote {
+                        code: FILE_REMOTE_FIELD,
+                        msg: format!("vault 读取条目 {entry_id} 失败: {e}"),
+                    }
+                })?
+                .ok_or_else(|| FileError::Remote {
+                    code: FILE_REMOTE_MISSING,
+                    msg: format!(
+                        "vault 条目 {entry_id} 不存在（条目缺失态——与缺端口/未解锁两态分列，不回落索取口令）"
+                    ),
+                })?;
+            let value = entry
+                .fields
+                .iter()
+                .find(|fld| fld.kind == FieldKind::Password)
+                .map(|fld| fld.value.clone())
+                .ok_or_else(|| FileError::Remote {
+                    code: FILE_REMOTE_FIELD,
+                    msg: format!(
+                        "vault 条目 {entry_id} 没有 kind==password 字段（指针悬空第四态——三态之外单列，不回落索取口令）"
+                    ),
+                })?;
+            Some(file_core::AuthSecret {
+                header: None,
+                password: Some(Zeroizing::new(value)),
+            })
+        }
+    };
+    Ok(ResolvedAuth {
+        user: profile.user.clone(),
+        secret,
+    })
+}
+
+/// 连接档案（四协议分派臂都在册；本命令的凭据面：`secret` 逐次入参只进不出，
+/// VaultEntry 档案经 [`resolve_auth`] 在宿主层解指针）。
+/// `allow_plaintext_once`（明文第三闸，T-B6-8）：缺省即 false——非回环明文连接
+/// 不带用户明示参数直接 `Err(FILE_REMOTE_008)`，拒在出网之前；无记忆语义在
+/// file-core 闸侧（逐次），面板复述目标地址经 confirmAction 后重试。
 #[tauri::command]
 pub async fn file_remote_connect(
     profile_id: String,
     secret: Option<AuthSecretDto>,
+    allow_plaintext_once: Option<bool>,
     state: State<'_, HostState>,
 ) -> Result<RemoteDriverDto, AppError> {
     let svc = file_service(&state)?;
-    tauri::async_runtime::spawn_blocking(move || svc.connect(&profile_id, secret))
-        .await
-        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
-        .map_err(file_err)
+    let vault = state.vault.service();
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile =
+            svc.profiles()
+                .get(&profile_id)
+                .ok_or_else(|| file_core::FileError::Remote {
+                    code: file_core::FILE_REMOTE_MISSING,
+                    msg: format!("档案不存在: {profile_id}（未建档的站点不建连接）"),
+                })?;
+        let resolved = resolve_auth(&profile, vault.as_deref(), secret)?;
+        svc.connect(
+            &profile_id,
+            resolved.secret,
+            allow_plaintext_once.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+    .map_err(file_err)
 }
 
 /// 远端列目录（独立子视图：不走 file_list/本地浏览链，见 09 §6.2 T-B6-3 落地补记）
