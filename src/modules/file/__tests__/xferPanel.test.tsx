@@ -18,6 +18,7 @@ import {
   type OpProgressDto,
 } from "../../../ipc/client";
 import { notify } from "../../../stores/notifications";
+import { useSession } from "../../../stores/session";
 import { confirmAction } from "../../../stores/confirm";
 
 // D-29 B6/T-B6-7 回归：resume 返回新 op_id 被消费并以其为行新身份（承重③ UI 半）、
@@ -133,6 +134,8 @@ beforeEach(() => {
   vi.mocked(fileEnqueue).mockResolvedValue({ op_id: "op-new", conflicts: [] });
   vi.mocked(fileOpResume).mockResolvedValue({ op_id: "op-resumed", previous_op_id: "op-old" });
   vi.mocked(xferStatus).mockResolvedValue(opRow("op-resumed"));
+  // T-B6-10 三档分派：本文件全部观察传输队列臂，默认停在 transfers 档
+  useSession.setState({ fileSubPanel: "transfers" });
 });
 
 afterEach(() => {
@@ -144,6 +147,7 @@ afterEach(() => {
     }
   });
   container.remove();
+  useSession.setState({ fileSubPanel: "browse" });
   vi.clearAllMocks();
 });
 
@@ -188,6 +192,8 @@ describe("FilePanel 传输状态类型化+断点真值+冲突消费（T-B6-7）"
         conflicts: [{ name: "a.txt", dst: "C:\\out\\a.txt" }],
       })
       .mockResolvedValue({ op_id: "op-2", conflicts: [] });
+    // 入队交互活在浏览档（列表选中 + 目标目录输入框都在左列工具区）
+    useSession.setState({ fileSubPanel: "browse" });
     await mount();
     await click(rowByText("a.txt")!);
     const dst = container.querySelector<HTMLInputElement>(
@@ -319,5 +325,22 @@ describe("FilePanel 传输事件面诚实化（T-B6-9）", () => {
     expect(rowB!.textContent).toContain("续自 old-A");
     // 后端收口即无需定点兜底读口参与本用例（防"xferStatus 才是去幽灵路"的回退）
     expect(xferStatus).not.toHaveBeenCalled();
+  });
+
+  it("xferPanel_directionBadge_matchesDerived：方向徽标只读 direction，OpKind 参与不到判色（T-B6-10）", async () => {
+    // 把 kind 和 direction 拧着摆：move+download / copy+upload。若面板从 OpKind
+    // 猜方向（"移动=上传"式臆断），这两行的徽标必翻；正确实现只看 direction。
+    vi.mocked(fileOpsActive).mockResolvedValue([
+      opRow("mv-down", { kind: "move", direction: "download" }),
+      opRow("cp-up", { kind: "copy", direction: "upload" }),
+    ]);
+    await mount();
+    expect(container.querySelector('[data-op-id="mv-down"]')?.textContent).toContain("下载");
+    expect(container.querySelector('[data-op-id="mv-down"]')?.textContent).not.toContain("上传");
+    expect(container.querySelector('[data-op-id="cp-up"]')?.textContent).toContain("上传");
+    expect(container.querySelector('[data-op-id="cp-up"]')?.textContent).not.toContain("下载");
+    // 行仍如实亮 kind 徽标（两事实源并存互不覆盖）：移动/复制字样在各自行内
+    expect(container.querySelector('[data-op-id="mv-down"]')?.textContent).toContain("移动");
+    expect(container.querySelector('[data-op-id="cp-up"]')?.textContent).toContain("复制");
   });
 });

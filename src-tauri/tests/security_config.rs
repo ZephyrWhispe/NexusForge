@@ -1584,3 +1584,104 @@ fn events_are_bell_only() {
         "门铃形状不建 watch 口（裁决非遗漏，见 09 §6.2 T-B6-9）"
     );
 }
+
+/// T-B6-10 新判据（09 §6.2）：命令层永不接受裸口令参数——九枚 file_remote_*
+/// 的签名字节逐枚切片扫凭据词（AuthSecretDto 包装是合法唯一入凭据通道，
+/// 裸 `password: String` / `passphrase` / `secret: String` 一律禁）。
+/// 扫描只取 `pub async fn` 起到签名闭合括号止——doc 注释里的"口令"字样
+/// 是给读者的，不在禁列。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-10）字面测试名优先于 rustc 命名惯例
+fn commands_never_accept_raw_password_args() {
+    let cmd = read("src/commands/file.rs");
+    let mut sigs = Vec::new();
+    let mut rest = cmd.as_str();
+    while let Some(idx) = rest.find("pub async fn file_remote") {
+        let body = &rest[idx..];
+        let end = body.find(")\n").expect("命令签名应有闭合括号");
+        sigs.push(body[..end].to_owned());
+        rest = &body[end..];
+    }
+    assert!(
+        sigs.len() >= 9,
+        "正对照：file_remote_* 命令应成规模（connect/profile/browse/ack 等），实得 {}",
+        sigs.len()
+    );
+    for sig in &sigs {
+        let head = sig.split_once("fn ").map(|(_, r)| r).unwrap_or(sig);
+        for word in ["password", "passphrase", "credential", "secret: String"] {
+            assert!(
+                !head.to_lowercase().contains(word),
+                "命令签名出现裸凭据参数词 {word:?}——凭据只准走 Option<AuthSecretDto>：{head}"
+            );
+        }
+    }
+    // 正对照防空洞：唯一凭据通道真实在位且只有包装形态
+    let connect = sigs
+        .iter()
+        .find(|s| s.contains("file_remote_connect"))
+        .expect("connect 命令应在册");
+    assert!(
+        connect.contains("secret: Option<AuthSecretDto>"),
+        "connect 应以 Option<AuthSecretDto> 收凭据（只进不出的包装口）"
+    );
+    assert!(
+        connect.contains("allow_plaintext_once: Option<bool>"),
+        "第三闸逐次参数应在 connect 签名（缺省拒在 unwrap_or(false) 侧，T-B6-8 已钉）"
+    );
+}
+
+/// T-B6-10 新判据（09 §6.2/§6.3）：file 域永不下载 artifact——file-core 全源
+/// 禁外部二进制/旁路投递词（rclone/sidecar/asset 协议/tauri http 插件的
+/// download_file）。大小写敏感是刻意的：§6.3 的"明示不做"登记（如
+/// `Netdisk/Rclone 档`）是文档提及不是依赖，禁词只杀小写标识符形态。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-10）字面测试名优先于 rustc 命名惯例
+fn file_domain_never_downloads_artifacts() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("目录应可读") {
+            let path = entry.expect("目录项").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/file-core/src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    assert!(
+        files.len() >= 15,
+        "正对照：file-core 源文件应成规模（本扫非空洞），实得 {}",
+        files.len()
+    );
+    for word in [
+        "download_file",
+        "rclone",
+        "sidecar",
+        "convert_file_src",
+        "convertFileSrc",
+        "asset_protocol",
+        "asset:",
+        "plugin-http",
+        "http::fetch",
+    ] {
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(
+                !text.contains(word),
+                "{:?} 出现 artifact 旁路投递词 {word:?}——文件域传输只有队列驱动一条路（§6.3 无网盘/外部二进制档）",
+                path.file_name().unwrap()
+            );
+        }
+    }
+    // Cargo.toml 双保险：不挂 tauri plugin-http / asset 协议类依赖
+    let cargo = read("../crates/file-core/Cargo.toml");
+    for word in ["plugin-http", "rclone", "sidecar"] {
+        assert!(
+            !cargo.contains(word),
+            "file-core 的 Cargo.toml 不得依赖 {word:?}（下载 artifact 的旁路从依赖层面就关门）"
+        );
+    }
+}

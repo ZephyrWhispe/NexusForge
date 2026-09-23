@@ -22,6 +22,7 @@ import {
 } from "../../../ipc/client";
 import { notify } from "../../../stores/notifications";
 import { confirmAction } from "../../../stores/confirm";
+import { useSession } from "../../../stores/session";
 
 // D-29 B1/T-B1-5 回归：批量重命名（预览表+前端推导冲突原因+勾选应用）、等待队列
 // 丢弃、压缩/解压入队 kind 字面透传（TS 联合放开到 FileOpKind 的接线证明）。
@@ -140,6 +141,7 @@ afterEach(() => {
     }
   });
   container.remove();
+  useSession.setState({ fileSubPanel: "browse" });
   vi.clearAllMocks();
 });
 
@@ -253,6 +255,8 @@ describe("FilePanel 批量重命名+等待队列+压缩解压（T-B1-5）", () =
   });
 
   it("fileOpsPending_dropInvokesAndReloads：挂载即拉等待队列，丢弃后恰一次重拉", async () => {
+    // T-B6-10 三档分派：等待队列整块原样搬入传输档（判据一字未动），观察需停在 transfers
+    useSession.setState({ fileSubPanel: "transfers" });
     vi.mocked(fileOpsPending)
       .mockResolvedValueOnce([pendingRow("op-9")])
       .mockResolvedValue([]);

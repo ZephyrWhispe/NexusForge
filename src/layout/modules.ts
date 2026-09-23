@@ -122,7 +122,18 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
     },
   ],
   vault: [],
-  file: [],
+  // T-B6-10（09 §6.2，panels/04 §2）：文件三档子面板，id 与 session store fileSubPanel 一一对应
+  // （view 维度第四枚分键；网盘/treemap 等延后档不在此开栏——§6.3 归 DeferredBadge）
+  file: [
+    {
+      group: "文件",
+      items: [
+        { id: "browse", label: "浏览与搜索", scope: "view" },
+        { id: "transfers", label: "传输队列", scope: "view" },
+        { id: "connections", label: "远程连接", scope: "view" },
+      ],
+    },
+  ],
   desktop: [],
   kvm: [],
   editor: [],
@@ -147,13 +158,19 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
 };
 
 /** 二级导航选择态的 session 键（MainWorkbench 的唯一派发目标，禁止再按模块写三元） */
-export type SubnavStateKey = "clipView" | "clipGroup" | "proxySubPanel" | "syncSubPanel";
+export type SubnavStateKey =
+  | "clipView"
+  | "clipGroup"
+  | "proxySubPanel"
+  | "syncSubPanel"
+  | "fileSubPanel";
 
 /** 模块 × 维度 → session 键（09 §8.1-⑩ 红线：分组筛选与子面板切换两种语义不得互污，故分键） */
 const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavStateKey>>>> = {
   clipboard: { view: "clipView", filter: "clipGroup" },
   proxy: { filter: "proxySubPanel" },
   sync: { filter: "syncSubPanel" },
+  file: { view: "fileSubPanel" },
 };
 
 /** 读选择态所需的最小会话快照（不依赖 store 类型，便于纯函数直测） */
@@ -162,6 +179,7 @@ export interface SubnavSelections {
   clipGroup: string;
   proxySub: string;
   syncSub: string;
+  fileSub: string;
 }
 
 /** 该模块该维度当前高亮项 id；模块未在该维度注册选择态则 undefined */
@@ -175,6 +193,7 @@ export function subnavActive(
   if (key === "clipGroup") return st.clipGroup;
   if (key === "proxySubPanel") return st.proxySub;
   if (key === "syncSubPanel") return st.syncSub;
+  if (key === "fileSubPanel") return st.fileSub;
   return undefined;
 }
 

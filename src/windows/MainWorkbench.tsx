@@ -104,6 +104,9 @@ export default function MainWorkbench() {
   // T-B5-8：同步五档再分一键（第三枚分键，理由同上）
   const syncSub = useSession((s) => s.syncSubPanel);
   const setSyncSub = useSession((s) => s.setSyncSubPanel);
+  // T-B6-10：文件三档再分一键（第四枚分键，理由同上）
+  const fileSub = useSession((s) => s.fileSubPanel);
+  const setFileSub = useSession((s) => s.setFileSubPanel);
   const search = useSession((s) => s.clipSearch);
   const setSearch = useSession((s) => s.setClipSearch);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -170,12 +173,13 @@ export default function MainWorkbench() {
   const moduleId = isModuleId(active) ? active : "clipboard";
   // T-B3-1：选择态读写一律经 modules.ts 路由表（模块 × 维度 → session 键），
   // 取代原先按模块硬分叉的选择态三元
-  const subnavSelections = { clipView, clipGroup: group, proxySub, syncSub };
+  const subnavSelections = { clipView, clipGroup: group, proxySub, syncSub, fileSub };
   const subnavSetters: Record<SubnavStateKey, (id: string) => void> = {
     clipView: setClipView,
     clipGroup: setGroup,
     proxySubPanel: setProxySub,
     syncSubPanel: setSyncSub,
+    fileSubPanel: setFileSub,
   };
   const selectSubnav = (scope: SubNavScope, id: string) => {
     const sel = subnavSelect(moduleId, scope, id);

@@ -17,14 +17,15 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
-  fileRemoteConnect,
+  fileRemoteFingerprintAck,
   parseAppError,
   type AuthKindDto,
   type RemoteDriverDto,
   type RemoteProfileDto,
 } from "../../ipc/client";
-import { confirmAction } from "../../stores/confirm";
 import { notify, reportError } from "../../stores/notifications";
+import { runConnect } from "./connectFlow";
+import TofuPromptDialog, { type TofuRequest } from "./TofuPromptDialog";
 
 /**
  * B6 T-B6-8 连接对话框（形状先行）：authKind 五档切换 = **整表单重挂载**
@@ -82,6 +83,7 @@ export default function ConnectDialog({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [tofu, setTofu] = useState<TofuRequest | null>(null);
 
   const switchKind = (next: AuthKindTag) => {
     // 换档即丢值：指针与口令都只在各自档位有意义，跨档携带是脏不是便利
@@ -94,52 +96,53 @@ export default function ConnectDialog({
 
   const typedValue = authKind === "prompt_each_time" || authKind === "session_password";
 
-  const doConnect = async (allowPlaintextOnce: boolean) => {
+  // 连接管线唯一实现已收口 connectFlow.runConnect（T-B6-10：008 逐次闸 + TOFU 两臂
+  // 单点裁决，本对话框与 ConnectionsSection 共用；本组件只管表单与呈现）
+  const doConnect = async () => {
     setBusy(true);
     setErr(null);
-    try {
-      // 只有逐次输入档才组凭据体；指针档由宿主层经真 vault 解析（前端不碰值）
-      const secret = typedValue && password.length > 0 ? { password } : null;
-      const info = await fileRemoteConnect(profile.id, secret, allowPlaintextOnce);
+    // 只有逐次输入档才组凭据体；指针档由宿主层经真 vault 解析（前端不碰值）
+    const secret = typedValue && password.length > 0 ? { password } : null;
+    const r = await runConnect(profile, secret);
+    setPassword("");
+    setBusy(false);
+    if (r.status === "connected") {
       notify(
         "success",
-        `已连接 ${info.label}`,
-        `凭据来源：${info.auth_source}（只报来源，不报值）。`,
+        `已连接 ${r.info.label}`,
+        `凭据来源：${r.info.auth_source}（只报来源，不报值）。`,
       );
-      onConnected?.(info);
+      onConnected?.(r.info);
       onOpenChange(false);
-    } catch (e) {
-      const ae = parseAppError(e);
-      if (ae?.data.code === "FILE_REMOTE_008" && !allowPlaintextOnce) {
-        // 明文第三闸：逐次明示——复述目标地址，确认只活过这一次调用
-        const ok = await confirmAction({
-          title: "确认明文连接？",
-          impact: [
-            `目标：${profile.host}:${profile.port}（协议 ${profile.protocol}，明文过网）`,
-            "口令与文件内容将以可读明文经过网络路径",
-          ],
-          detail: "本确认只对本次连接生效，不留记忆位；档案里永不存在口令字段。",
-          confirmLabel: "本次以明文连接",
-          danger: true,
-        });
-        if (ok) {
-          await doConnect(true);
-          return;
-        }
-        setErr("已取消：明文连接未获用户明示（FILE_REMOTE_008）");
-      } else if (ae) {
-        setErr(`${ae.data.code}: ${ae.data.message}`);
-      } else {
-        reportError(e, { context: "远端连接异常" });
-        setErr("连接失败（非典形错误，已上报宿主日志）");
-      }
-    } finally {
-      setPassword("");
-      setBusy(false);
+    } else if (r.status === "cancelled_plaintext") {
+      setErr("已取消：明文连接未获用户明示（FILE_REMOTE_008）");
+    } else if (r.status === "tofu") {
+      setTofu(r.request);
+    } else {
+      setErr(r.display);
     }
   };
 
+  const onTofuAck = async (fingerprint: string) => {
+    setTofu(null);
+    try {
+      await fileRemoteFingerprintAck(profile.id, fingerprint);
+    } catch (e) {
+      const ae = parseAppError(e);
+      if (ae) setErr(`${ae.data.code}: ${ae.data.message}`);
+      else {
+        reportError(e, { context: "指纹确认异常" });
+        setErr("指纹确认失败（非典形错误，已上报宿主日志）");
+      }
+      return;
+    }
+    // 「接受并连接」：记录后立即重发；口令按纪律已清空，逐次档会在下一道
+    // 门诚实地再要一次凭据（不偷偷续用）
+    await doConnect();
+  };
+
   return (
+    <>
     <Dialog open={open} onOpenChange={(_, d) => !d.open && onOpenChange(false)}>
       <DialogSurface>
         <DialogBody>
@@ -217,7 +220,7 @@ export default function ConnectDialog({
             <Button
               appearance="primary"
               disabled={busy}
-              onClick={() => void doConnect(false)}
+              onClick={() => void doConnect()}
             >
               {busy ? "连接中…" : "连接"}
             </Button>
@@ -225,5 +228,15 @@ export default function ConnectDialog({
         </DialogBody>
       </DialogSurface>
     </Dialog>
+    <TofuPromptDialog
+      request={tofu}
+      open={tofu !== null}
+      onCancel={() => {
+        setTofu(null);
+        setErr("已取消：主机密钥未获确认，连接未发起（TOFU）");
+      }}
+      onAck={(fp) => void onTofuAck(fp)}
+    />
+    </>
   );
 }

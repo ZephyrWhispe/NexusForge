@@ -53,9 +53,11 @@ import {
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
+import { isFileSubPanel, useSession } from "../../stores/session";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 import DeferredBadge from "../../components/DeferredBadge";
+import ConnectionsSection from "./ConnectionsSection";
 
 /**
  * 文件与存储面板（docs/impl/05 F，M6 v1）：
@@ -228,6 +230,11 @@ export function zipTarget(cwd: string, dstInput: string, stem: string): string {
 
 export default function FilePanel() {
   const styles = useStyles();
+  // T-B6-10 三档分派（第四枚分键 fileSubPanel）：浏览/传输/连接各占一档，
+  // 既有浏览·搜索·重命名代码原样进 browse（只挪分派不重写，T-B5-8 同纪律）；
+  // 野值确定性回落 browse（面板侧收窄，store 侧已拒落）
+  const storedSub = useSession((s) => s.fileSubPanel);
+  const sub = isFileSubPanel(storedSub) ? storedSub : "browse";
   const [cwd, setCwd] = useState<string | null>(null);
   const [crumbs, setCrumbs] = useState<[string, string][]>([]);
   const [entries, setEntries] = useState<FileEntryDto[]>([]);
@@ -705,8 +712,113 @@ export default function FilePanel() {
     ["done", "failed", "canceled"].includes(p.state),
   );
 
+  // transfers 档（T-B6-10）：操作队列 + 崩溃恢复记录 + 终态摘要三块自 browse 档
+  // 原样挪来（逐字未改）；该档首屏不空由诚实空态承担（D-18）
+  const transfersArm = (
+    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      {/* 操作队列（F2：进度 + 暂停/恢复/取消） */}
+      {activeOps.length > 0 && (
+        <div className={styles.queue}>
+          {activeOps.map((p) => {
+            const ratio = p.bytes_total > 0 ? p.bytes_done / p.bytes_total : 0;
+            return (
+              <div key={p.op_id} data-op-id={p.op_id} className={styles.opRow}>
+                <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
+                {/* 方向徽标只贴跨边界行（T-B6-9）：本地复制不显示方向——防
+                    "处处贴方向"噪音；值来自 direction 唯一派生，面板不自判 */}
+                {p.direction !== "local" && (
+                  <Badge appearance="outline" color="important">
+                    {p.direction === "upload" ? "上传" : "下载"}
+                  </Badge>
+                )}
+                <ProgressBar className={styles.bar} value={Math.min(1, Math.max(0, ratio))} />
+                <span className={styles.muted}>
+                  {fmtSize(p.bytes_done)} / {fmtSize(p.bytes_total)} · {p.files_done}/
+                  {p.files_total}
+                  {p.current ? ` · ${p.current}` : ""}
+                  {` · ${OP_STATE_LABEL[p.state] ?? p.state}`}
+                  {p.resumed_from ? ` · 续自 ${p.resumed_from.slice(0, 8)}` : ""}
+                  {/* 续传档位只报对端声明（resumable=null 即"未获事实源"，禁写"支持断点续传"） */}
+                  {p.resumable === "range" ? " · 支持断点续传" : ""}
+                  {p.error ? ` · ${p.error}` : ""}
+                </span>
+                {p.state === "running" || p.state === "queued" ? (
+                  <Button size="small" onClick={() => void opControl(p, "pause")}>
+                    暂停
+                  </Button>
+                ) : (
+                  <Button size="small" onClick={() => void opControl(p, "resume")}>
+                    恢复
+                  </Button>
+                )}
+                <Button size="small" onClick={() => void opControl(p, "cancel")}>
+                  取消
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 等待中（F2 崩溃恢复记录：pending_ops 表，可丢弃） */}
+      {pending.length > 0 && (
+        <div className={styles.queue}>
+          <Text weight="semibold" size={200}>
+            等待中（未完成操作的崩溃恢复记录）
+          </Text>
+          {pending.map((p) => (
+            <div key={p.op_id} className={styles.opRow}>
+              <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
+              <Text size={200} className={styles.muted}>
+                {p.srcs[0]?.split(/[\\/]/).pop() ?? "（无源）"}
+                {p.srcs.length > 1 ? ` 等 ${p.srcs.length} 项` : ""}
+                {` → ${p.dst} · 断点文件 ${p.file_index} · ${fmtTime(p.created_ms)}`}
+              </Text>
+              <span style={{ flex: 1 }} />
+              <Button size="small" onClick={() => void dropPending(p)}>
+                丢弃
+              </Button>
+            </div>
+          ))}
+          <Text size={200} className={styles.muted}>
+            应用重启时以上条目会被自动断点续传；「丢弃」仅删除恢复记录，不影响已落盘文件。
+          </Text>
+        </div>
+      )}
+
+      {/* 近期完成（终态摘要） */}
+      {finishedOps.length > 0 && (
+        <div className={styles.toolbar}>
+          {finishedOps.map((p) => (
+            <Badge key={p.op_id} data-op-id={p.op_id} appearance={p.state === "done" ? "filled" : "outline"} color={p.state === "done" ? "success" : "danger"}>
+              {OP_KIND_LABEL[p.kind]} · {OP_STATE_LABEL[p.state] ?? p.state}
+              {p.resumed_from ? ` · 续自 ${p.resumed_from.slice(0, 8)}` : ""}
+              {p.error ? ` · ${p.error}` : ""}
+            </Badge>
+          ))}
+          <Button
+            size="small"
+            appearance="subtle"
+            onClick={() => {
+              opsRef.current.clear();
+              setOps([]);
+            }}
+          >
+            清除
+          </Button>
+        </div>
+      )}
+
+      {activeOps.length === 0 && pending.length === 0 && finishedOps.length === 0 && (
+        <EmptyState text="当前没有进行中或近期的传输：复制/移动/删除入队后在这里跟进" />
+      )}
+    </div>
+  );
+
   return (
     <div className={styles.root}>
+    {sub === "browse" && (
+      <>
       <div className={styles.split}>
         <div className={styles.leftCol}>
       {/* 导航栏 */}
@@ -903,76 +1015,6 @@ export default function FilePanel() {
         </div>
       )}
 
-      {/* 操作队列（F2：进度 + 暂停/恢复/取消） */}
-      {activeOps.length > 0 && (
-        <div className={styles.queue}>
-          {activeOps.map((p) => {
-            const ratio = p.bytes_total > 0 ? p.bytes_done / p.bytes_total : 0;
-            return (
-              <div key={p.op_id} data-op-id={p.op_id} className={styles.opRow}>
-                <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
-                {/* 方向徽标只贴跨边界行（T-B6-9）：本地复制不显示方向——防
-                    "处处贴方向"噪音；值来自 direction 唯一派生，面板不自判 */}
-                {p.direction !== "local" && (
-                  <Badge appearance="outline" color="important">
-                    {p.direction === "upload" ? "上传" : "下载"}
-                  </Badge>
-                )}
-                <ProgressBar className={styles.bar} value={Math.min(1, Math.max(0, ratio))} />
-                <span className={styles.muted}>
-                  {fmtSize(p.bytes_done)} / {fmtSize(p.bytes_total)} · {p.files_done}/
-                  {p.files_total}
-                  {p.current ? ` · ${p.current}` : ""}
-                  {` · ${OP_STATE_LABEL[p.state] ?? p.state}`}
-                  {p.resumed_from ? ` · 续自 ${p.resumed_from.slice(0, 8)}` : ""}
-                  {/* 续传档位只报对端声明（resumable=null 即"未获事实源"，禁写"支持断点续传"） */}
-                  {p.resumable === "range" ? " · 支持断点续传" : ""}
-                  {p.error ? ` · ${p.error}` : ""}
-                </span>
-                {p.state === "running" || p.state === "queued" ? (
-                  <Button size="small" onClick={() => void opControl(p, "pause")}>
-                    暂停
-                  </Button>
-                ) : (
-                  <Button size="small" onClick={() => void opControl(p, "resume")}>
-                    恢复
-                  </Button>
-                )}
-                <Button size="small" onClick={() => void opControl(p, "cancel")}>
-                  取消
-                </Button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* 等待中（F2 崩溃恢复记录：pending_ops 表，可丢弃） */}
-      {pending.length > 0 && (
-        <div className={styles.queue}>
-          <Text weight="semibold" size={200}>
-            等待中（未完成操作的崩溃恢复记录）
-          </Text>
-          {pending.map((p) => (
-            <div key={p.op_id} className={styles.opRow}>
-              <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
-              <Text size={200} className={styles.muted}>
-                {p.srcs[0]?.split(/[\\/]/).pop() ?? "（无源）"}
-                {p.srcs.length > 1 ? ` 等 ${p.srcs.length} 项` : ""}
-                {` → ${p.dst} · 断点文件 ${p.file_index} · ${fmtTime(p.created_ms)}`}
-              </Text>
-              <span style={{ flex: 1 }} />
-              <Button size="small" onClick={() => void dropPending(p)}>
-                丢弃
-              </Button>
-            </div>
-          ))}
-          <Text size={200} className={styles.muted}>
-            应用重启时以上条目会被自动断点续传；「丢弃」仅删除恢复记录，不影响已落盘文件。
-          </Text>
-        </div>
-      )}
-
       {/* 目录列表 */}
       <div className={styles.tableWrap}>
         <Table>
@@ -1066,29 +1108,6 @@ export default function FilePanel() {
           )}
         </aside>
       </div>
-
-      {/* 近期完成（终态摘要） */}
-      {finishedOps.length > 0 && (
-        <div className={styles.toolbar}>
-          {finishedOps.map((p) => (
-            <Badge key={p.op_id} data-op-id={p.op_id} appearance={p.state === "done" ? "filled" : "outline"} color={p.state === "done" ? "success" : "danger"}>
-              {OP_KIND_LABEL[p.kind]} · {OP_STATE_LABEL[p.state] ?? p.state}
-              {p.resumed_from ? ` · 续自 ${p.resumed_from.slice(0, 8)}` : ""}
-              {p.error ? ` · ${p.error}` : ""}
-            </Badge>
-          ))}
-          <Button
-            size="small"
-            appearance="subtle"
-            onClick={() => {
-              opsRef.current.clear();
-              setOps([]);
-            }}
-          >
-            清除
-          </Button>
-        </div>
-      )}
 
       {/* 批量重命名 Dialog（F7：规则表单 → 预览表 → 勾选应用；冲突原因前端推导） */}
       <Dialog open={rnOpen} onOpenChange={(_, d) => !d.open && setRnOpen(false)}>
@@ -1216,6 +1235,10 @@ export default function FilePanel() {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+      </>
+    )}
+    {sub === "transfers" && transfersArm}
+    {sub === "connections" && <ConnectionsSection />}
     </div>
   );
 }

@@ -14,6 +14,7 @@ const ST: SubnavSelections = {
   clipGroup: "all",
   proxySub: "nodes",
   syncSub: "conflicts",
+  fileSub: "connections",
 };
 
 let container: HTMLDivElement;
@@ -151,6 +152,18 @@ describe("SubNav 双维度（T-B3-1）", () => {
     expect(subnavSelect("vault", "filter", "all")).toBeUndefined();
     expect(subnavSelect("sync", "filter", "nope")).toBeUndefined();
     expect(subnavSelect("sync", "view", "overview")).toBeUndefined();
+
+    // T-B6-10：文件三档走 view 维度 + 第四枚分键 fileSubPanel（此前各档分键从无到有）
+    expect(subnavActive("file", "view", ST)).toBe("connections");
+    expect(subnavActive("file", "filter", ST)).toBeUndefined();
+    expect(subnavSelect("file", "view", "transfers")).toEqual({
+      key: "fileSubPanel",
+      value: "transfers",
+    });
+    expect(subnavSelect("file", "filter", "browse")).toBeUndefined();
+    expect(subnavSelect("file", "view", "nope")).toBeUndefined();
+    // 文件只有一维：filter 无落键；剪切板/同步的视图态也不得错投给文件
+    expect(subnavSelect("clipboard", "view", "browse")).toBeUndefined();
   });
 
   it("subnav_syncFiveItems_highlightIsolated", async () => {

@@ -44,6 +44,16 @@ export function isSyncSubPanel(v: string): v is SyncSubPanel {
   return SYNC_SUB_PANEL_IDS.includes(v);
 }
 
+/** 文件子面板 id（T-B6-10，09 §6.2）：与 SUBNAV[file] 三项一一对应
+ *  （panels/04 §2 三档：浏览/传输/连接站点；网盘与 treemap 属 §6.3 延后档，不开空档占位） */
+export type FileSubPanel = "browse" | "transfers" | "connections";
+
+const FILE_SUB_PANEL_IDS: readonly string[] = ["browse", "transfers", "connections"];
+
+export function isFileSubPanel(v: string): v is FileSubPanel {
+  return FILE_SUB_PANEL_IDS.includes(v);
+}
+
 /** 剪切板子面板 id（T-B3-1，09 §8.2）：与 SUBNAV[clipboard] 「视图」五项一一对应
  *  （细案 01§2 IA：历史/收藏与分组/粘贴堆栈/敏感库/统计与设置） */
 export type ClipView = "history" | "groups" | "stack" | "secret" | "settings";
@@ -75,6 +85,8 @@ interface SessionState {
   clipView: ClipView;
   /** 同步子面板选择态（T-B5-8）：第三枚分键，旧快照缺键回退 overview */
   syncSubPanel: SyncSubPanel;
+  /** 文件子面板选择态（T-B6-10）：第四枚分键，旧快照缺键回退 browse */
+  fileSubPanel: FileSubPanel;
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
@@ -83,6 +95,7 @@ interface SessionState {
   setProxySubPanel: (id: string) => void;
   setClipView: (id: string) => void;
   setSyncSubPanel: (id: string) => void;
+  setFileSubPanel: (id: string) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -97,6 +110,7 @@ export const useSession = create<SessionState>()(
       proxySubPanel: "overview",
       clipView: "history",
       syncSubPanel: "overview",
+      fileSubPanel: "browse",
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
@@ -109,6 +123,8 @@ export const useSession = create<SessionState>()(
       setClipView: (id) => set(isClipView(id) ? { clipView: id } : {}),
       // 同上（T-B5-8）：第三枚分键——同步的五档与代理/剪切板的选择态互不覆写
       setSyncSubPanel: (id) => set(isSyncSubPanel(id) ? { syncSubPanel: id } : {}),
+      // 同上（T-B6-10）：第四枚分键——文件三档与其余模块选择态互不覆写
+      setFileSubPanel: (id) => set(isFileSubPanel(id) ? { fileSubPanel: id } : {}),
     }),
     {
       name: "nf-session",
@@ -121,6 +137,7 @@ export const useSession = create<SessionState>()(
         proxySubPanel: s.proxySubPanel,
         clipView: s.clipView,
         syncSubPanel: s.syncSubPanel,
+        fileSubPanel: s.fileSubPanel,
       }),
     },
   ),
