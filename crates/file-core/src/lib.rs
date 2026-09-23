@@ -11,6 +11,7 @@ pub mod error;
 pub mod module;
 pub mod ops;
 pub mod preview;
+pub mod profile;
 pub mod rename;
 pub mod search;
 pub mod service;
@@ -24,6 +25,9 @@ pub use error::FileError;
 pub use module::FileModule;
 pub use ops::{Checkpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState, PendingOp, CHUNK};
 pub use preview::Preview;
+pub use profile::{
+    profile_id_of, validate_profile, AuthKind, ProfileStore, RemoteProfile, RemoteProtocol,
+};
 pub use rename::{apply_plan, build_plan, CaseMode, RenamePlan, RenameRule};
 pub use search::{SearchOpts, SearchResult};
 pub use service::FileService;

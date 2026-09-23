@@ -1171,3 +1171,38 @@ fn auxWindows_neverGrantSyncDatasetsGet() {
         "正对照：main 必须持有 {ident}，否则本负例是空洞"
     );
 }
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-1）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantRemoteProfileCommands() {
+    // B6 T-B6-1 红线负例：档案 = 站点清单，会暴露内网主机名/端口/用户形状，
+    // 三命令全为 main-only；辅助窗（热键可在任意上下文呼出）永不持有。
+    let caps = load_capabilities();
+    for ident in [
+        "allow-file-remote-profiles",
+        "allow-file-remote-profile-save",
+        "allow-file-remote-profile-delete",
+    ] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（远程档案面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}

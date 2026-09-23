@@ -12,6 +12,7 @@ use crate::driver::{DriverInfo, DriverRegistry};
 use crate::error::FileError;
 use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp};
 use crate::preview::{preview_file, Preview};
+use crate::profile::ProfileStore;
 use crate::rename::{apply_plan, build_plan, RenamePlan, RenameRule};
 use crate::search::{self, SearchOpts, SearchResult};
 
@@ -19,6 +20,7 @@ pub struct FileService {
     queue: OpQueue,
     drivers: Arc<DriverRegistry>,
     ports: Arc<Ports>,
+    profiles: ProfileStore,
 }
 
 impl FileService {
@@ -74,6 +76,7 @@ impl FileService {
             queue,
             drivers: Arc::new(DriverRegistry::new()),
             ports,
+            profiles: ProfileStore::open(&app_data_dir.join("profiles"))?,
         })
     }
 
@@ -187,6 +190,12 @@ impl FileService {
 
     pub fn drivers(&self) -> Vec<DriverInfo> {
         self.drivers.list()
+    }
+
+    // ---- B6 远程档案（T-B6-1）----
+
+    pub fn profiles(&self) -> &ProfileStore {
+        &self.profiles
     }
 
     // ---- F7 批量重命名 ----

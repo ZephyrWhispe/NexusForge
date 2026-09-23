@@ -246,3 +246,47 @@ pub async fn file_rename_apply(
         .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
         .map_err(file_err)
 }
+
+// ---------------- B6 远程连接档案（09 §6.2 T-B6-1）----------------
+// 档案 = 站点清单（零凭据字段，AuthKind 只有指针）；口令面自 T-B6-3 起
+// 走 file_remote_connect 的逐次入参，永不入本命令面。
+
+/// 前端 DTO 与 file-core 档案同形（结构体已带 snake_case serde 契约）
+pub type RemoteProfileDto = file_core::RemoteProfile;
+
+/// 档案列表（按 last_used_ms 降序）
+#[tauri::command]
+pub async fn file_remote_profiles(
+    state: State<'_, HostState>,
+) -> Result<Vec<RemoteProfileDto>, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(svc.profiles().list()))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+}
+
+/// 存/改档案（写侧校验：保留 id、`remote:` 前缀、host/port/base_path 形状）
+#[tauri::command]
+pub async fn file_remote_profile_save(
+    profile: RemoteProfileDto,
+    state: State<'_, HostState>,
+) -> Result<RemoteProfileDto, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.profiles().save(profile))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+        .map_err(file_err)
+}
+
+/// 幂等删除：档案不存在回 false（非 Err）
+#[tauri::command]
+pub async fn file_remote_profile_delete(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.profiles().delete(&id))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+        .map_err(file_err)
+}

@@ -1,5 +1,22 @@
 //! file-core 错误类型（docs/impl/01 S2 契约：IPC 层映射 AppError，禁止裸 String）
 
+/// B6 固定码表（09 §6.2 T-B6-1）：远端面错误码恒出自这五枚，消息只由纯函数产出。
+/// T-B6-6/8 追加的 006/007/008 属运行期门禁码，随各自批次行入表。
+pub const FILE_REMOTE_MISSING: &str = "FILE_REMOTE_001";
+pub const FILE_REMOTE_ID: &str = "FILE_REMOTE_002";
+pub const FILE_REMOTE_MIXED: &str = "FILE_REMOTE_003";
+pub const FILE_REMOTE_NOTIMPL: &str = "FILE_REMOTE_004";
+pub const FILE_REMOTE_FIELD: &str = "FILE_REMOTE_005";
+
+/// 本批远端面固定码表（判据：新码须先入表再使用，禁散落字面量）
+pub const FILE_REMOTE_CODES: &[&str] = &[
+    FILE_REMOTE_MISSING,
+    FILE_REMOTE_ID,
+    FILE_REMOTE_MIXED,
+    FILE_REMOTE_NOTIMPL,
+    FILE_REMOTE_FIELD,
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum FileError {
     #[error("路径不存在: {0}")]
@@ -22,6 +39,8 @@ pub enum FileError {
     Usn(String),
     #[error("该驱动不支持此操作: {0}")]
     Unsupported(String),
+    #[error("{msg}")]
+    Remote { code: &'static str, msg: String },
 }
 
 impl FileError {
@@ -38,6 +57,7 @@ impl FileError {
             FileError::Rule(_) => "FILE_RENAME_001",
             FileError::Usn(_) => "FILE_SEARCH_001",
             FileError::Unsupported(_) => "FILE_OPS_005",
+            FileError::Remote { code, .. } => code,
         }
     }
 }
