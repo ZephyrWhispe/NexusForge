@@ -6,6 +6,7 @@
 //! 承重⑫：[`AuthSecret`] 只进不出——手写 `Deserialize`、手写 `Debug`（只报
 //! 在场），**故意不实现 `Serialize`**，凭据值不可能出现在任何命令返回体。
 
+pub mod http;
 pub mod webdav;
 
 use std::fmt;
@@ -18,8 +19,12 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::error::FileError;
+use crate::error::{FileError, FILE_REMOTE_FIELD};
 
+pub use http::{
+    classify_resume, range_plan, remote_error_message, resume_offset, throttle_share_kbps,
+    DownloadOutcome, HttpsDriver, Resumable,
+};
 pub use webdav::WebDavDriver;
 
 /// 远端目录条目（路径为服务端给定的百分号编码形状，`/` 分隔；解码只发生在
@@ -181,6 +186,40 @@ impl StorageDriver for WebDavDriver {
         self.rename_remote(&from.to_string_lossy(), &to.to_string_lossy())
             .map_err(host_core::error::AppError::from)
     }
+}
+
+/// 承重⑨：HTTPS 驱动**只有下载腿**——浏览/建目录/删除/改名一律诚实拒绝
+/// （假就绪 = 空表，拒才是诚实）。下载面见 [`http::HttpsDriver::download_to`]。
+impl StorageDriver for HttpsDriver {
+    fn id(&self) -> &'static str {
+        "https"
+    }
+    fn label(&self) -> String {
+        self.driver_label()
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![self.base_path().into()]
+    }
+    fn list(&self, _path: &Path) -> Result<Vec<FileEntry>, host_core::error::AppError> {
+        Err(no_browse_err())
+    }
+    fn mkdir(&self, _path: &Path) -> Result<(), host_core::error::AppError> {
+        Err(no_browse_err())
+    }
+    fn remove(&self, _path: &Path, _recycle: bool) -> Result<(), host_core::error::AppError> {
+        Err(no_browse_err())
+    }
+    fn rename(&self, _from: &Path, _to: &Path) -> Result<(), host_core::error::AppError> {
+        Err(no_browse_err())
+    }
+}
+
+fn no_browse_err() -> host_core::error::AppError {
+    FileError::Remote {
+        code: FILE_REMOTE_FIELD,
+        msg: "HTTP 下载源不支持浏览：该档案只有下载腿（GET/Range），无列目录与写面".into(),
+    }
+    .into()
 }
 
 #[cfg(test)]

@@ -10,12 +10,12 @@ use host_core::ports::{Ports, RecycleBinPort, ThumbPort, UsnIndexPort};
 use crate::browse::{self, DriveInfo, FileEntry, SortKey};
 use crate::conflict::{scan_conflicts, ConflictItem, ConflictPolicy};
 use crate::driver::{DriverInfo, DriverRegistry};
-use crate::error::{FileError, FILE_REMOTE_MISSING, FILE_REMOTE_NOTIMPL};
+use crate::error::{FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING, FILE_REMOTE_NOTIMPL};
 use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp};
 use crate::preview::{preview_file, Preview};
 use crate::profile::{ProfileStore, RemoteProtocol};
 use crate::remote::webdav::WebDavDriver;
-use crate::remote::{AuthSecret, RemoteDriverInfo, RemoteEntry};
+use crate::remote::{AuthSecret, HttpsDriver, RemoteDriverInfo, RemoteEntry};
 use crate::rename::{apply_plan, build_plan, RenamePlan, RenameRule};
 use crate::search::{self, SearchOpts, SearchResult};
 
@@ -24,7 +24,8 @@ use crate::search::{self, SearchOpts, SearchResult};
 #[derive(Clone)]
 enum ConnectedDriver {
     WebDav(Arc<WebDavDriver>),
-    // T-B6-4/5/6 在此追加各协议臂——分派口唯一，禁第二张连接表
+    Https(Arc<HttpsDriver>),
+    // T-B6-5/6 在此追加各协议臂——分派口唯一，禁第二张连接表
 }
 
 impl ConnectedDriver {
@@ -42,18 +43,36 @@ impl ConnectedDriver {
                     roots: vec![d.base_path()],
                 }
             }
+            ConnectedDriver::Https(d) => {
+                let p = d.profile();
+                RemoteDriverInfo {
+                    driver_id: p.id.clone(),
+                    label: d.driver_label(),
+                    protocol: p.protocol.as_str().to_owned(),
+                    host: p.host.clone(),
+                    port: p.port,
+                    base_path: p.base_path.clone(),
+                    roots: vec![d.base_path()],
+                }
+            }
         }
     }
 
     fn list_entries(&self, path: &str) -> Result<Vec<RemoteEntry>, FileError> {
         match self {
             ConnectedDriver::WebDav(d) => d.list_entries(path),
+            // 承重⑨：HTTPS 只有下载腿，浏览明确拒绝而非空表
+            ConnectedDriver::Https(_) => Err(FileError::Remote {
+                code: FILE_REMOTE_FIELD,
+                msg: "HTTP 下载源不支持浏览：该档案只有下载腿（GET/Range），无列目录与写面".into(),
+            }),
         }
     }
 
     fn as_dyn(&self) -> Arc<dyn host_core::storage::StorageDriver> {
         match self {
             ConnectedDriver::WebDav(d) => d.clone(),
+            ConnectedDriver::Https(d) => d.clone(),
         }
     }
 }
@@ -258,7 +277,8 @@ impl FileService {
 
     /// 连接：档案必须已建（凭据不喂给野地址），协议分派口唯一。
     /// 同档案重连 = 整体替换旧连接（新口令生效，旧驱动随表项一同退役）。
-    /// 本行只认 WebDAV，其余协议明确拒绝而非静默空驱动（禁假就绪）。
+    /// WebDAV（T-B6-3）与 HTTPS 下载腿（T-B6-4）在册；其余协议明确拒绝
+    /// 而非静默空驱动（禁假就绪）。
     pub fn connect(
         &self,
         profile_id: &str,
@@ -275,12 +295,19 @@ impl FileService {
             RemoteProtocol::WebDav => {
                 ConnectedDriver::WebDav(Arc::new(WebDavDriver::new(profile.clone(), secret)))
             }
+            RemoteProtocol::Https => {
+                // HTTPS 下载腿无凭据面（匿名 GET）；喂进来的 secret 就地退役，
+                // 不落到任何驱动字段（口令只进有认证协议的腿）
+                drop(secret);
+                ConnectedDriver::Https(Arc::new(HttpsDriver::new(profile.clone())))
+            }
             other => {
                 let row = match other {
-                    RemoteProtocol::Https => "T-B6-4（HTTPS 下载腿）",
                     RemoteProtocol::Sftp => "T-B6-5（SFTP 驱动）",
                     RemoteProtocol::Ftp => "T-B6-6（FTP 明文驱动）",
-                    RemoteProtocol::WebDav => unreachable!("WebDav 臂已在上面分派"),
+                    RemoteProtocol::WebDav | RemoteProtocol::Https => {
+                        unreachable!("已在上面分派")
+                    }
                 };
                 return Err(FileError::Remote {
                     code: FILE_REMOTE_NOTIMPL,
@@ -471,7 +498,6 @@ mod tests {
     fn connect_unsupportedProtocol_errs004NamingNextRow() {
         let (svc, root) = svc_fixture("connect004");
         for (proto, row) in [
-            (crate::profile::RemoteProtocol::Https, "T-B6-4"),
             (crate::profile::RemoteProtocol::Sftp, "T-B6-5"),
             (crate::profile::RemoteProtocol::Ftp, "T-B6-6"),
         ] {
@@ -536,6 +562,29 @@ mod tests {
         assert!(
             matches!(&e, FileError::Remote { code, msg } if *code == FILE_REMOTE_MISSING && msg.contains("remote:nope")),
             "须点名未连接的 id，实得 {e}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-4）字面测试名优先于 rustc 命名惯例
+    fn httpsDriver_listRefusesNotEmptyList_serviceMouth() {
+        // T-B6-4 换臂的端到端证据：Https 从 004"后续行交付"变成真连接，
+        // 而它的浏览面经 service 口仍必须 Err(005)——登记为在册 ≠ 假就绪。
+        let (svc, root) = svc_fixture("https005");
+        svc.profiles()
+            .save(remote_sample(
+                "remote:hs1",
+                crate::profile::RemoteProtocol::Https,
+            ))
+            .unwrap();
+        let info = svc.connect("remote:hs1", None).unwrap();
+        assert_eq!(info.protocol, "https");
+        assert_eq!(svc.remote_drivers().len(), 1);
+        let e = svc.remote_list("remote:hs1", "/").unwrap_err();
+        assert!(
+            matches!(&e, FileError::Remote { code, msg } if *code == FILE_REMOTE_FIELD && msg.contains("HTTP 下载源不支持浏览")),
+            "HTTPS 浏览须报 005 点名下载腿，实得 {e}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

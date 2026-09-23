@@ -590,10 +590,11 @@ fn run_job(job: Job, cb: &ProgressFn) {
     };
     rep.set_state(OpState::Running);
 
-    // 远端方向诚实拒绝（T-B6-3 起逐协议接线）：队列先落方向与断点、执行不假绿
+    // 远端方向诚实拒绝（协议腿 T-B6-3/4 已立，队列执行器接线归 T-B6-7）：
+    // 队列先落方向与断点、执行不假绿
     let result = if direction != TransferDirection::Local {
         Flow::msg(format!(
-            "远端传输（方向={direction:?}）执行器自 T-B6-3 起接线：本操作未执行，禁假就绪"
+            "远端传输（方向={direction:?}）的队列执行器接线归 09 §6.2 T-B6-7：协议腿已立于 T-B6-3/4，本操作未执行，禁假就绪"
         ))
     } else {
         match spec.kind {
@@ -618,7 +619,14 @@ fn run_job(job: Job, cb: &ProgressFn) {
         }
         Flow::Failed(e) => {
             remove_pending(&store_dir, &rep.cur.op_id);
-            rep.cur.error = Some(e);
+            // 承重③收口：远端方向的错误面只存脱敏口输出（OpProgress.error →
+            // 总线事件 → pending_ops 一条链上不再出现 URL query 凭据/响应体原文）；
+            // 本地臂逐字不变（io::Error.to_string() 原样，既有测零扰动）
+            rep.cur.error = Some(if direction == TransferDirection::Local {
+                e
+            } else {
+                crate::remote::remote_error_message(&e)
+            });
             rep.set_state(OpState::Failed);
         }
     }

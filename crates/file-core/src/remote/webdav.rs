@@ -611,8 +611,7 @@ mod tests {
                 // 头值取原始大小写（Authorization 的 "Basic " 前缀不得被压小写）
                 let value = h
                     .split_once(':')
-                    .map(|x| x.1.trim().to_owned())
-                    .unwrap_or_default();
+                    .map_or_else(String::new, |x| x.1.trim().to_owned());
                 match name.as_str() {
                     "depth" => depth = Some(value),
                     "authorization" => auth = Some(value),
