@@ -191,6 +191,9 @@ pub struct ScreenshotModule {
     /// 上传目标注册表（D-29 B4 T-B4-9）：随 `apply_config` 整表重建。装 `Arc` 是为了
     /// 让异步那一跳能在 `await` 之前把锁放掉——持锁跨 await 会把配置写入卡在网线上。
     uploads: RwLock<Arc<UploadRegistry>>,
+    /// WebDAV 提交桥（T-B6-12）：由宿主 setup 经 [`Self::set_upload_sender`] 一次性
+    /// 注入；缺位 ⇒ webdav 档不注册（禁注册一枚必失败的目标）。
+    webdav_send: RwLock<Option<upload::WebDavSend>>,
     state: ModuleStateCell,
     /// ocr.completed 历史回填协程的停机信道（S4 协作停机，同 automation-core）
     ocr_shutdown: RwLock<Option<watch::Sender<bool>>>,
@@ -210,6 +213,7 @@ impl ScreenshotModule {
             config: Arc::new(AsyncMutex::new(ScreenshotConfig::default())),
             // 空表 = "还没有任何一档目标"：端点一旦经 apply_config 落定就整表重建
             uploads: RwLock::new(Arc::new(UploadRegistry::empty())),
+            webdav_send: RwLock::new(None),
             state: ModuleStateCell::new(),
             ocr_shutdown: RwLock::new(None),
         }
@@ -217,6 +221,26 @@ impl ScreenshotModule {
 
     fn app_data(&self) -> Option<PathBuf> {
         self.app_data_dir.read().clone()
+    }
+
+    /// WebDAV 提交桥注入（T-B6-12，宿主 setup 一次性调用；file-core 与本 crate
+    /// 互不依赖，跨模块只经这条 src-tauri 宿主桥——09 §6.0 方向裁定 (b)）。
+    /// 注入即按现配置整表重建注册表：webdav 档**出现之前不存在**（禁预注册一枚
+    /// 必失败的）；配置锁被占则重建顺延到下一次 apply_config（启动派发必来，
+    /// warn 点名这一格，不静默）。
+    pub fn set_upload_sender(&self, send: upload::WebDavSend) {
+        *self.webdav_send.write() = Some(send);
+        match self.config.try_lock() {
+            Ok(cfg) => {
+                *self.uploads.write() = Arc::new(upload::registry_from_config_with(
+                    &cfg,
+                    self.webdav_send.read().as_ref(),
+                ));
+            }
+            Err(_) => {
+                tracing::warn!("upload_sender 已注入，但配置锁在途：注册表随下一次配置派发重建");
+            }
+        }
     }
 
     /// pins.json 原子写（临时文件 + rename，规约 5）
@@ -396,8 +420,8 @@ impl Module for ScreenshotModule {
                 },
                 "upload_target": {
                     "type": "string", "title": "上传目标",
-                    "enum": ["http-form"], "default": "http-form",
-                    "description": "本代只有 HTTP 表单一档；WebDAV 归 B6（D-29 §9.1-⑩ 收窄）"
+                    "enum": ["http-form", "webdav"], "default": "http-form",
+                    "description": "两档在册（T-B6-12）：webdav 档随宿主桥在场——桥未装配时选它会点名拒绝，不静默"
                 },
                 "upload_endpoint": {
                     "type": "string", "title": "上传端点",
@@ -469,7 +493,10 @@ impl Module for ScreenshotModule {
             *g = cfg.clone();
         }
         // 注册表整表重建：正在 await 的那一次上传持有旧 `Arc`，不受这次换档影响
-        *self.uploads.write() = Arc::new(upload::registry_from_config(&cfg));
+        *self.uploads.write() = Arc::new(upload::registry_from_config_with(
+            &cfg,
+            self.webdav_send.read().as_ref(),
+        ));
         Ok(())
     }
 
@@ -813,7 +840,7 @@ impl ScreenshotModule {
             file = file.or(outcome.file.clone());
             pin_id = pin_id.or(outcome.pin_id.clone());
             // 分段是降级路径：一次滚动只带第一段的待传产物（与"`file` 只报第一段"同一条
-            // 取舍——多段各传一次要的是 N 次点击或 N 条命令，那归 B6 的目标治理）
+            // 取舍——多段各传一次要的是 N 次点击或 N 条命令，那归目标治理的后续行）
             upload = upload.or(outcome.upload);
             let item = crate::types::ShotItem {
                 id: item_id,

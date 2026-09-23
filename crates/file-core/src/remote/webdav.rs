@@ -590,8 +590,11 @@ pub fn assemble_put(
         || filename.contains('/')
         || filename.contains('\\')
         || filename.chars().any(|c| c.is_control())
+        // 编码后穿越（%2e%2e）也在此收口：解码含 ".." 即拒——拼接口的静默弹栈
+        // 对浏览是宽容、对提交面就是交出父目录
+        || percent_decode(filename).contains("..")
     {
-        return Err("WebDAV 上传文件名非法（含路径分隔或控制字符）".to_owned());
+        return Err("WebDAV 上传文件名非法（含路径分隔、穿越段或控制字符）".to_owned());
     }
     let scheme_end = endpoint_base
         .find("://")
@@ -907,5 +910,49 @@ mod tests {
                 "{code} 臂消息须点名成因: {e}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-B6-12 装配口判据（截图桥的纯函数侧；真 PUT 出站属人工实启冒烟）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod put_assembly_tests {
+    use super::*;
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-12 判据侧）字面测试名优先于 rustc 命名惯例
+    fn assemblePut_shapesUrlHeaders_andRefusesEscapes() {
+        let a = assemble_put("https://h.example/dav", "shot.png", Some("Basic AAA")).unwrap();
+        assert_eq!(a.url, "https://h.example/dav/shot.png");
+        assert!(
+            a.headers
+                .contains(&("Overwrite".to_owned(), "F".to_owned())),
+            "同名不默默覆盖"
+        );
+        assert!(a
+            .headers
+            .contains(&("Authorization".to_owned(), "Basic AAA".to_owned())));
+        // 中文与空格名进 URL 形状（逐段 percent 编码由拼接口保证）
+        let b = assemble_put("https://h/d", "报告 2026.png", None).unwrap();
+        assert!(b.url.contains("%E6%8A%A5%E5%91%8A"), "{}", b.url);
+        assert!(b.url.contains("%20") || !b.url.contains(' '));
+        assert!(
+            !b.headers.iter().any(|(k, _)| k == "Authorization"),
+            "无凭据不得有该头（匿名 PUT）"
+        );
+        // 点名拒臂：穿越（含编码后）、分隔符、CRLF 凭据、相对端点
+        for bad_name in ["..", "%2e%2e", "a/../b", "x\\y.png", "a\nb.png"] {
+            assert!(
+                assemble_put("https://h/d", bad_name, None).is_err(),
+                "文件名 {bad_name:?} 必须拒"
+            );
+        }
+        assert!(assemble_put("https://h/d", "ok.png", Some("Basic x\r\nX-Evil: 1")).is_err());
+        assert!(assemble_put("/dav", "ok.png", None).is_err());
+        // 端点带 query 的怪形不许原样进 PUT url（拼接口按段编码消解）
+        let c = assemble_put("https://h/d?v=1", "ok.png", None).unwrap();
+        assert!(c.url.starts_with("https://h/"));
     }
 }

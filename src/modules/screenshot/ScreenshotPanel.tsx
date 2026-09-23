@@ -659,9 +659,8 @@ export default function ScreenshotPanel() {
         <Text className={styles.hint}>
           动作链里的「上传」用的就是这里勾选的目标；端点要求请求头时，链式通路拿不到凭据值（值只活在面板这一格），那种端点请改用历史行的上传钮。明文 http 只允许本机，写往公网会被拒。
         </Text>
-        <div className={styles.chipRow}>
-          <DeferredBadge label="WebDAV 上传目标" decisionRef="D-29 §9.1-⑩" />
-        </div>
+        {/* T-B6-12：WebDAV 上传档已接线——目标行由后端注册表供给（宿主桥在场才
+            出现），旧「待实现」徽标翻正为真目标，此处不再摆延后占位 */}
         {pins.length > 0 && (
           <>
             <Text className={styles.sectionTitle}>当前贴图 · {pins.length}</Text>

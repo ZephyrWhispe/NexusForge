@@ -200,6 +200,24 @@ impl HostState {
         registry.register_ability::<dyn TrayProvider>(clipboard.clone());
 
         let screenshot = Arc::new(ScreenshotModule::new());
+        // T-B6-12 截图 WebDAV 上传宿主桥（09 §6.0 方向裁定 (b)：跨模块只经
+        // src-tauri）——screenshot-core 交出纯数据请求，装配与提交走 file-core
+        // 唯一腿；两 crate 互不依赖的边长在这里。缺这段装配 webdav 档不注册。
+        {
+            let send: screenshot_core::upload::WebDavSend =
+                Arc::new(|req: screenshot_core::upload::WebDavPutRequest| {
+                    Box::pin(async move {
+                        let asm = file_core::remote::webdav::assemble_put(
+                            &req.endpoint_base,
+                            &req.filename,
+                            req.header_value.as_deref(),
+                        )?;
+                        file_core::remote::webdav::send_put(&asm, req.bytes).await?;
+                        Ok(asm.url)
+                    })
+                });
+            screenshot.set_upload_sender(send);
+        }
         config.register_schema("screenshot", screenshot.config_schema());
         registry.register(screenshot.clone())?;
         registry.register_ability::<dyn HotkeyProvider>(screenshot.clone());

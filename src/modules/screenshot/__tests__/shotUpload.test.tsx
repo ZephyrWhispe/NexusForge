@@ -325,3 +325,68 @@ function unmount() {
   act(() => root.unmount());
   document.body.replaceChildren();
 }
+
+describe("WebDAV 上传档上屏（T-B6-12：B4 徽标翻正）", () => {
+  it("shotPanel_webdavTargetAppears_onlyAfterConnected", async () => {
+    // 未注册（宿主桥缺席时后端就不给这档）⇒ 面板**不出现**这一行而非禁用后灰——
+    // "无事实源就无文案"的截图域镜像；注册表给了才在场。
+    await mount();
+    expect(bodyText()).not.toContain("WebDAV（PUT 到端点目录）");
+    unmount();
+    vi.mocked(screenshotUploadTargets).mockResolvedValue([
+      target({}),
+      target({
+        id: "webdav",
+        label: "WebDAV（PUT 到端点目录）",
+        endpoint_display: "https://dav.example.org/dav",
+      }),
+    ]);
+    await mount();
+    expect(bodyText()).toContain("WebDAV（PUT 到端点目录） · https://dav.example.org/dav");
+  });
+
+  it("shotPanel_uploadClick_neverSendsSecretToPanel", async () => {
+    // 凭据值只进这一次 invoke：DOM（含 innerHTML 第二张脸）全文不含它。
+    cfgFixture = baseCfg({
+      upload_enabled: true,
+      upload_target: "webdav",
+      upload_header_name: "Authorization",
+    });
+    vi.mocked(screenshotUploadTargets).mockResolvedValue([
+      target({ id: "webdav", label: "WebDAV（PUT 到端点目录）", enabled: true }),
+    ]);
+    await mount();
+    const cred = container.querySelector<HTMLInputElement>('input[type="password"]');
+    expect(cred).toBeTruthy();
+    await type(cred!, "Basic SUPER_SECRET_B6");
+    const btn = uploadRowButtons()[0];
+    expect(btn).toBeTruthy();
+    await act(async () => {
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    expect(screenshotUpload).toHaveBeenCalledWith("a9", "Basic SUPER_SECRET_B6");
+    expect(bodyText()).not.toContain("SUPER_SECRET_B6");
+    expect(document.body.innerHTML).not.toContain("SUPER_SECRET_B6");
+    // 写配置的批里同样没有值（B4 红线在 webdav 档同样成立）
+    for (const call of vi.mocked(hostConfigSet).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain("SUPER_SECRET_B6");
+    }
+  });
+
+  it("shotPanel_deferredBadge_goneAfterWiring", async () => {
+    // 徽标翻正的 DOM 面：旧延后文案零残留（provider 在册 ⇒ 真目标在场，正对照）
+    vi.mocked(screenshotUploadTargets).mockResolvedValue([
+      target({
+        id: "webdav",
+        label: "WebDAV（PUT 到端点目录）",
+        endpoint_display: "https://dav.example.org/dav",
+      }),
+    ]);
+    await mount();
+    expect(bodyText()).not.toContain("WebDAV 上传目标");
+    expect(bodyText()).toContain("WebDAV（PUT 到端点目录）");
+    // 正对照：同页其它明示不做的徽标不受牵连（翻正不是拆光）
+    expect(bodyText()).toContain("录屏");
+  });
+});

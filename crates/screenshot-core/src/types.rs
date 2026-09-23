@@ -38,7 +38,8 @@ pub struct ScreenshotConfig {
     /// 要用户显式开一次，而不是"配了端点就自动开始发"。
     #[serde(default)]
     pub upload_enabled: bool,
-    /// 启用的 provider id（本代只有 `"http-form"`；WebDAV 归 B6，注册即多一档可选）
+    /// 启用的 provider id（`"http-form"` | `"webdav"`——后者自 T-B6-12 注册即
+    /// 多一档可选，且要求宿主桥在场）
     #[serde(default)]
     pub upload_target: String,
     /// 表单端点。合规性由 `upload::validate_upload_endpoint` 裁决：非 https 且非本机一律拒
