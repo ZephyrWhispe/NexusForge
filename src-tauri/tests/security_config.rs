@@ -1242,3 +1242,37 @@ fn auxWindows_neverGrantRemoteConnectAndBrowse() {
         );
     }
 }
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-5）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantRemoteFingerprintAck() {
+    // B6 T-B6-5 红线负例：指纹确认写的是主机键信任表——信任决定比 connect
+    // 更敏感；disconnect 退役远端会话，与连接面同谱。两命令全为 main-only。
+    let caps = load_capabilities();
+    for ident in [
+        "allow-file-remote-fingerprint-ack",
+        "allow-file-remote-disconnect",
+    ] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（信任决定面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}

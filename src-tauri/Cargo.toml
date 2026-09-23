@@ -36,6 +36,8 @@ term-core = { path = "../crates/term-core" }
 sys-core = { path = "../crates/sys-core" }
 automation-core = { path = "../crates/automation-core" }
 sync-core = { path = "../crates/sync-core" }
+# B6 T-B6-5：vault 指针端口测试需要 Zeroizing 名义类型（零新包，workspace 已锁）
+zeroize = { workspace = true }
 base64.workspace = true
 # winops_helper token 熵源（docs/impl/08 §4.1 64 hex）
 rand.workspace = true

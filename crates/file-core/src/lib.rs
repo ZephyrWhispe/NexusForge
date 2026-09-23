@@ -34,6 +34,7 @@ pub use preview::Preview;
 pub use profile::{
     profile_id_of, validate_profile, AuthKind, ProfileStore, RemoteProfile, RemoteProtocol,
 };
+pub use remote::ssh::{vault_secret_via_ports, VaultSecretPort};
 pub use remote::{classify_resume, range_plan, remote_error_message, throttle_share_kbps};
 pub use remote::{
     webdav::{join_remote_url, parse_propfind_responses, percent_decode, propfind_body},

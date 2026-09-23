@@ -340,3 +340,34 @@ pub async fn file_remote_drivers(
         .await
         .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
 }
+
+// ---------------- B6 SFTP TOFU（09 §6.2 T-B6-5）----------------
+// 信任决定命令比 connect 更敏感（写的是主机键表）——capability 面 main-only
+// 负例与 auxWindows 扫描同谱。文案红线：接受的是**这一枚指纹**，不是"这台主机"。
+
+/// TOFU 首见的唯一出路：用户逐字核对后确认**这一枚**主机键描述符
+/// （"算法名 SHA256:base64"整串，取自 FILE_REMOTE_001 错误消息）
+#[tauri::command]
+pub async fn file_remote_fingerprint_ack(
+    profile_id: String,
+    fingerprint: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.fingerprint_ack(&profile_id, &fingerprint))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+        .map_err(file_err)
+}
+
+/// 主动断开（幂等：未连接回 false 而非 Err——退役不是错误）
+#[tauri::command]
+pub async fn file_remote_disconnect(
+    driver_id: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(svc.detach(&driver_id)))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+}

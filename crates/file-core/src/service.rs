@@ -14,6 +14,10 @@ use crate::error::{FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING, FILE_REMOT
 use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp};
 use crate::preview::{preview_file, Preview};
 use crate::profile::{ProfileStore, RemoteProtocol};
+use crate::remote::ssh::{
+    load_known_hosts, sftp_auth_for, tofu_guard, KnownHostsFile, RusshBackend, SftpDriver,
+    SshBackend,
+};
 use crate::remote::webdav::WebDavDriver;
 use crate::remote::{AuthSecret, HttpsDriver, RemoteDriverInfo, RemoteEntry};
 use crate::rename::{apply_plan, build_plan, RenamePlan, RenameRule};
@@ -25,7 +29,8 @@ use crate::search::{self, SearchOpts, SearchResult};
 enum ConnectedDriver {
     WebDav(Arc<WebDavDriver>),
     Https(Arc<HttpsDriver>),
-    // T-B6-5/6 在此追加各协议臂——分派口唯一，禁第二张连接表
+    Sftp(Arc<SftpDriver>),
+    // T-B6-6 在此追加 FTP 臂——分派口唯一，禁第二张连接表
 }
 
 impl ConnectedDriver {
@@ -55,6 +60,18 @@ impl ConnectedDriver {
                     roots: vec![d.base_path()],
                 }
             }
+            ConnectedDriver::Sftp(d) => {
+                let p = d.profile();
+                RemoteDriverInfo {
+                    driver_id: p.id.clone(),
+                    label: d.driver_label(),
+                    protocol: p.protocol.as_str().to_owned(),
+                    host: p.host.clone(),
+                    port: p.port,
+                    base_path: p.base_path.clone(),
+                    roots: vec![d.base_path()],
+                }
+            }
         }
     }
 
@@ -66,6 +83,7 @@ impl ConnectedDriver {
                 code: FILE_REMOTE_FIELD,
                 msg: "HTTP 下载源不支持浏览：该档案只有下载腿（GET/Range），无列目录与写面".into(),
             }),
+            ConnectedDriver::Sftp(d) => d.list_entries(path),
         }
     }
 
@@ -73,6 +91,7 @@ impl ConnectedDriver {
         match self {
             ConnectedDriver::WebDav(d) => d.clone(),
             ConnectedDriver::Https(d) => d.clone(),
+            ConnectedDriver::Sftp(d) => d.clone(),
         }
     }
 }
@@ -86,6 +105,12 @@ pub struct FileService {
     /// 不可达）；值同时注册进 [`DriverRegistry`]（`register_as` 动态键），两路
     /// 同一 Arc。断线/重启即消失——连接态永不落盘。
     connections: parking_lot::RwLock<HashMap<String, ConnectedDriver>>,
+    /// file 域自己的 known_hosts（T-B6-5）：与 term 的表**互不共享**（缺口登记
+    /// 09 §6.3）；open 时 fail-closed 加载——坏文件 ⇒ 服务根本开不起来。
+    known_hosts: Arc<KnownHostsFile>,
+    /// 测试注入位：SSH 协议腿替身（FakeSsh）。生产路径恒 None ⇒ 每档案
+    /// 现场 `RusshBackend::bound`；这不是回退兜底，是分派口的依赖注入槽。
+    ssh_backend_override: parking_lot::RwLock<Option<Arc<dyn SshBackend>>>,
 }
 
 impl FileService {
@@ -143,6 +168,8 @@ impl FileService {
             ports,
             profiles: ProfileStore::open(&app_data_dir.join("profiles"))?,
             connections: parking_lot::RwLock::new(HashMap::new()),
+            known_hosts: load_known_hosts(&app_data_dir.join("known_hosts.json"))?,
+            ssh_backend_override: parking_lot::RwLock::new(None),
         })
     }
 
@@ -277,8 +304,9 @@ impl FileService {
 
     /// 连接：档案必须已建（凭据不喂给野地址），协议分派口唯一。
     /// 同档案重连 = 整体替换旧连接（新口令生效，旧驱动随表项一同退役）。
-    /// WebDAV（T-B6-3）与 HTTPS 下载腿（T-B6-4）在册；其余协议明确拒绝
-    /// 而非静默空驱动（禁假就绪）。
+    /// WebDAV（T-B6-3）、HTTPS 下载腿（T-B6-4）与 SFTP（T-B6-5）在册；FTP 明确
+    /// 拒绝而非静默空驱动（禁假就绪）。SFTP 臂的 TOFU 守卫在**入表之前**：
+    /// 未受信主机键连"存在一条连接"这一事实都不该留下。
     pub fn connect(
         &self,
         profile_id: &str,
@@ -301,11 +329,37 @@ impl FileService {
                 drop(secret);
                 ConnectedDriver::Https(Arc::new(HttpsDriver::new(profile.clone())))
             }
+            RemoteProtocol::Sftp => {
+                let auth = sftp_auth_for(&profile, secret)?;
+                let backend: Arc<dyn SshBackend> = match self.ssh_backend_override.read().clone() {
+                    Some(injected) => injected,
+                    None => Arc::new(RusshBackend::bound(
+                        &profile,
+                        auth.clone(),
+                        self.known_hosts.clone(),
+                    )),
+                };
+                // 探测会话只走 KEX（凭据不出网）；Unknown/Changed 在此 Err，
+                // 表与注册器都还没动——"拒"是真的拒
+                tofu_guard(
+                    &*backend,
+                    &self.known_hosts,
+                    &profile.host,
+                    profile.port,
+                    &profile.user,
+                    &auth,
+                )?;
+                ConnectedDriver::Sftp(Arc::new(SftpDriver::new(
+                    profile.clone(),
+                    auth,
+                    backend,
+                    self.known_hosts.clone(),
+                )))
+            }
             other => {
                 let row = match other {
-                    RemoteProtocol::Sftp => "T-B6-5（SFTP 驱动）",
                     RemoteProtocol::Ftp => "T-B6-6（FTP 明文驱动）",
-                    RemoteProtocol::WebDav | RemoteProtocol::Https => {
+                    RemoteProtocol::WebDav | RemoteProtocol::Https | RemoteProtocol::Sftp => {
                         unreachable!("已在上面分派")
                     }
                 };
@@ -338,6 +392,39 @@ impl FileService {
         let removed = self.connections.write().remove(driver_id).is_some();
         self.drivers.unregister(driver_id);
         removed
+    }
+
+    /// TOFU 首见的唯一出路：用户在对话框里逐字核对后显式确认。
+    /// `fingerprint` 是**完整描述符**（"算法名 SHA256:base64"整串，来自
+    /// 001 错误消息点名）——接受的是这一枚键，不是"这台主机"；非 SFTP
+    /// 档案没有主机键概念，拒绝而非空操作。
+    pub fn fingerprint_ack(&self, profile_id: &str, fingerprint: &str) -> Result<(), FileError> {
+        let profile = self
+            .profiles
+            .get(profile_id)
+            .ok_or_else(|| FileError::Remote {
+                code: FILE_REMOTE_MISSING,
+                msg: format!("档案不存在: {profile_id}（不为野地址记主机键）"),
+            })?;
+        if profile.protocol != RemoteProtocol::Sftp {
+            return Err(FileError::Remote {
+                code: FILE_REMOTE_FIELD,
+                msg: format!(
+                    "指纹确认仅适用 SFTP 档案：{} 是 {} 腿",
+                    profile_id,
+                    profile.protocol.as_str()
+                ),
+            });
+        }
+        self.known_hosts
+            .accept(&profile.host, profile.port, fingerprint)
+    }
+
+    /// 测试位：注入 SSH 协议腿替身（FakeSsh），让 TOFU/驱动臂在无网可达的
+    /// CI 里走真分派口。生产命令面不暴露任何等价入口。
+    #[cfg(test)]
+    pub(crate) fn set_ssh_backend_for_test(&self, backend: Arc<dyn SshBackend>) {
+        *self.ssh_backend_override.write() = Some(backend);
     }
 
     /// 远端列目录：未连接的 id 诚实报错，**不回落空表**（假就绪红线）。
@@ -497,10 +584,10 @@ mod tests {
     #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-3）字面测试名优先于 rustc 命名惯例
     fn connect_unsupportedProtocol_errs004NamingNextRow() {
         let (svc, root) = svc_fixture("connect004");
-        for (proto, row) in [
-            (crate::profile::RemoteProtocol::Sftp, "T-B6-5"),
-            (crate::profile::RemoteProtocol::Ftp, "T-B6-6"),
-        ] {
+        // Sftp 臂 T-B6-5 已交付（拒语改走 TOFU 面，见 ssh.rs 字面测名）；
+        // 004 后续行现只剩 FTP——样本收窄而非删除，正对照仍须真命中一次
+        {
+            let (proto, row) = (crate::profile::RemoteProtocol::Ftp, "T-B6-6");
             let p = remote_sample("remote:next", proto);
             svc.profiles().save(p).unwrap();
             let e = svc.connect("remote:next", None).unwrap_err();

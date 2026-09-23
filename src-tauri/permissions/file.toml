@@ -114,3 +114,13 @@ commands.allow = ["file_remote_browse"]
 identifier = "allow-file-remote-drivers"
 description = "允许前端调用 file_remote_drivers 命令（D-28 按窗最小授权；连接态只读描述，无凭据位）"
 commands.allow = ["file_remote_drivers"]
+
+[[permission]]
+identifier = "allow-file-remote-fingerprint-ack"
+description = "允许前端调用 file_remote_fingerprint_ack 命令（D-28 按窗最小授权；TOFU 主机键确认写面，比 connect 更敏感）"
+commands.allow = ["file_remote_fingerprint_ack"]
+
+[[permission]]
+identifier = "allow-file-remote-disconnect"
+description = "允许前端调用 file_remote_disconnect 命令（D-28 按窗最小授权；幂等退役，无凭据面）"
+commands.allow = ["file_remote_disconnect"]

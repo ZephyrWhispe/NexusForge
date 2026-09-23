@@ -24,3 +24,8 @@ zip.workspace = true
 reqwest = { workspace = true }
 quick-xml = { workspace = true }
 zeroize = { workspace = true }
+# B6 T-B6-5（09 §6.2）：SFTP 腿三枚全部沿用 term-core 的已锁版本字面量（零新包，
+# "两份 SSH 栈"的重复成本按承重⑫ 在此显式登记）
+russh = "0.46"
+russh-sftp = "2"
+async-trait = "0.1"

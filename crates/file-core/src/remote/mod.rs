@@ -7,6 +7,7 @@
 //! 在场），**故意不实现 `Serialize`**，凭据值不可能出现在任何命令返回体。
 
 pub mod http;
+pub mod ssh;
 pub mod webdav;
 
 use std::fmt;
@@ -220,6 +221,45 @@ fn no_browse_err() -> host_core::error::AppError {
         msg: "HTTP 下载源不支持浏览：该档案只有下载腿（GET/Range），无列目录与写面".into(),
     }
     .into()
+}
+
+/// SFTP 驱动有完整浏览与写面（不像 HTTPS 只有下载腿）。TOFU 守卫不在这里——
+/// 它在分派口 [`crate::service::FileService::connect`] 建连前已毕，且每条
+/// 操作会话在 [`ssh::RusshBackend`] 内以 store 二次校验；驱动侧再设第二道
+/// 回收站闸（承重⑥，与 WebDAV 臂同一口径）。
+impl StorageDriver for ssh::SftpDriver {
+    fn id(&self) -> &'static str {
+        "sftp"
+    }
+    fn label(&self) -> String {
+        self.driver_label()
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![self.base_path().into()]
+    }
+    fn list(&self, path: &Path) -> Result<Vec<FileEntry>, host_core::error::AppError> {
+        let entries = self
+            .list_entries(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)?;
+        Ok(entries.iter().map(RemoteEntry::to_file_entry).collect())
+    }
+    fn mkdir(&self, path: &Path) -> Result<(), host_core::error::AppError> {
+        self.mkdir_remote(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
+    }
+    fn remove(&self, path: &Path, recycle: bool) -> Result<(), host_core::error::AppError> {
+        if recycle {
+            return Err(
+                FileError::Unsupported("远端驱动不支持回收站：请改用彻底删除".into()).into(),
+            );
+        }
+        self.remove_remote(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), host_core::error::AppError> {
+        self.rename_remote(&from.to_string_lossy(), &to.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
+    }
 }
 
 #[cfg(test)]
