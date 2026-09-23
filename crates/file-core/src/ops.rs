@@ -171,6 +171,10 @@ pub struct PendingOp {
     #[serde(default)]
     pub bytes_done: u64,
     pub created_ms: i64,
+    /// T-B6-7 加键（serde default ⇒ 旧 pending 文件零迁移）：本条由哪一枚
+    /// 旧 op resume 而来（断点链落盘，重开服务不丢）
+    #[serde(default)]
+    pub resumed_from: Option<String>,
 }
 
 /// 进度快照（事件 payload 与 active() 返回共用）
@@ -188,6 +192,62 @@ pub struct OpProgress {
     pub error: Option<String>,
     /// T-B6-2 加键（向后兼容）：入队时由 [`direction_of`] 唯一派生
     pub direction: TransferDirection,
+    /// T-B6-7 加键：**对端声明才承诺**——本地/未获事实源恒 None（禁给本地复制
+    /// 编一个"可续传"），远端下载腿接线（T-B6-11）后由 classify_resume 供值
+    #[serde(default)]
+    pub resumable: Option<crate::remote::Resumable>,
+    /// T-B6-7 加键：resume 产新 op 时指回旧 op（断点链面板可分辨）；
+    /// 随 PendingOp 落盘 ⇒ 重开服务链不丢
+    #[serde(default)]
+    pub resumed_from: Option<String>,
+}
+
+/// 传输状态 DTO（09 §6.2 T-B6-7：新命令 `xfer_status` 而非 `file_op_status`，
+/// 与 file_op_pause/resume 命名族同谱）。`XferState = OpState`（复用而非另立
+/// 镜像，防两套终态）。
+#[derive(Clone, Debug, Serialize)]
+pub struct XferStatusDto {
+    pub op_id: String,
+    pub kind: OpKind,
+    pub direction: TransferDirection,
+    pub state: OpState,
+    pub current: String,
+    pub files_done: u64,
+    pub files_total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub resumable: Option<crate::remote::Resumable>,
+    pub error: Option<String>,
+    pub resumed_from: Option<String>,
+}
+
+pub type XferState = OpState;
+
+impl From<&OpProgress> for XferStatusDto {
+    fn from(p: &OpProgress) -> Self {
+        Self {
+            op_id: p.op_id.clone(),
+            kind: p.kind,
+            direction: p.direction,
+            state: p.state,
+            current: p.current.clone(),
+            files_done: p.files_done,
+            files_total: p.files_total,
+            bytes_done: p.bytes_done,
+            bytes_total: p.bytes_total,
+            resumable: p.resumable,
+            error: p.error.clone(),
+            resumed_from: p.resumed_from.clone(),
+        }
+    }
+}
+
+/// resume 的返回形状（T-B6-7 破坏性 IPC 变更：`String → ResumeDto`）：
+/// 新行身份 `op_id` + 断点链来源 `previous_op_id`，前端必须消费而非丢弃。
+#[derive(Clone, Debug, Serialize)]
+pub struct ResumeDto {
+    pub op_id: String,
+    pub previous_op_id: Option<String>,
 }
 
 pub(crate) struct OpControl {
@@ -253,6 +313,8 @@ struct Job {
     spec: OpSpec,
     direction: TransferDirection,
     checkpoint: Option<Checkpoint>,
+    /// resume 产新 op 时的旧 op_id（进 OpProgress.resumed_from）
+    resumed_from: Option<String>,
     ctl: Arc<OpControl>,
     store_dir: PathBuf,
     recycle: Option<Arc<dyn RecycleBinPort>>,
@@ -391,13 +453,16 @@ impl OpQueue {
 
     /// 入队（Ask 策略的预扫描由上层 [`crate::conflict::scan_conflicts`] 完成）
     pub fn enqueue(&self, spec: OpSpec) -> Result<String, FileError> {
-        self.enqueue_with_checkpoint(spec, None)
+        self.enqueue_with_checkpoint(spec, None, None)
     }
 
+    /// `resumed_from` 第三参属 T-B6-7 签名偏离登记：断点链要随 PendingOp
+    /// 落盘才谈得上"重开服务链不丢"，二参口给不出这个事实源。
     pub fn enqueue_with_checkpoint(
         &self,
         spec: OpSpec,
         checkpoint: Option<Checkpoint>,
+        resumed_from: Option<String>,
     ) -> Result<String, FileError> {
         // 方向唯一算式（承重④）：入队即裁决，混合端点 Err(FILE_REMOTE_003)，
         // 禁静默"当本地复制处理"
@@ -428,6 +493,7 @@ impl OpQueue {
                 file_index: checkpoint.map(|c| c.file_index).unwrap_or(0),
                 bytes_done: checkpoint.map(|c| c.bytes_done).unwrap_or(0),
                 created_ms: now_ms(),
+                resumed_from: resumed_from.clone(),
             },
         )?;
         let ctl = Arc::new(OpControl::new());
@@ -443,8 +509,11 @@ impl OpQueue {
             bytes_total: 0,
             error: None,
             direction,
+            resumable: None,
+            resumed_from,
         };
         (self.cb)(progress.clone());
+        let job_resumed = progress.resumed_from.clone();
         self.latest.lock().insert(op_id.clone(), progress);
         self.tx
             .as_ref()
@@ -454,6 +523,7 @@ impl OpQueue {
                 spec,
                 direction,
                 checkpoint,
+                resumed_from: job_resumed,
                 ctl,
                 store_dir: self.store_dir.clone(),
                 recycle: self.recycle.clone(),
@@ -492,7 +562,7 @@ impl OpQueue {
             file_index: pending.file_index,
             bytes_done: pending.bytes_done,
         });
-        let new_op_id = self.enqueue_with_checkpoint(spec, checkpoint)?;
+        let new_op_id = self.enqueue_with_checkpoint(spec, checkpoint, Some(op_id.to_owned()))?;
         // 旧 pending 清理（新 op_id 下已重建；避免重复恢复）
         remove_pending(&self.store_dir, op_id);
         Ok(new_op_id)
@@ -519,6 +589,12 @@ impl OpQueue {
         let mut v: Vec<OpProgress> = self.latest.lock().values().cloned().collect();
         v.sort_by(|a, b| a.op_id.cmp(&b.op_id));
         v
+    }
+
+    /// 单条操作的状态事实源（`xfer_status` 命令的口）：只读 `latest` 表，
+    /// 查不到即 None——不为"看不见"编出"不存在"，也不回落空壳
+    pub fn status(&self, op_id: &str) -> Option<OpProgress> {
+        self.latest.lock().get(op_id).cloned()
     }
 
     /// 崩溃恢复扫描：pending_ops 目录里未完成的操作（docs/impl/01 S6.5）
@@ -621,6 +697,7 @@ fn run_job(job: Job, cb: &ProgressFn) {
         spec,
         direction,
         checkpoint,
+        resumed_from,
         ctl,
         store_dir,
         recycle,
@@ -639,15 +716,17 @@ fn run_job(job: Job, cb: &ProgressFn) {
             bytes_total: 0,
             error: None,
             direction,
+            resumable: None,
+            resumed_from,
         },
     };
     rep.set_state(OpState::Running);
 
-    // 远端方向诚实拒绝（协议腿 T-B6-3/4 已立，队列执行器接线归 T-B6-7）：
-    // 队列先落方向与断点、执行不假绿
+    // 远端方向诚实拒绝（协议腿 T-B6-3/4/5/6 已立；队列执行器接线随驱动
+    // 抽象泛化一并归 T-B6-11——本行只交付状态类型化与断点真值，执行不假绿）：
     let result = if direction != TransferDirection::Local {
         Flow::msg(format!(
-            "远端传输（方向={direction:?}）的队列执行器接线归 09 §6.2 T-B6-7：协议腿已立于 T-B6-3/4，本操作未执行，禁假就绪"
+            "远端传输（方向={direction:?}）的队列执行器接线归 09 §6.2 T-B6-11：协议腿已立于 T-B6-3..6，本操作未执行，禁假就绪"
         ))
     } else {
         match spec.kind {
@@ -810,15 +889,17 @@ fn run_copy_move(
                 return Flow::io(e);
             }
         }
-        // 冲突决议（Ask 在入队前已预扫描，到达 worker 的必为 Skip/Overwrite/Rename）
+        // 冲突决议（T-B6-7 路线 (ii)）：Ask 到达执行臂且真出现冲突 ⇒ 真报错
+        // 点名，绝不再与 Skip 同体静默跳过（承重⑩主证）
         let target = match resolve_target(&item.src, &item.dst, spec.policy) {
-            Some(t) => t,
-            None => {
+            Ok(Some(t)) => t,
+            Ok(None) => {
                 rep.cur.files_done += 1; // Skip
                 rep.cur.bytes_done += item.size;
                 rep.emit();
                 continue;
             }
+            Err(e) => return Flow::msg(e.to_string()),
         };
         rep.cur.current = item
             .src
@@ -980,6 +1061,7 @@ fn copy_one(
     };
     // op_id 先行取快照：闭包不持 rep 的可变借用，泵才能独享 Reporter
     let op_id_snap = rep.cur.op_id.clone();
+    let chain_snap = rep.cur.resumed_from.clone();
     let mut persist = |written: u64| {
         let _ = persist_pending(
             store_dir,
@@ -992,6 +1074,7 @@ fn copy_one(
                 recycle: spec.recycle,
                 file_index,
                 bytes_done: written,
+                resumed_from: chain_snap.clone(),
                 created_ms: now_ms(),
             },
         );
@@ -1166,6 +1249,14 @@ fn run_compress(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
     rep.cur.files_total = items.len() as u64;
     rep.cur.bytes_total = items.iter().map(|i| i.size).sum();
     let dst = to_long_path(&local!(&spec.dst));
+    // T-B6-7 同闸：Ask 下 `File::create` 会把已存在压缩包静默截断重写——
+    // 那是没决议过的冲突被自称决议过
+    if spec.policy == ConflictPolicy::Ask && dst.exists() {
+        return Flow::msg(format!(
+            "Ask 冲突未经决议: 压缩包已存在 {} ——须决议后重新入队（本操作未计入完成）",
+            dst.display()
+        ));
+    }
     if let Some(parent) = dst.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             return Flow::io(e);
@@ -1277,7 +1368,8 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
                 return Flow::io(e);
             }
         }
-        // 包内冲突：Skip 之外一律 Rename（安全默认），Overwrite 显式放行
+        // 包内冲突：Skip 之外…——T-B6-7 收口：Ask 不得被当成"已决议"，
+        // 静默改名与静默覆盖同罪；Overwrite 显式放行
         let final_path = if out_path.exists() {
             match spec.policy {
                 ConflictPolicy::Overwrite => out_path,
@@ -1287,7 +1379,13 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
                     rep.emit();
                     continue;
                 }
-                _ => unique_target(&out_path),
+                ConflictPolicy::Ask => {
+                    return Flow::msg(format!(
+                        "Ask 冲突未经决议: 解压目标已存在 {} ——须决议后重新入队（本操作未计入完成）",
+                        out_path.display()
+                    ));
+                }
+                ConflictPolicy::Rename => unique_target(&out_path),
             }
         } else {
             out_path
@@ -1699,6 +1797,7 @@ mod tests {
             recycle: false,
             file_index: 0,
             bytes_done: 0,
+            resumed_from: None,
             created_ms: 1,
         };
         let raw = serde_json::to_string(&rp).unwrap();
@@ -1802,6 +1901,8 @@ mod tests {
                 bytes_total: total,
                 error: None,
                 direction: TransferDirection::Local,
+                resumable: None,
+                resumed_from: None,
             },
         };
         let ctl = OpControl::new();
@@ -1893,6 +1994,7 @@ mod tests {
                 recycle: false,
                 file_index: 2,
                 bytes_done: 4 * 1024 * 1024,
+                resumed_from: None,
                 created_ms: 1,
             },
         )
@@ -1929,6 +2031,364 @@ mod tests {
             .unwrap();
         assert!(err.contains("T-B6-3"), "{err}");
         assert!(q.pending().is_empty());
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-7）字面测试名优先于 rustc 命名惯例
+    fn xferStatus_shapeKeysExactlyMatchStruct() {
+        // 序列化键集恰等声明字段集（防"偷偷加键/漏键"）；三枚传输新键在场。
+        let p = OpProgress {
+            op_id: "op-1".into(),
+            kind: OpKind::Copy,
+            state: OpState::Running,
+            current: "a.bin".into(),
+            files_done: 1,
+            files_total: 2,
+            bytes_done: 10,
+            bytes_total: 20,
+            error: None,
+            direction: TransferDirection::Download,
+            resumable: Some(crate::remote::Resumable::Range),
+            resumed_from: Some("op-0".into()),
+        };
+        let v = serde_json::to_value(XferStatusDto::from(&p)).unwrap();
+        let got: Vec<&str> = {
+            let mut k: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+            k.sort_unstable();
+            k
+        };
+        let mut want = vec![
+            "bytes_done",
+            "bytes_total",
+            "current",
+            "direction",
+            "error",
+            "files_done",
+            "files_total",
+            "kind",
+            "op_id",
+            "resumable",
+            "resumed_from",
+            "state",
+        ];
+        want.sort_unstable();
+        assert_eq!(got, want, "XferStatusDto 序列化键集必须恰等声明字段集");
+        // OpProgress（事件 payload 同源）三新键在场——方向/续传档/断点链
+        let pv = serde_json::to_value(&p).unwrap();
+        for k in ["direction", "resumable", "resumed_from"] {
+            assert!(pv.get(k).is_some(), "OpProgress 事件面须带 {k}");
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-7）字面测试名优先于 rustc 命名惯例
+    fn xferStatus_afterResume_pointsAtNewOpId() {
+        // 承重③：resume 后**新** id 的状态可查且 resumed_from 指回旧 id——
+        // 修前该测判红（旧形状只回裸 String，链在两行之间无从分辨）。
+        // 夹具用手工 pending（与"暂停出口落盘"同一形状），零时序竞态。
+        let src = tmpdir("xres_src");
+        let dst = tmpdir("xres_dst");
+        let store = tmpdir("xres_store");
+        std::fs::write(src.join("f.bin"), vec![3u8; 64 * 1024]).unwrap();
+        persist_pending(
+            &store,
+            &PendingOp {
+                op_id: "A".into(),
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("f.bin"))],
+                dst: L(dst.clone()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+                file_index: 0,
+                bytes_done: 0,
+                created_ms: 0,
+                resumed_from: None,
+            },
+        )
+        .unwrap();
+        let (cb, _) = sink();
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let b = q.resume("A").unwrap();
+        assert_ne!(b, "A");
+        assert!(wait_until(
+            || op_state(&q, &b) == OpState::Done,
+            Duration::from_secs(10)
+        ));
+        let sb = q.status(&b).expect("新 id 状态必须可查");
+        assert_eq!(sb.resumed_from.as_deref(), Some("A"), "断点链必须明写来源");
+        let dto = XferStatusDto::from(&sb);
+        assert_eq!(dto.op_id, b);
+        assert_eq!(dto.resumed_from.as_deref(), Some("A"));
+        // 正对照：直入队的新 op 没有链（不谎称"从谁续来"）
+        std::fs::write(src.join("g.bin"), vec![4u8; 1024]).unwrap();
+        let c = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("g.bin"))],
+                dst: L(dst.clone()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(wait_until(
+            || op_state(&q, &c) == OpState::Done,
+            Duration::from_secs(10)
+        ));
+        assert_eq!(q.status(&c).unwrap().resumed_from, None);
+        q.close();
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-7）字面测试名优先于 rustc 命名惯例
+    fn xferStatus_resumableMatchesPeerClaim_notAssumed() {
+        // "对端声明才承诺"：入队侧无任何对端事实源 ⇒ resumable 恒 None——
+        // 本地复制不得被编出"断点续传"；有声明（Range）才如实带出。
+        let store = tmpdir("claim_store");
+        let src = tmpdir("claim_src");
+        let dst = tmpdir("claim_dst");
+        std::fs::write(src.join("s.bin"), b"x").unwrap();
+        let (cb, _) = sink();
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("s.bin"))],
+                dst: L(dst.clone()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(wait_until(
+            || op_state(&q, &op) == OpState::Done,
+            Duration::from_secs(10)
+        ));
+        let p = q.status(&op).unwrap();
+        assert_eq!(p.direction, TransferDirection::Local);
+        assert!(
+            p.resumable.is_none(),
+            "本地臂无对端声明，resumable 必须为 None（无事实源即 null）"
+        );
+        // 正对照：事实源在场（远端下载腿声明 Range）时逐字带出，不降级不夸大
+        let mut claimed = p.clone();
+        claimed.resumable = Some(crate::remote::Resumable::Range);
+        let v = serde_json::to_value(&claimed).unwrap();
+        assert_eq!(v["resumable"], serde_json::json!("range"));
+        // Whole 档（只能整取）不得序列化出"range/append"字样——面板据此
+        // 显示"断点续传"与否的判据源头在此
+        let mut whole = claimed.clone();
+        whole.resumable = Some(crate::remote::Resumable::Whole);
+        let wv = serde_json::to_value(&whole).unwrap();
+        assert_eq!(wv["resumable"], serde_json::json!("whole"));
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-7）字面测试名优先于 rustc 命名惯例
+    fn askPolicy_conflictAfterPreScan_neverSilentlySkips() {
+        // 承重⑩主证：队列口不做预扫描（预扫描在 service 门面），Ask 到达执行臂
+        // 时目标已被占 ⇒ 真报错点名，该文件**不得**被当成"已完成"。
+        let src = tmpdir("askfix_src");
+        let dst = tmpdir("askfix_dst");
+        let store = tmpdir("askfix_store");
+        std::fs::write(src.join("a.txt"), b"new").unwrap();
+        std::fs::write(dst.join("a.txt"), b"old").unwrap();
+        let (cb, _) = sink();
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("a.txt"))],
+                dst: L(dst.clone()),
+                policy: ConflictPolicy::Ask,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(wait_until(
+            || op_state(&q, &op) == OpState::Failed,
+            Duration::from_secs(10)
+        ));
+        let p = q.status(&op).unwrap();
+        let err = p.error.clone().expect("Ask 冲突必须留下点名的 error");
+        assert!(err.contains("a.txt"), "错误须点名冲突文件，实得 {err}");
+        assert!(err.contains("未经决议"), "错误须自陈未决议，实得 {err}");
+        assert_eq!(p.files_done, 0, "冲突文件不得被计入完成");
+        assert_eq!(
+            std::fs::read(dst.join("a.txt")).unwrap(),
+            b"old",
+            "旧内容不得被偷换"
+        );
+        // 正对照：Skip 档仍静默跳＝语义不变（防误伤既有测）
+        let op2 = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("a.txt"))],
+                dst: L(dst.clone()),
+                policy: ConflictPolicy::Skip,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(wait_until(
+            || op_state(&q, &op2) == OpState::Done,
+            Duration::from_secs(10)
+        ));
+        let p2 = q.status(&op2).unwrap();
+        assert_eq!(
+            (p2.files_done, p2.error.clone()),
+            (1, None),
+            "Skip 语义逐字不变"
+        );
+        assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"old");
+        q.close();
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-7）字面测试名优先于 rustc 命名惯例
+    fn askPolicy_deleteCompressExtract_reachTheSameGate() {
+        // 三非 Copy/Move 类的 Ask 裁决现状按实收口（T-B6-6 前只 Copy/Move 有闸）：
+        // Compress/Extract 的执行臂冲突走同一"未经决议即报错"闸；
+        // Delete 无目标概念——免扫是**事实**，如实登记而非造一个冲突。
+        let root = tmpdir("gate3");
+        let store = tmpdir("gate3_store");
+        std::fs::create_dir_all(root.join("in")).unwrap();
+        std::fs::write(root.join("in/a.txt"), b"x").unwrap();
+        let zip_path = root.join("out.zip");
+        std::fs::write(&zip_path, b"existing-archive").unwrap();
+        let (cb, _) = sink();
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        // ① Compress：Ask + 已存在压缩包 ⇒ Failed 点名（修前 File::create 静默截断重写）
+        let cmp_op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Compress,
+                srcs: vec![L(root.join("in"))],
+                dst: L(zip_path.clone()),
+                policy: ConflictPolicy::Ask,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(
+            wait_until(
+                || op_state(&q, &cmp_op) == OpState::Failed,
+                Duration::from_secs(10)
+            ),
+            "Ask+已有压缩包必须判红"
+        );
+        let err = q.status(&cmp_op).unwrap().error.unwrap();
+        assert!(
+            err.contains("out.zip") && err.contains("未经决议"),
+            "须点名压缩包，实得 {err}"
+        );
+        assert_eq!(
+            std::fs::read(&zip_path).unwrap(),
+            b"existing-archive",
+            "旧档不得被截断"
+        );
+        // ② Extract：Ask + 包内条目已在场 ⇒ Failed 点名（修前静默改名自陈已决议）
+        let ext_dir = root.join("ext");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        {
+            use std::io::Write;
+            let zf = std::fs::File::create(root.join("real.zip")).unwrap();
+            let mut zw = zip::ZipWriter::new(zf);
+            let opts = SimpleFileOptions::default();
+            zw.start_file("a.txt", opts).unwrap();
+            zw.write_all(b"from-zip").unwrap();
+            zw.finish().unwrap();
+        }
+        std::fs::write(ext_dir.join("a.txt"), b"on-disk").unwrap();
+        let ext_op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Extract,
+                srcs: vec![L(root.join("real.zip"))],
+                dst: L(ext_dir.clone()),
+                policy: ConflictPolicy::Ask,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(
+            wait_until(
+                || op_state(&q, &ext_op) == OpState::Failed,
+                Duration::from_secs(10)
+            ),
+            "Ask+解压冲突必须判红（不得静默改名冒充决议）"
+        );
+        let err = q.status(&ext_op).unwrap().error.unwrap();
+        assert!(
+            err.contains("a.txt") && err.contains("未经决议"),
+            "实得 {err}"
+        );
+        assert_eq!(std::fs::read(ext_dir.join("a.txt")).unwrap(), b"on-disk");
+        // ③ Delete：Ask 无目标冲突概念——现状如实登记，正常执行（免扫是事实非漏洞）
+        std::fs::write(root.join("gone.txt"), b"x").unwrap();
+        let del_op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Delete,
+                srcs: vec![L(root.join("gone.txt"))],
+                dst: L(root.clone()),
+                policy: ConflictPolicy::Ask,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(wait_until(
+            || op_state(&q, &del_op) == OpState::Done,
+            Duration::from_secs(10)
+        ));
+        assert!(!root.join("gone.txt").exists());
+        q.close();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-7）字面测试名优先于 rustc 命名惯例
+    fn resumeDto_reopenService_preservesChain() {
+        // 承重⑤ 的传输面镜像：链与断点都在 pending 文件里，重开服务读回后
+        // 再 resume 链只续不断；**旧 pending 文件（无 resumed_from 键）零迁移**。
+        let store = tmpdir("chain_store");
+        let legacy = store.join("L.json");
+        std::fs::write(
+            &legacy,
+            r#"{"op_id":"L","kind":"copy","srcs":["C:\\nf\\legacy 中文\\a.txt"],"dst":"D:\\b","policy":"overwrite","recycle":false,"file_index":2,"bytes_done":4096,"created_ms":7}"#,
+        )
+        .unwrap();
+        let (cb, _) = sink();
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let ls = q.pending().into_iter().find(|p| p.op_id == "L").unwrap();
+        assert_eq!(ls.resumed_from, None, "旧盘无键 ⇒ None（加键向后兼容）");
+        assert_eq!(
+            (ls.file_index, ls.bytes_done),
+            (2, 4096),
+            "断点真值逐字保真"
+        );
+        // 新形状（resume 产物）重开可读且链在场：手工落一枚 B（模拟崩溃前由 A 续来）
+        persist_pending(
+            &store,
+            &PendingOp {
+                op_id: "B".into(),
+                kind: OpKind::Copy,
+                srcs: vec![],
+                dst: L(std::env::temp_dir()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+                file_index: 1,
+                bytes_done: 512,
+                created_ms: 0,
+                resumed_from: Some("A".into()),
+            },
+        )
+        .unwrap();
+        let b = q.pending().into_iter().find(|p| p.op_id == "B").unwrap();
+        assert_eq!(b.resumed_from.as_deref(), Some("A"), "重开后链必须原样读回");
         q.close();
         let _ = std::fs::remove_dir_all(&store);
     }

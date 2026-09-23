@@ -229,6 +229,7 @@ pub fn run() {
             commands::file_enqueue,
             commands::file_ops_active,
             commands::file_ops_pending,
+            commands::xfer_status,
             commands::file_op_pause,
             commands::file_op_resume,
             commands::file_op_cancel,

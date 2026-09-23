@@ -38,6 +38,7 @@ import {
   fileRenameEntry,
   fileRenamePlan,
   fileSearch,
+  xferStatus,
   parseAppError,
   type ConflictItemDto,
   type ConflictPolicyDto,
@@ -180,6 +181,16 @@ const OP_KIND_LABEL: Record<string, string> = {
   extract: "解压",
 };
 
+/** 六态中文档（T-B6-7）：Badge 只报裸态名的旧形状在此换成受控词表，键=线上 snake_case */
+const OP_STATE_LABEL: Record<string, string> = {
+  queued: "排队中",
+  running: "进行中",
+  paused: "已暂停",
+  done: "已完成",
+  failed: "已失败",
+  canceled: "已取消",
+};
+
 /**
  * 冲突原因前端推导（T-B1-5）：后端 conflict 是单一布尔、两种成因不可分辨
  * （rename.rs:141-149 目标已存在 || 计划内重复），故"表内重复"由计划内同名
@@ -236,6 +247,7 @@ export default function FilePanel() {
   const [dstInput, setDstInput] = useState("");
   const [drives, setDrives] = useState<[string, string][]>([]);
   const opsRef = useRef<Map<string, OpProgressDto>>(new Map());
+  const resumeFocusRef = useRef<string | null>(null);
   // ---- T-B1-4 搜索 + 预览 ----
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
@@ -294,7 +306,18 @@ export default function FilePanel() {
 
   const refreshOps = useCallback(async () => {
     try {
-      const list = await fileOpsActive();
+      let list = await fileOpsActive();
+      // 续传焦点（T-B6-7）：resume 产出的新 op_id 即该行新身份；全表按事件节拍
+      // 重取可能晚一拍，用 xfer_status 定点兜底，"哪条是续上的"当场可见
+      const focus = resumeFocusRef.current;
+      if (focus && !list.some((p) => p.op_id === focus)) {
+        try {
+          const st: OpProgressDto = await xferStatus(focus);
+          list = [...list, st];
+        } catch {
+          /* 焦点行已不在 latest（终态幽灵行），清理收口归 T-B6-9，不在此谎报 */
+        }
+      }
       for (const p of list) opsRef.current.set(p.op_id, p);
       // 只保留近端（Done/Failed 保留至下一次刷新窗口）
       setOps(list.slice(-8));
@@ -314,7 +337,9 @@ export default function FilePanel() {
 
   useEffect(() => {
     void loadPending();
-  }, [loadPending]);
+    // 挂载即拉一次在途传输：只靠事件刷新的旧形在"打开面板时已有传输"下整段隐形
+    void refreshOps();
+  }, [loadPending, refreshOps]);
 
   // operation.progress 事件驱动刷新（节流由后端保证 200ms）
   useEffect(() => {
@@ -514,7 +539,11 @@ export default function FilePanel() {
     try {
       if (action === "pause") await fileOpPause(p.op_id);
       else if (action === "cancel") await fileOpCancel(p.op_id);
-      else await fileOpResume(p.op_id);
+      else {
+        // 消费 ResumeDto（T-B6-7）：新 op_id 作行的新身份，断点链经 resumed_from 指回旧行
+        const r = await fileOpResume(p.op_id);
+        resumeFocusRef.current = r.op_id;
+      }
       void refreshOps();
     } catch (e) {
       applyError(e, "操作控制失败");
@@ -669,10 +698,10 @@ export default function FilePanel() {
   const rnReasons = rnPlans ? renameConflictReasons(rnPlans) : null;
 
   const activeOps = ops.filter((p) =>
-    ["Queued", "Running", "Paused"].includes(p.state),
+    ["queued", "running", "paused"].includes(p.state),
   );
   const finishedOps = ops.filter((p) =>
-    ["Done", "Failed", "Canceled"].includes(p.state),
+    ["done", "failed", "canceled"].includes(p.state),
   );
 
   return (
@@ -879,16 +908,20 @@ export default function FilePanel() {
           {activeOps.map((p) => {
             const ratio = p.bytes_total > 0 ? p.bytes_done / p.bytes_total : 0;
             return (
-              <div key={p.op_id} className={styles.opRow}>
+              <div key={p.op_id} data-op-id={p.op_id} className={styles.opRow}>
                 <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
                 <ProgressBar className={styles.bar} value={Math.min(1, Math.max(0, ratio))} />
                 <span className={styles.muted}>
                   {fmtSize(p.bytes_done)} / {fmtSize(p.bytes_total)} · {p.files_done}/
                   {p.files_total}
                   {p.current ? ` · ${p.current}` : ""}
-                  {p.state === "Paused" ? " · 已暂停" : ""}
+                  {` · ${OP_STATE_LABEL[p.state] ?? p.state}`}
+                  {p.resumed_from ? ` · 续自 ${p.resumed_from.slice(0, 8)}` : ""}
+                  {/* 续传档位只报对端声明（resumable=null 即"未获事实源"，禁写"支持断点续传"） */}
+                  {p.resumable === "range" ? " · 支持断点续传" : ""}
+                  {p.error ? ` · ${p.error}` : ""}
                 </span>
-                {p.state === "Running" || p.state === "Queued" ? (
+                {p.state === "running" || p.state === "queued" ? (
                   <Button size="small" onClick={() => void opControl(p, "pause")}>
                     暂停
                   </Button>
@@ -1030,8 +1063,9 @@ export default function FilePanel() {
       {finishedOps.length > 0 && (
         <div className={styles.toolbar}>
           {finishedOps.map((p) => (
-            <Badge key={p.op_id} appearance={p.state === "Done" ? "filled" : "outline"} color={p.state === "Done" ? "success" : "danger"}>
-              {OP_KIND_LABEL[p.kind]} · {p.state}
+            <Badge key={p.op_id} data-op-id={p.op_id} appearance={p.state === "done" ? "filled" : "outline"} color={p.state === "done" ? "success" : "danger"}>
+              {OP_KIND_LABEL[p.kind]} · {OP_STATE_LABEL[p.state] ?? p.state}
+              {p.resumed_from ? ` · 续自 ${p.resumed_from.slice(0, 8)}` : ""}
               {p.error ? ` · ${p.error}` : ""}
             </Badge>
           ))}

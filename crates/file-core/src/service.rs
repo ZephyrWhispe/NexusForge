@@ -12,7 +12,7 @@ use crate::conflict::{scan_conflicts, ConflictItem, ConflictPolicy};
 use crate::driver::{DriverInfo, DriverRegistry};
 use crate::error::{FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING};
 use crate::module::FileConfig;
-use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp};
+use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp, ResumeDto, XferStatusDto};
 use crate::preset::PresetStore;
 use crate::preview::{preview_file, Preview};
 use crate::profile::{ProfileStore, RemoteProtocol};
@@ -318,9 +318,23 @@ impl FileService {
         self.queue.pause(op_id)
     }
 
-    /// 恢复（返回新 op_id，前端据此刷新追踪对象）
-    pub fn op_resume(&self, op_id: &str) -> Result<String, FileError> {
-        self.queue.resume(op_id)
+    /// 恢复（T-B6-7 破坏性 IPC 变更：`String → ResumeDto`）。断点链在返回体
+    /// 里明写（`previous_op_id`），前端必须消费新行身份——丢弃返回值续不上链。
+    pub fn op_resume(&self, op_id: &str) -> Result<ResumeDto, FileError> {
+        let new_op_id = self.queue.resume(op_id)?;
+        Ok(ResumeDto {
+            op_id: new_op_id,
+            previous_op_id: Some(op_id.to_owned()),
+        })
+    }
+
+    /// 单条传输的 typed 状态（09 §6.2 T-B6-7 `xfer_status`）：查不到 ⇒ Err
+    /// 点名，**不回落空壳**（诚实空 vs 错纪律）
+    pub fn xfer_status(&self, op_id: &str) -> Result<XferStatusDto, FileError> {
+        self.queue
+            .status(op_id)
+            .map(|p| XferStatusDto::from(&p))
+            .ok_or_else(|| FileError::NoSuchOp(op_id.to_owned()))
     }
 
     pub fn op_cancel(&self, op_id: &str) -> Result<(), FileError> {

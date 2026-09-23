@@ -128,6 +128,21 @@ pub async fn file_ops_pending(
         .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
 }
 
+/// 单条传输的 typed 状态（09 §6.2 T-B6-7）。命令名按任务书取 `xfer_status`
+/// 而非 `file_op_status`——与 `file_op_pause`/`file_op_resume` 命名族同谱的
+/// 传输状态口，查不到 ⇒ Err 点名不回落空壳。
+#[tauri::command]
+pub async fn xfer_status(
+    op_id: String,
+    state: State<'_, HostState>,
+) -> Result<file_core::XferStatusDto, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.xfer_status(&op_id))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+        .map_err(file_err)
+}
+
 /// 暂停操作（块边界生效）
 #[tauri::command]
 pub async fn file_op_pause(op_id: String, state: State<'_, HostState>) -> Result<(), AppError> {
@@ -138,12 +153,13 @@ pub async fn file_op_pause(op_id: String, state: State<'_, HostState>) -> Result
         .map_err(file_err)
 }
 
-/// 恢复操作（返回新 op_id）
+/// 恢复操作（T-B6-7 起返回 `ResumeDto`：新行身份 + 断点链来源，
+/// 前端必须消费 `op_id` 而非丢弃——旧 `String` 形状致续传链在 UI 断成两条）
 #[tauri::command]
 pub async fn file_op_resume(
     op_id: String,
     state: State<'_, HostState>,
-) -> Result<String, AppError> {
+) -> Result<file_core::ResumeDto, AppError> {
     let svc = file_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || svc.op_resume(&op_id))
         .await

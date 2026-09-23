@@ -238,6 +238,7 @@
     "allow-winops-catalog",
     "allow-winops-rollback",
     "allow-winops-scan",
+    "allow-xfer-status",
     "core:default",
     "core:webview:allow-create-webview-window",
     "core:window:allow-close",

@@ -129,3 +129,8 @@ commands.allow = ["file_remote_disconnect"]
 identifier = "allow-file-remote-presets"
 description = "允许前端调用 file_remote_presets 命令（D-28 按窗最小授权；预设=数据文件只读列举，auth_kind 无凭据档）"
 commands.allow = ["file_remote_presets"]
+
+[[permission]]
+identifier = "allow-xfer-status"
+description = "允许前端调用 xfer_status 命令（09 §6.2 T-B6-7；单条传输 typed 状态，续传链与断点真值的查询口）"
+commands.allow = ["xfer_status"]

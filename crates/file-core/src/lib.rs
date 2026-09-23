@@ -21,15 +21,13 @@ pub mod service;
 pub use browse::{
     breadcrumbs, display_path, drives, list_dir, to_long_path, DriveInfo, FileEntry, SortKey,
 };
-pub use conflict::{
-    conflict_pairs, scan_conflicts, unique_name, ConflictAction, ConflictItem, ConflictPolicy,
-};
+pub use conflict::{conflict_pairs, scan_conflicts, unique_name, ConflictItem, ConflictPolicy};
 pub use driver::{DriverInfo, DriverRegistry, FileStoragePort, LocalDriver, StorageDriver};
 pub use error::{FileError, FILE_REMOTE_CODES};
 pub use module::{FileConfig, FileModule, MAX_CONCURRENT_CEILING};
 pub use ops::{
     direction_of, parent_key, Checkpoint, OpEndpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState,
-    PendingOp, TransferDirection, CHUNK,
+    PendingOp, ResumeDto, TransferDirection, XferStatusDto, CHUNK,
 };
 pub use preset::{PresetAuthKind, PresetStore, RemotePreset};
 pub use preview::Preview;

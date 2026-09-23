@@ -969,7 +969,14 @@ export interface FileEnqueueDto {
   conflicts: ConflictItemDto[];
 }
 
-export type OpStateDto = "Queued" | "Running" | "Paused" | "Done" | "Failed" | "Canceled";
+/** 线上真相 = Rust OpState 的 snake_case 序列化（T-B6-7 假绿位收口：旧 PascalCase
+ *  字面量与线上永不互等 ⇒ 面板活动/终态过滤在实启下恒空，队列整段隐形） */
+export type OpStateDto = "queued" | "running" | "paused" | "done" | "failed" | "canceled";
+
+export type TransferDirectionDto = "local" | "upload" | "download";
+
+/** 续传档位（T-B6-7）：对端声明才承诺，无事实源即 null（禁给本地复制编一个"可续传"） */
+export type ResumableDto = "range" | "append" | "whole";
 
 export interface OpProgressDto {
   op_id: string;
@@ -981,6 +988,31 @@ export interface OpProgressDto {
   bytes_done: number;
   bytes_total: number;
   error: string | null;
+  direction: TransferDirectionDto;
+  resumable: ResumableDto | null;
+  resumed_from: string | null;
+}
+
+/** resume 产新 op 的返回值（T-B6-7）：面板须以 op_id 重绑行身份，previous_op_id 供断点链展示 */
+export interface ResumeDto {
+  op_id: string;
+  previous_op_id: string | null;
+}
+
+/** xfer_status 返回体（T-B6-7）：字段与 OpProgressDto 同谱（Rust 侧 From<&OpProgress> 唯一投影） */
+export interface XferStatusDto {
+  op_id: string;
+  kind: FileOpKind;
+  direction: TransferDirectionDto;
+  state: OpStateDto;
+  current: string;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  resumable: ResumableDto | null;
+  error: string | null;
+  resumed_from: string | null;
 }
 
 export interface PendingOpDto {
@@ -1060,8 +1092,12 @@ export function fileOpsPending(): Promise<PendingOpDto[]> {
 export function fileOpPause(opId: string): Promise<void> {
   return invoke("file_op_pause", { opId });
 }
-export function fileOpResume(opId: string): Promise<string> {
+export function fileOpResume(opId: string): Promise<ResumeDto> {
   return invoke("file_op_resume", { opId });
+}
+/** 单条传输状态查询（T-B6-7）：断点链与续传档位的事件旁兜底读口（事件只作门铃纪律同 B5） */
+export function xferStatus(opId: string): Promise<XferStatusDto> {
+  return invoke("xfer_status", { opId });
 }
 export function fileOpCancel(opId: string): Promise<void> {
   return invoke("file_op_cancel", { opId });
