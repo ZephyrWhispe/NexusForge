@@ -1,0 +1,85 @@
+{
+  "$comment": "内置远程连接预设（09 §6.2 T-B6-6）。数据文件非代码：经 preset.rs 的同一校验口 parse_preset_file 构造期即测。preset ≠ profile——这里只是填表草稿，落档须用户显式保存；本文件结构上装不进口令字段（auth_kind 仅 anonymous/prompt_each_time 两枚举位）。",
+  "presets": [
+    {
+      "id": "webdav-jianguoyun",
+      "label": "坚果云 WebDAV",
+      "protocol": "web_dav",
+      "default_host": "dav.jianguoyun.com",
+      "port": 443,
+      "base_path": "/dav",
+      "auth_kind": "prompt_each_time",
+      "notes": "需在坚果云「账户信息」里生成应用密码，登录用邮箱 + 应用密码"
+    },
+    {
+      "id": "webdav-nextcloud",
+      "label": "nextCloud WebDAV",
+      "protocol": "web_dav",
+      "default_host": "demo.nextcloud.com",
+      "port": 443,
+      "base_path": "/remote.php/dav",
+      "auth_kind": "prompt_each_time",
+      "notes": "把 default_host 改成自己的实例域名；路径前缀为 /remote.php/dav"
+    },
+    {
+      "id": "webdav-owncloud",
+      "label": "ownCloud WebDAV",
+      "protocol": "web_dav",
+      "default_host": "demo.owncloud.com",
+      "port": 443,
+      "base_path": "/remote.php/webdav",
+      "auth_kind": "prompt_each_time",
+      "notes": "ownCloud 10 及更早的 webdav 端点形状"
+    },
+    {
+      "id": "sftp-linux",
+      "label": "Linux 主机（SFTP）",
+      "protocol": "sftp",
+      "default_host": "127.0.0.1",
+      "port": 22,
+      "base_path": "/",
+      "auth_kind": "prompt_each_time",
+      "notes": "自建 sshd 的家用/Linux 主机；首次连接会走主机键逐字核对（TOFU）"
+    },
+    {
+      "id": "sftp-synology",
+      "label": "Synology DSM（SFTP）",
+      "protocol": "sftp",
+      "default_host": "diskstation.local",
+      "port": 22,
+      "base_path": "/",
+      "auth_kind": "prompt_each_time",
+      "notes": "需在 DSM「文件传输服务」里启用 SFTP 协议"
+    },
+    {
+      "id": "https-github-releases",
+      "label": "GitHub Releases（直链下载）",
+      "protocol": "https",
+      "default_host": "github.com",
+      "port": 443,
+      "base_path": "/",
+      "auth_kind": "anonymous",
+      "notes": "只有下载腿（GET/Range 断点续传），无浏览无写面"
+    },
+    {
+      "id": "https-static-cdn",
+      "label": "静态资源站（jsDelivr）",
+      "protocol": "https",
+      "default_host": "cdn.jsdelivr.net",
+      "port": 443,
+      "base_path": "/",
+      "auth_kind": "anonymous",
+      "notes": "公开 CDN 直链下载源；同样只有下载腿"
+    },
+    {
+      "id": "ftp-anonymous",
+      "label": "匿名 FTP（GNU 镜像）",
+      "protocol": "ftp",
+      "default_host": "ftp.gnu.org",
+      "port": 21,
+      "base_path": "/gnu",
+      "auth_kind": "anonymous",
+      "notes": "明文过网：非回环地址需先在设置打开 insecure_plaintext 总闸（FILE_REMOTE_006）"
+    }
+  ]
+}

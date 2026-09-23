@@ -81,6 +81,7 @@
     "allow-file-remote-disconnect",
     "allow-file-remote-drivers",
     "allow-file-remote-fingerprint-ack",
+    "allow-file-remote-presets",
     "allow-file-remote-profile-delete",
     "allow-file-remote-profile-save",
     "allow-file-remote-profiles",

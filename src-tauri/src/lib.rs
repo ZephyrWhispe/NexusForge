@@ -246,6 +246,7 @@ pub fn run() {
             commands::file_remote_disconnect,
             commands::file_remote_drivers,
             commands::file_remote_fingerprint_ack,
+            commands::file_remote_presets,
             commands::proxy_status,
             commands::proxy_kernel_install,
             commands::proxy_kernel_restart,

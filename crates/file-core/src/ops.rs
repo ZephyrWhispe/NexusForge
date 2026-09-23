@@ -282,6 +282,47 @@ macro_rules! local {
 /// 进度回调（模块把它接到 EventBus：payload key=op_id 供 UI 去抖订阅）
 pub type ProgressFn = Arc<dyn Fn(OpProgress) + Send + Sync>;
 
+/// 并发准入门（09 §6.2 T-B6-6 `max_concurrent` 的执行体）：worker 线程数在
+/// 建队时定死（内置上限 2），配置只收紧不超发——`set_max_concurrent` 夹到
+/// `1..=workers`，取到 job 的 worker 先过门再执行。
+struct AdmitGate {
+    limit: std::sync::atomic::AtomicUsize,
+    workers: usize,
+    running: Mutex<usize>,
+    cvar: parking_lot::Condvar,
+}
+
+impl AdmitGate {
+    fn new(workers: usize) -> Self {
+        Self {
+            limit: std::sync::atomic::AtomicUsize::new(workers),
+            workers,
+            running: Mutex::new(0),
+            cvar: parking_lot::Condvar::new(),
+        }
+    }
+    fn set_limit(&self, n: usize) {
+        self.limit.store(n.clamp(1, self.workers), Ordering::SeqCst);
+        self.cvar.notify_all();
+    }
+    fn acquire(&self) {
+        let mut g = self.running.lock();
+        loop {
+            if *g < self.limit.load(Ordering::SeqCst) {
+                *g += 1;
+                return;
+            }
+            // parking_lot 就地更新 guard，超时返回只用于重查（防丢唤醒也防永睡）
+            self.cvar
+                .wait_for(&mut g, std::time::Duration::from_millis(200));
+        }
+    }
+    fn release(&self) {
+        *self.running.lock() -= 1;
+        self.cvar.notify_all();
+    }
+}
+
 pub struct OpQueue {
     tx: Option<std::sync::mpsc::Sender<Job>>,
     ctls: Mutex<HashMap<String, Arc<OpControl>>>,
@@ -290,6 +331,7 @@ pub struct OpQueue {
     store_dir: PathBuf,
     cb: ProgressFn,
     recycle: Option<Arc<dyn RecycleBinPort>>,
+    admit: Arc<AdmitGate>,
     _workers: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -302,10 +344,12 @@ impl OpQueue {
         let latest: Arc<Mutex<HashMap<String, OpProgress>>> = Arc::new(Mutex::new(HashMap::new()));
         let mut handles = Vec::new();
         let workers = workers.max(1);
+        let admit = Arc::new(AdmitGate::new(workers));
         for _ in 0..workers {
             let rx = rx.clone();
             let cb = cb.clone();
             let latest = latest.clone();
+            let admit = admit.clone();
             handles.push(std::thread::spawn(move || {
                 // 快照更新包装：active() 永远拿到最新状态（每 worker 构造一次）
                 let sink: ProgressFn = Arc::new(move |p: OpProgress| {
@@ -316,7 +360,9 @@ impl OpQueue {
                     // 持锁阻塞 recv：有 job 的 worker 取走后立即放锁，其余 worker 依次排队
                     let job = { rx.lock().recv() };
                     let Ok(job) = job else { return }; // 发送端关闭 → 退出
+                    admit.acquire(); // max_concurrent 准入门（配置收紧时排队等位）
                     run_job(job, &sink);
+                    admit.release();
                 }
             }));
         }
@@ -327,8 +373,15 @@ impl OpQueue {
             store_dir,
             cb,
             recycle: None,
+            admit,
             _workers: handles,
         })
+    }
+
+    /// 配置真源 `max_concurrent` 的落点：夹到 `1..=内置 worker 数`
+    /// （线程在建队时定死，配置不许超发线程——无事实源的承诺不给）
+    pub fn set_max_concurrent(&self, n: usize) {
+        self.admit.set_limit(n);
     }
 
     /// 注册回收站端口（Delete recycle=true 需要；未注册降级直删并告警）

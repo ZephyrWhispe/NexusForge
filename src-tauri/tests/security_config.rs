@@ -1208,6 +1208,38 @@ fn auxWindows_neverGrantRemoteProfileCommands() {
 }
 
 #[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-6）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantRemotePresetsAndDrivers() {
+    // B6 T-B6-6 红线负例：预设表暴露"用户可能连哪些站"的意图面，drivers 暴露
+    // 已连接内网形状——两者 main-only。drivers 与 T-B6-3 负例有意重复登记：
+    // 命令面红线在每行的门禁里各钉一枚，删测试要先删命令。
+    let caps = load_capabilities();
+    for ident in ["allow-file-remote-presets", "allow-file-remote-drivers"] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（远端预设/驱动面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}
+
+#[test]
 #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-3）字面测试名优先于 rustc 命名惯例
 fn auxWindows_neverGrantRemoteConnectAndBrowse() {
     // B6 T-B6-3 红线负例：connect 携带逐次口令、browse 暴露远端目录树、

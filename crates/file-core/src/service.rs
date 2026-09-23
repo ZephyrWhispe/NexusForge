@@ -10,10 +10,13 @@ use host_core::ports::{Ports, RecycleBinPort, ThumbPort, UsnIndexPort};
 use crate::browse::{self, DriveInfo, FileEntry, SortKey};
 use crate::conflict::{scan_conflicts, ConflictItem, ConflictPolicy};
 use crate::driver::{DriverInfo, DriverRegistry};
-use crate::error::{FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING, FILE_REMOTE_NOTIMPL};
+use crate::error::{FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING};
+use crate::module::FileConfig;
 use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp};
+use crate::preset::PresetStore;
 use crate::preview::{preview_file, Preview};
 use crate::profile::{ProfileStore, RemoteProtocol};
+use crate::remote::ftp::{ftp_plaintext_guard, FtpDriver};
 use crate::remote::ssh::{
     load_known_hosts, sftp_auth_for, tofu_guard, KnownHostsFile, RusshBackend, SftpDriver,
     SshBackend,
@@ -30,7 +33,8 @@ enum ConnectedDriver {
     WebDav(Arc<WebDavDriver>),
     Https(Arc<HttpsDriver>),
     Sftp(Arc<SftpDriver>),
-    // T-B6-6 在此追加 FTP 臂——分派口唯一，禁第二张连接表
+    Ftp(Arc<FtpDriver>),
+    // 分派口唯一，禁第二张连接表（四协议在 T-B6-6 集齐，004 分派臂退役）
 }
 
 impl ConnectedDriver {
@@ -72,6 +76,18 @@ impl ConnectedDriver {
                     roots: vec![d.base_path()],
                 }
             }
+            ConnectedDriver::Ftp(d) => {
+                let p = d.profile();
+                RemoteDriverInfo {
+                    driver_id: p.id.clone(),
+                    label: d.driver_label(),
+                    protocol: p.protocol.as_str().to_owned(),
+                    host: p.host.clone(),
+                    port: p.port,
+                    base_path: p.base_path.clone(),
+                    roots: vec![d.base_path()],
+                }
+            }
         }
     }
 
@@ -84,6 +100,7 @@ impl ConnectedDriver {
                 msg: "HTTP 下载源不支持浏览：该档案只有下载腿（GET/Range），无列目录与写面".into(),
             }),
             ConnectedDriver::Sftp(d) => d.list_entries(path),
+            ConnectedDriver::Ftp(d) => d.list_entries(path),
         }
     }
 
@@ -92,6 +109,7 @@ impl ConnectedDriver {
             ConnectedDriver::WebDav(d) => d.clone(),
             ConnectedDriver::Https(d) => d.clone(),
             ConnectedDriver::Sftp(d) => d.clone(),
+            ConnectedDriver::Ftp(d) => d.clone(),
         }
     }
 }
@@ -111,6 +129,12 @@ pub struct FileService {
     /// 测试注入位：SSH 协议腿替身（FakeSsh）。生产路径恒 None ⇒ 每档案
     /// 现场 `RusshBackend::bound`；这不是回退兜底，是分派口的依赖注入槽。
     ssh_backend_override: parking_lot::RwLock<Option<Arc<dyn SshBackend>>>,
+    /// 配置真源（09 §6.2 T-B6-6）：Arc 让各消费点（入队闸/连接闸/限速腿）
+    /// 读到同一份现场值——apply_config 即写即生效，无重启窗口
+    config: Arc<parking_lot::RwLock<FileConfig>>,
+    /// 连接预设（内置 + 用户目录，open 时 fail-closed 全量校验；
+    /// 预设不是档案，零注册零连接，命令面只读列表）
+    presets: PresetStore,
 }
 
 impl FileService {
@@ -162,6 +186,8 @@ impl FileService {
         if let Some(port) = ports.get::<dyn RecycleBinPort>() {
             queue.set_recycle_port(port);
         }
+        let config = Arc::new(parking_lot::RwLock::new(FileConfig::default()));
+        queue.set_max_concurrent(config.read().max_concurrent);
         Ok(Self {
             queue,
             drivers: Arc::new(DriverRegistry::new()),
@@ -170,7 +196,31 @@ impl FileService {
             connections: parking_lot::RwLock::new(HashMap::new()),
             known_hosts: load_known_hosts(&app_data_dir.join("known_hosts.json"))?,
             ssh_backend_override: parking_lot::RwLock::new(None),
+            config,
+            presets: PresetStore::load(&app_data_dir.join("presets"))?,
         })
+    }
+
+    // ---- 配置真源（T-B6-6）----
+
+    pub fn config(&self) -> FileConfig {
+        self.config.read().clone()
+    }
+
+    pub(crate) fn config_arc(&self) -> Arc<parking_lot::RwLock<FileConfig>> {
+        self.config.clone()
+    }
+
+    /// 写侧唯一口（[`crate::module::FileModule::apply_config`] 校验后经此）：
+    /// 现场值 + 队列准入门一次更新，各读侧下一动作即见新值（不重启即生效）
+    pub fn set_config(&self, next: FileConfig) {
+        self.queue.set_max_concurrent(next.max_concurrent);
+        *self.config.write() = next;
+    }
+
+    /// 预设列表（只读；坏预设文件在 open 已 fail-closed，这里恒为全好快照）
+    pub fn presets(&self) -> Vec<crate::preset::RemotePreset> {
+        self.presets.list()
     }
 
     // ---- F1 浏览 ----
@@ -208,8 +258,27 @@ impl FileService {
 
     // ---- F2/F3 操作队列 ----
 
-    /// 入队（Ask 策略先预扫描：有冲突则不入队，返回冲突清单给 UI 决议）
+    /// 配置真源消费点（纯函数，派发测与入队面共读同一实现）：把运行态配置
+    /// 施加到调用方 spec 上。`default_conflict_policy` 非 Ask 时接管调用方
+    /// 留下的 Ask（用户说了"别逐单问"，队列不再挂预扫描）；
+    /// `delete_to_recycle` 只收紧删除臂——放开方向不存在（开=维持请求，关=强制直删）。
+    /// 远端源的回收站红线在队列闸先行（ops.rs 入队 Err 与驱动侧第二道），
+    /// 配置开闸也到不了远端。
+    pub(crate) fn apply_config_to_spec(cfg: &FileConfig, mut spec: OpSpec) -> OpSpec {
+        if spec.kind == crate::ops::OpKind::Delete && !cfg.delete_to_recycle {
+            spec.recycle = false;
+        }
+        if spec.policy == ConflictPolicy::Ask && cfg.default_conflict_policy != ConflictPolicy::Ask
+        {
+            spec.policy = cfg.default_conflict_policy;
+        }
+        spec
+    }
+
+    /// 入队（Ask 策略先预扫描：有冲突则不入队，返回冲突清单给 UI 决议）。
+    /// 配置两消费点经 [`Self::apply_config_to_spec`]（T-B6-6）。
     pub fn enqueue(&self, spec: OpSpec) -> Result<(Option<String>, Vec<ConflictItem>), FileError> {
+        let spec = Self::apply_config_to_spec(&self.config(), spec);
         if spec.kind == crate::ops::OpKind::Copy || spec.kind == crate::ops::OpKind::Move {
             // T-B6-2：Ask 预扫描只覆盖本地端点（fs 事实源）；远端端点跳过预扫描，
             // 冲突引擎本身已在 conflict_pairs 收口为唯一一份，远端事实源接线随协议行落地
@@ -304,9 +373,10 @@ impl FileService {
 
     /// 连接：档案必须已建（凭据不喂给野地址），协议分派口唯一。
     /// 同档案重连 = 整体替换旧连接（新口令生效，旧驱动随表项一同退役）。
-    /// WebDAV（T-B6-3）、HTTPS 下载腿（T-B6-4）与 SFTP（T-B6-5）在册；FTP 明确
-    /// 拒绝而非静默空驱动（禁假就绪）。SFTP 臂的 TOFU 守卫在**入表之前**：
-    /// 未受信主机键连"存在一条连接"这一事实都不该留下。
+    /// 四协议自 T-B6-6 集齐（004"后续行"分派臂退役——每条腿都在册）：
+    /// WebDAV（T-B6-3）、HTTPS 下载腿（T-B6-4）、SFTP（T-B6-5）、FTP 明文腿
+    /// （T-B6-6，入表前先过 [`ftp_plaintext_guard`] 三闸）。SFTP 臂的 TOFU
+    /// 守卫同样在**入表之前**：未受信主机键连"存在一条连接"这一事实都不该留下。
     pub fn connect(
         &self,
         profile_id: &str,
@@ -327,7 +397,10 @@ impl FileService {
                 // HTTPS 下载腿无凭据面（匿名 GET）；喂进来的 secret 就地退役，
                 // 不落到任何驱动字段（口令只进有认证协议的腿）
                 drop(secret);
-                ConnectedDriver::Https(Arc::new(HttpsDriver::new(profile.clone())))
+                ConnectedDriver::Https(Arc::new(HttpsDriver::new(
+                    profile.clone(),
+                    self.config_arc(),
+                )))
             }
             RemoteProtocol::Sftp => {
                 let auth = sftp_auth_for(&profile, secret)?;
@@ -356,20 +429,11 @@ impl FileService {
                     self.known_hosts.clone(),
                 )))
             }
-            other => {
-                let row = match other {
-                    RemoteProtocol::Ftp => "T-B6-6（FTP 明文驱动）",
-                    RemoteProtocol::WebDav | RemoteProtocol::Https | RemoteProtocol::Sftp => {
-                        unreachable!("已在上面分派")
-                    }
-                };
-                return Err(FileError::Remote {
-                    code: FILE_REMOTE_NOTIMPL,
-                    msg: format!(
-                        "协议 {} 的驱动由 09 §6.2 {row} 交付，本行不假就绪（档案 {profile_id}）",
-                        other.as_str()
-                    ),
-                });
+            RemoteProtocol::Ftp => {
+                // 明文总闸在建驱动之前裁决（惰建连：驱动 new 零网络，
+                // 被拒的明文档案不可能留下半条连接的事实源）
+                ftp_plaintext_guard(&profile, self.config().insecure_plaintext)?;
+                ConnectedDriver::Ftp(Arc::new(FtpDriver::new(profile.clone(), secret)))
             }
         };
         let info = connected.info();
@@ -583,20 +647,28 @@ mod tests {
     #[test]
     #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-3）字面测试名优先于 rustc 命名惯例
     fn connect_unsupportedProtocol_errs004NamingNextRow() {
+        // T-B6-6 取代（落地补记④）：四协议分派臂集齐，004"后续行"臂退役
+        // （FILE_REMOTE_NOTIMPL 常量仍留在码表，但已无任何档案走得进去）。
+        // 名字保留原语义——"拒而非静默空"：FTP 臂的拒现在是明文三闸（006），
+        // 总闸开了才放行（惰性驱动：connect 握手都不发生，见 ftp.rs 字面测名）。
         let (svc, root) = svc_fixture("connect004");
-        // Sftp 臂 T-B6-5 已交付（拒语改走 TOFU 面，见 ssh.rs 字面测名）；
-        // 004 后续行现只剩 FTP——样本收窄而非删除，正对照仍须真命中一次
-        {
-            let (proto, row) = (crate::profile::RemoteProtocol::Ftp, "T-B6-6");
-            let p = remote_sample("remote:next", proto);
-            svc.profiles().save(p).unwrap();
-            let e = svc.connect("remote:next", None).unwrap_err();
-            assert!(
-                matches!(&e, FileError::Remote { code, msg } if *code == crate::error::FILE_REMOTE_NOTIMPL && msg.contains(row)),
-                "{proto:?} 臂须以 FILE_REMOTE_004 点名后续行 {row}，实得 {e}"
-            );
-        }
-        // 档案不存在同样拒（凭据不喂给野地址）
+        let mut p = remote_sample("remote:ftp-pub", crate::profile::RemoteProtocol::Ftp);
+        p.host = "ftp.example.org".into();
+        svc.profiles().save(p).unwrap();
+        let e = svc.connect("remote:ftp-pub", None).unwrap_err();
+        assert!(
+            matches!(&e, FileError::Remote { code, msg } if *code == crate::error::FILE_REMOTE_PLAINTEXT && msg.contains("insecure_plaintext")),
+            "非回环 FTP 未开闸须报 006 点名总闸，实得 {e}"
+        );
+        // 正对照：用户显式开闸后同站点放行——明文是用户的决定，不是假就绪
+        svc.set_config(crate::module::FileConfig {
+            insecure_plaintext: true,
+            ..Default::default()
+        });
+        let info = svc.connect("remote:ftp-pub", None).unwrap();
+        assert_eq!(info.protocol, "ftp");
+        assert!(svc.detach("remote:ftp-pub"), "开闸连接须真实入表");
+        // 档案不存在同样拒（凭据不喂给野地址）——004 退役后此臂仍在
         let e = svc.connect("remote:ghost", None).unwrap_err();
         assert!(
             matches!(&e, FileError::Remote { code, .. } if *code == FILE_REMOTE_MISSING),
@@ -673,6 +745,43 @@ mod tests {
             matches!(&e, FileError::Remote { code, msg } if *code == FILE_REMOTE_FIELD && msg.contains("HTTP 下载源不支持浏览")),
             "HTTPS 浏览须报 005 点名下载腿，实得 {e}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn enqueue_appliesDefaultPolicy_whenCallerLeftAsk() {
+        // 配置真源消费点（T-B6-6）：`default_conflict_policy` 非 Ask 时接管
+        // 调用方留下的 Ask——用户说了"别逐单问"，队列就不该再挂预扫描返回冲突。
+        let (svc, root) = svc_fixture("policy");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("a.txt"), b"x").unwrap();
+        std::fs::write(dst.join("a.txt"), b"y").unwrap();
+        let spec = || crate::ops::OpSpec {
+            kind: crate::ops::OpKind::Copy,
+            srcs: vec![crate::ops::OpEndpoint::local(src.join("a.txt"))],
+            dst: crate::ops::OpEndpoint::local(dst.clone()),
+            policy: ConflictPolicy::Ask,
+            recycle: false,
+        };
+        // 默认（Ask）：冲突预扫描原样返回
+        let (op, conflicts) = svc.enqueue(spec()).unwrap();
+        assert!(op.is_none() && conflicts.len() == 1, "Ask 缺省须回冲突清单");
+        // 改闸为 Rename：同一次 Ask 调用被配置接管，直接入队
+        svc.set_config(crate::module::FileConfig {
+            default_conflict_policy: ConflictPolicy::Rename,
+            ..Default::default()
+        });
+        let (op, conflicts) = svc.enqueue(spec()).unwrap();
+        assert!(
+            op.is_some() && conflicts.is_empty(),
+            "非 Ask 缺省必须接管 Ask 调用位"
+        );
+        let op_id = op.unwrap();
+        let _ = svc.op_cancel(&op_id);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -13,16 +13,18 @@
 
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FileError, FILE_REMOTE_MISSING};
+use crate::module::FileConfig;
 use crate::profile::{looks_like_loopback, RemoteProfile};
 
 use super::webdav::join_remote_url;
-use super::{remote_block_on, remote_enter};
+use super::{remote_block_on, remote_enter, ThrottleGate};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -122,10 +124,16 @@ pub struct HttpsDriver {
     profile: RemoteProfile,
     origin: String,
     client: reqwest::Client,
+    /// 配置真源句柄（T-B6-6）：`download_kbps` 总闸的**唯一直读点**——每次下载
+    /// 起算时读一次现值，改闸不重连即生效。与 FileService 共享同一个 Arc。
+    config: Arc<parking_lot::RwLock<FileConfig>>,
 }
 
 impl HttpsDriver {
-    pub(crate) fn new(profile: RemoteProfile) -> Self {
+    pub(crate) fn new(
+        profile: RemoteProfile,
+        config: Arc<parking_lot::RwLock<FileConfig>>,
+    ) -> Self {
         // 承重⑬：非回环 host 强制 https；回环 http 仅供本地联调与测试桩
         let scheme = if looks_like_loopback(&profile.host) {
             "http"
@@ -143,6 +151,7 @@ impl HttpsDriver {
             profile,
             origin,
             client,
+            config,
         }
     }
 
@@ -174,7 +183,9 @@ impl HttpsDriver {
 
     /// 下载一条腿：`have` 为调用方声称的本地已有字节；对端回 206 才从 `have`
     /// 续写，回 200 即整取重下（截断重写，见 [`resume_offset`]）。
-    /// `max_kbps` 为单连接预算（0 = 不限，由 [`throttle_share_kbps`] 摊）。
+    /// `max_kbps` 为调用方显式预算（0 = 交给配置总闸）：没显式预算时按
+    /// `download_kbps / max(活跃并发, 1)` 摊（[`throttle_share_kbps`]），
+    /// 总闸默认 0 = 不限——配置位与调用位在这一个口合流，禁两处各限一次。
     pub fn download_to(
         &self,
         remote_path: &str,
@@ -185,12 +196,18 @@ impl HttpsDriver {
         let url = self.url_for(remote_path);
         let client = self.client.clone();
         let dst = dst.to_path_buf();
-        remote_block_on(async move { download_pump(&client, &url, &dst, have, max_kbps).await })
+        let effective = if max_kbps == 0 {
+            let cfg = self.config.read();
+            throttle_share_kbps(cfg.download_kbps, cfg.max_concurrent.max(1))
+        } else {
+            max_kbps
+        };
+        remote_block_on(async move { download_pump(&client, &url, &dst, have, effective).await })
     }
 }
 
 /// 流式泵：`Response::chunk()` 逐块落盘（无 `stream` feature 不扩），
-/// 每块过最小限速闸（T-B6-6 的 `ThrottleGate` 落地后统一替换，本行不提前立型）。
+/// 每块过 [`ThrottleGate`]（T-B6-6 统一限速闸，纯核心可单测）。
 async fn download_pump(
     client: &reqwest::Client,
     url: &str,
@@ -241,9 +258,7 @@ async fn download_pump(
     };
     let mut body = resp;
     let mut written = 0u64;
-    let rate_bytes_per_sec = max_kbps as u64 * 1024;
-    let mut budget: i64 = rate_bytes_per_sec as i64;
-    let mut last = Instant::now();
+    let mut gate = ThrottleGate::new(max_kbps);
     loop {
         let chunk = tokio::time::timeout(REQUEST_TIMEOUT, body.chunk())
             .await
@@ -253,18 +268,9 @@ async fn download_pump(
         file.write_all(&bytes)
             .map_err(|e| http_err(format!("目标文件写入失败（{}）: {e}", dst.display())))?;
         written += bytes.len() as u64;
-        if rate_bytes_per_sec > 0 {
-            let now = Instant::now();
-            budget = (budget
-                + (now.duration_since(last).as_secs_f64() * rate_bytes_per_sec as f64) as i64)
-                .min(rate_bytes_per_sec as i64);
-            last = now;
-            budget -= bytes.len() as i64;
-            if budget < 0 {
-                let secs = -budget as f64 / rate_bytes_per_sec as f64;
-                tokio::time::sleep(Duration::from_secs_f64(secs)).await;
-                budget = 0;
-            }
+        let pause = gate.allow(bytes.len() as u64);
+        if !pause.is_zero() {
+            tokio::time::sleep(pause).await;
         }
     }
     file.flush().ok();
@@ -396,6 +402,10 @@ mod tests {
 
     const BODY: &[u8] = b"0123456789ABCDEFGH";
 
+    fn default_cfg() -> Arc<parking_lot::RwLock<FileConfig>> {
+        Arc::new(parking_lot::RwLock::new(FileConfig::default()))
+    }
+
     fn tmp_dst(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("nf_https_{tag}_{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&p);
@@ -406,7 +416,7 @@ mod tests {
     #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-4）字面测试名优先于 rustc 命名惯例
     fn httpsDriver_listRefusesNotEmptyList() {
         // 承重⑨：假就绪 = 空表，拒才是诚实
-        let drv = HttpsDriver::new(profile_for(9));
+        let drv = HttpsDriver::new(profile_for(9), default_cfg());
         let e = <HttpsDriver as StorageDriver>::list(&drv, Path::new("/"))
             .expect_err("HTTP 下载源的 list 必须 Err，不得回落空表");
         assert!(
@@ -450,7 +460,7 @@ mod tests {
         // 桩对 Range 视而不见（恒 200 全量）：声称已有 6 字节的续传必须
         // 从 0 重下，且上报的是**实际写齐**的字节数，不是谎报的旧 have。
         let (port, _rx) = serve(BODY, false);
-        let drv = HttpsDriver::new(profile_for(port));
+        let drv = HttpsDriver::new(profile_for(port), default_cfg());
         let dst = tmp_dst("whole");
         std::fs::write(&dst, &BODY[..6]).unwrap();
         let out = drv.download_to("/f", &dst, 6, 0).unwrap();
@@ -515,7 +525,7 @@ mod tests {
     #[allow(non_snake_case)]
     fn httpsDownload_againstFakeServer_resumesWithRange() {
         let (port, rx) = serve(BODY, true);
-        let drv = HttpsDriver::new(profile_for(port));
+        let drv = HttpsDriver::new(profile_for(port), default_cfg());
         let dst = tmp_dst("range");
 
         // ① have=0：第一请求无 Range 头（对"假设服务器支持"的防漂移断言）
@@ -545,6 +555,30 @@ mod tests {
             "续传请求逐字校 Range"
         );
         assert_eq!(std::fs::read(&dst).unwrap(), BODY, "续写拼接后文件完整");
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn downloadConsumesConfigKbps_whenNoExplicitBudget() {
+        // 配置真源直读臂：max_kbps=0 时下载腿必须吃 `download_kbps` 总闸。
+        // 1 kbps（1024 B/s）下 16 字节要停约 15ms——下限断言证明闸真的在链路上，
+        // 而不是只有纯函数臂在跑。
+        let (port, _rx) = serve(BODY, false);
+        let config = Arc::new(parking_lot::RwLock::new(FileConfig {
+            download_kbps: 1,
+            ..FileConfig::default()
+        }));
+        let drv = HttpsDriver::new(profile_for(port), config);
+        let dst = tmp_dst("cfg-kbps");
+        let start = std::time::Instant::now();
+        let out = drv.download_to("/f", &dst, 0, 0).unwrap();
+        assert_eq!(out.bytes_done, BODY.len() as u64);
+        assert!(
+            start.elapsed() >= Duration::from_millis(5),
+            "总闸 1 kbps 下 16 字节不得零暂停放行: {:?}",
+            start.elapsed()
+        );
         std::fs::remove_file(&dst).ok();
     }
 }

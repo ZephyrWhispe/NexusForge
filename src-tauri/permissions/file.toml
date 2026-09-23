@@ -124,3 +124,8 @@ commands.allow = ["file_remote_fingerprint_ack"]
 identifier = "allow-file-remote-disconnect"
 description = "允许前端调用 file_remote_disconnect 命令（D-28 按窗最小授权；幂等退役，无凭据面）"
 commands.allow = ["file_remote_disconnect"]
+
+[[permission]]
+identifier = "allow-file-remote-presets"
+description = "允许前端调用 file_remote_presets 命令（D-28 按窗最小授权；预设=数据文件只读列举，auth_kind 无凭据档）"
+commands.allow = ["file_remote_presets"]

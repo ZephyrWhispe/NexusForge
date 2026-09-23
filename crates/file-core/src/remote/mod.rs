@@ -6,6 +6,7 @@
 //! 承重⑫：[`AuthSecret`] 只进不出——手写 `Deserialize`、手写 `Debug`（只报
 //! 在场），**故意不实现 `Serialize`**，凭据值不可能出现在任何命令返回体。
 
+pub mod ftp;
 pub mod http;
 pub mod ssh;
 pub mod webdav;
@@ -14,6 +15,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use host_core::storage::{FileEntry, StorageDriver};
 use serde::de::Deserializer;
@@ -262,6 +264,111 @@ impl StorageDriver for ssh::SftpDriver {
     }
 }
 
+/// FTP 与 WebDAV 同谱：完整浏览与写面，回收站恒拒（承重⑥第二道闸）；
+/// 明文总闸不在这里——它在 [`crate::service::FileService::connect`]
+/// 建驱动之前已由 [`ftp::ftp_plaintext_guard`] 毕（驱动侧不设第二张闸皮）。
+impl StorageDriver for ftp::FtpDriver {
+    fn id(&self) -> &'static str {
+        "ftp"
+    }
+    fn label(&self) -> String {
+        self.driver_label()
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![self.base_path().into()]
+    }
+    fn list(&self, path: &Path) -> Result<Vec<FileEntry>, host_core::error::AppError> {
+        let entries = self
+            .list_entries(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)?;
+        Ok(entries.iter().map(RemoteEntry::to_file_entry).collect())
+    }
+    fn mkdir(&self, path: &Path) -> Result<(), host_core::error::AppError> {
+        self.mkdir_remote(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
+    }
+    fn remove(&self, path: &Path, recycle: bool) -> Result<(), host_core::error::AppError> {
+        if recycle {
+            return Err(
+                FileError::Unsupported("远端驱动不支持回收站：请改用彻底删除".into()).into(),
+            );
+        }
+        self.remove_remote(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), host_core::error::AppError> {
+        self.rename_remote(&from.to_string_lossy(), &to.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 限速令牌桶（09 §6.2 T-B6-6：`download_kbps` 的执行体；upload 侧随 T-B6-7）
+// ---------------------------------------------------------------------------
+
+/// 纯核裁决：本批 `bytes` 消费后需暂停多久。`rate_bytes_per_sec = 0` ⇒ 恒
+/// `Duration::ZERO`（0 = 不限，配置真源的诚实语义）。预算随真实流逝补给、
+/// 封顶一秒流量（禁攒出"开机到现在没下载"的突发豁免）。
+/// 偏离任务书签名（`allow(bytes,&mut Instant,&mut u64)`）登记为落地补记：
+/// 无 rate 参数的桶不是桶，是计时器。
+pub fn throttle_allow(
+    bytes: u64,
+    last: &mut Instant,
+    budget: &mut u64,
+    rate_bytes_per_sec: u64,
+) -> Duration {
+    if rate_bytes_per_sec == 0 {
+        return Duration::ZERO;
+    }
+    let now = Instant::now();
+    let refill = now
+        .checked_duration_since(*last)
+        .map(|d| (d.as_secs_f64() * rate_bytes_per_sec as f64) as u64)
+        .unwrap_or(0);
+    *budget = (*budget + refill).min(rate_bytes_per_sec);
+    *last = now;
+    let cost = bytes.max(1);
+    if *budget >= cost {
+        *budget -= cost;
+        Duration::ZERO
+    } else {
+        let deficit = cost - *budget;
+        *budget = 0;
+        Duration::from_secs_f64(deficit as f64 / rate_bytes_per_sec as f64)
+    }
+}
+
+/// 带状态的桶（协议腿泵用）：包一层 `(rate, last, budget)` 三态
+#[derive(Clone, Debug)]
+pub struct ThrottleGate {
+    rate_bytes_per_sec: u64,
+    last: Instant,
+    budget: u64,
+}
+
+impl ThrottleGate {
+    /// `kbps = 0` ⇒ 不限速
+    pub fn new(kbps: u32) -> Self {
+        Self {
+            rate_bytes_per_sec: kbps as u64 * 1024,
+            last: Instant::now(),
+            budget: 0,
+        }
+    }
+    pub fn is_unlimited(&self) -> bool {
+        self.rate_bytes_per_sec == 0
+    }
+    /// 消费 `bytes`，返回调用方应 sleep 的时长（ZERO = 放行）
+    pub fn allow(&mut self, bytes: u64) -> Duration {
+        throttle_allow(
+            bytes,
+            &mut self.last,
+            &mut self.budget,
+            self.rate_bytes_per_sec,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +440,47 @@ mod tests {
         );
         // 非法入参 fail-closed：多余凭据外的未知键拒收（deny_unknown_fields）
         assert!(serde_json::from_str::<AuthSecret>(r#"{"nope":"x"}"#).is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-6）字面测试名优先于 rustc 命名惯例
+    fn throttleGate_zeroMeansUnlimited() {
+        // 0 = 不限：天文数字连发也不暂停一拍
+        let mut gate = ThrottleGate::new(0);
+        assert!(gate.is_unlimited());
+        for _ in 0..64 {
+            assert_eq!(
+                gate.allow(1 << 30),
+                Duration::ZERO,
+                "0 值闸不得积累任何暂停"
+            );
+        }
+        // 正对照：10 KB/s 桶下 20 KB 一次性消费必须回暂停时长（>0），
+        // 且消息面（is_unlimited）如实翻转
+        let mut gate = ThrottleGate::new(10);
+        assert!(!gate.is_unlimited());
+        let pause = gate.allow(20 * 1024);
+        assert!(
+            pause > Duration::ZERO && pause < Duration::from_secs(5),
+            "20KB 走 10KB/s 桶应暂停约 2s，实得 {pause:?}"
+        );
+        // 纯核臂：补给封顶一秒流量——last 拨回一小时也不许攒出突发豁免
+        let mut last = Instant::now() - Duration::from_secs(3600);
+        let mut budget = 0u64;
+        let pause = throttle_allow(2048, &mut last, &mut budget, 1024);
+        assert!(
+            pause >= Duration::ZERO && pause < Duration::from_millis(1200),
+            "补给封顶 1s 流量：2KB 至多等约 1s，实得 {pause:?}"
+        );
+        // 0 速率纯核臂：状态位一个都不许动（缺省即透明）
+        let mut last2 = Instant::now();
+        let keep = last2;
+        let mut budget2 = 42u64;
+        assert_eq!(
+            throttle_allow(1 << 20, &mut last2, &mut budget2, 0),
+            Duration::ZERO
+        );
+        assert_eq!(last2, keep, "0=不限不得篡改时间事实源");
+        assert_eq!(budget2, 42, "0=不限不得动预算");
     }
 }

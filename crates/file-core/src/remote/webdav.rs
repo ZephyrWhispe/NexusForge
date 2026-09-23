@@ -143,8 +143,9 @@ pub fn parse_http_date_ms(s: &str) -> i64 {
     inner(s).unwrap_or(0)
 }
 
-/// Howard Hinnant days_from_civil：公历日期 → 距 Unix 纪元的天数（无 chrono）
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+/// Howard Hinnant days_from_civil：公历日期 → 距 Unix 纪元的天数（无 chrono）。
+/// T-B6-6 起 FTP 的 MLSD 时间解析共用此口（无事实源纪律同谱，禁两份实现）
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;

@@ -341,6 +341,25 @@ pub async fn file_remote_drivers(
         .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
 }
 
+// ---------------- B6 远程预设（09 §6.2 T-B6-6）----------------
+// 预设 = 数据文件非代码（`file-core/presets/default.json` + 用户目录），
+// 形状校验 fail-closed 在 FileService::open 已完成（坏一份 ⇒ 服务开不起来），
+// 本命令面只读列举；auth_kind 只有匿名/逐次输入两档——预设永不含凭据。
+
+/// 前端 DTO 与 file-core 预设同形（结构体已带 snake_case + deny_unknown_fields 契约）
+pub type RemotePresetDto = file_core::RemotePreset;
+
+/// 预设列表（内置 + 用户目录合并快照，按 id 排序前的装载序）
+#[tauri::command]
+pub async fn file_remote_presets(
+    state: State<'_, HostState>,
+) -> Result<Vec<RemotePresetDto>, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(svc.presets()))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+}
+
 // ---------------- B6 SFTP TOFU（09 §6.2 T-B6-5）----------------
 // 信任决定命令比 connect 更敏感（写的是主机键表）——capability 面 main-only
 // 负例与 auxWindows 扫描同谱。文案红线：接受的是**这一枚指纹**，不是"这台主机"。
