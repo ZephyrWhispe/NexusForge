@@ -55,15 +55,97 @@ pub enum OpState {
     Canceled,
 }
 
+/// T-B6-2（09 §6.2）操作端点：本地路径或"驱动 + 远端 String 路径"。
+/// untagged ⇒ 旧 `pending_ops/*.json` 里的裸字符串（含 Windows 反斜杠与中文）
+/// 继续落 [`OpEndpoint::Local`]，零迁移、零版本协商（承重⑤）。
+/// 远端臂的路径是 `/` 分隔 String——不进 PathBuf，防 Windows 分隔符污染（承重①( b)）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OpEndpoint {
+    Local(PathBuf),
+    Remote { driver_id: String, path: String },
+}
+
+impl OpEndpoint {
+    pub fn local(p: impl Into<PathBuf>) -> Self {
+        OpEndpoint::Local(p.into())
+    }
+    /// 唯一本地取形口：非本地给 None（调用方按方向拒绝，禁静默当本地处理）
+    pub fn as_local(&self) -> Option<&PathBuf> {
+        match self {
+            OpEndpoint::Local(p) => Some(p),
+            OpEndpoint::Remote { .. } => None,
+        }
+    }
+    pub fn display(&self) -> String {
+        match self {
+            OpEndpoint::Local(p) => p.display().to_string(),
+            OpEndpoint::Remote { driver_id, path } => format!("{driver_id}:{path}"),
+        }
+    }
+}
+
+/// 传输方向（面板文案与断点算法共读的唯一派生值，禁两处各判，承重④）
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferDirection {
+    #[default]
+    Local,
+    Upload,
+    Download,
+}
+
+/// 方向唯一算式（承重④）：全本地→Local；dst 远且 srcs 全本地→Upload；
+/// srcs 全远且 dst 本地→Download；混合两端→拒（禁"当本地复制处理"）。
+pub fn direction_of(srcs: &[OpEndpoint], dst: &OpEndpoint) -> Result<TransferDirection, FileError> {
+    let src_remote = srcs
+        .iter()
+        .filter(|e| matches!(e, OpEndpoint::Remote { .. }))
+        .count();
+    let dst_remote = matches!(dst, OpEndpoint::Remote { .. });
+    let direction = match (src_remote == 0, src_remote == srcs.len(), dst_remote) {
+        (true, _, false) => TransferDirection::Local,
+        (true, _, true) => TransferDirection::Upload,
+        (false, true, false) => TransferDirection::Download,
+        _ => {
+            return Err(FileError::Remote {
+                code: crate::error::FILE_REMOTE_MIXED,
+                msg: format!(
+                    "混合端点不可表达（{src_remote}/{n} 源为远端、目标远端={dst_remote}）：一次操作只允许跨一次系统边界",
+                    n = srcs.len()
+                ),
+            })
+        }
+    };
+    Ok(direction)
+}
+
+/// 目标桶键（纯函数，零 fs 调用，承重④ 对 target_for 隐式 Path 算术的收口）：
+/// 本地取 `Path::parent`，远端取最后一个 `/` 之前的前缀。
+pub fn parent_key(e: &OpEndpoint) -> String {
+    match e {
+        OpEndpoint::Local(p) => p
+            .parent()
+            .map(|x| x.display().to_string())
+            .unwrap_or_default(),
+        OpEndpoint::Remote { path, .. } => match path.rfind('/') {
+            Some(0) => "/".to_string(),
+            Some(i) => path[..i].to_string(),
+            None => String::new(),
+        },
+    }
+}
+
 /// 操作规格（IPC 提交）
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpSpec {
     pub kind: OpKind,
-    pub srcs: Vec<PathBuf>,
+    pub srcs: Vec<OpEndpoint>,
     /// Copy/Move：目标目录或文件；Compress：zip 输出路径；Extract：解压根目录
-    pub dst: PathBuf,
+    pub dst: OpEndpoint,
     pub policy: ConflictPolicy,
-    /// Delete 专用：true 走回收站（需 RecycleBinPort），false 直删
+    /// Delete 专用：true 走回收站（需 RecycleBinPort），false 直删；
+    /// 远端源 + recycle=true 在入队即拒（远端无回收站，承重⑥）
     #[serde(default)]
     pub recycle: bool,
 }
@@ -80,8 +162,8 @@ pub struct Checkpoint {
 pub struct PendingOp {
     pub op_id: String,
     pub kind: OpKind,
-    pub srcs: Vec<PathBuf>,
-    pub dst: PathBuf,
+    pub srcs: Vec<OpEndpoint>,
+    pub dst: OpEndpoint,
     pub policy: ConflictPolicy,
     pub recycle: bool,
     #[serde(default)]
@@ -104,6 +186,8 @@ pub struct OpProgress {
     pub bytes_done: u64,
     pub bytes_total: u64,
     pub error: Option<String>,
+    /// T-B6-2 加键（向后兼容）：入队时由 [`direction_of`] 唯一派生
+    pub direction: TransferDirection,
 }
 
 pub(crate) struct OpControl {
@@ -167,10 +251,32 @@ impl From<Gate> for Flow {
 struct Job {
     op_id: String,
     spec: OpSpec,
+    direction: TransferDirection,
     checkpoint: Option<Checkpoint>,
     ctl: Arc<OpControl>,
     store_dir: PathBuf,
     recycle: Option<Arc<dyn RecycleBinPort>>,
+}
+
+/// 本地端点唯一取形口（承重①(b)：非本地绝不静默当 PathBuf 用）。
+/// worker 侧方向拒绝在前，这里 Err 属 fail-closed 兜底而非业务分支。
+fn expect_local(e: &OpEndpoint) -> Result<PathBuf, Flow> {
+    e.as_local().cloned().ok_or_else(|| {
+        Flow::msg(format!(
+            "远端端点 {} 的执行器自 T-B6-3 起接线，本臂只认本地路径",
+            e.display()
+        ))
+    })
+}
+
+/// Flow 直返函数里的本地取形早退（? 只活在 Result<_, Flow> 上下文）
+macro_rules! local {
+    ($e:expr) => {
+        match expect_local($e) {
+            Ok(p) => p,
+            Err(flow) => return flow,
+        }
+    };
 }
 
 /// 进度回调（模块把它接到 EventBus：payload key=op_id 供 UI 去抖订阅）
@@ -240,6 +346,21 @@ impl OpQueue {
         spec: OpSpec,
         checkpoint: Option<Checkpoint>,
     ) -> Result<String, FileError> {
+        // 方向唯一算式（承重④）：入队即裁决，混合端点 Err(FILE_REMOTE_003)，
+        // 禁静默"当本地复制处理"
+        let direction = direction_of(&spec.srcs, &spec.dst)?;
+        // 承重⑥：远端源无回收站——recycle=true 在入队即拒（修前该臂静默直删）
+        if spec.kind == OpKind::Delete
+            && spec.recycle
+            && spec
+                .srcs
+                .iter()
+                .any(|e| matches!(e, OpEndpoint::Remote { .. }))
+        {
+            return Err(FileError::BadState(
+                "远端源无回收站：回收站只覆盖本地盘，请改用彻底删除".into(),
+            ));
+        }
         let op_id = Uuid::now_v7().to_string();
         let op_id2 = op_id.clone();
         persist_pending(
@@ -268,6 +389,7 @@ impl OpQueue {
             bytes_done: 0,
             bytes_total: 0,
             error: None,
+            direction,
         };
         (self.cb)(progress.clone());
         self.latest.lock().insert(op_id.clone(), progress);
@@ -277,6 +399,7 @@ impl OpQueue {
             .send(Job {
                 op_id: op_id2,
                 spec,
+                direction,
                 checkpoint,
                 ctl,
                 store_dir: self.store_dir.clone(),
@@ -443,6 +566,7 @@ fn run_job(job: Job, cb: &ProgressFn) {
     let Job {
         op_id,
         spec,
+        direction,
         checkpoint,
         ctl,
         store_dir,
@@ -461,15 +585,25 @@ fn run_job(job: Job, cb: &ProgressFn) {
             bytes_done: 0,
             bytes_total: 0,
             error: None,
+            direction,
         },
     };
     rep.set_state(OpState::Running);
 
-    let result = match spec.kind {
-        OpKind::Copy | OpKind::Move => run_copy_move(&spec, checkpoint, &ctl, &mut rep, &store_dir),
-        OpKind::Delete => run_delete(&spec, &ctl, &mut rep, recycle.as_ref()),
-        OpKind::Compress => run_compress(&spec, &ctl, &mut rep),
-        OpKind::Extract => run_extract(&spec, &ctl, &mut rep),
+    // 远端方向诚实拒绝（T-B6-3 起逐协议接线）：队列先落方向与断点、执行不假绿
+    let result = if direction != TransferDirection::Local {
+        Flow::msg(format!(
+            "远端传输（方向={direction:?}）执行器自 T-B6-3 起接线：本操作未执行，禁假就绪"
+        ))
+    } else {
+        match spec.kind {
+            OpKind::Copy | OpKind::Move => {
+                run_copy_move(&spec, checkpoint, &ctl, &mut rep, &store_dir)
+            }
+            OpKind::Delete => run_delete(&spec, &ctl, &mut rep, recycle.as_ref()),
+            OpKind::Compress => run_compress(&spec, &ctl, &mut rep),
+            OpKind::Extract => run_extract(&spec, &ctl, &mut rep),
+        }
     };
 
     match result {
@@ -513,17 +647,19 @@ fn target_for(src: &Path, dst: &Path) -> PathBuf {
 /// - 文件源 → target_for 归一化
 fn expand_plan(spec: &OpSpec) -> Result<Vec<CopyItem>, Flow> {
     let mut items = Vec::new();
-    for src in &spec.srcs {
-        let long_src = to_long_path(src);
+    let dst = expect_local(&spec.dst)?;
+    for src_ep in &spec.srcs {
+        let src = expect_local(src_ep)?;
+        let long_src = to_long_path(&src);
         if long_src.is_dir() {
-            if spec.dst.is_file() {
+            if dst.is_file() {
                 return Err(Flow::msg(format!(
                     "目标是文件而源是目录: {}",
                     src.display()
                 )));
             }
             // 基准：dst 已存在 → 源父目录（保留源目录名）；否则 → 源本身（内容直达 dst）
-            let base = if spec.dst.is_dir() {
+            let base = if dst.is_dir() {
                 long_src.parent().unwrap_or(Path::new("/"))
             } else {
                 long_src.as_path()
@@ -540,7 +676,7 @@ fn expand_plan(spec: &OpSpec) -> Result<Vec<CopyItem>, Flow> {
                     .map_err(|e| Flow::msg(e.to_string()))?;
                 items.push(CopyItem {
                     src: entry.path().to_path_buf(),
-                    dst: spec.dst.join(rel),
+                    dst: dst.join(rel),
                     size: md.len(),
                 });
             }
@@ -548,7 +684,7 @@ fn expand_plan(spec: &OpSpec) -> Result<Vec<CopyItem>, Flow> {
             let md = std::fs::metadata(&long_src).map_err(Flow::io)?;
             items.push(CopyItem {
                 src: long_src,
-                dst: target_for(src, &spec.dst),
+                dst: target_for(&src, &dst),
                 size: md.len(),
             });
         } else {
@@ -574,8 +710,10 @@ fn run_copy_move(
 
     // Move 单源快速路径：同卷 rename 瞬时完成（跨卷 rename 失败走逐项复制+删源）
     if spec.kind == OpKind::Move && spec.srcs.len() == 1 && checkpoint.is_none() {
-        let src = to_long_path(&spec.srcs[0]);
-        let dst = target_for(&spec.srcs[0], &spec.dst);
+        let src_local = local!(&spec.srcs[0]);
+        let dst_local = local!(&spec.dst);
+        let src = to_long_path(&src_local);
+        let dst = target_for(&src_local, &dst_local);
         if let Some(parent) = dst.parent() {
             let _ = std::fs::create_dir_all(to_long_path(parent));
         }
@@ -646,8 +784,8 @@ fn run_copy_move(
 
     // Move：搬空的源目录收尾
     if spec.kind == OpKind::Move {
-        for src in &spec.srcs {
-            let long = to_long_path(src);
+        for src_ep in &spec.srcs {
+            let long = to_long_path(&local!(src_ep));
             if long.is_dir() {
                 let _ = std::fs::remove_dir_all(&long);
             }
@@ -656,8 +794,90 @@ fn run_copy_move(
     Flow::Done
 }
 
-/// 复制单个文件（支持从 bytes_done 续传）；逐块读满；尺寸终验。
+/// 可 seek 的读/写端（T-B6-2 落地补记：任务书写 `Box<dyn Read+Send>`，
+/// 但 `copyPumped_resumeAtOffset_seeksBothEnds` 要求泵自身在 offset 处两端定位
+/// ⇒ 句柄类型加 Seek 超轨；形状仍是 `Box<dyn …+Send>`，仅约束随职责收紧）
+pub(crate) trait ReadSeek: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ReadSeek for T {}
+pub(crate) trait WriteSeek: Write + Seek + Send {}
+impl<T: Write + Seek + Send> WriteSeek for T {}
+
+/// 字节泵两端（本地 File 即其"两端皆本地"特例；远端腿自 T-B6-3 起接线）
+pub(crate) struct PumpPair {
+    pub reader: Box<dyn ReadSeek>,
+    pub writer: Box<dyn WriteSeek>,
+}
+
+/// 泵的副作用出口：断点落盘 / 取消清理——本地臂接 pending 文件与 fs，
+/// 远端臂将来接各自协议（泵本体零协议知识，禁第二份泵）
+pub(crate) struct PumpHooks<'a> {
+    /// 已写字节 → 断点持久化（暂停出口 + CHECKPOINT_EVERY 周期）
+    pub persist: &'a mut dyn FnMut(u64),
+    /// 取消出口：清理部分目标
+    pub on_cancel: &'a mut dyn FnMut(),
+}
+
+/// 字节泵本体（任务书锚点 copy_one :662-780 的抽形）：从 offset 两端定位后
+/// 逐块搬运。CHUNK 4MiB 与"非末块必须读满"（read_chunk）纪律逐字保留。
+fn copy_pumped(
+    pump: &mut PumpPair,
+    offset: u64,
+    ctl: &OpControl,
+    rep: &mut Reporter,
+    hooks: &mut PumpHooks,
+) -> Flow {
+    let mut written_in_file = offset;
+    if offset > 0 {
+        if pump.reader.seek(SeekFrom::Start(offset)).is_err() {
+            return Flow::msg("续传 seek 失败（源端）");
+        }
+        if pump.writer.seek(SeekFrom::Start(offset)).is_err() {
+            return Flow::msg("续传 seek 失败（目标端）");
+        }
+    }
+    let mut last_ckpt = offset;
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        match gate(ctl) {
+            Gate::Pause => {
+                // 断点落盘后暂停退出
+                (hooks.persist)(written_in_file);
+                return Flow::Paused;
+            }
+            Gate::Cancel => {
+                (hooks.on_cancel)();
+                return Flow::Canceled;
+            }
+            Gate::Go => {}
+        }
+        // 逐块读满（非末块 read_exact 语义；M4 K9 零洞教训）
+        let n = match read_chunk(&mut pump.reader, &mut buf) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        if n == 0 {
+            break;
+        }
+        if let Err(e) = pump.writer.write_all(&buf[..n]) {
+            return Flow::io(e);
+        }
+        written_in_file += n as u64;
+        rep.cur.bytes_done += n as u64;
+        rep.emit();
+        if written_in_file - last_ckpt >= CHECKPOINT_EVERY {
+            last_ckpt = written_in_file;
+            (hooks.persist)(written_in_file);
+        }
+    }
+    if let Err(e) = pump.writer.flush() {
+        return Flow::io(e);
+    }
+    Flow::Done
+}
+
+/// 复制单个本地文件（支持从 bytes_done 续传）；尺寸终验。
 /// 暂停 → 持久化断点；取消 → 清理部分文件。
+/// 即 [`copy_pumped`] 的"两端皆本地"特例（任务书承重：真泵不收为特例即零收益）。
 #[allow(clippy::too_many_arguments)] // 进度报告/断点续传上下文天然多参，私有 helper 不再包结构体
 fn copy_one(
     item: &CopyItem,
@@ -670,7 +890,7 @@ fn copy_one(
     spec: &OpSpec,
 ) -> Flow {
     let long_dst = to_long_path(dst);
-    let mut reader = match File::open(&item.src) {
+    let reader = match File::open(&item.src) {
         Ok(f) => f,
         Err(e) => return Flow::io(e),
     };
@@ -681,12 +901,9 @@ fn copy_one(
         && long_dst.exists()
         && std::fs::metadata(&long_dst).map(|m| m.len()).unwrap_or(0) == start
     {
-        // 断点续传：从已写字节处追加
+        // 断点续传：从已写字节处追加（seek 由泵在两端执行）
         match OpenOptions::new().write(true).open(&long_dst) {
-            Ok(mut f) => match f.seek(SeekFrom::Start(start)) {
-                Ok(_) => f,
-                Err(e) => return Flow::io(e),
-            },
+            Ok(f) => f,
             Err(e) => return Flow::io(e),
         }
     } else {
@@ -696,75 +913,41 @@ fn copy_one(
             Err(e) => return Flow::io(e),
         }
     };
-    if start > 0 && reader.seek(SeekFrom::Start(start)).is_err() {
-        return Flow::msg("续传 seek 失败");
+    let mut pump = PumpPair {
+        reader: Box::new(reader),
+        writer: Box::new(writer),
+    };
+    // op_id 先行取快照：闭包不持 rep 的可变借用，泵才能独享 Reporter
+    let op_id_snap = rep.cur.op_id.clone();
+    let mut persist = |written: u64| {
+        let _ = persist_pending(
+            store_dir,
+            &PendingOp {
+                op_id: op_id_snap.clone(),
+                kind: spec.kind,
+                srcs: spec.srcs.clone(),
+                dst: spec.dst.clone(),
+                policy: spec.policy,
+                recycle: spec.recycle,
+                file_index,
+                bytes_done: written,
+                created_ms: now_ms(),
+            },
+        );
+    };
+    let mut on_cancel = || {
+        let _ = std::fs::remove_file(&long_dst);
+    };
+    let mut hooks = PumpHooks {
+        persist: &mut persist,
+        on_cancel: &mut on_cancel,
+    };
+    let flow = copy_pumped(&mut pump, start, ctl, rep, &mut hooks);
+    drop(pump); // 释放句柄后再读终尺寸（Windows 占用面）
+    if !matches!(flow, Flow::Done) {
+        return flow;
     }
-    let mut written_in_file = start;
-    let mut last_ckpt = start;
-    let mut buf = vec![0u8; CHUNK];
-    let mut writer = writer;
-    loop {
-        match gate(ctl) {
-            Gate::Pause => {
-                // 断点落盘后暂停退出
-                let _ = persist_pending(
-                    store_dir,
-                    &PendingOp {
-                        op_id: rep.cur.op_id.clone(),
-                        kind: spec.kind,
-                        srcs: spec.srcs.clone(),
-                        dst: spec.dst.clone(),
-                        policy: spec.policy,
-                        recycle: spec.recycle,
-                        file_index,
-                        bytes_done: written_in_file,
-                        created_ms: now_ms(),
-                    },
-                );
-                return Flow::Paused;
-            }
-            Gate::Cancel => {
-                let _ = std::fs::remove_file(&long_dst);
-                return Flow::Canceled;
-            }
-            Gate::Go => {}
-        }
-        // 逐块读满（非末块 read_exact 语义；M4 K9 零洞教训）
-        let n = match read_chunk(&mut reader, &mut buf) {
-            Ok(n) => n,
-            Err(e) => return e,
-        };
-        if n == 0 {
-            break;
-        }
-        if let Err(e) = writer.write_all(&buf[..n]) {
-            return Flow::io(e);
-        }
-        written_in_file += n as u64;
-        rep.cur.bytes_done += n as u64;
-        rep.emit();
-        if written_in_file - last_ckpt >= CHECKPOINT_EVERY {
-            last_ckpt = written_in_file;
-            let _ = persist_pending(
-                store_dir,
-                &PendingOp {
-                    op_id: rep.cur.op_id.clone(),
-                    kind: spec.kind,
-                    srcs: spec.srcs.clone(),
-                    dst: spec.dst.clone(),
-                    policy: spec.policy,
-                    recycle: spec.recycle,
-                    file_index,
-                    bytes_done: written_in_file,
-                    created_ms: now_ms(),
-                },
-            );
-        }
-    }
-    if let Err(e) = writer.flush() {
-        return Flow::io(e);
-    }
-    // 尺寸终验
+    // 尺寸终验（本地臂专属：目标 metadata 是唯一事实源）
     let written = match std::fs::metadata(&long_dst) {
         Ok(m) => m.len(),
         Err(e) => return Flow::io(e),
@@ -779,7 +962,7 @@ fn copy_one(
 }
 
 /// 读满 buf 或到 EOF；返回字节数（0 = EOF）
-fn read_chunk(reader: &mut File, buf: &mut [u8]) -> Result<usize, Flow> {
+fn read_chunk<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> Result<usize, Flow> {
     let mut filled = 0;
     while filled < buf.len() {
         match reader.read(&mut buf[filled..]) {
@@ -798,10 +981,15 @@ fn run_delete(
     rep: &mut Reporter,
     recycle: Option<&Arc<dyn RecycleBinPort>>,
 ) -> Flow {
+    // 本臂只认本地端点（远端+recycle 已在入队口拒，远端直删腿自 T-B6-5/6 起）
+    let mut srcs: Vec<PathBuf> = Vec::with_capacity(spec.srcs.len());
+    for src_ep in &spec.srcs {
+        srcs.push(local!(src_ep));
+    }
     // 统计字节（回收站整批交接，无逐文件进度）
     let mut bytes_total = 0u64;
     let mut file_count = 0u64;
-    for src in &spec.srcs {
+    for src in &srcs {
         let long = to_long_path(src);
         let walker = if long.is_dir() {
             walkdir::WalkDir::new(&long).into_iter()
@@ -822,7 +1010,7 @@ fn run_delete(
 
     if spec.recycle {
         match recycle {
-            Some(port) => match port.delete(&spec.srcs) {
+            Some(port) => match port.delete(&srcs) {
                 Ok(_) => {
                     rep.cur.files_done = file_count;
                     rep.cur.bytes_done = bytes_total;
@@ -836,7 +1024,7 @@ fn run_delete(
             None => tracing::warn!("RecycleBinPort 未注册，回收站删除降级为直删"),
         }
     }
-    for src in &spec.srcs {
+    for src in &srcs {
         match gate(ctl) {
             Gate::Go => {}
             g => return g.into(),
@@ -868,11 +1056,14 @@ struct CompressItem {
     size: u64,
 }
 
-/// 压缩计划：目录以其名称为 zip 内根（`dir/a.txt`）
+/// 压缩计划：目录以其名称为 zip 内根（`dir/a.txt`）。
+/// Compress/Extract 无可续断点（三臂不接 checkpoint），resumable 恒 `Whole`
+/// ——§6.1④ 裁定 (ii)：本行只把该事实变得可表达，不改其行为。
 fn expand_plan_for_compress(spec: &OpSpec) -> Result<Vec<CompressItem>, Flow> {
     let mut items = Vec::new();
-    for src in &spec.srcs {
-        let long = to_long_path(src);
+    for src_ep in &spec.srcs {
+        let src = expect_local(src_ep)?;
+        let long = to_long_path(&src);
         let base_name = src.file_name().unwrap_or_default().to_os_string();
         if long.is_dir() {
             // rel 相对源目录本身，再前置目录名 → zip 内 `dir_name/...`
@@ -913,7 +1104,7 @@ fn run_compress(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
     };
     rep.cur.files_total = items.len() as u64;
     rep.cur.bytes_total = items.iter().map(|i| i.size).sum();
-    let dst = to_long_path(&spec.dst);
+    let dst = to_long_path(&local!(&spec.dst));
     if let Some(parent) = dst.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             return Flow::io(e);
@@ -972,9 +1163,10 @@ fn zip_err(e: ZipError) -> Flow {
 
 fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
     let zip_path = match spec.srcs.first() {
-        Some(p) => p.clone(),
+        Some(p) => local!(p),
         None => return Flow::msg("缺少压缩包路径"),
     };
+    let root = local!(&spec.dst);
     let file = match File::open(to_long_path(&zip_path)) {
         Ok(f) => f,
         Err(e) => return Flow::io(e),
@@ -992,7 +1184,7 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
     }
     rep.cur.bytes_total = bytes_total;
 
-    if let Err(e) = std::fs::create_dir_all(to_long_path(&spec.dst)) {
+    if let Err(e) = std::fs::create_dir_all(to_long_path(&root)) {
         return Flow::io(e);
     }
     for i in 0..archive.len() {
@@ -1011,7 +1203,7 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
             rep.cur.files_done += 1;
             continue;
         }
-        let out_path = spec.dst.join(&name);
+        let out_path = root.join(&name);
         if entry.is_dir() {
             if let Err(e) = std::fs::create_dir_all(to_long_path(&out_path)) {
                 return Flow::io(e);
@@ -1108,6 +1300,26 @@ mod tests {
             .unwrap_or(OpState::Queued)
     }
 
+    // 端点速构 helper：L=Local、R=Remote，单字母即语义
+    #[allow(non_snake_case)]
+    fn L(p: impl Into<PathBuf>) -> OpEndpoint {
+        OpEndpoint::local(p)
+    }
+    #[allow(non_snake_case)]
+    fn R(driver_id: &str, path: &str) -> OpEndpoint {
+        OpEndpoint::Remote {
+            driver_id: driver_id.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+    fn direction_of_op(q: &OpQueue, op: &str) -> TransferDirection {
+        q.active()
+            .iter()
+            .find(|p| p.op_id == op)
+            .expect("快照在场")
+            .direction
+    }
+
     #[test]
     fn copy_dir_recursive_with_progress_and_done() {
         let src = tmpdir("copy_src");
@@ -1119,8 +1331,8 @@ mod tests {
         let op = q
             .enqueue(OpSpec {
                 kind: OpKind::Copy,
-                srcs: vec![src.clone()],
-                dst: dst.clone(),
+                srcs: vec![L(src.clone())],
+                dst: L(dst.clone()),
                 policy: ConflictPolicy::Overwrite,
                 recycle: false,
             })
@@ -1169,8 +1381,8 @@ mod tests {
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
             kind: OpKind::Move,
-            srcs: vec![src.join("sub/b.txt")],
-            dst: dst.join("b.txt"),
+            srcs: vec![L(src.join("sub/b.txt"))],
+            dst: L(dst.join("b.txt")),
             policy: ConflictPolicy::Overwrite,
             recycle: false,
         })
@@ -1196,8 +1408,8 @@ mod tests {
         // 目标为已存在目录 → rename 到 dst/src_name；模拟跨卷失败路径用逐项校验
         q.enqueue(OpSpec {
             kind: OpKind::Move,
-            srcs: vec![src.clone()],
-            dst: dst.clone(),
+            srcs: vec![L(src.clone())],
+            dst: L(dst.clone()),
             policy: ConflictPolicy::Overwrite,
             recycle: false,
         })
@@ -1222,8 +1434,8 @@ mod tests {
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
             kind: OpKind::Copy,
-            srcs: vec![src.join("f.txt")],
-            dst: dst.clone(),
+            srcs: vec![L(src.join("f.txt"))],
+            dst: L(dst.clone()),
             policy: ConflictPolicy::Rename,
             recycle: false,
         })
@@ -1247,8 +1459,8 @@ mod tests {
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
             kind: OpKind::Delete,
-            srcs: vec![src.clone()],
-            dst: PathBuf::new(),
+            srcs: vec![L(src.clone())],
+            dst: L(PathBuf::new()),
             policy: ConflictPolicy::default(),
             recycle: false,
         })
@@ -1269,8 +1481,8 @@ mod tests {
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
             kind: OpKind::Compress,
-            srcs: vec![src],
-            dst: zipfile.clone(),
+            srcs: vec![L(src)],
+            dst: L(zipfile.clone()),
             policy: ConflictPolicy::default(),
             recycle: false,
         })
@@ -1291,8 +1503,8 @@ mod tests {
         let op2 = q
             .enqueue(OpSpec {
                 kind: OpKind::Extract,
-                srcs: vec![zipfile],
-                dst: ext_dir.clone(),
+                srcs: vec![L(zipfile)],
+                dst: L(ext_dir.clone()),
                 policy: ConflictPolicy::Overwrite,
                 recycle: false,
             })
@@ -1327,8 +1539,8 @@ mod tests {
         let op = q
             .enqueue(OpSpec {
                 kind: OpKind::Copy,
-                srcs: vec![src.join("big.bin")],
-                dst: dst.join("big.bin"),
+                srcs: vec![L(src.join("big.bin"))],
+                dst: L(dst.join("big.bin")),
                 policy: ConflictPolicy::Overwrite,
                 recycle: false,
             })
@@ -1374,8 +1586,8 @@ mod tests {
         let op = q
             .enqueue(OpSpec {
                 kind: OpKind::Copy,
-                srcs: vec![src.join("big.bin")],
-                dst: dst.join("big.bin"),
+                srcs: vec![L(src.join("big.bin"))],
+                dst: L(dst.join("big.bin")),
                 policy: ConflictPolicy::Overwrite,
                 recycle: false,
             })
@@ -1392,5 +1604,271 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store);
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    // ---- T-B6-2 队列方向化（09 §6.2 八枚字面测名） ----
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn pendingLegacy_localFormatBytes_stillDeserializes() {
+        // 承重⑤ 主证：旧 pending JSON（裸字符串端点，含 Windows 反斜杠与中文路径）
+        // 继续落 OpEndpoint::Local——零迁移、零版本协商
+        let legacy = r#"{"op_id":"op-legacy-1","kind":"copy","srcs":["C:\\用户\\me\\资料 档\\a.txt","D:/plain/b.bin"],"dst":"C:\\out\\a.txt","policy":"overwrite","recycle":false,"file_index":0,"bytes_done":0,"created_ms":1700000000000}"#;
+        let p: PendingOp = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.srcs.len(), 2);
+        assert_eq!(
+            p.srcs[0],
+            OpEndpoint::Local(PathBuf::from(r"C:\用户\me\资料 档\a.txt"))
+        );
+        assert_eq!(
+            p.srcs[1],
+            OpEndpoint::Local(PathBuf::from("D:/plain/b.bin"))
+        );
+        assert_eq!(
+            p.dst.as_local().unwrap().as_path(),
+            Path::new(r"C:\out\a.txt")
+        );
+        // 新格式远端臂序列化为对象、反序列化回同值（untagged 第二候选）
+        let rp = PendingOp {
+            op_id: "op-remote-1".into(),
+            kind: OpKind::Copy,
+            srcs: vec![R("remote:webdav-1", "/docs/报告.docx")],
+            dst: L(r"C:\download\报告.docx"),
+            policy: ConflictPolicy::Overwrite,
+            recycle: false,
+            file_index: 0,
+            bytes_done: 0,
+            created_ms: 1,
+        };
+        let raw = serde_json::to_string(&rp).unwrap();
+        let back: PendingOp = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.srcs[0], rp.srcs[0]);
+        assert_eq!(back.dst, rp.dst);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn direction_of_uploadDownloadAndMixed() {
+        let loc = L(r"C:\x\a.txt");
+        let rem = R("remote:webdav-1", "/docs/a.txt");
+        // 四臂：全本地 / 上传 / 下载 / 混合两端
+        assert_eq!(
+            direction_of(std::slice::from_ref(&loc), &loc).unwrap(),
+            TransferDirection::Local
+        );
+        assert_eq!(
+            direction_of(std::slice::from_ref(&loc), &rem).unwrap(),
+            TransferDirection::Upload
+        );
+        assert_eq!(
+            direction_of(&[rem.clone(), R("remote:sftp-1", "/b")], &loc).unwrap(),
+            TransferDirection::Download
+        );
+        // 混合（部分源远端）与远端→远端都必 Err——禁静默"当本地复制处理"
+        for (srcs, dst) in [
+            (vec![rem.clone(), loc.clone()], loc.clone()),
+            (vec![rem.clone(), loc.clone()], rem.clone()),
+            (vec![rem.clone()], rem.clone()),
+        ] {
+            let e = direction_of(&srcs, &dst).unwrap_err();
+            assert_eq!(e.code(), crate::error::FILE_REMOTE_MIXED);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn direction_of_matchesPanelCopySemantics() {
+        // 回归既有形状：两 src.parent() 相同 ⇒ 同桶（抽函数不改 target_for 语义）
+        let a = L(r"C:\dst\one.txt");
+        let b = L(r"C:\dst\two.txt");
+        assert_eq!(parent_key(&a), parent_key(&b));
+        assert_eq!(parent_key(&a), r"C:\dst");
+        let c = R("remote:webdav-1", "/data/x.txt");
+        let d = R("remote:webdav-1", "/data/y.txt");
+        assert_eq!(parent_key(&c), parent_key(&d));
+        assert_eq!(parent_key(&c), "/data");
+        // 同桶本地复制到同目录另一文件：方向仍是 Local，面板零新文案
+        let (cb, _) = sink();
+        let store = tmpdir("dirsem_store");
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![a.clone()],
+                dst: L(r"C:\dst\copy_one.txt"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        assert_eq!(direction_of_op(&q, &op), TransferDirection::Local);
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn parentKey_pureNoFilesystemCall() {
+        // 纯函数判据=对不存在的路径照样给值、无 Err 分支、零 fs 参与
+        assert_eq!(parent_key(&L(r"Z:\不存在\深\f.txt")), r"Z:\不存在\深");
+        assert_eq!(parent_key(&R("webdav", "/no/such/远程.txt")), "/no/such");
+        assert_eq!(parent_key(&R("webdav", "/f.txt")), "/");
+        assert_eq!(parent_key(&R("webdav", "f.txt")), "");
+        assert_eq!(parent_key(&L(PathBuf::new())), "");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn copyPumped_resumeAtOffset_seeksBothEnds() {
+        let d = tmpdir("pump");
+        let src_path = d.join("src.bin");
+        let dst_path = d.join("dst.bin");
+        let total = CHUNK as u64 + 1024;
+        let payload: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src_path, &payload).unwrap();
+        // 镜像 copy_one 的 `metadata(dst).len()==start` 前提：前 CHUNK 字节已在目标
+        std::fs::write(&dst_path, &payload[..CHUNK]).unwrap();
+        let (cb, _) = sink();
+        let mut rep = Reporter {
+            cb: &cb,
+            cur: OpProgress {
+                op_id: "pump".into(),
+                kind: OpKind::Copy,
+                state: OpState::Running,
+                current: "src.bin".into(),
+                files_done: 0,
+                files_total: 1,
+                bytes_done: 0,
+                bytes_total: total,
+                error: None,
+                direction: TransferDirection::Local,
+            },
+        };
+        let ctl = OpControl::new();
+        let mut pump = PumpPair {
+            reader: Box::new(File::open(&src_path).unwrap()),
+            writer: Box::new(OpenOptions::new().write(true).open(&dst_path).unwrap()),
+        };
+        let mut persisted: Vec<u64> = Vec::new();
+        let mut persist = |w: u64| persisted.push(w);
+        let mut on_cancel = || {};
+        let mut hooks = PumpHooks {
+            persist: &mut persist,
+            on_cancel: &mut on_cancel,
+        };
+        let flow = copy_pumped(&mut pump, CHUNK as u64, &ctl, &mut rep, &mut hooks);
+        assert!(matches!(flow, Flow::Done));
+        drop(pump);
+        // 目标不被截断（offset 前字节保真）且只补了尾部
+        assert_eq!(std::fs::metadata(&dst_path).unwrap().len(), total);
+        assert_eq!(std::fs::read(&dst_path).unwrap(), payload);
+        // 源确被 seek：进度只计新搬运的 1024 字节（未 seek 则会计满 CHUNK+1024）
+        assert_eq!(rep.cur.bytes_done, 1024);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn remoteDelete_recycleTrue_rejectsAndNamesNoRecycleBin() {
+        // 承重⑥：修前该臂静默直删（回收站端口收下 PathBuf 列表根本不含远端腿）
+        let (cb, _) = sink();
+        let store = tmpdir("rdel_store");
+        let mut q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let e = q
+            .enqueue(OpSpec {
+                kind: OpKind::Delete,
+                srcs: vec![R("remote:webdav-1", "/docs/报告.docx")],
+                dst: L(PathBuf::new()),
+                policy: ConflictPolicy::default(),
+                recycle: true,
+            })
+            .unwrap_err();
+        assert_eq!(e.code(), "FILE_OPS_003");
+        assert!(e.to_string().contains("无回收站"), "{e}");
+        // 正对照防空洞：本地源 + recycle=true 不被这道闸拦（缺端口降级直删是既有语义）
+        let loc = tmpdir("rdel_loc");
+        std::fs::write(loc.join("f.txt"), b"x").unwrap();
+        q.set_recycle_port(Arc::new(FakeRecycleNever));
+        assert!(q
+            .enqueue(OpSpec {
+                kind: OpKind::Delete,
+                srcs: vec![L(loc.join("f.txt"))],
+                dst: L(PathBuf::new()),
+                policy: ConflictPolicy::default(),
+                recycle: true,
+            })
+            .is_ok());
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&loc);
+    }
+
+    /// 永远"失败"的回收站端口：证明正对照走的是入队闸而非端口感情
+    struct FakeRecycleNever;
+    impl RecycleBinPort for FakeRecycleNever {
+        fn delete(&self, _paths: &[PathBuf]) -> Result<u32, host_core::error::AppError> {
+            Err(host_core::error::AppError::module(
+                "TEST",
+                "fake recycle never",
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn queue_resumeAcrossReopen_remoteDirectionSurvives() {
+        // 落 PendingOp（远端源+本地目标+断点，绕过 worker 竞态）→ 重开 OpQueue →
+        // resume 后 active() 的 direction 与 checkpoint 不丢
+        let store = tmpdir("dirsurv_store");
+        let op_id = "op-remote-legacy";
+        persist_pending(
+            &store,
+            &PendingOp {
+                op_id: op_id.to_owned(),
+                kind: OpKind::Copy,
+                srcs: vec![R("remote:webdav-1", "/docs/a.bin")],
+                dst: L(r"C:\download\a.bin"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+                file_index: 2,
+                bytes_done: 4 * 1024 * 1024,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+        let (cb, _) = sink();
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let pend = q.pending();
+        assert_eq!(pend.len(), 1);
+        assert!(
+            matches!(&pend[0].srcs[0], OpEndpoint::Remote { driver_id, path }
+                if driver_id == "remote:webdav-1" && path == "/docs/a.bin"),
+            "远端端点须在重开后原样可读"
+        );
+        assert_eq!(
+            (pend[0].file_index, pend[0].bytes_done),
+            (2, 4 * 1024 * 1024)
+        );
+        let new_op = q.resume(op_id).unwrap();
+        assert_ne!(new_op, op_id);
+        // direction 由 direction_of 在入队口唯一派生：远端源 + 本地目标 ⇒ Download
+        assert_eq!(direction_of_op(&q, &new_op), TransferDirection::Download);
+        // 诚实拒绝：远端腿 T-B6-3 起接线，worker 判 Failed 点名该行（不假称 Done）
+        assert!(wait_until(
+            || op_state(&q, &new_op) == OpState::Failed,
+            Duration::from_secs(10)
+        ));
+        let err = q
+            .active()
+            .iter()
+            .find(|p| p.op_id == new_op)
+            .unwrap()
+            .error
+            .clone()
+            .unwrap();
+        assert!(err.contains("T-B6-3"), "{err}");
+        assert!(q.pending().is_empty());
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

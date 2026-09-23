@@ -19,11 +19,16 @@ pub mod service;
 pub use browse::{
     breadcrumbs, display_path, drives, list_dir, to_long_path, DriveInfo, FileEntry, SortKey,
 };
-pub use conflict::{scan_conflicts, ConflictAction, ConflictItem, ConflictPolicy};
+pub use conflict::{
+    conflict_pairs, scan_conflicts, unique_name, ConflictAction, ConflictItem, ConflictPolicy,
+};
 pub use driver::{DriverInfo, DriverRegistry, FileStoragePort, LocalDriver, StorageDriver};
 pub use error::FileError;
 pub use module::FileModule;
-pub use ops::{Checkpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState, PendingOp, CHUNK};
+pub use ops::{
+    direction_of, parent_key, Checkpoint, OpEndpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState,
+    PendingOp, TransferDirection, CHUNK,
+};
 pub use preview::Preview;
 pub use profile::{
     profile_id_of, validate_profile, AuthKind, ProfileStore, RemoteProfile, RemoteProtocol,

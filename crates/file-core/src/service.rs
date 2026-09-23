@@ -118,17 +118,26 @@ impl FileService {
     /// 入队（Ask 策略先预扫描：有冲突则不入队，返回冲突清单给 UI 决议）
     pub fn enqueue(&self, spec: OpSpec) -> Result<(Option<String>, Vec<ConflictItem>), FileError> {
         if spec.kind == crate::ops::OpKind::Copy || spec.kind == crate::ops::OpKind::Move {
-            let dst_dir = if spec.dst.is_dir() {
-                spec.dst.clone()
-            } else {
-                spec.dst
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("."))
-            };
-            let conflicts = scan_conflicts(&spec.srcs, &dst_dir);
-            if !conflicts.is_empty() && spec.policy == ConflictPolicy::Ask {
-                return Ok((None, conflicts));
+            // T-B6-2：Ask 预扫描只覆盖本地端点（fs 事实源）；远端端点跳过预扫描，
+            // 冲突引擎本身已在 conflict_pairs 收口为唯一一份，远端事实源接线随协议行落地
+            let locals: Option<(Vec<PathBuf>, PathBuf)> = spec
+                .srcs
+                .iter()
+                .map(|e| e.as_local().cloned())
+                .collect::<Option<Vec<_>>>()
+                .and_then(|srcs| spec.dst.as_local().cloned().map(|dst| (srcs, dst)));
+            if let Some((srcs, dst)) = locals {
+                let dst_dir = if dst.is_dir() {
+                    dst
+                } else {
+                    dst.parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("."))
+                };
+                let conflicts = scan_conflicts(&srcs, &dst_dir);
+                if !conflicts.is_empty() && spec.policy == ConflictPolicy::Ask {
+                    return Ok((None, conflicts));
+                }
             }
         }
         let op_id = self.queue.enqueue(spec)?;
@@ -218,7 +227,7 @@ impl FileService {
 mod tests {
     use super::*;
     use crate::conflict::ConflictPolicy;
-    use crate::ops::OpKind;
+    use crate::ops::{OpEndpoint, OpKind};
     use tokio::sync::broadcast::error::TryRecvError;
 
     /// D-03 回归：operation.progress 经 EventBus::publish_merged 合并发布
@@ -242,8 +251,8 @@ mod tests {
         let (op_id, conflicts) = svc
             .enqueue(OpSpec {
                 kind: OpKind::Copy,
-                srcs: vec![src.join("big.bin")],
-                dst: dst.clone(),
+                srcs: vec![OpEndpoint::local(src.join("big.bin"))],
+                dst: OpEndpoint::local(dst.clone()),
                 policy: ConflictPolicy::Overwrite,
                 recycle: false,
             })

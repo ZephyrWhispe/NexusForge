@@ -3,6 +3,7 @@
 //! v1 交互简化：`Ask` 策略在入队前预扫描返回冲突清单，UI 逐条（或"应用到全部"）
 //! 决议后以具体策略重新入队；`operation.conflict` 事件保留给未来的逐文件中断式询问。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -83,7 +84,7 @@ pub fn unique_target(dst: &Path) -> PathBuf {
     ))
 }
 
-/// 预扫描：srcs 列表落到位 dst 时会冲突的目标（Ask 策略 UI 决议数据源）
+/// 预扫描冲突条目（Ask 策略 UI 决议数据源）
 #[derive(Clone, Debug, Serialize)]
 pub struct ConflictItem {
     /// 源文件名
@@ -91,16 +92,69 @@ pub struct ConflictItem {
     pub dst: PathBuf,
 }
 
-pub fn scan_conflicts(srcs: &[PathBuf], dst_dir: &Path) -> Vec<ConflictItem> {
-    srcs.iter()
-        .filter_map(|src| {
-            let name = src.file_name()?.to_string_lossy().into_owned();
-            let target = dst_dir.join(&name);
-            target
-                .exists()
-                .then_some(ConflictItem { name, dst: target })
+/// 纯冲突引擎（T-B6-2 承重：本地 `scan_conflicts` 与远端预扫描共读一份，
+/// 禁第二份冲突引擎）：从 src_names 中挑出与目标桶 `existing`（该目录已有
+/// 名字集合）冲突者，落到桶键 dst 上。本地事实源=fs 探测，远端事实源=列表
+/// 返回——只有事实源不同，裁决算法在此唯一。
+pub fn conflict_pairs(
+    src_names: &[String],
+    existing: &HashSet<String>,
+    dst: &str,
+) -> Vec<ConflictItem> {
+    src_names
+        .iter()
+        .filter(|name| existing.contains(*name))
+        .map(|name| ConflictItem {
+            name: name.clone(),
+            dst: Path::new(dst).join(name),
         })
         .collect()
+}
+
+/// 同名冲突时的唯一名（Windows 资源管理器风格 `name (2).ext`）——纯集合版：
+/// 本地探测 fs（[`unique_target`]），远端探测目录列表集合；序号算法两处共读。
+pub fn unique_name(name: &str, existing: &HashSet<String>) -> String {
+    if !existing.contains(name) {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 2..10_000u32 {
+        let cand = format!("{stem} ({n}){ext}");
+        if !existing.contains(&cand) {
+            return cand;
+        }
+    }
+    // 兜底：时间戳后缀（与 unique_target 同形）
+    format!(
+        "{stem} ({}){ext}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default()
+    )
+}
+
+pub fn scan_conflicts(srcs: &[PathBuf], dst_dir: &Path) -> Vec<ConflictItem> {
+    // 本地事实源逐字保留 exists() 语义（Windows 大小写不敏感由 fs 裁决）；
+    // 冲突判定与目标拼接交回唯一引擎
+    let names: Vec<String> = srcs
+        .iter()
+        .filter_map(|src| src.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    let existing: HashSet<String> = names
+        .iter()
+        .filter(|name| dst_dir.join(name).exists())
+        .cloned()
+        .collect();
+    conflict_pairs(&names, &existing, &dst_dir.display().to_string())
 }
 
 #[cfg(test)]
@@ -166,6 +220,48 @@ mod tests {
         let items = scan_conflicts(&srcs, &d);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "hit.txt");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-2）字面测试名优先于 rustc 命名惯例
+    fn conflictPairs_localAndRemoteEnginesAgree() {
+        let d = tmpdir("agree");
+        std::fs::write(d.join("hit.txt"), b"").unwrap();
+        std::fs::write(d.join("hit2.txt"), b"").unwrap();
+        let src_names: Vec<String> = vec![
+            "hit.txt".to_string(),
+            "miss.txt".to_string(),
+            "hit2.txt".to_string(),
+        ];
+        let srcs: Vec<PathBuf> = src_names.iter().map(|n| d.join(n)).collect();
+        // 两路预扫描：本地（fs 事实源）vs 远端形状（列表集合事实源）
+        let local = scan_conflicts(&srcs, &d);
+        let existing: HashSet<String> = src_names
+            .iter()
+            .filter(|n| d.join(n).exists())
+            .cloned()
+            .collect();
+        let remote = conflict_pairs(&src_names, &existing, "/remote/dir");
+        let names = |v: &[ConflictItem]| v.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&local), names(&remote));
+        assert_eq!(
+            names(&local),
+            vec!["hit.txt".to_string(), "hit2.txt".to_string()]
+        );
+        // 唯一名两引擎逐字同序：本地 unique_target（探测 fs）vs 纯 unique_name（探测集合）
+        std::fs::write(d.join("a.txt"), b"1").unwrap();
+        std::fs::write(d.join("a (2).txt"), b"2").unwrap();
+        let mut ex2: HashSet<String> = HashSet::new();
+        ex2.insert("a.txt".to_string());
+        ex2.insert("a (2).txt".to_string());
+        assert_eq!(
+            unique_target(&d.join("a.txt")).file_name().unwrap(),
+            Path::new(&unique_name("a.txt", &ex2)).file_name().unwrap()
+        );
+        assert_eq!(unique_name("a.txt", &ex2), "a (3).txt");
+        // 远端臂零 fs 参与：空集合直通原名（无冲突即不改名）
+        assert_eq!(unique_name("报告.md", &HashSet::new()), "报告.md");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
