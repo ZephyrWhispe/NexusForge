@@ -12,6 +12,7 @@ import {
   type SyncDatasetDto,
 } from "../../ipc/client";
 import Section from "../../components/Section";
+import DeferredBadge from "../../components/DeferredBadge";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 
@@ -74,6 +75,7 @@ export default function DatasetsSection() {
       actions={
         <>
           <Badge appearance="outline">白名单在册 · 运行态并排可见</Badge>
+          <DeferredBadge label="剪贴板数据集" decisionRef="09 §10.3-②" />
           <Button size="small" onClick={() => void load()}>
             刷新
           </Button>

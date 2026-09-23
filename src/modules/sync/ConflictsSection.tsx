@@ -19,6 +19,7 @@ import {
   type SyncConflictDto,
 } from "../../ipc/client";
 import Section from "../../components/Section";
+import DeferredBadge from "../../components/DeferredBadge";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 import { confirmAction } from "../../stores/confirm";
@@ -160,6 +161,7 @@ export default function ConflictsSection({
       actions={
         <>
           <Badge appearance="outline">LWW 败方快照 · 本机留存</Badge>
+          <DeferredBadge label="三方合并" decisionRef="09 §10.2-9(a)" />
           <Button size="small" onClick={() => void load()}>
             刷新
           </Button>

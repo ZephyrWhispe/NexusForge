@@ -9,6 +9,7 @@ import {
 } from "@fluentui/react-components";
 import type { SyncStatusDto } from "../../ipc/client";
 import Section from "../../components/Section";
+import DeferredBadge from "../../components/DeferredBadge";
 import InlineError from "../../components/InlineError";
 
 /**
@@ -67,6 +68,7 @@ export default function OverviewSection({
             </>
           )}
           {autoBusy && <Spinner size="tiny" />}
+          <DeferredBadge label="云中转" decisionRef="09 §10.2-9(b)" />
         </>
       }
     >
