@@ -562,6 +562,120 @@ impl SftpDriver {
         })?;
         Ok(())
     }
+
+    // ---- T-B6-11 字节腿（队列远端执行器经 trait 消费）----
+
+    /// spool 读腿：RPC Download 整文件落盘（协议腿粒度是文件），读柄内部
+    /// seek 到 `offset` 才交出——trait 的"流恰从 offset 起"契约由此兑现；
+    /// offset 超盘上实长即 Err 点名（断点失真禁静默）。
+    pub(crate) fn read_spool(
+        &self,
+        remote_path: &str,
+        offset: u64,
+    ) -> Result<super::SpoolReader, FileError> {
+        use std::io::Seek;
+        let spool_path = super::reserve_spool_path("sftp");
+        let total = self.rpc(SshRpc::Download {
+            path: remote_path.to_owned(),
+            dst: spool_path.clone(),
+            offset: 0,
+        })?;
+        let SshReply::Size(written) = total else {
+            super::SpoolReader::discard(&spool_path);
+            return Err(FileError::BadState(
+                "协议内部矛盾：Download 臂必须回 Size".into(),
+            ));
+        };
+        let reader = match super::SpoolReader::open(spool_path.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                super::SpoolReader::discard(&spool_path);
+                return Err(e);
+            }
+        };
+        let mut reader = reader;
+        let len = {
+            use std::io::SeekFrom;
+            let pos = reader.seek(SeekFrom::End(0)).map_err(FileError::Io)?;
+            reader
+                .seek(SeekFrom::Start(offset))
+                .map_err(FileError::Io)?;
+            pos
+        };
+        if offset > len {
+            drop(reader);
+            super::SpoolReader::discard(&spool_path);
+            return Err(FileError::BadState(format!(
+                "断点失真：声称 offset={offset} 但 spool 只有 {len} 字节（远端实收 {written}）"
+            )));
+        }
+        Ok(reader)
+    }
+
+    /// spool 写腿：字节先攒盘，finish 时经 RPC Upload 整提交并核对回执
+    /// （泵完字节 ≠ 传成——回执 Size 与盘上实长不等即 Err）。
+    pub(crate) fn put_writer(
+        &self,
+        remote_path: &str,
+    ) -> Result<Box<dyn host_core::storage::WriteCommit>, FileError> {
+        Ok(Box::new(SftpPutWriter {
+            spool: super::Spool::create("sftp-put")?,
+            remote: remote_path.to_owned(),
+            backend: self.backend.clone(),
+        }))
+    }
+}
+
+struct SftpPutWriter {
+    spool: super::Spool,
+    remote: String,
+    backend: Arc<dyn SshBackend>,
+}
+
+impl std::io::Write for SftpPutWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(self.spool.file_mut(), buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(self.spool.file_mut())
+    }
+}
+
+impl host_core::storage::WriteCommit for SftpPutWriter {
+    fn finish(mut self: Box<Self>) -> Result<(), host_core::error::AppError> {
+        let want = self.spool.disk_len()?;
+        let path = self.spool.publish()?;
+        let rpc = self.backend.open(&SshRpc::Upload {
+            path: self.remote.clone(),
+            src: path.clone(),
+            offset: 0,
+        });
+        // 提交后 spool 由本臂终删（成功失败都不留残）
+        let cleanup = || {
+            let _ = std::fs::remove_file(&path);
+        };
+        match rpc {
+            Ok(SshReply::Size(written)) => {
+                cleanup();
+                if written != want {
+                    return Err(host_core::error::AppError::from(FileError::BadState(
+                        format!("SFTP 上传回执失真：盘上 {want} 字节而对端收报 {written}"),
+                    )));
+                }
+                Ok(())
+            }
+            Ok(_) => {
+                cleanup();
+                Err(host_core::error::AppError::from(FileError::BadState(
+                    "协议内部矛盾：Upload 臂必须回 Size".into(),
+                )))
+            }
+            Err(e) => {
+                cleanup();
+                Err(e.into())
+            }
+        }
+    }
 }
 
 impl Drop for SftpDriver {

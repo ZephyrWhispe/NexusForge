@@ -951,10 +951,20 @@ export type ConflictPolicyDto = "ask" | "skip" | "overwrite" | "rename";
 
 export type FileOpKind = "copy" | "move" | "delete" | "compress" | "extract";
 
+/** 操作端点（线上真相 = Rust OpEndpoint 的 untagged 形状，T-B6-2）：
+ *  裸字符串 = 本地路径；`{driver_id, path}` = 远端（path 恒 `/` 分隔 String）。
+ *  远端执行器自 T-B6-11 起真接线——本形状从"预留"转为可投递的事实源。 */
+export type FileEndpointDto = string | { driver_id: string; path: string };
+
+/** 端点的展示形状（Rust OpEndpoint::display 的镜像算式，唯一一处） */
+export function endpointText(e: FileEndpointDto): string {
+  return typeof e === "string" ? e : `${e.driver_id}:${e.path}`;
+}
+
 export interface OpSpecDto {
   kind: FileOpKind;
-  srcs: string[];
-  dst: string;
+  srcs: FileEndpointDto[];
+  dst: FileEndpointDto;
   policy: ConflictPolicyDto;
   recycle?: boolean;
 }
@@ -1018,13 +1028,15 @@ export interface XferStatusDto {
 export interface PendingOpDto {
   op_id: string;
   kind: FileOpKind;
-  srcs: string[];
-  dst: string;
+  srcs: FileEndpointDto[];
+  dst: FileEndpointDto;
   policy: ConflictPolicyDto;
   recycle: boolean;
   file_index: number;
   bytes_done: number;
   created_ms: number;
+  /** T-B6-7 加键：断点链指回旧 op（可缺省——旧盘残留零迁移） */
+  resumed_from?: string | null;
 }
 
 export type PreviewDto =

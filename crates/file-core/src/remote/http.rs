@@ -11,32 +11,25 @@
 //! - `remote_error_message` 是远端错误**唯一对外消息口**：`OpProgress.error`
 //!   与 pending_ops 的 error 面从此不含 URL query 凭据与响应体原文。
 
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 
 use crate::error::{FileError, FILE_REMOTE_MISSING};
 use crate::module::FileConfig;
 use crate::profile::{looks_like_loopback, RemoteProfile};
 
 use super::webdav::join_remote_url;
-use super::{remote_block_on, remote_enter, ThrottleGate};
+use super::{remote_block_on, remote_enter, remote_rt, ThrottleGate};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 续传档位（承重③）：`Range` = 对端真回了 206；`Append` 预留给 T-B6-5/6 的
-/// SFTP/FTP 续写腿（HTTP 面**永不产 Append**——无事实源就不承诺）；`Whole` = 只能整取。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Resumable {
-    Range,
-    Append,
-    Whole,
-}
+/// 续传档位（T-B6-11 上移至 host-core::storage——`DriverCapabilities` 引用它，
+/// D-02 同谱；此处再导出保持 `crate::remote::Resumable` 的既有读口与 wire 形状）
+pub use host_core::storage::Resumable;
 
 /// 续传起点唯一裁决（[`classify_resume`] 的下游）：`Whole` 档续传从 0 起重取，
 /// 禁拿着旧 `have` 假装断点成立（"显示已续传实际重跑"的谎报位在此收口）。
@@ -181,6 +174,20 @@ impl HttpsDriver {
         }
     }
 
+    /// 真流式读腿（T-B6-11）：GET（`offset>0` 带 `Range` 且**必须**收到 206，
+    /// 否则 Err 点名——读流恰从 offset 起是 trait 契约，禁静默从头给字节）。
+    /// 与 [`download_to`](Self::download_to) 共用 [`super::stream_get`] 一条腿，
+    /// 不另起第二份请求装配。
+    pub(crate) fn get_stream(
+        &self,
+        remote_path: &str,
+        offset: u64,
+    ) -> Result<Box<dyn std::io::Read + Send>, FileError> {
+        let url = self.url_for(remote_path);
+        let req = self.client.get(&url).timeout(REQUEST_TIMEOUT);
+        super::stream_get(req, &url, offset)
+    }
+
     /// 下载一条腿：`have` 为调用方声称的本地已有字节；对端回 206 才从 `have`
     /// 续写，回 200 即整取重下（截断重写，见 [`resume_offset`]）。
     /// `max_kbps` 为调用方显式预算（0 = 交给配置总闸）：没显式预算时按
@@ -286,6 +293,104 @@ fn http_err(msg: String) -> FileError {
         code: FILE_REMOTE_MISSING,
         // 构造即脱敏：错误出口唯一，任何上游拿到的是掩后形状
         msg: remote_error_message(&msg),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 真流式 GET 腿（T-B6-11）：HTTPS 与 WebDAV 共用这一条——协议装配差异只在
+// 调用方递进来的 RequestBuilder（auth 头），请求/验身/泵/通道不存在第二套。
+// ---------------------------------------------------------------------------
+
+/// 流式 GET 统一口：发送 → 状态验身 → `offset>0` 必须真收到 206（否则 Err
+/// 点名"未按 Range"，执行器据此裁决整取重启）→ chunk 泵进远端专用 runtime。
+/// 返回的读流**恰从 offset 起**——这是 [`StorageDriver::read_stream`](host_core::storage::StorageDriver::read_stream)
+/// 的契约，禁静默从头给字节。
+pub(crate) fn stream_get(
+    req: reqwest::RequestBuilder,
+    url_display: &str,
+    offset: u64,
+) -> Result<Box<dyn Read + Send>, FileError> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
+    let url_owned = url_display.to_owned();
+    remote_block_on(async move {
+        let url_display = url_owned;
+        let mut req = req.timeout(REQUEST_TIMEOUT);
+        if offset > 0 {
+            req = req.header("Range", format!("bytes={offset}-"));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| http_err(format!("HTTP 流请求失败（{url_display}）: {e}")))?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return Err(http_err(format!(
+                "HTTP 对端返回 {status}（{url_display}）: {}",
+                resp.status().canonical_reason().unwrap_or("未知状态")
+            )));
+        }
+        if offset > 0 && status != 206 {
+            // "未按 Range"是 ops.rs 远端臂的裁决锚点（截断重启从 0），改措辞须两处同改
+            return Err(http_err(format!(
+                "未按 Range 应答（{url_display}）：请求 bytes={offset}- 而对端回 {status}，拒绝拼接错位字节"
+            )));
+        }
+        remote_rt().handle().spawn(async move {
+            let mut body = resp;
+            loop {
+                match body.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if tx.send(Ok(chunk.to_vec())).is_err() {
+                            break; // 读端已弃 = 取消，泵静默退役
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        // 半途错误必须成形为读 Err，不得伪装 EOF（承重：谎报 EOF = 残缺文件当成功）
+                        let _ = tx.send(Err(remote_error_message(&format!(
+                            "HTTP 流读取失败（{url_display}）: {e}"
+                        ))));
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(())
+    })?;
+    Ok(Box::new(ChunkReader {
+        rx: Some(rx),
+        pending: Vec::new(),
+        pos: 0,
+    }))
+}
+
+/// 异步 chunk → 同步 `Read` 的唯一桥（读端线程阻塞在通道上，worker 无 tokio
+/// 上下文也可泵字节）
+struct ChunkReader {
+    rx: Option<std::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
+    pending: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for ChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.pending.len() {
+            let Some(rx) = &self.rx else {
+                return Ok(0); // 泵正常收尾（sender 已 drop）= EOF
+            };
+            match rx.recv() {
+                Ok(Ok(bytes)) => {
+                    self.pending = bytes;
+                    self.pos = 0;
+                }
+                Ok(Err(msg)) => return Err(std::io::Error::other(msg)),
+                Err(_) => self.rx = None,
+            }
+        }
+        let n = buf.len().min(self.pending.len() - self.pos);
+        buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
     }
 }
 

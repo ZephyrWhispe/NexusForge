@@ -80,3 +80,54 @@ impl From<FileError> for host_core::error::AppError {
         host_core::error::AppError::module(e.code(), e.to_string(), None)
     }
 }
+
+/// 回程拆 Display 前缀（与 `#[error("…: {0}")]` 字面同源，两处同改）：
+/// FileError→AppError 走过一次 Display，重建变体时若不剥回前缀就会叠出
+/// "路径不存在: 路径不存在: …" 的谎形——`listDir_nowGoesThroughRegistry_…`
+/// 的字面相等判据拦的就是这种漂移。
+fn unprefix(msg: String, prefix: &str) -> String {
+    msg.strip_prefix(prefix).map(str::to_owned).unwrap_or(msg)
+}
+
+/// T-B6-11（浏览链统一走注册表的回程件）：AppError → FileError 的**码表回程**。
+/// `file_list` 的既有错误形状（NotFound 等 typed 变体 + 码）必须逐字不塌，
+/// 故注册表臂取回 AppError 后在此还原；未知 FILE_* 码落 BadState（消息保真，
+/// 不静默丢——这是回程兜底不是业务分支）。
+impl From<host_core::error::AppError> for FileError {
+    fn from(e: host_core::error::AppError) -> Self {
+        let msg = e.to_string();
+        match e.code() {
+            "FILE_BROWSE_001" => FileError::NotFound(unprefix(msg, "路径不存在: ")),
+            "FILE_OPS_001" => FileError::Io(std::io::Error::other(unprefix(msg, "IO 错误: "))),
+            "FILE_BROWSE_002" => FileError::BadPath(unprefix(msg, "路径不合法: ")),
+            "FILE_OPS_002" => FileError::NoSuchOp(unprefix(msg, "操作不存在: ")),
+            "FILE_OPS_003" => FileError::BadState(unprefix(msg, "操作状态不允许该动作: ")),
+            "FILE_OPS_004" => FileError::Zip(unprefix(msg, "压缩/解压失败: ")),
+            "FILE_PREVIEW_001" => FileError::Preview(unprefix(msg, "预览失败: ")),
+            "FILE_RENAME_001" => FileError::Rule(unprefix(msg, "重命名规则错误: ")),
+            "FILE_SEARCH_001" => FileError::Usn(unprefix(msg, "USN 索引不可用: ")),
+            "FILE_OPS_005" => FileError::Unsupported(unprefix(msg, "该驱动不支持此操作: ")),
+            "FILE_CONFIG_001" => FileError::Config(unprefix(msg, "配置值非法: ")),
+            code if code.starts_with("FILE_REMOTE_") => FileError::Remote {
+                // 回程只认在表码（新码须先入 FILE_REMOTE_CODES 的既有纪律）；
+                // 不在表的远端码塌成消息保真的 BadState。Remote 的 Display 即
+                // 消息本体（`#[error("{msg}")]`），无前后缀可剥
+                code: match code {
+                    crate::error::FILE_REMOTE_MISSING => crate::error::FILE_REMOTE_MISSING,
+                    crate::error::FILE_REMOTE_ID => crate::error::FILE_REMOTE_ID,
+                    crate::error::FILE_REMOTE_MIXED => crate::error::FILE_REMOTE_MIXED,
+                    crate::error::FILE_REMOTE_NOTIMPL => crate::error::FILE_REMOTE_NOTIMPL,
+                    crate::error::FILE_REMOTE_FIELD => crate::error::FILE_REMOTE_FIELD,
+                    crate::error::FILE_REMOTE_PLAINTEXT => crate::error::FILE_REMOTE_PLAINTEXT,
+                    crate::error::FILE_REMOTE_PLAIN_AUTH => crate::error::FILE_REMOTE_PLAIN_AUTH,
+                    crate::error::FILE_REMOTE_PLAIN_CONFIRM => {
+                        crate::error::FILE_REMOTE_PLAIN_CONFIRM
+                    }
+                    _ => return FileError::BadState(format!("{code}: {msg}")),
+                },
+                msg,
+            },
+            _ => FileError::BadState(msg),
+        }
+    }
+}

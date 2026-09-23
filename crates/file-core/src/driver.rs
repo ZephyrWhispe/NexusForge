@@ -14,7 +14,10 @@ use host_core::error::AppError;
 use host_core::storage::StoragePort;
 
 // D-02：trait/DTO 住 host-core::storage；此处 pub use 保持 file_core::driver::* API
-pub use host_core::storage::{DriverInfo, FileEntry, StorageDriver};
+// （T-B6-11 起随泛化增出能力声明与写流柄）
+pub use host_core::storage::{
+    DriverCapabilities, DriverInfo, FileEntry, StorageDriver, WriteCommit,
+};
 
 use crate::browse;
 
@@ -31,8 +34,8 @@ fn io_err(e: std::io::Error) -> AppError {
 pub struct LocalDriver;
 
 impl StorageDriver for LocalDriver {
-    fn id(&self) -> &'static str {
-        "local"
+    fn id(&self) -> String {
+        "local".into()
     }
     fn label(&self) -> String {
         "本地磁盘".into()
@@ -154,6 +157,16 @@ impl DriverRegistry {
             .map(|r| r.driver.clone())
     }
 
+    /// 浏览/传输链的驱动解析唯一分派口（T-B6-11）：`None` 或空 ⇒ `"local"`
+    /// （既有 `file_list` 调用零扰动的缺省臂）；点名取不存在的驱动 ⇒ None，
+    /// 由调用方诚实报错——**禁回落到 local 假装服务成功**。
+    pub fn read_of(&self, driver_id: Option<&str>) -> Option<Arc<dyn StorageDriver>> {
+        match driver_id.filter(|s| !s.is_empty()) {
+            Some(id) => self.get(id),
+            None => self.get("local"),
+        }
+    }
+
     pub fn list(&self) -> Vec<DriverInfo> {
         self.drivers
             .read()
@@ -230,8 +243,8 @@ mod tests {
         // "local" 条目原封不动（同 id 顶替域只在 key 相等时生效）
         struct FakeRemote;
         impl StorageDriver for FakeRemote {
-            fn id(&self) -> &'static str {
-                "webdav"
+            fn id(&self) -> String {
+                "webdav".into()
             }
             fn label(&self) -> String {
                 "远端假驱动".into()
@@ -269,8 +282,8 @@ mod tests {
     fn dynamic_driver_registration_replaces_same_id() {
         struct Fake;
         impl StorageDriver for Fake {
-            fn id(&self) -> &'static str {
-                "local"
+            fn id(&self) -> String {
+                "local".into()
             }
             fn label(&self) -> String {
                 "假驱动".into()
@@ -309,5 +322,183 @@ mod tests {
         // 动态注册即时可见（同一注册表实例）
         port.driver("local").unwrap();
         assert_eq!(reg.list().len(), 1);
+    }
+
+    // ---- T-B6-11 驱动抽象泛化（09 §6.2 字面测名）----
+
+    use host_core::storage::DriverCapabilities;
+
+    /// 可编程假远端：动词全记账（trait 形状不塌的端到端替身）
+    struct ScriptedRemote {
+        calls: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    impl ScriptedRemote {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl StorageDriver for ScriptedRemote {
+        fn id(&self) -> String {
+            "scripted".into()
+        }
+        fn label(&self) -> String {
+            "脚本远端".into()
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            vec!["/srv".into()]
+        }
+        fn list(&self, _p: &Path) -> Result<Vec<FileEntry>, AppError> {
+            self.calls.lock().push("list".into());
+            Ok(vec![FileEntry {
+                name: "a.txt".into(),
+                path: "/srv/a.txt".into(),
+                is_dir: false,
+                size: 3,
+                modified_ms: 0,
+                ext: "txt".into(),
+                hidden: false,
+            }])
+        }
+        fn mkdir(&self, _p: &Path) -> Result<(), AppError> {
+            self.calls.lock().push("mkdir".into());
+            Ok(())
+        }
+        fn remove(&self, _p: &Path, recycle: bool) -> Result<(), AppError> {
+            // 假驱动同样守回收站红线：带 recycle 下来即 panic（执行器第三道闸的镜像）
+            assert!(!recycle, "远端不得收到 recycle=true");
+            self.calls.lock().push("remove".into());
+            Ok(())
+        }
+        fn rename(&self, _f: &Path, _t: &Path) -> Result<(), AppError> {
+            self.calls.lock().push("rename".into());
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn remoteDriver_satisfiesStorageDriver() {
+        // 编译期：泛型断言 + trait 对象两处都不塌（id()->String 放宽后仍成立）
+        fn assert_driver<T: StorageDriver + ?Sized>() {}
+        assert_driver::<LocalDriver>();
+        assert_driver::<ScriptedRemote>();
+        assert_driver::<dyn StorageDriver>();
+        // 端到端：假驱动经注册表以 trait 对象走一遍浏览/建目录/删除三动词
+        let reg = DriverRegistry::new();
+        let fake = ScriptedRemote::new();
+        let calls = fake.calls.clone();
+        reg.register_as("remote:s", Arc::new(fake));
+        let drv = reg.read_of(Some("remote:s")).expect("动态键可寻址");
+        let entries = drv.list(Path::new("/srv")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.txt");
+        drv.mkdir(Path::new("/srv/sub")).unwrap();
+        drv.remove(Path::new("/srv/sub"), false).unwrap();
+        assert_eq!(*calls.lock(), vec!["list", "mkdir", "remove"]);
+        // 自报 id 是协议名（"scripted"），寻址键是注入的 "remote:s"——两件事
+        assert_eq!(drv.id(), "scripted");
+        assert!(
+            reg.get("scripted").is_none(),
+            "自报 id 不是寻址键（语义零变）"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn capabilities_localDriverDefaultsUnchanged() {
+        // 正对照：LocalDriver 不覆写 capabilities ⇒ 新增位逐字为缺省形
+        // （全 false + Whole）——"能力声明"是纯增量面，既有本地行为零扰动
+        let caps = LocalDriver.capabilities();
+        assert_eq!(caps, DriverCapabilities::default());
+        assert!(!caps.browse && !caps.mkcol && !caps.delete);
+        assert!(!caps.permanent_delete_only && !caps.rename_same_driver);
+        assert_eq!(
+            caps.resume,
+            host_core::storage::Resumable::Whole,
+            "未声明即 Whole（不承诺任何断点）"
+        );
+        // 未覆写流式腿的驱动同样落在缺省声明上（假远端只做了动词，没做腿）
+        assert_eq!(
+            ScriptedRemote::new().capabilities(),
+            DriverCapabilities::default()
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn readStream_unimplementedDriver_refusesNotPanics() {
+        // 承重⑨：默认臂是 Err 而非 unwrap/panic——未实现流式的驱动对
+        // read_stream/write_stream 都诚实拒绝，码表沿用 FILE_OPS_005
+        let r = LocalDriver.read_stream(Path::new("C:/x"), 0);
+        let e = match r {
+            Err(e) => e,
+            Ok(_) => panic!("本地驱动不该有 read_stream 腿（本行只声明不接线）"),
+        };
+        assert_eq!(e.code(), "FILE_OPS_005");
+        let w = ScriptedRemote::new().write_stream(Path::new("/srv/x"));
+        let e = match w {
+            Err(e) => e,
+            Ok(_) => panic!("未实现写流的假驱动必须走默认臂拒绝（不得给出门）"),
+        };
+        assert_eq!(e.code(), "FILE_OPS_005");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn registry_unregister_keepsLocalDriver() {
+        // 承重①(c)：注销一个远端 id 后 "local" 仍在原位（注册表退役不连坐）
+        let reg = DriverRegistry::new();
+        reg.register_as("remote:x", Arc::new(ScriptedRemote::new()));
+        assert_eq!(reg.list().len(), 2);
+        assert!(reg.unregister("remote:x"));
+        assert!(!reg.unregister("remote:x"), "幂等注销回 false");
+        let local = reg.read_of(None).expect("local 恒在默认臂");
+        assert_eq!(local.id(), "local");
+        assert_eq!(local.label(), "本地磁盘");
+        assert!(
+            reg.read_of(Some("remote:x")).is_none(),
+            "read_of 不回落 local——取不到就是取不到"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn sameIdRegistration_stillReplacesWithinNamespace() {
+        // 保留既有语义（dynamic_driver_registration_replaces_same_id 的同谱
+        // 正名版）：register() 顶替同自报 id 的行为对 "local" 命名空间不变——
+        // 防"为远端而破坏本地注册语义"
+        struct Dup;
+        impl StorageDriver for Dup {
+            fn id(&self) -> String {
+                "local".into()
+            }
+            fn label(&self) -> String {
+                "第二次注册者".into()
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                vec![]
+            }
+            fn list(&self, _p: &Path) -> Result<Vec<FileEntry>, AppError> {
+                Ok(vec![])
+            }
+            fn mkdir(&self, _p: &Path) -> Result<(), AppError> {
+                Ok(())
+            }
+            fn remove(&self, _p: &Path, _r: bool) -> Result<(), AppError> {
+                Ok(())
+            }
+            fn rename(&self, _f: &Path, _t: &Path) -> Result<(), AppError> {
+                Ok(())
+            }
+        }
+        let reg = DriverRegistry::new();
+        reg.register(Arc::new(ScriptedRemote::new())); // id=scripted，不撞 local
+        reg.register(Arc::new(Dup)); // id=local ⇒ 顶替默认条目
+        assert_eq!(reg.list().len(), 2, "scripted 条目不受 local 顶替连坐");
+        assert_eq!(reg.get("local").unwrap().label(), "第二次注册者");
     }
 }

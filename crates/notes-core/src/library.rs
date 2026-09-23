@@ -520,8 +520,8 @@ mod tests {
     }
 
     impl StorageDriver for FsDriver {
-        fn id(&self) -> &'static str {
-            "local"
+        fn id(&self) -> String {
+            "local".to_owned()
         }
         fn label(&self) -> String {
             "本地磁盘(测试)".into()

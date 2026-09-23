@@ -21,9 +21,10 @@ use crate::service::FileService;
 /// 配置只收紧不超发——设置项与运行事实同源，禁"配 8 实际 2"的谎
 pub const MAX_CONCURRENT_CEILING: usize = 2;
 
-/// file 域配置真源（09 §6.2 T-B6-6：`config_schema()` 五键的唯一读者群，
-/// [`FileModule::apply_config`] 的唯一产物）。`upload_kbps` 随 T-B6-7 执行器
-/// 一并入表——本行没有上传字节路径，先声明就是自造死键（落地补记①）。
+/// file 域配置真源（09 §6.2 T-B6-6：`config_schema()` 六键的唯一读者群，
+/// [`FileModule::apply_config`] 的唯一产物）。`upload_kbps` 随 T-B6-11 上传
+/// 字节路径接通一并入表——死键复活的判据形态是 merged/schema/读者三面同批
+/// 到位（T-B6-6"先声明就是自造死键"的逆命题同样成立）。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct FileConfig {
@@ -36,6 +37,9 @@ pub struct FileConfig {
     pub insecure_plaintext: bool,
     /// 下载限速（KB/s/腿的总预算，多腿经 `throttle_share_kbps` 摊分）；0 = 不限
     pub download_kbps: u32,
+    /// 上传限速（T-B6-11：上传字节路径接通后入表；闸的落点在远端执行器的
+    /// throttle 适配器，与 download_kbps 同一算式）；0 = 不限
+    pub upload_kbps: u32,
     /// 并发传输数（队列准入门 + 限速摊分母），合法域 `1..=MAX_CONCURRENT_CEILING`
     pub max_concurrent: usize,
 }
@@ -47,6 +51,7 @@ impl Default for FileConfig {
             delete_to_recycle: true,
             insecure_plaintext: false,
             download_kbps: 0,
+            upload_kbps: 0,
             max_concurrent: MAX_CONCURRENT_CEILING,
         }
     }
@@ -91,6 +96,18 @@ impl FileConfig {
                     )
                 })? as u32;
             next.download_kbps = n;
+        }
+        if let Some(v) = values.get("upload_kbps") {
+            let n = v
+                .as_u64()
+                .filter(|n| u32::try_from(*n).is_ok())
+                .ok_or_else(|| {
+                    FileConfig::bad(
+                        "upload_kbps",
+                        format!("须为 0..=4294967295 的整数（0=不限），收到 {v}"),
+                    )
+                })? as u32;
+            next.upload_kbps = n;
         }
         if let Some(v) = values.get("max_concurrent") {
             let n = v
@@ -212,6 +229,11 @@ impl Module for FileModule {
                     "description": "所有并发下载腿共享的总预算（逐腿摊分）；0 = 不限",
                     "minimum": 0, "default": 0
                 },
+                "upload_kbps": {
+                    "type": "integer", "title": "上传限速（KB/s）",
+                    "description": "所有并发上传腿共享的总预算（逐腿摊分，T-B6-11 随上传字节路径接通入表）；0 = 不限",
+                    "minimum": 0, "default": 0
+                },
                 "max_concurrent": {
                     "type": "integer", "title": "并发传输数",
                     "description": "上限 = 内置 worker 数 2：配置只收紧不超发（线程在建队时定死）",
@@ -292,11 +314,12 @@ mod tests {
             delete_to_recycle: false,
             insecure_plaintext: true,
             download_kbps: 500,
+            upload_kbps: 0,
             max_concurrent: 1,
         };
         // 全缺省补丁 ⇒ 逐值原样
         assert_eq!(runtime.merged(&serde_json::json!({})).unwrap(), runtime);
-        // 单键补丁 ⇒ 其余四键保持现值（现值故意全部≠默认，缺键回默认在这里必炸）
+        // 单键补丁 ⇒ 其余各键保持现值（现值故意全部≠默认，缺键回默认在这里必炸）
         let patched = runtime
             .merged(&serde_json::json!({ "download_kbps": 90 }))
             .unwrap();
@@ -306,19 +329,27 @@ mod tests {
                 patched.default_conflict_policy,
                 patched.delete_to_recycle,
                 patched.insecure_plaintext,
+                patched.upload_kbps,
                 patched.max_concurrent
             ),
-            (ConflictPolicy::Skip, false, true, 1)
+            (ConflictPolicy::Skip, false, true, 0, 1)
         );
         // 正对照：显式写回默认值 = 真改值（0 从 500 归位、true 总闸不动仍 true）
         let explicit_default = runtime
             .merged(&serde_json::json!({ "download_kbps": 0 }))
             .unwrap();
         assert_eq!(explicit_default.download_kbps, 0, "填了 0 就必须看见 0");
-        // 未知键（含旧盘残留）零影响，也不写"已迁移"
+        // T-B6-11 键位翻转：upload_kbps 从"未知键零影响"升为真键（上传字节
+        // 路径已接通——判据随事实走，登记于 09 本行落地补记）；未知键（旧盘
+        // 残留）仍零影响，也不写"已迁移"
+        let up = runtime
+            .merged(&serde_json::json!({ "upload_kbps": 66 }))
+            .unwrap();
+        assert_eq!(up.upload_kbps, 66, "upload_kbps 现已是真读者在场的键");
+        assert_eq!(up.download_kbps, 500, "单键补丁不得连坐");
         assert_eq!(
             runtime
-                .merged(&serde_json::json!({ "upload_kbps": 66, "an_old_key": 7 }))
+                .merged(&serde_json::json!({ "an_old_key": 7, "retired_speed_limit": 9 }))
                 .unwrap(),
             runtime
         );

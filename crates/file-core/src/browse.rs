@@ -91,6 +91,14 @@ pub fn list_dir(path: &Path, sort: SortKey, asc: bool) -> Result<Vec<FileEntry>,
         let Ok(md) = item.metadata() else { continue };
         entries.push(entry_from_metadata(item.path(), &md));
     }
+    sort_entries(&mut entries, sort, asc);
+    Ok(entries)
+}
+
+/// 排序裁决唯一口（T-B6-11 浏览链统一后经注册表取回的条目在此归序——
+/// 本地与远端消费同一比较器，禁第二份排序算式）。稳定排序：同值项保持
+/// 进入时的相对次序（目录恒在前）。
+pub(crate) fn sort_entries(entries: &mut [FileEntry], sort: SortKey, asc: bool) {
     let dir_rank = |e: &FileEntry| if e.is_dir { 0u8 } else { 1 };
     entries.sort_by(|a, b| {
         dir_rank(a).cmp(&dir_rank(b)).then_with(|| match sort {
@@ -119,7 +127,6 @@ pub fn list_dir(path: &Path, sort: SortKey, asc: bool) -> Result<Vec<FileEntry>,
             }
         })
     });
-    Ok(entries)
 }
 
 /// 面包屑（F1）：`C:\a\b` → [("C:", C:\), ("a", C:\a), ("b", C:\a\b)]

@@ -10,15 +10,17 @@
 //! - 凭据只进不出：口令只进 Authorization 头（Basic 现拼），URL 永不携带凭据。
 
 use base64::Engine;
+use host_core::storage::WriteCommit;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use zeroize::Zeroizing;
 
-use crate::error::{FileError, FILE_REMOTE_MISSING};
+use crate::error::{FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING};
 use crate::profile::{looks_like_loopback, RemoteProfile};
-use crate::remote::{remote_block_on, remote_enter, AuthSecret, RemoteEntry};
+use crate::remote::{remote_block_on, remote_enter, remote_error_message, AuthSecret, RemoteEntry};
 
-/// 请求硬超时：WebDAV 无断点语义（续传归 T-B6-4 的 HTTPS 腿），宁可失败重发
+/// 请求硬超时（整请求口径）。T-B6-11 起本腿也有断点语义：读腿 GET/Range 真
+/// 验身走 [`super::stream_get`]，写腿 spool+PUT 见 [`WebDavPutWriter`]。
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
@@ -454,6 +456,190 @@ impl WebDavDriver {
             200 | 201 | 204 => Ok(()),
             _ => Err(webdav_status_err(status, to)),
         }
+    }
+
+    // ---- T-B6-11 字节腿（队列远端执行器的消费面）----
+
+    /// 真流式读腿：与 HTTPS 腿共用 [`super::stream_get`]（auth 头装配是本腿
+    /// 唯一差异）；`offset>0` 必须真收到 206，错位字节绝不进流。
+    pub(crate) fn get_stream(
+        &self,
+        remote_path: &str,
+        offset: u64,
+    ) -> Result<Box<dyn std::io::Read + Send>, FileError> {
+        let url = self.url_for(remote_path);
+        let mut req = self.client.get(&url);
+        if let Some(a) = self.auth_header() {
+            req = req.header("Authorization", a.as_str());
+        }
+        super::stream_get(req, &url, offset)
+    }
+
+    /// 写腿（spool + 一次性 PUT）：reqwest 的 stream feature 是批次红线不扩
+    /// ⇒ 上传先攒 spool、提交时整体送，并带**单件字节限额**——超限 Err 点名
+    /// 而不在大文件上赌内存（限额是登记的偏差，09 §6.2 T-B6-11 落地补记）。
+    pub(crate) fn put_writer(&self, remote_path: &str) -> Result<Box<dyn WriteCommit>, FileError> {
+        let url = self.url_for(remote_path);
+        Ok(Box::new(WebDavPutWriter {
+            spool: super::Spool::create("webdav-put")?,
+            remote: remote_path.to_owned(),
+            url,
+            client: self.client.clone(),
+            auth: self.auth_header(),
+        }))
+    }
+}
+
+/// PUT 提交上限（spool 落盘也要读进内存才能整体送——超限连 spool 都不收）
+pub(crate) const WEBDAV_PUT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+struct WebDavPutWriter {
+    spool: super::Spool,
+    remote: String,
+    url: String,
+    client: reqwest::Client,
+    auth: Option<Zeroizing<String>>,
+}
+
+impl std::io::Write for WebDavPutWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(self.spool.file_mut(), buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(self.spool.file_mut())
+    }
+}
+
+impl WriteCommit for WebDavPutWriter {
+    fn finish(mut self: Box<Self>) -> Result<(), host_core::error::AppError> {
+        let len = self.spool.disk_len()?;
+        if len > WEBDAV_PUT_MAX_BYTES {
+            return Err(host_core::error::AppError::from(FileError::Remote {
+                code: FILE_REMOTE_FIELD,
+                msg: format!(
+                    "WebDAV 上传单件上限 {WEBDAV_PUT_MAX_BYTES} 字节（PUT 为整体提交腿，spool 超限即拒；本件 {len}）",
+                ),
+            }));
+        }
+        let path = self.spool.publish()?;
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return Err(FileError::Io(e).into()),
+        };
+        let remote = self.remote.clone();
+        let e = put_submit(&self.client, &self.url, &remote, self.auth.as_ref(), bytes);
+        // 失败与成功都清 spool（临时文件不留残）
+        let _ = std::fs::remove_file(&path);
+        e
+    }
+}
+
+/// PUT 提交（auth 头在此进请求——口令只进请求，url 与消息面零凭据位）
+fn put_submit(
+    client: &reqwest::Client,
+    url: &str,
+    remote: &str,
+    auth: Option<&Zeroizing<String>>,
+    bytes: Vec<u8>,
+) -> Result<(), host_core::error::AppError> {
+    let url = url.to_owned();
+    let client = client.clone();
+    let auth = auth.map(|a| Zeroizing::new(a.to_string()));
+    let result: Result<u16, FileError> = super::remote_block_on(async move {
+        let mut req = client.put(&url).timeout(REQUEST_TIMEOUT).body(bytes);
+        if let Some(a) = &auth {
+            req = req.header("Authorization", a.as_str());
+        }
+        let resp = req.send().await.map_err(|e| FileError::Remote {
+            code: FILE_REMOTE_MISSING,
+            msg: super::remote_error_message(&format!("WebDAV PUT 请求失败（{url}）: {e}")),
+        })?;
+        Ok(resp.status().as_u16())
+    });
+    match result {
+        Ok(200 | 201 | 204) => Ok(()),
+        Ok(status) => Err(webdav_status_err(status, remote).into()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 截图桥最小装配（09 §6.2 T-B6-12）：screenshot-core 与 file-core 互不依赖
+// （DESIGN O1），src-tauri 宿主桥闭包消费下面这一对——装配是纯函数（可单测），
+// 提交是一条 async 腿。截图侧对 WebDAV 协议零知识；凭据由调用方逐次传入，
+// 与本文件 auth_header() 的"只进请求不进字段"同谱。
+// ---------------------------------------------------------------------------
+
+/// PUT 装配结果（URL + 请求头形状；body 由提交腿携带，不经过此处——
+/// 字节不落进任何可 Debug 的装配体）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebDavPutAssembly {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// 唯一装配口：endpoint_base（绝对地址，可带目录段）+ 单层文件名 →
+/// 逐段重编码的目标 URL；`Overwrite: F`（同名不默默覆盖——截图撞名是用户的
+/// 资产互踩，409/412 在提交腿点名）。auth_header 逐次传入（None/空 = 匿名 PUT）。
+pub fn assemble_put(
+    endpoint_base: &str,
+    filename: &str,
+    auth_header: Option<&str>,
+) -> Result<WebDavPutAssembly, String> {
+    if filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.chars().any(|c| c.is_control())
+    {
+        return Err("WebDAV 上传文件名非法（含路径分隔或控制字符）".to_owned());
+    }
+    let scheme_end = endpoint_base
+        .find("://")
+        .ok_or_else(|| "WebDAV 上传端点不是绝对地址（缺 scheme://）".to_owned())?;
+    let after = &endpoint_base[scheme_end + 3..];
+    let path_start = after.find('/').unwrap_or(after.len());
+    let (origin, base_path) = endpoint_base.split_at(scheme_end + 3 + path_start);
+    if base_path.chars().any(|c| c.is_control()) {
+        return Err("WebDAV 上传端点含控制字符".to_owned());
+    }
+    let url = format!("{origin}{}", join_remote_url(base_path, filename));
+    let mut headers = vec![("Overwrite".to_owned(), "F".to_owned())];
+    if let Some(h) = auth_header.map(str::trim).filter(|s| !s.is_empty()) {
+        if h.chars().any(|c| c == '\r' || c == '\n') {
+            return Err("凭据含 CRLF（请求头注入面），本次 PUT 拒发".to_owned());
+        }
+        headers.push(("Authorization".to_owned(), h.to_owned()));
+    }
+    Ok(WebDavPutAssembly { url, headers })
+}
+
+/// 提交腿：PUT 整字节。合规闸（TLS/本机裁决）**不在这里**——权威口是
+/// screenshot-core 的 `validate_upload_endpoint`（桥闭包先裁后到），本处不建
+/// 第二张 TLS 闸（09 §6.2 T-B6-12 落地补记）。
+pub async fn send_put(assembled: &WebDavPutAssembly, bytes: Vec<u8>) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("NexusForge")
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| remote_error_message(&format!("WebDAV 客户端构建失败: {e}")))?;
+    let mut req = client.put(&assembled.url).body(bytes);
+    for (k, v) in &assembled.headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| remote_error_message(&format!("WebDAV PUT 失败（{}）: {e}", assembled.url)))?;
+    let status = resp.status().as_u16();
+    match status {
+        200 | 201 | 204 => Ok(()),
+        409 | 412 => Err(format!(
+            "远端同名已存在，已按 Overwrite: F 拒覆盖（HTTP {status}）：请改端点目录或先清理"
+        )),
+        s => Err(remote_error_message(&format!(
+            "WebDAV PUT 对端返回 {s}（{}）",
+            assembled.url
+        ))),
     }
 }
 

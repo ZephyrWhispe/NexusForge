@@ -13,21 +13,23 @@ import {
   tokens,
 } from "@fluentui/react-components";
 import {
+  fileEnqueue,
   fileRemoteBrowse,
   fileRemoteDrivers,
   parseAppError,
   type RemoteDriverDto,
   type RemoteEntryDto,
 } from "../../ipc/client";
-import { reportError } from "../../stores/notifications";
+import { notify, reportError } from "../../stores/notifications";
 import EmptyState from "../../components/EmptyState";
 import InlineError from "../../components/InlineError";
 
 /**
- * 远端浏览（T-B6-10，承重⑮⑯）：驱动行与根目录**只**出自 file_remote_drivers
- * 的 roots——本地盘符表（fileDrivers）是另一张脸，混表即把"未连接的远端"
- * 假称在场。本面只读：跨边界传输入队尚未接线（队列远端执行器归 T-B6-11），
- * 这里不摆"下载"假钮。
+ * 远端浏览与传输投递（T-B6-10 立浏览面，T-B6-11 接传输臂）：驱动行与根目录
+ * **只**出自 file_remote_drivers 的 roots——本地盘符表（fileDrivers）是另一张
+ * 脸，混表即把"未连接的远端"假称在场。队列远端执行器已接线（09 §6.2 T-B6-11），
+ * 这里的"下载/上传"是把 OpEndpoint 投进 fileEnqueue 的真钮：只入队不搬运，
+ * 进度与断点归『传输队列』档——本面板不自建第二套传输事实源。
  */
 
 const useStyles = makeStyles({
@@ -59,6 +61,63 @@ export default function RemoteBrowser() {
   const [entries, setEntries] = useState<RemoteEntryDto[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 传输投递的两侧路径输入：无事实源即拒——不猜 Downloads、不猜默认文件名
+  const [dlDst, setDlDst] = useState("");
+  const [ulSrc, setUlSrc] = useState("");
+
+  const enqueueTransfer = async (spec: Parameters<typeof fileEnqueue>[0], what: string) => {
+    try {
+      const res = await fileEnqueue(spec);
+      if (res.op_id) {
+        notify("success", `${what}已入队`, "进度与断点见『传输队列』档");
+      } else {
+        setError(`未入队${what}：目标有未决议的同名冲突（${res.conflicts.length} 条），先在传输面板决议`);
+      }
+    } catch (e) {
+      const ae = parseAppError(e);
+      if (ae) setError(`${ae.data.code}: ${ae.data.message}`);
+      else {
+        reportError(e, { context: "远端传输入队异常" });
+        setError("传输入队失败（非典形错误，已上报宿主日志）");
+      }
+    }
+  };
+
+  const download = (e: RemoteEntryDto) => {
+    const dst = dlDst.trim();
+    if (!dst) {
+      setError("请先填写本地落点目录（不代猜下载目录——无事实源就不承诺）");
+      return;
+    }
+    void enqueueTransfer(
+      {
+        kind: "copy",
+        srcs: [{ driver_id: driver?.driver_id ?? "", path: e.path }],
+        dst: `${dst.replace(/[\\/]$/, "")}\\${e.name}`,
+        policy: "ask",
+      },
+      "下载",
+    );
+  };
+
+  const upload = () => {
+    const src = ulSrc.trim();
+    if (!src) {
+      setError("请先填写本地文件或目录路径（上传不代选源）");
+      return;
+    }
+    const name = src.split(/[\\/]/).filter(Boolean).pop() ?? "";
+    const base = path.endsWith("/") ? path.slice(0, -1) : path;
+    void enqueueTransfer(
+      {
+        kind: "copy",
+        srcs: [src],
+        dst: { driver_id: driver?.driver_id ?? "", path: `${base}/${name}` },
+        policy: "ask",
+      },
+      "上传",
+    );
+  };
 
   const refreshDrivers = useCallback(async () => {
     try {
@@ -164,6 +223,28 @@ export default function RemoteBrowser() {
         </Button>
         {driver && <Badge appearance="outline">凭据来源 {driver.auth_source}</Badge>}
       </div>
+      <div className={styles.toolbar}>
+        {/* 传输投递（T-B6-11）：只入队，进度/断点归『传输队列』档——本行不建第二套事实源 */}
+        <Input
+          size="small"
+          aria-label="本地落点目录"
+          placeholder="下载落点：本地目录路径"
+          value={dlDst}
+          onChange={(_, d) => setDlDst(d.value)}
+          style={{ maxWidth: "220px" }}
+        />
+        <Input
+          size="small"
+          aria-label="本地上传源"
+          placeholder="上传源：本地文件或目录路径"
+          value={ulSrc}
+          onChange={(_, d) => setUlSrc(d.value)}
+          style={{ maxWidth: "220px" }}
+        />
+        <Button size="small" disabled={!driver || !ulSrc.trim()} onClick={() => upload()}>
+          上传到此目录
+        </Button>
+      </div>
       {loading && (
         <div className={styles.toolbar} role="status">
           <Text className={styles.muted}>远端目录加载中…</Text>
@@ -189,6 +270,13 @@ export default function RemoteBrowser() {
                   </TableCell>
                   <TableCell>
                     <Text className={styles.muted}>{e.is_dir ? "目录" : fmtSize(e.size)}</Text>
+                  </TableCell>
+                  <TableCell>
+                    {/* 目录下载随远端目录树的队列展开臂在场（fileEnqueue 接受目录源，
+                        执行器走 walk_remote）；钮对目录同样给——语义由后端裁决非本面猜 */}
+                    <Button size="small" appearance="subtle" onClick={() => download(e)}>
+                      下载
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}

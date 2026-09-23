@@ -38,10 +38,15 @@ import {
   fileRenameEntry,
   fileRenamePlan,
   fileSearch,
+  fileRemoteDrivers,
+  fileRemotePresets,
+  fileRemoteProfiles,
   xferStatus,
   parseAppError,
+  endpointText,
   type ConflictItemDto,
   type ConflictPolicyDto,
+  type FileEndpointDto,
   type FileEntryDto,
   type FileOpKind,
   type OpProgressDto,
@@ -54,6 +59,7 @@ import {
 import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import { isFileSubPanel, useSession } from "../../stores/session";
+import { parse_magic_target } from "./magicTarget";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 import DeferredBadge from "../../components/DeferredBadge";
@@ -246,7 +252,7 @@ export default function FilePanel() {
   // 冲突挂起的操作：srcs 一并暂存，避免决议时读到已变动的当前选中集（确认框按此计数）
   const [pendingSpec, setPendingSpec] = useState<{
     kind: FileOpKind;
-    dst: string;
+    dst: FileEndpointDto;
     srcs: string[];
   } | null>(null);
   const [ops, setOps] = useState<OpProgressDto[]>([]);
@@ -450,6 +456,59 @@ export default function FilePanel() {
     }
   };
 
+  // 魔术栏消费点（magicTarget.ts 的 T-B6-10 交付形状由本行接线）：drive 与
+  // remote 的解析分派只走 parse_magic_target 一处；"认不出的输入当本地路径
+  // 放行"没有算式——null 就是点名不识别，绝不"当远端主机名试试"。
+  const resolveMagicDst = async (
+    text: string,
+  ): Promise<{ ok: true; dst: FileEndpointDto } | { ok: false }> => {
+    let presets: Awaited<ReturnType<typeof fileRemotePresets>> = [];
+    try {
+      presets = await fileRemotePresets();
+    } catch {
+      // 预设不可达按无预设处理：drive/盘符形态不受牵连（正对照在既有用例里）
+    }
+    const t = parse_magic_target(text, presets);
+    if (!t) {
+      setError(
+        "无法识别为路径或连接地址（认盘符/UNC/目录路径，或 协议://主机/路径、预设主机直呼）",
+      );
+      return { ok: false };
+    }
+    if (t.kind === "drive") return { ok: true, dst: text };
+    const m = /^([a-z_+]+):\/\/([^/]+)(\/.*)?$/.exec(t.value);
+    if (!m) {
+      setError("无法识别为路径或连接地址");
+      return { ok: false };
+    }
+    const [, proto, host, rest] = m;
+    try {
+      const profiles = await fileRemoteProfiles();
+      const cands = profiles.filter((p) => p.protocol === proto && p.host === host);
+      if (cands.length === 0) {
+        setError(`站点 ${host}（${proto}）没有建档的连接档案：先在「远程连接」新建`);
+        return { ok: false };
+      }
+      if (cands.length > 1) {
+        setError(
+          `站点 ${host} 命中 ${cands.length} 枚连接档案（${cands
+            .map((p) => p.label)
+            .join("、")}）：请在连接列表里操作，魔术栏不替你选`,
+        );
+        return { ok: false };
+      }
+      const drivers = await fileRemoteDrivers();
+      if (!drivers.some((d) => d.driver_id === cands[0].id)) {
+        setError(`站点 ${host} 的档案「${cands[0].label}」未连接：请先连接（不代你自动重连）`);
+        return { ok: false };
+      }
+      return { ok: true, dst: { driver_id: cands[0].id, path: rest ?? "/" } };
+    } catch (e) {
+      applyError(e, "魔术栏目标解析失败");
+      return { ok: false };
+    }
+  };
+
   const enqueue = async (
     kind: FileOpKind,
     dst = "",
@@ -479,8 +538,14 @@ export default function FilePanel() {
       )
         return;
     }
-    // copy/move 的目标即用户输入；delete/compress/extract 由调用方算好经 dst 传入
-    const target = kind === "copy" || kind === "move" ? dstInput.trim() : dst;
+    // copy/move 的目标即用户输入（T-B6-11 起经魔术栏分派，可为远端端点）；
+    // delete/compress/extract 由调用方算好经 dst 传入
+    let target: FileEndpointDto = dst;
+    if (kind === "copy" || kind === "move") {
+      const r = await resolveMagicDst(dstInput.trim());
+      if (!r.ok) return;
+      target = r.dst;
+    }
     try {
       const res = await fileEnqueue({
         kind,
@@ -513,7 +578,7 @@ export default function FilePanel() {
           title: "覆盖同名文件",
           impact: [
             `将覆盖 ${items.length} 个已存在的目标文件`,
-            `目标目录：${spec.dst}`,
+            `目标目录：${endpointText(spec.dst)}`,
             `被覆盖：${namePreview(items.map((c) => c.dst))}`,
           ],
           detail: "覆盖为原地重写，被覆盖的原件不进回收站且无法找回；需保留两侧请改选「重命名保留两者」。",
@@ -770,9 +835,9 @@ export default function FilePanel() {
             <div key={p.op_id} className={styles.opRow}>
               <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
               <Text size={200} className={styles.muted}>
-                {p.srcs[0]?.split(/[\\/]/).pop() ?? "（无源）"}
+                {p.srcs[0] ? endpointText(p.srcs[0]).split(/[\\/]/).pop() : "（无源）"}
                 {p.srcs.length > 1 ? ` 等 ${p.srcs.length} 项` : ""}
-                {` → ${p.dst} · 断点文件 ${p.file_index} · ${fmtTime(p.created_ms)}`}
+                {` → ${endpointText(p.dst)} · 断点文件 ${p.file_index} · ${fmtTime(p.created_ms)}`}
               </Text>
               <span style={{ flex: 1 }} />
               <Button size="small" onClick={() => void dropPending(p)}>
@@ -984,7 +1049,7 @@ export default function FilePanel() {
       {conflicts && (
         <div className={styles.conflictBox}>
           <Text weight="semibold" size={300}>
-            {conflicts.length} 个同名冲突（目标：{pendingSpec?.dst}）
+            {conflicts.length} 个同名冲突（目标：{pendingSpec ? endpointText(pendingSpec.dst) : ""}）
           </Text>
           {conflicts.slice(0, 5).map((c) => (
             <Text key={c.dst} size={200} className={styles.muted}>

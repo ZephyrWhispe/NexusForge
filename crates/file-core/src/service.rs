@@ -197,9 +197,16 @@ impl FileService {
         }
         let config = Arc::new(parking_lot::RwLock::new(FileConfig::default()));
         queue.set_max_concurrent(config.read().max_concurrent);
+        // T-B6-11 远端执行臂装配：注册表与配置真源同一 Arc 注入队列——
+        // 队列不另造第二张驱动表、第二份限速事实源
+        let drivers = Arc::new(DriverRegistry::new());
+        queue.set_remote_legs(Arc::new(crate::ops::RemoteLegs {
+            drivers: drivers.clone(),
+            config: config.clone(),
+        }));
         Ok(Self {
             queue,
-            drivers: Arc::new(DriverRegistry::new()),
+            drivers,
             ports,
             profiles: ProfileStore::open(&app_data_dir.join("profiles"))?,
             connections: parking_lot::RwLock::new(HashMap::new()),
@@ -240,7 +247,19 @@ impl FileService {
         sort: SortKey,
         asc: bool,
     ) -> Result<Vec<FileEntry>, FileError> {
-        browse::list_dir(path, sort, asc)
+        // T-B6-11 浏览链收口（§6.1①"浏览绕过注册表"的收口证据）：驱动解析
+        // 只走注册表 read_of 唯一分派口（缺省 local 臂 ⇒ 既有 file_list 调用
+        // 零扰动）；AppError 经 error.rs 码表回程还原 typed 变体，改前改后
+        // 返回逐字相等（listDir_nowGoesThroughRegistry_localBehaviourIdentical）。
+        // 排序经 browse::sort_entries 唯一比较器——与直调 browse::list_dir 同款
+        // 稳定序，同名次项先经名称序（tie 次序从 read_dir 序变名称序，登记补记）。
+        let driver = self
+            .drivers
+            .read_of(None)
+            .ok_or_else(|| FileError::BadState("local 驱动不在注册表（协议内部矛盾）".into()))?;
+        let mut entries = driver.list(path)?;
+        browse::sort_entries(&mut entries, sort, asc);
+        Ok(entries)
     }
 
     pub fn breadcrumbs(&self, path: &Path) -> Vec<(String, PathBuf)> {
@@ -1045,6 +1064,78 @@ mod tests {
         );
         let op_id = op.unwrap();
         let _ = svc.op_cancel(&op_id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- T-B6-11 浏览链统一与驱动表（09 §6.2 字面测名）----
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn listDir_nowGoesThroughRegistry_localBehaviourIdentical() {
+        // 承重① 收口证据：同一夹具，走注册表（read_of→LocalDriver.list→
+        // sort_entries）与直调 browse::list_dir 的返回**逐字相等**——
+        // 判据不是"变好"而是"没变坏"（尺寸互异防稳定序 tie 掩盖差异）
+        let (svc, root) = svc_fixture("regbrowse");
+        let d = root.join("tree");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(d.join("a.txt"), b"123").unwrap(); // 3B
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(d.join("b.log"), b"45678").unwrap(); // 5B
+                                                            // （mtime 逐一拉开：Modified 序无 tie，稳定序差异不致假红）
+        for (sort, asc) in [
+            (crate::browse::SortKey::Name, true),
+            (crate::browse::SortKey::Name, false),
+            (crate::browse::SortKey::Size, true),
+            (crate::browse::SortKey::Size, false),
+            (crate::browse::SortKey::Modified, true),
+        ] {
+            let via_reg = serde_json::to_value(svc.list_dir(&d, sort, asc).unwrap()).unwrap();
+            let direct =
+                serde_json::to_value(crate::browse::list_dir(&d, sort, asc).unwrap()).unwrap();
+            assert_eq!(
+                via_reg, direct,
+                "浏览链统一后 file_list 输出必须逐字相等（{:?} asc={asc}）",
+                sort
+            );
+        }
+        // 错误形状同样回程不塌：目录缺失仍是 NotFound（FILE_BROWSE_001 码与消息本体）
+        let missing = d.join("nope");
+        let e_reg = svc
+            .list_dir(&missing, crate::browse::SortKey::Name, true)
+            .unwrap_err();
+        let e_direct =
+            crate::browse::list_dir(&missing, crate::browse::SortKey::Name, true).unwrap_err();
+        assert!(matches!(e_reg, crate::error::FileError::NotFound(_)));
+        assert_eq!(e_reg.code(), e_direct.code());
+        assert_eq!(e_reg.to_string(), e_direct.to_string());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn fileDrivers_exposesIdAndRoots() {
+        // 承重②：驱动表就是"谁在服务浏览"的事实源——id 与 roots 在场且形状
+        // 稳定；连接远端后远端驱动同表可寻址（消费端 T-B6-10 已接线）
+        let (svc, root) = svc_fixture("drvtable");
+        let drivers = svc.drivers();
+        assert_eq!(drivers.len(), 1, "首启只有 local");
+        assert_eq!(drivers[0].id, "local");
+        assert!(!drivers[0].roots.is_empty(), "本地盘符 roots 必须在场");
+        svc.profiles()
+            .save(remote_sample(
+                "remote:dav1",
+                crate::profile::RemoteProtocol::WebDav,
+            ))
+            .unwrap();
+        svc.connect("remote:dav1", None, false).unwrap();
+        let drivers = svc.drivers();
+        assert_eq!(drivers.len(), 2);
+        let remote = drivers
+            .iter()
+            .find(|d| d.id == "remote:dav1")
+            .expect("动态键入表");
+        assert!(!remote.roots.is_empty(), "远端驱动同样暴露 roots");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -321,14 +321,18 @@ struct Job {
     ctl: Arc<OpControl>,
     store_dir: PathBuf,
     recycle: Option<Arc<dyn RecycleBinPort>>,
+    /// T-B6-11：远端执行臂句柄（None ⇒ 远端方向诚实报错点名"注册表未装配"，
+    /// 禁假就绪；[`crate::service::FileService::open`] 建队即注入）
+    legs: Option<Arc<RemoteLegs>>,
 }
 
 /// 本地端点唯一取形口（承重①(b)：非本地绝不静默当 PathBuf 用）。
-/// worker 侧方向拒绝在前，这里 Err 属 fail-closed 兜底而非业务分支。
+/// worker 侧方向分派在前（远端臂见 [`run_remote_transfer`]），
+/// 这里 Err 属 fail-closed 兜底而非业务分支。
 fn expect_local(e: &OpEndpoint) -> Result<PathBuf, Flow> {
     e.as_local().cloned().ok_or_else(|| {
         Flow::msg(format!(
-            "远端端点 {} 的执行器自 T-B6-3 起接线，本臂只认本地路径",
+            "远端端点 {} 走远端执行臂（T-B6-11），本臂只认本地路径",
             e.display()
         ))
     })
@@ -397,6 +401,8 @@ pub struct OpQueue {
     store_dir: PathBuf,
     cb: ProgressFn,
     recycle: Option<Arc<dyn RecycleBinPort>>,
+    /// T-B6-11：远端腿（驱动注册表 + 配置真源的共享句柄），随 Job 逐件下发
+    legs: Option<Arc<RemoteLegs>>,
     admit: Arc<AdmitGate>,
     _workers: Vec<std::thread::JoinHandle<()>>,
 }
@@ -439,9 +445,16 @@ impl OpQueue {
             store_dir,
             cb,
             recycle: None,
+            legs: None,
             admit,
             _workers: handles,
         })
+    }
+
+    /// 远端执行臂装配（T-B6-11）：注册表与配置真源的 Arc 由服务层注入——
+    /// 队列不另造第二张驱动表、第二份限速事实源（单一事实源纪律）
+    pub(crate) fn set_remote_legs(&mut self, legs: Arc<RemoteLegs>) {
+        self.legs = Some(legs);
     }
 
     /// 配置真源 `max_concurrent` 的落点：夹到 `1..=内置 worker 数`
@@ -531,6 +544,7 @@ impl OpQueue {
                 ctl,
                 store_dir: self.store_dir.clone(),
                 recycle: self.recycle.clone(),
+                legs: self.legs.clone(),
             })
             .map_err(|_| FileError::BadState("操作队列已关闭".into()))?;
         Ok(op_id)
@@ -740,6 +754,7 @@ fn run_job(job: Job, cb: &ProgressFn) {
         ctl,
         store_dir,
         recycle,
+        legs,
     } = job;
     let kind = spec.kind;
     let mut rep = Reporter {
@@ -761,12 +776,23 @@ fn run_job(job: Job, cb: &ProgressFn) {
     };
     rep.set_state(OpState::Running);
 
-    // 远端方向诚实拒绝（协议腿 T-B6-3/4/5/6 已立；队列执行器接线随驱动
-    // 抽象泛化一并归 T-B6-11——本行只交付状态类型化与断点真值，执行不假绿）：
+    // T-B6-11 队列远端执行臂：方向非 Local 时按 kind 分派到远端实现，
+    // 消费面 = trait 流式腿（read_stream/write_stream）+ 既有泵 copy_pumped
+    // （泵本体零协议知识，禁第二份泵）。`legs` 缺席（手工组队的单测形态）时
+    // 仍走诚实报错臂——真值执行必须有真驱动注册表当事实源。
     let result = if direction != TransferDirection::Local {
-        Flow::msg(format!(
-            "远端传输（方向={direction:?}）的队列执行器接线归 09 §6.2 T-B6-11：协议腿已立于 T-B6-3..6，本操作未执行，禁假就绪"
-        ))
+        match (legs.as_ref(), spec.kind) {
+            (None, _) => Flow::msg(format!(
+                "远端传输（方向={direction:?}）需驱动注册表装配（FileService::open 注入）：本操作未执行，禁假就绪"
+            )),
+            (Some(l), OpKind::Copy | OpKind::Move) => {
+                run_remote_transfer(&spec, direction, checkpoint, &ctl, &mut rep, &store_dir, l)
+            }
+            (Some(l), OpKind::Delete) => run_remote_delete(&spec, &ctl, &mut rep, l),
+            (Some(_), k) => Flow::msg(format!(
+                "{k:?} 不支持远端端点（压缩/解压是本地臂的动词，拒绝而非半做）"
+            )),
+        }
     } else {
         match spec.kind {
             OpKind::Copy | OpKind::Move => {
@@ -1226,6 +1252,742 @@ fn run_delete(
         };
         if let Err(e) = r {
             return Flow::io(e);
+        }
+        rep.cur.files_done += 1;
+        rep.emit();
+    }
+    Flow::Done
+}
+
+// ---------------------------------------------------------------------------
+// T-B6-11 远端执行臂（队列远端执行器接线 + resumable 真值供给 + upload_kbps 执行体）
+//
+// 纪律一览：
+// - 泵复用 [`copy_pumped`]（零协议知识，禁第二份泵）；远端端经 trait 流式腿
+//   （read_stream/write_stream）进泵——无字节腿的驱动撞默认臂
+//   Err(FILE_OPS_005) 点名，本臂不开例外；
+// - 限速单点在泵适配器（Throttled*），预算起传时现读配置真源
+//   download_kbps/upload_kbps，与 throttle_share_kbps 同一摊分算式（禁两处各限）；
+// - resumable **对端声明才承诺**（T-B6-9 裁决：真值供给落在本行）：
+//   断点重取成功 ⇒ 写 capabilities().resume；对端拒 Range ⇒ 整取重启并写 Whole；
+//   全新传输与上传臂恒 None（无事实源即 null，禁给上传编"可续传"）；
+// - 写腿完成裁决走 WriteCommit::finish（STOR 的 226 / PUT 响应码 / Upload 回执）
+//   ——泵完字节 ≠ 传成；
+// - spool 腿协议（SFTP/FTP，见 remote/mod.rs）的暂停粒度是文件级（协议腿
+//   粒度是文件，09 §6.2 本行落地补记登记）；HTTP 族腿真流式、文件内断点。
+// ---------------------------------------------------------------------------
+
+/// 远端臂装配句柄（服务层注入：注册表与配置与 [`crate::service::FileService`]
+/// 共享同一 Arc——不存在第二张驱动表、第二份限速事实源）
+pub(crate) struct RemoteLegs {
+    pub drivers: Arc<crate::driver::DriverRegistry>,
+    pub config: Arc<parking_lot::RwLock<crate::module::FileConfig>>,
+}
+
+/// 解析后的端点腿（解析只发生在展开处一次，禁第二算式）
+enum Leg {
+    Local(PathBuf),
+    Remote(Arc<dyn host_core::storage::StorageDriver>, String),
+}
+
+/// 远端臂的扁平传输项（与本地臂 CopyItem 共享 checkpoint 编号语义）
+struct XferItem {
+    src: Leg,
+    dst: Leg,
+    /// 0 = 总大小无事实源（无浏览面驱动的整件下载）——bytes_total 诚实缺位，不编数
+    size: u64,
+}
+
+/// 跨系统边界的 Move 唯一裁决形（"假移动"红线的锚，crossDriverMove 测落点）：
+/// 端点类型不同侧即永不触碰任何 rename 动词——事实形态是复制+删除，
+/// 面板与错误面文案必须说"复制+删除"，不得写"移动"。
+pub fn plan_move_form(src: &OpEndpoint, dst: &OpEndpoint) -> &'static str {
+    let same_side = match (src, dst) {
+        (OpEndpoint::Local(_), OpEndpoint::Local(_)) => true,
+        (OpEndpoint::Remote { driver_id: a, .. }, OpEndpoint::Remote { driver_id: b, .. }) => {
+            a == b
+        }
+        _ => false,
+    };
+    if same_side {
+        "rename（同驱动）"
+    } else {
+        "copy then delete（复制+删除，跨系统边界不走 rename）"
+    }
+}
+
+fn remote_side(e: &OpEndpoint) -> Option<(String, String)> {
+    match e {
+        OpEndpoint::Remote { driver_id, path } => Some((driver_id.clone(), path.clone())),
+        OpEndpoint::Local(_) => None,
+    }
+}
+
+fn resolve_driver(
+    legs: &RemoteLegs,
+    driver_id: &str,
+) -> Result<Arc<dyn host_core::storage::StorageDriver>, Flow> {
+    // read_of 是驱动解析唯一分派口；未连接 ⇒ 点名报错，不假造驱动
+    //（连接态是进程内事实：崩溃恢复后必须先重连，执行器不静默重连）
+    legs.drivers.read_of(Some(driver_id)).ok_or_else(|| {
+        Flow::msg(format!(
+            "远端驱动未连接: {driver_id}——重启/断线即失联，请先重连再续传（不回落假驱动）"
+        ))
+    })
+}
+
+fn remote_basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+fn join_remote(base: &str, rel: &str) -> String {
+    let b = base.trim_end_matches('/');
+    if rel.is_empty() {
+        b.to_owned()
+    } else {
+        format!("{b}/{rel}")
+    }
+}
+
+/// 远端目录树走查（仅 browse 能力驱动；对文件 list 撞 Err 返回空集，
+/// 由调用方落单文件腿——真错误在 read_stream 处露真容）。深度上限防环。
+fn walk_remote(
+    drv: &Arc<dyn host_core::storage::StorageDriver>,
+    path: &str,
+    rel: &str,
+    depth: usize,
+    out: &mut Vec<(String, String, u64)>,
+) -> Result<(), Flow> {
+    if depth > 64 {
+        return Err(Flow::msg(format!(
+            "远端目录深度超过 64——疑似环，停止走查: {path}"
+        )));
+    }
+    if let Ok(entries) = drv.list(Path::new(path)) {
+        for e in entries {
+            let child_path = join_remote(path, &e.name);
+            let child_rel = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            if e.is_dir {
+                walk_remote(drv, &child_path, &child_rel, depth + 1, out)?;
+            } else {
+                out.push((child_path, child_rel, e.size));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 远端存在性探针：列父目录找名字（唯一可信事实源是列表面；stat 无 trait 形状）
+fn remote_exists(drv: &dyn host_core::storage::StorageDriver, path: &str) -> bool {
+    let name = remote_basename(path);
+    let parent = match path.rfind('/') {
+        Some(0) | None => return false,
+        Some(i) => {
+            if i == 0 {
+                "/"
+            } else {
+                &path[..i]
+            }
+        }
+    };
+    match drv.list(Path::new(parent)) {
+        Ok(entries) => entries.iter().any(|e| e.name == name),
+        // 探针失败按"不在场"处理：Ask 臂最坏多写一次，不静默跳过任何决议
+        Err(_) => false,
+    }
+}
+
+/// 上传臂冲突闸（远端侧）：Ask 在场即 Err 点名（与本地执行臂同一承重⑩口径）；
+/// Rename 拒而不代行；Skip 跳过该件。
+fn remote_upload_gate(
+    drv: &Arc<dyn host_core::storage::StorageDriver>,
+    rpath: &str,
+    policy: ConflictPolicy,
+) -> Result<bool, Flow> {
+    let exists = remote_exists(drv.as_ref(), rpath);
+    match policy {
+        ConflictPolicy::Ask if exists => Err(Flow::msg(format!(
+            "Ask 冲突未经决议不得执行: 远端已存在 {rpath} ——须决议后重新入队（本操作未计入完成）"
+        ))),
+        ConflictPolicy::Rename if exists => Err(Flow::msg(format!(
+            "远端冲突 rename 未开面（09 §6.3 登记）: 远端已存在 {rpath} ——拒绝代改名也拒绝代覆盖，请决议后入队"
+        ))),
+        ConflictPolicy::Skip if exists => Ok(false),
+        _ => Ok(true),
+    }
+}
+
+/// 定位适配读腿：驱动契约已把流定位到 offset（HTTP 族 206 验身 / spool 内部
+/// seek），泵的 seek(Start(x)) 只认回指起点——"跳位重寻"在被定位流上是假算术。
+/// 限速闸同腿（唯一闸位，预算由执行器算好传入）。
+struct ThrottledPositionedRead {
+    inner: Box<dyn Read + Send>,
+    base: u64,
+    gate: Option<crate::remote::ThrottleGate>,
+}
+
+impl Read for ThrottledPositionedRead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            if let Some(g) = &mut self.gate {
+                let pause = g.allow(n as u64);
+                if !pause.is_zero() {
+                    std::thread::sleep(pause);
+                }
+            }
+        }
+        Ok(n)
+    }
+}
+
+impl Seek for ThrottledPositionedRead {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        match from {
+            SeekFrom::Start(x) if x == self.base => Ok(x),
+            other => Err(std::io::Error::other(format!(
+                "定位读腿只许 seek 回起点（base={}，请求 {other:?}）",
+                self.base
+            ))),
+        }
+    }
+}
+
+/// 写腿槽位：泵持适配器、执行器持槽——泵结束后从槽取回 WriteCommit 走
+/// finish（完成裁决唯一出口）。
+struct CommitSlot {
+    commit: Mutex<Option<Box<dyn host_core::storage::WriteCommit>>>,
+}
+
+struct ThrottledCommitWrite {
+    slot: Arc<CommitSlot>,
+    gate: Option<crate::remote::ThrottleGate>,
+}
+
+impl Write for ThrottledCommitWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = {
+            let mut guard = self.slot.commit.lock();
+            let w = guard
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("写腿已提交，不得再写字节"))?;
+            w.write(buf)?
+        };
+        if n > 0 {
+            if let Some(g) = &mut self.gate {
+                let pause = g.allow(n as u64);
+                if !pause.is_zero() {
+                    std::thread::sleep(pause);
+                }
+            }
+        }
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut guard = self.slot.commit.lock();
+        match guard.as_mut() {
+            Some(w) => w.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Seek for ThrottledCommitWrite {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        match from {
+            SeekFrom::Start(0) => Ok(0),
+            other => Err(std::io::Error::other(format!(
+                "上传腿无断点偏移（请求 {other:?}）——远端续写未开面，禁假装可续传"
+            ))),
+        }
+    }
+}
+
+/// 远端臂的扁平展开（方向唯一，混合端点在入队口已被 [`direction_of`] 拒）。
+/// 资源管理器语义与本地臂 expand_plan 逐项对齐：dst 在场为目录 ⇒ 源名重建，
+/// 否则 dst 即新目录名/目标文件本体。
+fn build_remote_items(
+    spec: &OpSpec,
+    direction: TransferDirection,
+    legs: &RemoteLegs,
+) -> Result<Vec<XferItem>, Flow> {
+    let mut items = Vec::new();
+    match direction {
+        TransferDirection::Download => {
+            let dst_local = expect_local(&spec.dst)?;
+            let dst_is_dir = dst_local.is_dir();
+            for src_ep in &spec.srcs {
+                let (driver_id, path) = remote_side(src_ep)
+                    .ok_or_else(|| Flow::msg("下载臂要求源端点全为远端（本地源走本地臂）"))?;
+                let drv = resolve_driver(legs, &driver_id)?;
+                let mut found: Vec<(String, String, u64)> = Vec::new();
+                if drv.capabilities().browse {
+                    walk_remote(&drv, &path, "", 0, &mut found)?;
+                }
+                if found.is_empty() {
+                    // 单文件腿（含无浏览面驱动：总大小无事实源 ⇒ 诚实 0）
+                    if !dst_is_dir && spec.srcs.len() > 1 {
+                        return Err(Flow::msg(
+                            "目标是文件而源含多枚文件：不得把多件塞进同一目标",
+                        ));
+                    }
+                    let target = if dst_is_dir {
+                        dst_local.join(remote_basename(&path))
+                    } else {
+                        dst_local.clone()
+                    };
+                    items.push(XferItem {
+                        src: Leg::Remote(drv, path),
+                        dst: Leg::Local(target),
+                        size: 0,
+                    });
+                } else {
+                    let prefix = if dst_is_dir {
+                        remote_basename(&path)
+                    } else {
+                        String::new()
+                    };
+                    for (rpath, rel, size) in found {
+                        let full_rel = if prefix.is_empty() {
+                            rel
+                        } else {
+                            format!("{prefix}/{rel}")
+                        };
+                        let target =
+                            dst_local.join(full_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                        items.push(XferItem {
+                            src: Leg::Remote(drv.clone(), rpath),
+                            dst: Leg::Local(target),
+                            size,
+                        });
+                    }
+                }
+            }
+        }
+        TransferDirection::Upload => {
+            let (driver_id, dpath) = remote_side(&spec.dst)
+                .ok_or_else(|| Flow::msg("上传臂要求目标端点为远端（本地目标走本地臂）"))?;
+            let drv = resolve_driver(legs, &driver_id)?;
+            // dst 形态探针：可列 ⇒ 目录（源名在其下重建）；不可列 ⇒ 内容直接
+            // 落进 dst 命名的新目录（与本地臂同款资源管理器语义）
+            let dst_is_dir = drv.list(Path::new(&dpath)).is_ok();
+            for src_ep in &spec.srcs {
+                let src = expect_local(src_ep)?;
+                let long = to_long_path(&src);
+                let name = src
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if long.is_dir() {
+                    let base = if dst_is_dir {
+                        long.parent().unwrap_or(Path::new("/")).to_path_buf()
+                    } else {
+                        long.clone()
+                    };
+                    for entry in walkdir::WalkDir::new(&long).follow_links(false) {
+                        let entry = entry.map_err(|e| Flow::msg(e.to_string()))?;
+                        if !entry.file_type().is_file() {
+                            continue;
+                        }
+                        let md = entry.metadata().map_err(|e| Flow::msg(e.to_string()))?;
+                        let rel = entry
+                            .path()
+                            .strip_prefix(&base)
+                            .map_err(|e| Flow::msg(e.to_string()))?;
+                        let rel_posix = rel.to_string_lossy().replace('\\', "/");
+                        items.push(XferItem {
+                            src: Leg::Local(entry.path().to_path_buf()),
+                            dst: Leg::Remote(drv.clone(), join_remote(&dpath, &rel_posix)),
+                            size: md.len(),
+                        });
+                    }
+                } else if long.is_file() {
+                    let target = if dst_is_dir {
+                        join_remote(&dpath, &name)
+                    } else {
+                        dpath.clone()
+                    };
+                    let size = std::fs::metadata(&long).map(|m| m.len()).unwrap_or(0);
+                    items.push(XferItem {
+                        src: Leg::Local(long),
+                        dst: Leg::Remote(drv.clone(), target),
+                        size,
+                    });
+                } else {
+                    return Err(Flow::msg(format!("源不存在: {}", src.display())));
+                }
+            }
+        }
+        TransferDirection::Local => {
+            return Err(Flow::msg("本地方向不进远端展开（分派口不变量）"));
+        }
+    }
+    if items.is_empty() {
+        return Err(Flow::msg(
+            "远端展开为空：源目录无文件或列表面无匹配——不为空传输谎称完成",
+        ));
+    }
+    Ok(items)
+}
+
+#[allow(clippy::too_many_arguments)] // 远端下载单件泵：与 copy_one 同形制（执行上下文天然多参）
+fn pump_download(
+    drv: &Arc<dyn host_core::storage::StorageDriver>,
+    rpath: &str,
+    dst: &Path,
+    have: u64,
+    size: u64,
+    ctl: &OpControl,
+    rep: &mut Reporter,
+    file_index: usize,
+    store_dir: &Path,
+    spec: &OpSpec,
+    cfg: &crate::module::FileConfig,
+) -> Flow {
+    let long_dst = to_long_path(dst);
+    if let Some(parent) = long_dst.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return Flow::io(e);
+        }
+    }
+    // 断点真值以盘上为唯一事实源（copy_one 同口径）：声称 ≠ 盘上即归零重取
+    let mut start = have;
+    if start > 0 {
+        match std::fs::metadata(&long_dst) {
+            Ok(m) if m.len() == start => {}
+            _ => start = 0,
+        }
+    }
+    let mut stream = match drv.read_stream(Path::new(rpath), start) {
+        Ok(s) => s,
+        Err(app) => {
+            let fe = FileError::from(app);
+            if start > 0 && fe.to_string().contains("未按 Range") {
+                // 对端声明不支持 Range ⇒ 从 0 整取重启——Whole 由这次拒答成为事实
+                rep.cur.resumable = Some(crate::remote::Resumable::Whole);
+                start = 0;
+                match drv.read_stream(Path::new(rpath), 0) {
+                    Ok(s) => s,
+                    Err(app2) => return Flow::msg(FileError::from(app2).to_string()),
+                }
+            } else {
+                return Flow::msg(fe.to_string());
+            }
+        }
+    };
+    let _ = &mut stream;
+    if start > 0 {
+        // 断点重取成功 = 对端按声明档位从 offset 供过字节（"对端声明才承诺"的
+        // 兑现点；T-B6-9 裁决：真值供给归本行，只供值零耦合）
+        rep.cur.resumable = Some(drv.capabilities().resume);
+    }
+    let budget = crate::remote::throttle_share_kbps(cfg.download_kbps, cfg.max_concurrent.max(1));
+    let reader: Box<dyn ReadSeek> = Box::new(ThrottledPositionedRead {
+        inner: stream,
+        base: start,
+        gate: (budget > 0).then(|| crate::remote::ThrottleGate::new(budget)),
+    });
+    let opened = if start > 0 {
+        OpenOptions::new().write(true).open(&long_dst)
+    } else {
+        File::create(&long_dst)
+    };
+    let writer: Box<dyn WriteSeek> = match opened {
+        Ok(f) => Box::new(f),
+        Err(e) => return Flow::io(e),
+    };
+    let mut pump = PumpPair { reader, writer };
+    let op_id_snap = rep.cur.op_id.clone();
+    let chain_snap = rep.cur.resumed_from.clone();
+    let mut persist = |written: u64| {
+        let _ = persist_pending(
+            store_dir,
+            &PendingOp {
+                op_id: op_id_snap.clone(),
+                kind: spec.kind,
+                srcs: spec.srcs.clone(),
+                dst: spec.dst.clone(),
+                policy: spec.policy,
+                recycle: spec.recycle,
+                file_index,
+                bytes_done: written,
+                created_ms: now_ms(),
+                resumed_from: chain_snap.clone(),
+            },
+        );
+    };
+    let dst_snap = long_dst.clone();
+    let mut on_cancel = || {
+        let _ = std::fs::remove_file(&dst_snap);
+    };
+    let mut hooks = PumpHooks {
+        persist: &mut persist,
+        on_cancel: &mut on_cancel,
+    };
+    let flow = copy_pumped(&mut pump, start, ctl, rep, &mut hooks);
+    drop(pump);
+    if !matches!(flow, Flow::Done) {
+        return flow;
+    }
+    if size > 0 {
+        // 尺寸终验（总大小无事实源的件跳验——不拿 0 谎称"验过"）
+        match std::fs::metadata(&long_dst) {
+            Ok(m) if m.len() == size => {}
+            Ok(m) => {
+                return Flow::msg(format!(
+                    "远端下载尺寸不符 src={size} dst={}: {}",
+                    m.len(),
+                    dst.display()
+                ))
+            }
+            Err(e) => return Flow::io(e),
+        }
+    }
+    Flow::Done
+}
+
+#[allow(clippy::too_many_arguments)] // 远端上传单件泵：同 copy_one 形制
+fn pump_upload(
+    src: &Path,
+    drv: &Arc<dyn host_core::storage::StorageDriver>,
+    rpath: &str,
+    ctl: &OpControl,
+    rep: &mut Reporter,
+    file_index: usize,
+    store_dir: &Path,
+    spec: &OpSpec,
+    cfg: &crate::module::FileConfig,
+) -> Flow {
+    let opened = File::open(src);
+    let reader: Box<dyn ReadSeek> = match opened {
+        Ok(f) => Box::new(f),
+        Err(e) => return Flow::io(e),
+    };
+    let commit = match drv.write_stream(Path::new(rpath)) {
+        Ok(c) => c,
+        Err(app) => return Flow::msg(FileError::from(app).to_string()),
+    };
+    let budget = crate::remote::throttle_share_kbps(cfg.upload_kbps, cfg.max_concurrent.max(1));
+    let slot = Arc::new(CommitSlot {
+        commit: Mutex::new(Some(commit)),
+    });
+    let writer: Box<dyn WriteSeek> = Box::new(ThrottledCommitWrite {
+        slot: slot.clone(),
+        gate: (budget > 0).then(|| crate::remote::ThrottleGate::new(budget)),
+    });
+    let mut pump = PumpPair { reader, writer };
+    let op_id_snap = rep.cur.op_id.clone();
+    let chain_snap = rep.cur.resumed_from.clone();
+    let mut persist = |written: u64| {
+        // 上传腿无断点：checkpoint 的 in-file 偏移恒记 0（续传即整件重传，
+        // 记谎偏移会让 resume 拿半截远端文件当真）
+        let _ = written;
+        let _ = persist_pending(
+            store_dir,
+            &PendingOp {
+                op_id: op_id_snap.clone(),
+                kind: spec.kind,
+                srcs: spec.srcs.clone(),
+                dst: spec.dst.clone(),
+                policy: spec.policy,
+                recycle: spec.recycle,
+                file_index,
+                bytes_done: 0,
+                created_ms: now_ms(),
+                resumed_from: chain_snap.clone(),
+            },
+        );
+    };
+    let mut on_cancel = || {
+        // 未提交的写腿在 drop 里退役：spool 系自动清料；STOR 臂的服务器端
+        // 半件按 FTP 协议归对端管理（09 §6.2 本行落地补记登记该边界）
+    };
+    let mut hooks = PumpHooks {
+        persist: &mut persist,
+        on_cancel: &mut on_cancel,
+    };
+    let flow = copy_pumped(&mut pump, 0, ctl, rep, &mut hooks);
+    drop(pump);
+    if !matches!(flow, Flow::Done) {
+        return flow;
+    }
+    let commit = slot.commit.lock().take();
+    match commit {
+        // 完成裁决唯一出口：泵完字节到这里才算"传成"
+        Some(c) => match c.finish() {
+            Ok(()) => Flow::Done,
+            Err(e) => Flow::msg(FileError::from(e).to_string()),
+        },
+        None => Flow::msg("写腿在提交前失踪（协议内部矛盾）"),
+    }
+}
+
+fn run_remote_transfer(
+    spec: &OpSpec,
+    direction: TransferDirection,
+    checkpoint: Option<Checkpoint>,
+    ctl: &OpControl,
+    rep: &mut Reporter,
+    store_dir: &Path,
+    legs: &Arc<RemoteLegs>,
+) -> Flow {
+    let cfg = legs.config.read().clone();
+    let items = match build_remote_items(spec, direction, legs) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    rep.cur.files_total = items.len() as u64;
+    rep.cur.bytes_total = items.iter().map(|i| i.size).sum();
+    let is_move = spec.kind == OpKind::Move;
+    if is_move && direction == TransferDirection::Download && items.len() > spec.srcs.len() {
+        // 树级"复制+删源树"未开面：多件展开的远端源必是目录源
+        return Flow::msg(
+            "远端 Move 只支持文件级源（树级复制+删除未开面——目录请改用 Copy，延后登记 09 §6.3）",
+        );
+    }
+    let start_index = checkpoint
+        .map(|c| c.file_index.min(items.len()))
+        .unwrap_or(0);
+    let before_start: u64 = items[..start_index].iter().map(|i| i.size).sum();
+    rep.cur.bytes_done = if direction == TransferDirection::Upload {
+        // 上传无断点事实：in-file 偏移恒 0，账只记整件完成的件
+        before_start
+    } else {
+        checkpoint
+            .map(|c| c.bytes_done)
+            .unwrap_or(0)
+            .max(before_start)
+    };
+
+    for (idx, item) in items.iter().enumerate() {
+        if idx < start_index {
+            rep.cur.files_done += 1;
+            continue;
+        }
+        match gate(ctl) {
+            Gate::Go => {}
+            g => return g.into(),
+        }
+        rep.cur.current = match &item.src {
+            Leg::Local(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            Leg::Remote(_, p) => remote_basename(p),
+        };
+        let flow = match (&item.src, &item.dst) {
+            (Leg::Remote(drv, rpath), Leg::Local(dst)) => {
+                let have = if idx == start_index {
+                    checkpoint.map(|c| c.bytes_done).unwrap_or(0)
+                } else {
+                    0
+                };
+                let have = if item.size > 0 {
+                    have.min(item.size)
+                } else {
+                    0
+                };
+                pump_download(
+                    drv, rpath, dst, have, item.size, ctl, rep, idx, store_dir, spec, &cfg,
+                )
+            }
+            (Leg::Local(src), Leg::Remote(drv, rpath)) => {
+                match remote_upload_gate(drv, rpath, spec.policy) {
+                    Ok(true) => pump_upload(src, drv, rpath, ctl, rep, idx, store_dir, spec, &cfg),
+                    Ok(false) => {
+                        rep.cur.files_done += 1; // Skip
+                        rep.cur.bytes_done += item.size;
+                        rep.emit();
+                        continue;
+                    }
+                    Err(f) => return f,
+                }
+            }
+            _ => {
+                return Flow::msg("远端展开产出非预期腿组合（协议内部矛盾）");
+            }
+        };
+        if !matches!(flow, Flow::Done) {
+            return flow;
+        }
+        rep.cur.files_done += 1;
+        if is_move {
+            match &item.src {
+                Leg::Local(p) => {
+                    if let Err(e) = std::fs::remove_file(to_long_path(p)) {
+                        return Flow::io(e);
+                    }
+                }
+                Leg::Remote(drv, p) => {
+                    if let Err(e) = drv.remove(Path::new(p), false) {
+                        return Flow::msg(format!(
+                            "{}——源删除失败（{p}）: {e}",
+                            plan_move_form(&spec.srcs[0], &spec.dst)
+                        ));
+                    }
+                }
+            }
+        }
+        rep.emit();
+    }
+    // Move（上传方向）：本地源目录收尾清空（与本地臂同款）
+    if is_move && direction == TransferDirection::Upload {
+        for src_ep in &spec.srcs {
+            let long = to_long_path(&local!(src_ep));
+            if long.is_dir() {
+                let _ = std::fs::remove_dir_all(&long);
+            }
+        }
+    }
+    Flow::Done
+}
+
+fn run_remote_delete(
+    spec: &OpSpec,
+    ctl: &OpControl,
+    rep: &mut Reporter,
+    legs: &Arc<RemoteLegs>,
+) -> Flow {
+    // 远端删除恒直删（回收站红线在入队闸与驱动臂两道已立，这里第三道不开）；
+    // 总字节无事实源 ⇒ bytes_total 诚实缺位（不拿列目录凑数）
+    rep.cur.files_total = spec.srcs.len() as u64;
+    for src_ep in &spec.srcs {
+        match gate(ctl) {
+            Gate::Go => {}
+            g => return g.into(),
+        }
+        match src_ep {
+            OpEndpoint::Remote { driver_id, path } => {
+                let drv = match resolve_driver(legs, driver_id) {
+                    Ok(d) => d,
+                    Err(f) => return f,
+                };
+                rep.cur.current = remote_basename(path);
+                if let Err(e) = drv.remove(Path::new(path), false) {
+                    return Flow::msg(FileError::from(e).to_string());
+                }
+            }
+            OpEndpoint::Local(p) => {
+                rep.cur.current = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let long = to_long_path(p);
+                let r = if long.is_dir() {
+                    std::fs::remove_dir_all(&long)
+                } else if long.is_file() {
+                    std::fs::remove_file(&long).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                if let Err(e) = r {
+                    return Flow::io(e);
+                }
+            }
         }
         rep.cur.files_done += 1;
         rep.emit();
@@ -2055,7 +2817,10 @@ mod tests {
         assert_ne!(new_op, op_id);
         // direction 由 direction_of 在入队口唯一派生：远端源 + 本地目标 ⇒ Download
         assert_eq!(direction_of_op(&q, &new_op), TransferDirection::Download);
-        // 诚实拒绝：远端腿 T-B6-3 起接线，worker 判 Failed 点名该行（不假称 Done）
+        // 诚实拒绝（判据随 T-B6-11 换锚）：远端执行臂的字节腿已接线，本队列
+        // 未装配注册表 ⇒ worker 判 Failed 点名"注册表装配"缺失（不假称 Done）。
+        // 原"T-B6-3 未执行"臂随本行成为历史；崩溃恢复后真拒绝语义不变——
+        // 先重连才有续传，注册表在场但驱动失联同样点名报错（resolve_driver）
         assert!(wait_until(
             || op_state(&q, &new_op) == OpState::Failed,
             Duration::from_secs(10)
@@ -2068,7 +2833,8 @@ mod tests {
             .error
             .clone()
             .unwrap();
-        assert!(err.contains("T-B6-3"), "{err}");
+        assert!(err.contains("注册表"), "{err}");
+        assert!(err.contains("未执行"), "{err}");
         assert!(q.pending().is_empty());
         q.close();
         let _ = std::fs::remove_dir_all(&store);
@@ -2705,5 +3471,504 @@ mod tests {
             "同键末值胜出（合并语义不因新键退化）"
         );
         assert_eq!(got.last().unwrap().payload["resumable"], "range");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-B6-11 远端执行臂的机器判据（内存驱动全链，零网络）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod remote_exec_tests {
+    use super::*;
+    use crate::driver::DriverRegistry;
+    use crate::module::FileConfig;
+    use host_core::error::AppError;
+    use host_core::storage::{DriverCapabilities, FileEntry, StorageDriver, WriteCommit};
+    use std::sync::atomic::AtomicUsize;
+
+    /// 内存远端：browse/list/read_stream/write_stream/remove/rename 全记账，
+    /// Range 支持位与失败位可注入（执行器判据的替身，非协议替身）
+    struct MemRemote {
+        files: HashMap<String, Vec<u8>>,
+        /// 上传落账面（提交后由断言从外面读）
+        uploaded: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        rename_calls: Arc<AtomicUsize>,
+        range_ok: bool,
+        fail_finish: bool,
+        remove_fails: bool,
+    }
+
+    impl MemRemote {
+        fn new(path: &str, bytes: Vec<u8>) -> Self {
+            let mut files = HashMap::new();
+            files.insert(path.to_owned(), bytes);
+            Self {
+                files,
+                uploaded: Arc::new(Mutex::new(HashMap::new())),
+                rename_calls: Arc::new(AtomicUsize::new(0)),
+                range_ok: true,
+                fail_finish: false,
+                remove_fails: false,
+            }
+        }
+    }
+
+    struct MemWriter {
+        key: String,
+        buf: Vec<u8>,
+        sink: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        fail_finish: bool,
+    }
+
+    impl std::io::Write for MemWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buf.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl WriteCommit for MemWriter {
+        fn finish(self: Box<Self>) -> Result<(), AppError> {
+            if self.fail_finish {
+                return Err(AppError::module(
+                    "FILE_REMOTE_005",
+                    "对端收尾拒绝（内存替身注入位）",
+                    None,
+                ));
+            }
+            self.sink.lock().insert(self.key, self.buf);
+            Ok(())
+        }
+    }
+
+    impl StorageDriver for MemRemote {
+        fn id(&self) -> String {
+            "memremote".into()
+        }
+        fn label(&self) -> String {
+            "内存远端".into()
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            vec!["/".into()]
+        }
+        fn capabilities(&self) -> DriverCapabilities {
+            DriverCapabilities {
+                browse: true,
+                mkcol: true,
+                delete: true,
+                permanent_delete_only: true,
+                resume: if self.range_ok {
+                    crate::remote::Resumable::Range
+                } else {
+                    crate::remote::Resumable::Whole
+                },
+                rename_same_driver: true,
+            }
+        }
+        fn list(&self, path: &Path) -> Result<Vec<FileEntry>, AppError> {
+            let p = path.to_string_lossy().replace('\\', "/");
+            let prefix = format!("{p}/");
+            let mut out = Vec::new();
+            for (k, v) in self.files.iter() {
+                if let Some(name) = k.strip_prefix(&prefix) {
+                    if !name.is_empty() && !name.contains('/') {
+                        out.push(FileEntry {
+                            name: name.to_owned(),
+                            path: k.clone().into(),
+                            is_dir: false,
+                            size: v.len() as u64,
+                            modified_ms: 0,
+                            ext: name.rsplit('.').next().unwrap_or("").to_owned(),
+                            hidden: false,
+                        });
+                    }
+                }
+            }
+            if out.is_empty() {
+                return Err(AppError::module(
+                    "FILE_REMOTE_005",
+                    format!("列目录无果（文件本体或不存在）: {p}"),
+                    None,
+                ));
+            }
+            Ok(out)
+        }
+        fn mkdir(&self, _p: &Path) -> Result<(), AppError> {
+            Ok(())
+        }
+        fn remove(&self, p: &Path, recycle: bool) -> Result<(), AppError> {
+            assert!(
+                !recycle,
+                "远端回收站红线：执行器不得带 recycle=true 下到驱动"
+            );
+            if self.remove_fails {
+                return Err(AppError::module(
+                    "FILE_REMOTE_005",
+                    "对端拒删（内存替身注入位）",
+                    None,
+                ));
+            }
+            let _ = p;
+            Ok(())
+        }
+        fn rename(&self, _f: &Path, _t: &Path) -> Result<(), AppError> {
+            self.rename_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn read_stream(&self, path: &Path, offset: u64) -> Result<Box<dyn Read + Send>, AppError> {
+            let p = path.to_string_lossy().replace('\\', "/");
+            let bytes = self.files.get(&p).ok_or_else(|| {
+                AppError::module("FILE_REMOTE_001", format!("无此文件 {p}"), None)
+            })?;
+            if offset > 0 && !self.range_ok {
+                // 与 http.rs stream_get 同一裁决词：执行器据"未按 Range"整取重启
+                return Err(AppError::module(
+                    "FILE_REMOTE_005",
+                    format!("未按 Range 应答（{p}）：内存替身拒 Range"),
+                    None,
+                ));
+            }
+            let rest = bytes
+                .get(offset as usize..)
+                .ok_or_else(|| {
+                    AppError::module("FILE_REMOTE_005", "offset 越界".to_string(), None)
+                })?
+                .to_vec();
+            Ok(Box::new(std::io::Cursor::new(rest)))
+        }
+        fn write_stream(&self, path: &Path) -> Result<Box<dyn WriteCommit>, AppError> {
+            Ok(Box::new(MemWriter {
+                key: path.to_string_lossy().replace('\\', "/"),
+                buf: Vec::new(),
+                sink: self.uploaded.clone(),
+                fail_finish: self.fail_finish,
+            }))
+        }
+    }
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nf_file_remote_{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn sink() -> (ProgressFn, Arc<AtomicUsize>) {
+        let n = Arc::new(AtomicUsize::new(0));
+        let c = n.clone();
+        (
+            Arc::new(move |_p: OpProgress| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }),
+            n,
+        )
+    }
+
+    fn fixture(
+        name: &str,
+        drv: MemRemote,
+        cfg: FileConfig,
+    ) -> (OpQueue, Arc<DriverRegistry>, PathBuf) {
+        let store = tmpdir(&format!("{name}_store"));
+        let (cb, _n) = sink();
+        let mut q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let reg = Arc::new(DriverRegistry::new());
+        reg.register_as("remote:m", Arc::new(drv));
+        let legs = Arc::new(RemoteLegs {
+            drivers: reg.clone(),
+            config: Arc::new(parking_lot::RwLock::new(cfg)),
+        });
+        q.set_remote_legs(legs);
+        (q, reg, store)
+    }
+
+    fn wait_done(q: &OpQueue, op: &str) -> OpProgress {
+        for _ in 0..200 {
+            if let Some(p) = q.active().iter().find(|p| p.op_id == op) {
+                if matches!(p.state, OpState::Done | OpState::Failed | OpState::Canceled) {
+                    return p.clone();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("远端传输未终结: {op}");
+    }
+
+    #[allow(non_snake_case)] // 与 ops::tests 的端点夹具同谱（单字母构造器是任务书形状）
+    fn L(p: impl Into<PathBuf>) -> OpEndpoint {
+        OpEndpoint::local(p.into())
+    }
+    #[allow(non_snake_case)]
+    fn R(driver_id: &str, path: &str) -> OpEndpoint {
+        OpEndpoint::Remote {
+            driver_id: driver_id.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn queueRemote_download_movesBytesAndResumableStaysNullWhenFresh() {
+        // 下载全链：远端 5000 字节 → 本地落盘逐字等；fresh 传输无断点事实 ⇒
+        // resumable 恒 None（T-B6-9 裁决的正对照：无对端声明不承诺）
+        let payload: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let drv = MemRemote::new("/docs/f.bin", payload.clone());
+        let (q, _reg, store) = fixture("dl", drv, FileConfig::default());
+        q.set_max_concurrent(1);
+        let dst = store.join("out");
+        std::fs::create_dir_all(&dst).unwrap();
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![R("remote:m", "/docs/f.bin")],
+                dst: L(dst.join("f.bin")),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Done, "错误面: {:?}", row.error);
+        assert_eq!(row.direction, TransferDirection::Download);
+        assert!(row.resumable.is_none(), "fresh 下载不得编续传承诺");
+        assert_eq!(std::fs::read(dst.join("f.bin")).unwrap(), payload);
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn queueRemote_upload_commitsOnlyThroughWriteFinish() {
+        // 上传泵完字节还不够：finish（对端收尾回执）落账才算传成；
+        // 注入收尾失败位 ⇒ 操作 Failed 且 uploaded 表无键（半途字节不冒充成果）
+        let store0 = tmpdir("ul_src");
+        let payload: Vec<u8> = (0..3000u32).map(|i| (i % 97) as u8).collect();
+        std::fs::write(store0.join("up.bin"), &payload).unwrap();
+
+        let drv = MemRemote::new("/x", vec![]);
+        let uploaded = drv.uploaded.clone();
+        let (q, _reg, store) = fixture("ul", drv, FileConfig::default());
+        q.set_max_concurrent(1);
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(store0.join("up.bin"))],
+                dst: R("remote:m", "/inbox/up.bin"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Done, "错误面: {:?}", row.error);
+        assert_eq!(uploaded.lock().get("/inbox/up.bin").unwrap(), &payload);
+        // 收尾失败臂
+        let drv2 = MemRemote {
+            fail_finish: true,
+            ..MemRemote::new("/x", vec![])
+        };
+        let uploaded2 = drv2.uploaded.clone();
+        let (q2, _r2, store2) = fixture("ul_fail", drv2, FileConfig::default());
+        q2.set_max_concurrent(1);
+        let op2 = q2
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(store0.join("up.bin"))],
+                dst: R("remote:m", "/inbox/up.bin"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let row2 = wait_done(&q2, &op2);
+        assert_eq!(row2.state, OpState::Failed);
+        assert!(row2.error.unwrap().contains("收尾"));
+        assert!(uploaded2.lock().is_empty(), "finish 被拒不落账");
+        q.close();
+        q2.close();
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&store2);
+        let _ = std::fs::remove_dir_all(&store0);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn uploadThrottle_uploadKbps_gatesTheUploadPump() {
+        // upload_kbps 挂账清偿（T-B6-6/7 两度顺延的执行体）：总闸 1 KB/s 下
+        // 2048 字节必须真停拍——只有纯函数在场不算闸在链路上
+        let store0 = tmpdir("thr_src");
+        std::fs::write(store0.join("t.bin"), vec![9u8; 2048]).unwrap();
+        let drv = MemRemote::new("/x", vec![]);
+        let uploaded = drv.uploaded.clone();
+        let cfg = FileConfig {
+            upload_kbps: 1,
+            max_concurrent: 1,
+            ..FileConfig::default()
+        };
+        let (q, _reg, store) = fixture("thr", drv, cfg);
+        q.set_max_concurrent(1);
+        let t0 = std::time::Instant::now();
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(store0.join("t.bin"))],
+                dst: R("remote:m", "/up/t.bin"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Done);
+        assert_eq!(uploaded.lock().get("/up/t.bin").unwrap().len(), 2048);
+        assert!(
+            t0.elapsed() >= std::time::Duration::from_millis(900),
+            "1 KB/s 闸下 2KB 不得零暂停放行: {:?}",
+            t0.elapsed()
+        );
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&store0);
+    }
+
+    /// 断点重取夹具：dst 以目录形态在场 ⇒ 源目录名在其下重建（资源管理器
+    /// 语义），预写 `dst/docs/f.bin` 前 7 字节配 checkpoint (0, 7)
+    fn resume_fixture(tag: &str, range_ok: bool) -> (OpQueue, PathBuf, Vec<u8>) {
+        let payload: Vec<u8> = (0..10u32).map(|i| b'a' + i as u8).collect();
+        let drv = MemRemote {
+            range_ok,
+            ..MemRemote::new("/docs/f.bin", payload.clone())
+        };
+        let (q, _reg, store) = fixture(tag, drv, FileConfig::default());
+        q.set_max_concurrent(1);
+        let dst = store.join("out");
+        std::fs::create_dir_all(dst.join("docs")).unwrap();
+        std::fs::write(dst.join("docs").join("f.bin"), &payload[..7]).unwrap();
+        (q, dst, payload)
+    }
+
+    fn enqueue_with_have(q: &OpQueue, dst: &Path) -> String {
+        q.enqueue_with_checkpoint(
+            OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![R("remote:m", "/docs")],
+                dst: L(dst.to_path_buf()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            },
+            Some(Checkpoint {
+                file_index: 0,
+                bytes_done: 7,
+            }),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn resumeRange_whenPeerHonorsOffset_promisesDriverDeclaredTier() {
+        // T-B6-9 裁决"真值供给归 T-B6-11"：断点重取成功 = 对端按 offset 供过
+        // 字节 ⇒ resumable 由 null 翻成驱动声明档（Range）；字节从第 7 字节续
+        let (q, dst, payload) = resume_fixture("rng", true);
+        let op = enqueue_with_have(&q, &dst);
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Done, "错误面: {:?}", row.error);
+        assert_eq!(row.resumable, Some(crate::remote::Resumable::Range));
+        assert_eq!(
+            std::fs::read(dst.join("docs").join("f.bin")).unwrap(),
+            payload
+        );
+        q.close();
+        let _ = std::fs::remove_dir_all(dst.parent().unwrap());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn resumeWhole_whenRangeRefused_restartsFromZeroAndPromisesOnlyWhole() {
+        // 对端拒 Range（非 206 裁决词）⇒ 截断从 0 整取，且 Whole 由这次拒答
+        // 成为可承诺事实——"声称续传实际错位拼接"在此结构性不可能
+        let (q, dst, payload) = resume_fixture("whl", false);
+        let op = enqueue_with_have(&q, &dst);
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Done, "错误面: {:?}", row.error);
+        assert_eq!(row.resumable, Some(crate::remote::Resumable::Whole));
+        assert_eq!(
+            std::fs::read(dst.join("docs").join("f.bin")).unwrap(),
+            payload
+        );
+        q.close();
+        let _ = std::fs::remove_dir_all(dst.parent().unwrap());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-11）字面测试名优先于 rustc 命名惯例
+    fn crossDriverMove_refuses_and_message_says_copy_then_delete() {
+        // 纯函数臂：同侧 = rename；跨侧 = "copy then delete"，且文案含"复制+删除"
+        assert_eq!(plan_move_form(&L("a"), &L("b")), "rename（同驱动）");
+        let cross = plan_move_form(&R("remote:m", "/f"), &L("b"));
+        assert!(
+            cross.contains("copy then delete") && cross.contains("复制+删除"),
+            "{cross}"
+        );
+        // 执行臂：Move 跨边界永不触碰 rename（计数器恒零）；删源失败时
+        // 错误面以"复制+删除"自我指称
+        let drv = MemRemote {
+            remove_fails: true,
+            ..MemRemote::new("/docs/f.bin", b"12345".to_vec())
+        };
+        let renames = drv.rename_calls.clone();
+        let (q, _reg, store) = fixture("mv", drv, FileConfig::default());
+        q.set_max_concurrent(1);
+        let dst = store.join("out");
+        std::fs::create_dir_all(&dst).unwrap();
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Move,
+                srcs: vec![R("remote:m", "/docs/f.bin")],
+                dst: L(dst.join("f.bin")),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Failed, "删源失败不得假称 Done");
+        let err = row.error.unwrap();
+        assert!(err.contains("复制+删除"), "{err}");
+        assert_eq!(
+            renames.load(Ordering::SeqCst),
+            0,
+            "跨边界 Move 不得走 rename"
+        );
+        assert!(
+            dst.join("f.bin").exists(),
+            "目的件已复制成功——失败只在源删除腿，事实分离呈现"
+        );
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn remoteDelete_afterDisconnect_failsNamingDriver_notFakeSuccess() {
+        // 崩溃恢复形状：pending 里的远端删除在驱动失联后必须 Failed 点名
+        // "远端驱动未连接"，不得静默记 Done（连接态是进程内事实）
+        let drv = MemRemote::new("/x", vec![]);
+        let (q, _reg, store) = fixture("del", drv, FileConfig::default());
+        q.set_max_concurrent(1);
+        let op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Delete,
+                srcs: vec![R("remote:gone", "/docs/old.txt")],
+                dst: L(store.clone()),
+                policy: ConflictPolicy::Ask,
+                recycle: false,
+            })
+            .unwrap();
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Failed);
+        assert!(row.error.unwrap().contains("远端驱动未连接"));
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

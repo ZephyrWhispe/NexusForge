@@ -13,11 +13,13 @@ pub mod webdav;
 
 use std::fmt;
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use host_core::storage::{FileEntry, StorageDriver};
+use host_core::storage::{DriverCapabilities, FileEntry, StorageDriver, WriteCommit};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -26,9 +28,113 @@ use crate::error::{FileError, FILE_REMOTE_FIELD};
 
 pub use http::{
     classify_resume, range_plan, remote_error_message, resume_offset, throttle_share_kbps,
-    DownloadOutcome, HttpsDriver, Resumable,
+    DownloadOutcome, HttpsDriver,
 };
+// 流式 GET 腿（webdav.rs/https 臂共用）：crate 内工具形制，不进公开 API
+pub(crate) use http::stream_get;
+// Resumable 经 http.rs 的再导出链回到本模块（`crate::remote::Resumable` 读口零变）
+pub use http::Resumable;
 pub use webdav::WebDavDriver;
+
+// ---------------------------------------------------------------------------
+// Spool 腿助件（T-B6-11）：协议腿是文件粒度（SFTP RPC / FTP 的 226 收尾校验）
+// 的 socket 协议，读流先落盘再包成可 seek 的读柄；写流先攒盘再一次性提交——
+// 队列执行器的内存恒 O(1)（禁把整文件积在 RAM）。删除纪律：读柄与未被
+// `publish` 的写料在 drop 时自删；publish 之后提交臂负责终删（失败路径不留残）。
+// ---------------------------------------------------------------------------
+
+fn next_spool_seq() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 为一次传输预约一个唯一 spool 路径（不创建句柄——RPC 腿自带写盘）
+pub(crate) fn reserve_spool_path(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "nf-file-spool-{tag}-{}-{}",
+        std::process::id(),
+        next_spool_seq()
+    ))
+}
+
+/// 写料（STOR/PUT/Upload 提交前的攒盘体）
+pub(crate) struct Spool {
+    file: std::fs::File,
+    path: PathBuf,
+    published: bool,
+}
+
+impl Spool {
+    pub(crate) fn create(tag: &str) -> Result<Self, FileError> {
+        let path = reserve_spool_path(tag);
+        Ok(Self {
+            file: std::fs::File::create(&path)?,
+            path,
+            published: false,
+        })
+    }
+    pub(crate) fn file_mut(&mut self) -> &mut std::fs::File {
+        &mut self.file
+    }
+    pub(crate) fn disk_len(&mut self) -> Result<u64, FileError> {
+        self.file.flush()?;
+        Ok(self.file.metadata()?.len())
+    }
+    /// 冲刷并让出删除责任：调用方提交完成后必须自删返回的路径（含失败臂）
+    pub(crate) fn publish(&mut self) -> Result<PathBuf, FileError> {
+        self.file.flush()?;
+        self.published = true;
+        Ok(self.path.clone())
+    }
+}
+
+impl Drop for Spool {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// 读料：自 spool 文件重开的可 seek 读柄，消费完（drop）即删
+pub(crate) struct SpoolReader {
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl SpoolReader {
+    fn open(path: PathBuf) -> Result<Self, FileError> {
+        match std::fs::File::open(&path) {
+            Ok(file) => Ok(Self { file, path }),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                Err(FileError::Io(e))
+            }
+        }
+    }
+    /// RPC/transfer 失败时的统一收口：清掉预约的半成品再抛错
+    fn discard(path: &Path) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+impl std::io::Read for SpoolReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.file, buf)
+    }
+}
+
+impl std::io::Seek for SpoolReader {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.file, from)
+    }
+}
+
+impl Drop for SpoolReader {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 /// 远端目录条目（路径为服务端给定的百分号编码形状，`/` 分隔；解码只发生在
 /// `name` 展示面——协议细节见 [`webdav`]）
@@ -157,13 +263,40 @@ pub(crate) fn remote_enter() -> tokio::runtime::EnterGuard<'static> {
 }
 
 impl StorageDriver for WebDavDriver {
-    /// 自报 id 是协议名（`&'static str` 契约）；寻址键 `remote:{profile_id}`
-    /// 由 [`crate::driver::DriverRegistry::register_as`] 注入，两者不是一回事。
-    fn id(&self) -> &'static str {
-        "webdav"
+    /// 自报 id 是协议名；寻址键 `remote:{profile_id}` 由
+    /// [`crate::driver::DriverRegistry::register_as`] 注入，两者不是一回事
+    /// （T-B6-11：签名放宽为 `String`，动态 id 自此也能自报）。
+    fn id(&self) -> String {
+        "webdav".into()
     }
     fn label(&self) -> String {
         self.driver_label()
+    }
+    fn capabilities(&self) -> DriverCapabilities {
+        DriverCapabilities {
+            browse: true,
+            mkcol: true,
+            delete: true,
+            permanent_delete_only: true,
+            // 读腿 GET/Range 真验身（stream_get）；写腿为 spool+一次性 PUT（限额见 webdav.rs）
+            resume: Resumable::Range,
+            rename_same_driver: true,
+        }
+    }
+    fn read_stream(
+        &self,
+        path: &Path,
+        offset: u64,
+    ) -> Result<Box<dyn std::io::Read + Send>, host_core::error::AppError> {
+        self.get_stream(&path.to_string_lossy(), offset)
+            .map_err(host_core::error::AppError::from)
+    }
+    fn write_stream(
+        &self,
+        path: &Path,
+    ) -> Result<Box<dyn WriteCommit>, host_core::error::AppError> {
+        self.put_writer(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
     }
     fn roots(&self) -> Vec<PathBuf> {
         vec![self.base_path().into()]
@@ -197,11 +330,40 @@ impl StorageDriver for WebDavDriver {
 /// 承重⑨：HTTPS 驱动**只有下载腿**——浏览/建目录/删除/改名一律诚实拒绝
 /// （假就绪 = 空表，拒才是诚实）。下载面见 [`http::HttpsDriver::download_to`]。
 impl StorageDriver for HttpsDriver {
-    fn id(&self) -> &'static str {
-        "https"
+    fn id(&self) -> String {
+        "https".into()
     }
     fn label(&self) -> String {
         self.driver_label()
+    }
+    fn capabilities(&self) -> DriverCapabilities {
+        DriverCapabilities {
+            // 承重⑨：只有下载腿——除读/续取外全部缺席即诚实形状
+            browse: false,
+            mkcol: false,
+            delete: false,
+            permanent_delete_only: false,
+            resume: Resumable::Range,
+            rename_same_driver: false,
+        }
+    }
+    fn read_stream(
+        &self,
+        path: &Path,
+        offset: u64,
+    ) -> Result<Box<dyn std::io::Read + Send>, host_core::error::AppError> {
+        self.get_stream(&path.to_string_lossy(), offset)
+            .map_err(host_core::error::AppError::from)
+    }
+    fn write_stream(
+        &self,
+        _path: &Path,
+    ) -> Result<Box<dyn WriteCommit>, host_core::error::AppError> {
+        // 假就绪红线：上传面根本不该被当作"稍后就有"——点名下载腿而拒
+        Err(host_core::error::AppError::from(FileError::Remote {
+            code: FILE_REMOTE_FIELD,
+            msg: "HTTP 下载源不支持上传：该档案只有下载腿（GET/Range），无写面".into(),
+        }))
     }
     fn roots(&self) -> Vec<PathBuf> {
         vec![self.base_path().into()]
@@ -233,11 +395,42 @@ fn no_browse_err() -> host_core::error::AppError {
 /// 操作会话在 [`ssh::RusshBackend`] 内以 store 二次校验；驱动侧再设第二道
 /// 回收站闸（承重⑥，与 WebDAV 臂同一口径）。
 impl StorageDriver for ssh::SftpDriver {
-    fn id(&self) -> &'static str {
-        "sftp"
+    fn id(&self) -> String {
+        "sftp".into()
     }
     fn label(&self) -> String {
         self.driver_label()
+    }
+    fn capabilities(&self) -> DriverCapabilities {
+        DriverCapabilities {
+            browse: true,
+            mkcol: true,
+            delete: true,
+            permanent_delete_only: true,
+            // 协议腿天然任意偏移定位（v1 断点续取按整文件重取——RPC 粒度是
+            // 文件，带宽成本 09 §6.2 补记登记；续传"能力"本身真实存在）
+            resume: Resumable::Range,
+            rename_same_driver: true,
+        }
+    }
+    fn read_stream(
+        &self,
+        path: &Path,
+        offset: u64,
+    ) -> Result<Box<dyn std::io::Read + Send>, host_core::error::AppError> {
+        // spool 腿：整文件先落盘，读柄内部 seek 到 offset 才交出去
+        // （文件粒度协议腿的 offset 契约由可 seek 的读料兑现，非协议端 Range；
+        //  断点失真——offset 超盘上实长——在驱动口 Err 点名）
+        self.read_spool(&path.to_string_lossy(), offset)
+            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>)
+            .map_err(host_core::error::AppError::from)
+    }
+    fn write_stream(
+        &self,
+        path: &Path,
+    ) -> Result<Box<dyn WriteCommit>, host_core::error::AppError> {
+        self.put_writer(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
     }
     fn roots(&self) -> Vec<PathBuf> {
         vec![self.base_path().into()]
@@ -271,11 +464,40 @@ impl StorageDriver for ssh::SftpDriver {
 /// 明文总闸不在这里——它在 [`crate::service::FileService::connect`]
 /// 建驱动之前已由 [`ftp::ftp_plaintext_guard`] 毕（驱动侧不设第二张闸皮）。
 impl StorageDriver for ftp::FtpDriver {
-    fn id(&self) -> &'static str {
-        "ftp"
+    fn id(&self) -> String {
+        "ftp".into()
     }
     fn label(&self) -> String {
         self.driver_label()
+    }
+    fn capabilities(&self) -> DriverCapabilities {
+        DriverCapabilities {
+            browse: true,
+            mkcol: true,
+            delete: true,
+            permanent_delete_only: true,
+            // 读腿 REST 断点在对端真验身（350 才继续，否则 Err）；写腿 STOR
+            // 从 0 起整取（REST-on-STOR 不在本批子集）
+            resume: Resumable::Range,
+            rename_same_driver: true,
+        }
+    }
+    fn read_stream(
+        &self,
+        path: &Path,
+        offset: u64,
+    ) -> Result<Box<dyn std::io::Read + Send>, host_core::error::AppError> {
+        // spool 腿 + REST：数据段先过 226 收尾校验再交读柄（谎报 EOF 无门）
+        self.read_spool(&path.to_string_lossy(), offset)
+            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>)
+            .map_err(host_core::error::AppError::from)
+    }
+    fn write_stream(
+        &self,
+        path: &Path,
+    ) -> Result<Box<dyn WriteCommit>, host_core::error::AppError> {
+        self.stor_writer(&path.to_string_lossy())
+            .map_err(host_core::error::AppError::from)
     }
     fn roots(&self) -> Vec<PathBuf> {
         vec![self.base_path().into()]

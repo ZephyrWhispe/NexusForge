@@ -518,12 +518,27 @@ impl Session {
         cmd: &str,
         use_: impl FnOnce(&mut TcpStream) -> Result<R, FileError>,
     ) -> Result<R, FileError> {
+        self.transfer_at(cmd, None, use_)
+    }
+
+    /// [`transfer`](Self::transfer) 加 REST 前置臂（T-B6-11）：`rest = Some(n)`
+    /// 时在数据通道就绪后、传输命令前发 `REST n`，**必须**收到 350 才继续——
+    /// 对端不应 Range 就 Err 点名，禁静默从头给字节。
+    fn transfer_at<R>(
+        &mut self,
+        cmd: &str,
+        rest: Option<u64>,
+        use_: impl FnOnce(&mut TcpStream) -> Result<R, FileError>,
+    ) -> Result<R, FileError> {
         let pasv = self.command("PASV", &[227])?;
         let (ip, port) = parse_pasv(&pasv.display(), self.peer_ip)?;
         let mut data = TcpStream::connect((ip, port))
             .map_err(|e| ftp_err(format!("FTP 数据通道连接失败（{ip}:{port}）: {e}")))?;
         let _ = data.set_read_timeout(Some(CONTROL_TIMEOUT));
         let _ = data.set_write_timeout(Some(CONTROL_TIMEOUT));
+        if let Some(n) = rest {
+            self.command(&format!("REST {n}"), &[350])?;
+        }
         self.command(cmd, &[125, 150])?;
         let out = use_(&mut data)?;
         drop(data);
@@ -640,6 +655,102 @@ impl FtpDriver {
         let mut s = self.session()?;
         s.command(&format!("RNFR {f}"), &[350])?;
         s.command(&format!("RNTO {t}"), &[250])?;
+        Ok(())
+    }
+
+    // ---- T-B6-11 字节腿（队列远端执行器经 trait 消费）----
+
+    /// spool 读腿：RETR（`offset>0` 时 REST 真验身 350）→ 数据段整体过
+    /// 226 收尾校验后，读柄才交出去——谎报 EOF 在此结构性不可能。
+    pub(crate) fn read_spool(
+        &self,
+        remote_path: &str,
+        offset: u64,
+    ) -> Result<super::SpoolReader, FileError> {
+        let p = self.server_path(remote_path)?;
+        let spool_path = super::reserve_spool_path("ftp");
+        {
+            let mut s = self.session()?;
+            s.command(plan_ascii_or_binary(&p).command(), &[200, 250])?;
+            let dst = spool_path.clone();
+            s.transfer_at(
+                &format!("RETR {p}"),
+                (offset > 0).then_some(offset),
+                |data| {
+                    let mut f = std::fs::File::create(&dst)?;
+                    let n = std::io::copy(data, &mut f)?;
+                    Ok(n)
+                },
+            )?;
+        }
+        super::SpoolReader::open(spool_path.clone()).inspect_err(|_| {
+            super::SpoolReader::discard(&spool_path);
+        })
+    }
+
+    /// 流式写腿：STOR 的数据通道直接活在写柄里（finish 关闭数据段后
+    /// 收 226 校验——泵完字节 ≠ 传成）；上传无断点：STOR 恒从 0。
+    pub(crate) fn stor_writer(
+        &self,
+        remote_path: &str,
+    ) -> Result<Box<dyn host_core::storage::WriteCommit>, FileError> {
+        let p = self.server_path(remote_path)?;
+        let mut s = self.session()?;
+        s.command(plan_ascii_or_binary(&p).command(), &[200, 250])?;
+        let pasv = s.command("PASV", &[227])?;
+        let (ip, port) = parse_pasv(&pasv.display(), s.peer_ip)?;
+        let data = TcpStream::connect((ip, port))
+            .map_err(|e| ftp_err(format!("FTP 数据通道连接失败（{ip}:{port}）: {e}")))?;
+        let _ = data.set_write_timeout(Some(CONTROL_TIMEOUT));
+        s.command(&format!("STOR {p}"), &[125, 150])?;
+        Ok(Box::new(FtpStorWriter {
+            data: Some(data),
+            session: s,
+            remote: p,
+        }))
+    }
+}
+
+struct FtpStorWriter {
+    data: Option<TcpStream>,
+    session: Session,
+    remote: String,
+}
+
+impl std::io::Write for FtpStorWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match &mut self.data {
+            Some(d) => d.write(buf),
+            None => Err(std::io::Error::other("FTP STOR 数据通道已关闭")),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.data {
+            Some(d) => d.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl host_core::storage::WriteCommit for FtpStorWriter {
+    fn finish(mut self: Box<Self>) -> Result<(), host_core::error::AppError> {
+        if let Some(mut d) = self.data.take() {
+            let _ = d.flush();
+            drop(d); // 关数据段，服务器随即在控制段回终结应答
+        }
+        let done = self
+            .session
+            .read_reply()
+            .map_err(host_core::error::AppError::from)?;
+        let _ = self.session.send("QUIT");
+        if done.code != 226 && done.code != 250 {
+            return Err(host_core::error::AppError::from(ftp_err(format!(
+                "FTP STOR 收尾非 226/250（{}）: {} {}",
+                self.remote,
+                done.code,
+                done.display()
+            ))));
+        }
         Ok(())
     }
 }
