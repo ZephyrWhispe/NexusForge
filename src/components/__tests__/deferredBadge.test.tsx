@@ -72,6 +72,8 @@ describe("DeferredBadge（T-B0-5）", () => {
     expect(String(screenshotSrc)).toContain('label="录屏" decisionRef="D-08"');
     expect(String(screenshotSrc)).toContain('label="每显示器覆盖层" decisionRef="D-23"');
     expect(String(ocrSrc)).toContain('label="PaddleOCR 引擎" decisionRef="D-08"');
-    expect(String(fileSrc)).toContain('label="网盘" decisionRef="B6"');
+    // T-B6-13 随行：file 域"网盘"挂点出处从批次号 `B6` 改钉 §6.3 档号（批次号会
+    // 随批次完工过期成死引用，B5 同纪律）；本测试的"必须带出处"本质一条未动。
+    expect(String(fileSrc)).toContain('label="网盘" decisionRef="09 §6.3-(c)"');
   });
 });

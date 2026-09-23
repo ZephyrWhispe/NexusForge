@@ -918,7 +918,10 @@ export default function FilePanel() {
             </option>
           ))}
         </Select>
-        <DeferredBadge label="网盘" decisionRef="B6" />
+        {/* T-B6-13 明示不做（09 §6.3 双向钉）：徽标只说"没做"，不扮"禁用的就绪" */}
+        <DeferredBadge label="网盘" decisionRef="09 §6.3-(c)" />
+        <DeferredBadge label="diff/镜像工作台" decisionRef="09 §6.3-(d)" />
+        <DeferredBadge label="treemap/回收站找回" decisionRef="09 §6.3-(h)" />
         <Input
           size="small"
           placeholder="搜索文件名（全局）"
