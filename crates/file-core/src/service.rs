@@ -153,13 +153,18 @@ impl FileService {
         let bus_cb = bus.clone();
         let cb: crate::ops::ProgressFn = Arc::new(move |p: OpProgress| {
             // D-03 统一背压：operation.progress 走总线合并发布（200ms 窗口，
-            // 阈值登记于 TOPIC_REGISTRY），key=op_id 使各操作独立合并
-            let mut payload = serde_json::to_value(&p).unwrap_or_default();
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("key".into(), serde_json::Value::String(p.op_id.clone()));
-            }
+            // 阈值登记于 TOPIC_REGISTRY），key=op_id 使各操作独立合并。
+            // T-B6-9（裁决非遗漏）：**不新增主题**（事件面复用 operation.
+            // progress/done/failed 三题）、**不建服务侧 watch 读口**；
+            // payload 即 OpProgress 序列化，禁第二处手拼 JSON——曾在此附加的
+            // obj.insert("key") 路由字段无任何消费者，且破"payload 键集==字段集"
+            // 判据，随本行拆除。
             let _ = bus_cb.publish_merged(
-                Event::new("operation.progress", "file", payload),
+                Event::new(
+                    "operation.progress",
+                    "file",
+                    serde_json::to_value(&p).unwrap_or_default(),
+                ),
                 &p.op_id,
                 merged_window("operation.progress"),
             );
@@ -634,6 +639,96 @@ mod tests {
                 .any(|e| e.payload["state"] == "done" && e.payload["op_id"] == op_id.as_str()),
             "flush_merged 应保证 state=done 的终态进度快照立即送达"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- T-B6-9 传输事件面诚实化（09 §6.2 字面测名）----
+
+    /// 事件 payload == `OpProgress` 序列化本体：键集**恰等**声明字段集——多一枚
+    /// （第二处手拼，如曾被拆掉的 "key" 路由字段）或少一枚（漏键）都判红。
+    /// 这是"禁第二处手拼 JSON"的机检面（防 T-B4-10 式"同一事实两处实现"漂移）。
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名优先于 rustc 命名惯例
+    fn progressEvent_payloadEqualsOpProgressSerialization() {
+        let root = std::env::temp_dir().join(format!("nf_file_payload_{}", uuid::Uuid::now_v7()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("s.bin"), vec![3u8; 2048]).unwrap();
+        let bus = Arc::new(EventBus::new());
+        let svc =
+            FileService::open(&root.join("store"), bus.clone(), Arc::new(Ports::new())).unwrap();
+        let mut prog = bus.subscribe("operation.progress").unwrap();
+        let mut done = bus.subscribe("operation.done").unwrap();
+        let (op_id, _) = svc
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![OpEndpoint::local(src.join("s.bin"))],
+                dst: OpEndpoint::local(dst.clone()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let op_id = op_id.unwrap();
+        let start = std::time::Instant::now();
+        let mut progress = Vec::new();
+        loop {
+            while let Ok(ev) = prog.try_recv() {
+                progress.push(ev);
+            }
+            match done.try_recv() {
+                Ok(_) => break,
+                Err(TryRecvError::Empty) => {}
+                Err(other) => panic!("operation.done 通道异常: {other:?}"),
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(30),
+                "复制未完成"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // 冲刷语义：done 快照或已在通道、或在下几拍到达
+        for _ in 0..30 {
+            while let Ok(ev) = prog.try_recv() {
+                progress.push(ev);
+            }
+            if progress.iter().any(|e| e.payload["state"] == "done") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!progress.is_empty(), "至少应收到进度事件");
+        let mut want = vec![
+            "bytes_done",
+            "bytes_total",
+            "current",
+            "direction",
+            "error",
+            "files_done",
+            "files_total",
+            "kind",
+            "op_id",
+            "resumable",
+            "resumed_from",
+            "state",
+        ];
+        want.sort_unstable();
+        for ev in &progress {
+            let mut got: Vec<&str> = ev
+                .payload
+                .as_object()
+                .expect("payload 是对象")
+                .keys()
+                .map(|s| s.as_str())
+                .collect();
+            got.sort_unstable();
+            assert_eq!(
+                got, want,
+                "payload 键集必须恰等 OpProgress 字段集（禁第二处手拼）"
+            );
+            assert_eq!(ev.payload["op_id"], op_id.as_str());
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

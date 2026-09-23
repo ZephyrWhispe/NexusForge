@@ -1521,3 +1521,66 @@ fn allowPlaintextOnce_failClosed() {
         }
     }
 }
+
+/// T-B6-9 新判据（09 §6.2）：FilePanel 的 `nf:event` 回调**只作门铃**——事件对象
+/// 上唯一允许读取的是 topic，事实源恒为重新 invoke 命令。静态扫生产源码
+/// （B5 "事件只作门铃" 的 TSX 扫形），正对照防空洞：禁了 payload 读取之后
+/// 区域必须仍有真重取，否则"什么都不干"也能过扫描。
+#[test]
+fn events_are_bell_only() {
+    let panel = read("../src/modules/file/FilePanel.tsx");
+    // ① 门铃区域切片：`nf:event"` 起到同一注册效应的失败处理者止
+    let start = panel.find("nf:event\"").expect("nf:event 门铃订阅必须在场");
+    let tail = &panel[start..];
+    let end_rel = tail
+        .find("文件面板事件监听注册失败")
+        .expect("同效应失败处理者必须在场（切片界锚）");
+    let region = &tail[..end_rel];
+    // ② 只许 topic：剥掉唯一许可读口后，区域不得再出现任何 payload/进度字段读取
+    let residual = region.replace("e.payload?.topic", "");
+    for word in [
+        "payload",
+        "bytes_done",
+        "bytes_total",
+        "files_done",
+        "resumable",
+        "direction",
+        "op_id",
+    ] {
+        assert!(
+            !residual.contains(word),
+            "门铃回调区域内出现 {word:?} 读取——事件只作门铃，事实源必须是命令重取"
+        );
+    }
+    // ③ 正对照防空洞：门铃确实重取（回调体两声呼叫 + refreshOps 定义体以
+    //    `await fileOpsActive()` 为唯一事实源）
+    assert!(
+        region.contains("void refreshOps();"),
+        "进度/完成/失败门铃必须触发 refreshOps 重取"
+    );
+    assert!(
+        region.contains("void loadPending();"),
+        "终态门铃必须顺带重取等待队列"
+    );
+    let rstart = panel
+        .find("const refreshOps =")
+        .expect("refreshOps 定义必须在场");
+    let rtail = &panel[rstart..];
+    let rend = rtail.find("}, []);").expect("useCallback 结束锚");
+    let rbody = &rtail[..rend];
+    assert!(
+        rbody.contains("await fileOpsActive()"),
+        "面板行事实源 = file_ops_active 命令重取（正对照：非空洞禁读区）"
+    );
+    // ④ 零新主题：主题字面量计数恰等现账（四行五处，全在 topic 比较式；
+    //    要加题先改任务书 09 §6.2——本行结论就是"不另立主题"）
+    assert_eq!(
+        panel.matches("\"operation.").count(),
+        5,
+        "前端主题字面量集合变动——禁为传输新立 file.xfer_* 或第二组 operation.* 题"
+    );
+    assert!(
+        !panel.contains("file.xfer_") && !panel.contains("xfer_watch"),
+        "门铃形状不建 watch 口（裁决非遗漏，见 09 §6.2 T-B6-9）"
+    );
+}

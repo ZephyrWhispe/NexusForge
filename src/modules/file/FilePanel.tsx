@@ -315,7 +315,8 @@ export default function FilePanel() {
           const st: OpProgressDto = await xferStatus(focus);
           list = [...list, st];
         } catch {
-          /* 焦点行已不在 latest（终态幽灵行），清理收口归 T-B6-9，不在此谎报 */
+          /* T-B6-9 收口后焦点行恒在 latest（resume 移旧行、prune 只裁终态）；
+             此处仅兜"入队节拍晚一拍"的窗口，查不到即不追加，不谎报 */
         }
       }
       for (const p of list) opsRef.current.set(p.op_id, p);
@@ -910,6 +911,13 @@ export default function FilePanel() {
             return (
               <div key={p.op_id} data-op-id={p.op_id} className={styles.opRow}>
                 <Badge appearance="outline">{OP_KIND_LABEL[p.kind] ?? p.kind}</Badge>
+                {/* 方向徽标只贴跨边界行（T-B6-9）：本地复制不显示方向——防
+                    "处处贴方向"噪音；值来自 direction 唯一派生，面板不自判 */}
+                {p.direction !== "local" && (
+                  <Badge appearance="outline" color="important">
+                    {p.direction === "upload" ? "上传" : "下载"}
+                  </Badge>
+                )}
                 <ProgressBar className={styles.bar} value={Math.min(1, Math.max(0, ratio))} />
                 <span className={styles.muted}>
                   {fmtSize(p.bytes_done)} / {fmtSize(p.bytes_total)} · {p.files_done}/

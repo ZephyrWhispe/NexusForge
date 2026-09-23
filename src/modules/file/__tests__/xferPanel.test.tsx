@@ -22,6 +22,14 @@ import { confirmAction } from "../../../stores/confirm";
 
 // D-29 B6/T-B6-7 回归：resume 返回新 op_id 被消费并以其为行新身份（承重③ UI 半）、
 // Ask 冲突先上屏再携带决议重入队、错误行只呈现后端脱敏成品不掺原文、六态中文档全覆盖。
+// T-B6-9 追加：事件只作门铃（不读 payload 当数据）、方向徽标只贴跨边界行、
+// resume 后旧幽灵行由后端收口（前端兜底口不再是唯一去幽灵路）。
+
+const listenMock = vi.fn();
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (...args: unknown[]) => listenMock(...args),
+}));
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -107,6 +115,9 @@ async function setInput(el: HTMLInputElement, value: string) {
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  delete (window as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  listenMock.mockReset();
+  listenMock.mockResolvedValue(() => {});
   container = document.createElement("div");
   document.body.append(container);
   vi.mocked(fileList).mockResolvedValue([entry("docs", true), entry("a.txt", false)]);
@@ -146,7 +157,8 @@ async function mount() {
 
 describe("FilePanel 传输状态类型化+断点真值+冲突消费（T-B6-7）", () => {
   it("xferPanel_resumeRow_rebindsPollingToNewOpId：resume 返回的新 op_id 成为行新身份（承重③ UI 半）", async () => {
-    // 全表滞后场景：file_ops_active 始终只回旧 Paused 行（幽灵行清理归 T-B6-9），
+    // 全表滞后场景：file_ops_active 始终只回旧 Paused 行（模拟"入队节拍晚一拍"
+    // 的窗口；真实幽灵行已由后端 T-B6-9 收口，见下方 resumeRebinds 用例），
     // 面板必须以 ResumeDto.op_id 经 xfer_status 定点兜底把续上行接上
     vi.mocked(fileOpsActive).mockResolvedValue([opRow("old-1", { state: "paused" })]);
     vi.mocked(fileOpResume).mockResolvedValue({
@@ -234,5 +246,78 @@ describe("FilePanel 传输状态类型化+断点真值+冲突消费（T-B6-7）"
     for (const id of ["q", "r", "p", "d", "f", "c"]) {
       expect(container.querySelector(`[data-op-id="${id}"]`)).not.toBeNull();
     }
+  });
+});
+
+describe("FilePanel 传输事件面诚实化（T-B6-9）", () => {
+  it("filePanel_eventIsBellNotData_refetchesActiveOps：门铃响后以命令重取，事件载荷一个字都不进渲染", async () => {
+    (window as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    vi.mocked(fileOpsActive).mockResolvedValue([opRow("live-1", { state: "running" })]);
+    await mount();
+    expect(listenMock).toHaveBeenCalledTimes(1);
+    expect(listenMock.mock.calls[0][0]).toBe("nf:event");
+    const bell = listenMock.mock.calls[0][1] as (e: unknown) => void;
+    const before = vi.mocked(fileOpsActive).mock.calls.length;
+    // 门铃"数据"全是假的：面板若读 payload 当事实源，ghost-9 / lie.bin 必上屏
+    await act(async () => {
+      bell({
+        payload: {
+          topic: "operation.progress",
+          op_id: "ghost-9",
+          kind: "copy",
+          state: "running",
+          current: "lie.bin",
+          files_done: 7,
+          files_total: 7,
+          bytes_done: 999998,
+          bytes_total: 999999,
+          error: null,
+          direction: "upload",
+          resumable: "range",
+          resumed_from: null,
+        },
+      });
+    });
+    // 正对照：确实重取了一次（mock invoke 计数 +1），而不是拿载荷凑渲染
+    expect(vi.mocked(fileOpsActive).mock.calls.length).toBe(before + 1);
+    expect(container.querySelector('[data-op-id="ghost-9"]')).toBeNull();
+    expect(container.textContent).not.toContain("lie.bin");
+    expect(container.querySelector('[data-op-id="live-1"]')).not.toBeNull();
+  });
+
+  it("filePanel_progressRowShowsDirectionBadge：上传/下载两徽标在位，本地复制不显示方向", async () => {
+    vi.mocked(fileOpsActive).mockResolvedValue([
+      opRow("up-1", { direction: "upload" }),
+      opRow("down-1", { direction: "download", resumable: "range" }),
+      opRow("loc-1", { direction: "local" }),
+    ]);
+    await mount();
+    expect(container.querySelector('[data-op-id="up-1"]')?.textContent).toContain("上传");
+    const down = container.querySelector('[data-op-id="down-1"]');
+    expect(down?.textContent).toContain("下载");
+    // 正对照：档位事实源在场时"支持断点续传"照旧上屏（徽标与档位两事实不互踩）
+    expect(down?.textContent).toContain("支持断点续传");
+    const loc = container.querySelector('[data-op-id="loc-1"]');
+    expect(loc).not.toBeNull();
+    // 本地不显示方向——防"处处贴方向"噪音
+    expect(loc!.textContent).not.toMatch(/上传|下载/);
+  });
+
+  it("filePanel_resumeRebindsToNewOpIdAndDropsGhost：后端收口旧行后，前端重取即见旧行消失", async () => {
+    // 与 T-B6-7 那枚的区别：本测模拟 T-B6-9 后端真收口——resume 之后的重取
+    // 返回里旧行已不在场，面板不需要 xfer_status 兜底也得换绑成功。
+    vi.mocked(fileOpsActive).mockResolvedValue([opRow("old-A", { state: "paused" })]);
+    vi.mocked(fileOpResume).mockResolvedValue({ op_id: "new-B", previous_op_id: "old-A" });
+    await mount();
+    expect(container.querySelector('[data-op-id="old-A"]')).not.toBeNull();
+    // 下一拍全表真相 = 只剩新行（latest 旧 Paused 行已被后端 resume 收口）
+    vi.mocked(fileOpsActive).mockResolvedValue([opRow("new-B", { resumed_from: "old-A" })]);
+    await click(buttonByText("恢复")!);
+    expect(container.querySelector('[data-op-id="old-A"]')).toBeNull();
+    const rowB = container.querySelector('[data-op-id="new-B"]');
+    expect(rowB).not.toBeNull();
+    expect(rowB!.textContent).toContain("续自 old-A");
+    // 后端收口即无需定点兜底读口参与本用例（防"xferStatus 才是去幽灵路"的回退）
+    expect(xferStatus).not.toHaveBeenCalled();
   });
 });

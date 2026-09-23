@@ -32,6 +32,9 @@ use crate::error::FileError;
 pub const CHUNK: usize = 4 * 1024 * 1024;
 /// 断点持久化间隔（单文件内复制字节量）
 const CHECKPOINT_EVERY: u64 = 64 * 1024 * 1024;
+/// T-B6-9：`active()` 出口为终态行（Done/Failed/Canceled）保留的最近行数上限。
+/// 面板回看用的纯运行态预算——`pending_ops/*.json` 的终态清理语义逐字不动。
+pub const FINISHED_ROWS_KEPT: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -388,7 +391,8 @@ impl AdmitGate {
 pub struct OpQueue {
     tx: Option<std::sync::mpsc::Sender<Job>>,
     ctls: Mutex<HashMap<String, Arc<OpControl>>>,
-    /// 活跃/近期操作最新进度快照（active() 用；worker 回调前先更新）
+    /// 活跃/近期操作最新进度快照（active() 用；worker 回调前先更新）。终态行经
+    /// [`Self::prune_finished`] 常态化裁剪、resume 移交时收口旧行（T-B6-9）
     latest: Arc<Mutex<HashMap<String, OpProgress>>>,
     store_dir: PathBuf,
     cb: ProgressFn,
@@ -565,6 +569,11 @@ impl OpQueue {
         let new_op_id = self.enqueue_with_checkpoint(spec, checkpoint, Some(op_id.to_owned()))?;
         // 旧 pending 清理（新 op_id 下已重建；避免重复恢复）
         remove_pending(&self.store_dir, op_id);
+        // T-B6-9 幽灵行收口：resume 后旧 op 的断点入口已移交给 new_op_id
+        // （resumed_from 链指回），它在 `latest` 里留下的 Paused 行成为面板
+        // 清不掉的幽灵行——就地移除。只碰这一条 op_id 的行；ctls 不动
+        //（其 worker 已在暂停边界退出）。
+        self.latest.lock().remove(op_id);
         Ok(new_op_id)
     }
 
@@ -584,8 +593,38 @@ impl OpQueue {
             .ok_or_else(|| FileError::NoSuchOp(op_id.to_owned()))
     }
 
+    /// T-B6-9：终态行（Done/Failed/Canceled）按 op_id v7 时序裁剪至最近 `keep_last`
+    /// 条，返回实际删除数。"事件面诚实化"这一行的结论是**不另立主题**——不新增
+    /// xfer 前缀的传输主题、不建服务侧 watch 读口（无消费者即不铺，裁决非遗漏，
+    /// 写在此处防后来者再铺）；诚实化真正的落点是运行态：`latest` 原为
+    /// 只插不删（worker 回调与入队两处 insert，全文件零 remove），终态行永久累积。
+    /// 纪律：Queued/Running/Paused **永不裁**——裁了丢断点入口，面板恢复钮挂在行上；
+    /// 本函数只碰 `latest`，pending_ops/*.json 与 ctls 逐字不动。
+    /// v7 字符串序 == 时间序（与 [`Self::active`] 的排序同一谱系）。
+    pub fn prune_finished(&self, keep_last: usize) -> usize {
+        let mut g = self.latest.lock();
+        let mut finished: Vec<String> = g
+            .iter()
+            .filter(|(_, p)| matches!(p.state, OpState::Done | OpState::Failed | OpState::Canceled))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if finished.len() <= keep_last {
+            return 0;
+        }
+        finished.sort();
+        let mut dropped = 0;
+        for id in &finished[..finished.len() - keep_last] {
+            if g.remove(id).is_some() {
+                dropped += 1;
+            }
+        }
+        dropped
+    }
+
     /// 活跃/近期操作快照
     pub fn active(&self) -> Vec<OpProgress> {
+        // 出口侧常态化裁剪（T-B6-9）：读口即清扫，面板每拍门铃重取都顺带收口幽灵
+        self.prune_finished(FINISHED_ROWS_KEPT);
         let mut v: Vec<OpProgress> = self.latest.lock().values().cloned().collect();
         v.sort_by(|a, b| a.op_id.cmp(&b.op_id));
         v
@@ -2391,5 +2430,280 @@ mod tests {
         assert_eq!(b.resumed_from.as_deref(), Some("A"), "重开后链必须原样读回");
         q.close();
         let _ = std::fs::remove_dir_all(&store);
+    }
+
+    // ---- T-B6-9 传输事件面诚实化（09 §6.2 字面测名）----
+
+    fn row(id: &str, state: OpState) -> OpProgress {
+        OpProgress {
+            op_id: id.to_owned(),
+            kind: OpKind::Copy,
+            state,
+            current: String::new(),
+            files_done: 0,
+            files_total: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            error: None,
+            direction: TransferDirection::Local,
+            resumable: None,
+            resumed_from: None,
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-9）字面测试名优先于 rustc 命名惯例
+    fn pruneFinished_keepsTerminalRowsWithinBudget() {
+        // 三终态一活跃（另加一 Queued 档）：裁剪后活跃/暂停/排队行必留，
+        // 终态按 op_id v7 时序（字符串序==时间序，与 active() 同谱）留最近 keep_last 条
+        let (cb, _) = sink();
+        let store = tmpdir("prune_budget");
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        // 合成 v7 形状 id：仅尾字节递增，字典序即入表时序
+        let mk = |tail: u8| format!("0198f2c7-3a4e-7a10-9b6a-2f1c8d5e4b{tail:02x}");
+        q.latest.lock().insert(mk(1), row(&mk(1), OpState::Done));
+        q.latest.lock().insert(mk(2), row(&mk(2), OpState::Failed));
+        q.latest
+            .lock()
+            .insert(mk(3), row(&mk(3), OpState::Canceled));
+        q.latest.lock().insert(mk(4), row(&mk(4), OpState::Running));
+        q.latest.lock().insert(mk(5), row(&mk(5), OpState::Queued));
+        assert_eq!(q.prune_finished(2), 1, "三终态留二 ⇒ 恰裁最旧一条");
+        let ids: Vec<String> = q.active().into_iter().map(|p| p.op_id).collect();
+        assert_eq!(
+            ids,
+            vec![mk(2), mk(3), mk(4), mk(5)],
+            "裁旧留新，活跃/排队不动"
+        );
+        assert_eq!(q.prune_finished(0), 2, "keep_last=0 臂：终态全裁");
+        let ids: Vec<String> = q.active().into_iter().map(|p| p.op_id).collect();
+        assert_eq!(ids, vec![mk(4), mk(5)], "非终态行一条不丢");
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-9）字面测试名优先于 rustc 命名惯例
+    fn pruneFinished_neverDropsRunningOrPaused() {
+        // 红线：活跃与暂停行永不裁——裁了就丢断点入口（面板恢复钮与 xfer_status
+        // 读口都挂在行上）。正对照防空洞：同预算下终态行确实被裁。
+        let (cb, _) = sink();
+        let store = tmpdir("prune_active");
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        q.latest
+            .lock()
+            .insert("a-run".into(), row("a-run", OpState::Running));
+        q.latest
+            .lock()
+            .insert("b-pause".into(), row("b-pause", OpState::Paused));
+        q.latest
+            .lock()
+            .insert("c-queued".into(), row("c-queued", OpState::Queued));
+        q.latest
+            .lock()
+            .insert("d-done".into(), row("d-done", OpState::Done));
+        assert_eq!(
+            q.prune_finished(0),
+            1,
+            "正对照：终态行在 keep_last=0 下被裁"
+        );
+        let states: Vec<(String, OpState)> = q
+            .active()
+            .into_iter()
+            .map(|p| (p.op_id.clone(), p.state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("a-run".to_owned(), OpState::Running),
+                ("b-pause".to_owned(), OpState::Paused),
+                ("c-queued".to_owned(), OpState::Queued),
+            ],
+            "Running/Paused/Queued 一条不许丢"
+        );
+        // 断点入口在场性：xfer_status 读口（status）对 Paused 行仍可取
+        assert_eq!(q.status("b-pause").unwrap().state, OpState::Paused);
+        assert!(q.status("d-done").is_none(), "被裁终态不谎称在场");
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-9）字面测试名优先于 rustc 命名惯例
+    fn resume_noGhostRows_afterThreePauseResumeCycles() {
+        // 承重：三次 pause/resume 后面板 active() 行数不单调增。
+        // 修前该测判红——latest 只插不删，每枚周期永久留下一条 Paused 幽灵行。
+        let src = tmpdir("ghost_src");
+        let dst = tmpdir("ghost_dst");
+        std::fs::write(src.join("big.bin"), vec![9u8; 24 * 1024 * 1024]).unwrap();
+        let (cb, _) = sink();
+        let store = tmpdir("ghost_store");
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let mut op = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("big.bin"))],
+                dst: L(dst.join("big.bin")),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        for _ in 0..3 {
+            q.pause(&op).unwrap();
+            assert!(
+                wait_until(
+                    || matches!(op_state(&q, &op), OpState::Paused | OpState::Done),
+                    Duration::from_secs(10)
+                ),
+                "暂停未在块边界生效"
+            );
+            if op_state(&q, &op) == OpState::Done {
+                break; // 极快机器在暂停落地前已完成：无幽灵可留，转入收尾断言
+            }
+            assert_eq!(
+                q.active().len(),
+                1,
+                "恢复前面板恰一条 Paused 行（正对照防空洞）"
+            );
+            op = q.resume(&op).unwrap();
+            let ids: Vec<String> = q.active().into_iter().map(|p| p.op_id).collect();
+            assert_eq!(ids, vec![op.clone()], "恢复后旧幽灵行须收口、只剩新行");
+        }
+        assert!(wait_until(
+            || op_state(&q, &op) == OpState::Done,
+            Duration::from_secs(30)
+        ));
+        assert_eq!(q.active().len(), 1, "三枚周期后表内无累积幽灵");
+        assert_eq!(
+            std::fs::metadata(dst.join("big.bin")).unwrap().len(),
+            24 * 1024 * 1024,
+            "续传产物完整"
+        );
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-9）字面测试名优先于 rustc 命名惯例
+    fn progressPayload_directionAndResumablePresent() {
+        // 两键接线（T-B6-2/T-B6-7 已备形状 ⇒ 本行只接线）：
+        // ①本地 op：direction=local、resumable **显式 null 在场**——无事实源即 null，
+        //   禁给本地复制编一个"可续传"；
+        // ②远端 op：direction 非 null（端点唯一派生即事实源）；resumable 档位由
+        //   对端声明裁决口（classify_resume，206⇒range）供值后经同一 payload 上屏——
+        //   远端腿执行接线归 T-B6-11，在那之前活体远端行不假填档位（如实 null）。
+        let (cb, _) = sink();
+        let store = tmpdir("keys_store");
+        let q = OpQueue::new(store.clone(), 1, cb).unwrap();
+        let src = tmpdir("keys_src");
+        std::fs::write(src.join("a.bin"), b"x").unwrap();
+        let kd = tmpdir("keys_dst");
+        let local = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("a.bin"))],
+                dst: L(kd.clone()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let pv = serde_json::to_value(q.status(&local).unwrap()).unwrap();
+        assert_eq!(pv["direction"], "local");
+        assert!(
+            pv.get("resumable").is_some_and(|v| v.is_null()),
+            "resumable 须以显式 null 在场（键不缺、值不编）：{pv}"
+        );
+        let remote = q
+            .enqueue(OpSpec {
+                kind: OpKind::Copy,
+                srcs: vec![L(src.join("a.bin"))],
+                dst: R("remote:webdav-1", "/up/a.bin"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let rp = q.status(&remote).unwrap();
+        assert_eq!(rp.direction, TransferDirection::Upload);
+        assert_eq!(rp.resumable, None, "未获对端声明不假填（正对照）");
+        // 裁决口形状接线：206 是"对端真回了 Range"的唯一事实源 ⇒ 档位经同一
+        // payload 上屏为 "range"（下载腿形状；执行接线归 T-B6-11，本行测的是槽位）
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::ACCEPT_RANGES,
+            reqwest::header::HeaderValue::from_static("bytes"),
+        );
+        let fact = crate::remote::http::classify_resume(206, &h);
+        let mut wired = rp.clone();
+        wired.direction = TransferDirection::Download;
+        wired.resumable = Some(fact);
+        let wv = serde_json::to_value(&wired).unwrap();
+        assert_eq!(wv["direction"], "download");
+        assert_eq!(wv["resumable"], "range", "对端声明的档位须原样进 payload");
+        // 反例臂（裁决口自带，防 payload 侧擅自升级档位）：200 + Accept-Ranges 仍 whole
+        let whole = crate::remote::http::classify_resume(200, &h);
+        let mut lied = rp;
+        lied.resumable = Some(whole);
+        assert_eq!(
+            serde_json::to_value(&lied).unwrap()["resumable"],
+            "whole",
+            "没真用 Range 就不能承诺续传"
+        );
+        q.close();
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-9）字面测试名优先于 rustc 命名惯例
+    fn progressMergedWindow_unchangedByNewKeys() {
+        // D-03 回归：200ms 合并窗口与两新键共存——阈值不动、合并语义不因
+        // direction/resumable 入 payload 而退化（突发 N 条 ⇒ 送达 ≪ N，末值胜出）。
+        use host_core::events::{merged_window, Event, EventBus};
+        let w = merged_window("operation.progress");
+        assert_eq!(w, Duration::from_millis(200), "两新键不得移动 D-03 阈值");
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe("operation.progress").unwrap();
+        let base = row("op-merge-1", OpState::Running);
+        for i in 0..20u64 {
+            let mut p = base.clone();
+            p.bytes_done = i;
+            p.direction = TransferDirection::Download;
+            p.resumable = Some(crate::remote::Resumable::Range);
+            bus.publish_merged(
+                Event::new(
+                    "operation.progress",
+                    "file",
+                    serde_json::to_value(&p).unwrap(),
+                ),
+                &p.op_id,
+                w,
+            )
+            .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        bus.flush_merged("operation.progress", &base.op_id);
+        let mut got = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            got.push(ev);
+        }
+        assert!(!got.is_empty(), "窗口冲刷或终态冲刷至少要送达一条");
+        assert!(
+            got.len() < 20,
+            "合并必须仍生效：送达 {} 条 ≪ 发布 20 条",
+            got.len()
+        );
+        for ev in &got {
+            assert_eq!(ev.payload["op_id"], "op-merge-1");
+            assert_eq!(ev.payload["direction"], "download", "新键在合并通道不丢");
+        }
+        assert_eq!(
+            got.last().unwrap().payload["bytes_done"],
+            19,
+            "同键末值胜出（合并语义不因新键退化）"
+        );
+        assert_eq!(got.last().unwrap().payload["resumable"], "range");
     }
 }
