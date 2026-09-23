@@ -29,6 +29,8 @@ arc-swap = "1"
 # file-core（docs/impl/05 F1–F7）
 walkdir = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# B6 T-B6-3：WebDAV PROPFIND XML（reader-only，无 macro；经 plist 已在 Cargo.lock 内，零新包）
+quick-xml = { version = "0.42", default-features = false }
 
 # proxy-core（docs/impl/05 PR1–PR6）：订阅拉取 / Sidecar 下载（rustls 避免系统代理劫持自身）
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }

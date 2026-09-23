@@ -2,8 +2,9 @@
 //!
 //! D-02：trait 与 DTO 已上移至 host-core::storage（notes-core 等消费方经
 //! [`host_core::storage::StoragePort`] 取驱动，不直依本 crate）；本文件保留
-//! 本地驱动实现与注册表。v1 内置 LocalDriver（本地盘/UNC）；smb/ftp/webdav/s3
-//! 经 rclone sidecar 包装驱动在后续里程碑接入（注册表已留扩展位）。
+//! 本地驱动实现与注册表。v1 内置 LocalDriver（本地盘/UNC）；B6 远端连接
+//! 经 [`DriverRegistry::register_as`] 以 `remote:{profile_id}` 动态键入表
+//! （Netdisk/Rclone 明示不做，见 09 §6.3）。
 
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
@@ -89,9 +90,16 @@ impl StorageDriver for LocalDriver {
     }
 }
 
-/// 驱动注册表：静态内置 + 动态注册（rclone sidecar 预留）
+/// 注册表条目：`key` 是寻址 id（静态驱动 = `driver.id()`；B6 远端动态驱动 =
+/// `remote:{profile_id}`，见 09 §6.1 ① 前缀裁定——`"local"` 结构性不可顶替）。
+struct Registered {
+    key: String,
+    driver: Arc<dyn StorageDriver>,
+}
+
+/// 驱动注册表：静态内置 + 动态注册（B6 远端连接态即住这里，进程内、不落盘）
 pub struct DriverRegistry {
-    drivers: RwLock<Vec<Arc<dyn StorageDriver>>>,
+    drivers: RwLock<Vec<Registered>>,
 }
 
 impl Default for DriverRegistry {
@@ -102,30 +110,58 @@ impl Default for DriverRegistry {
 
 impl DriverRegistry {
     pub fn new() -> Self {
+        let local: Arc<dyn StorageDriver> = Arc::new(LocalDriver);
         Self {
-            drivers: RwLock::new(vec![Arc::new(LocalDriver)]),
+            drivers: RwLock::new(vec![Registered {
+                key: local.id().to_owned(),
+                driver: local,
+            }]),
         }
     }
 
-    /// 注册驱动（同 id 重复注册以最后者为准）
+    /// 注册驱动（以驱动自报 id 寻址；同 id 重复注册以最后者为准）
     pub fn register(&self, driver: Arc<dyn StorageDriver>) {
+        let key = driver.id().to_owned();
+        self.register_as(&key, driver);
+    }
+
+    /// 以显式 id 注册（T-B6-3）：`StorageDriver::id()` 是 `&'static str`，
+    /// 承载不了 `remote:{profile_id}` 这类动态 id，寻址键由注册口注入。
+    /// 注意与 [`register`](Self::register) 的顶替域不同：这里按 `key` 去重，
+    /// 不同 profile 的两个 webdav 驱动（自报 id 同为 `"webdav"`）互不顶替。
+    pub fn register_as(&self, key: &str, driver: Arc<dyn StorageDriver>) {
         let mut v = self.drivers.write();
-        v.retain(|d| d.id() != driver.id());
-        v.push(driver);
+        v.retain(|r| r.key != key);
+        v.push(Registered {
+            key: key.to_owned(),
+            driver,
+        });
+    }
+
+    /// 注销（幂等）：回传是否真实移除了一个条目
+    pub fn unregister(&self, key: &str) -> bool {
+        let mut v = self.drivers.write();
+        let before = v.len();
+        v.retain(|r| r.key != key);
+        before != v.len()
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn StorageDriver>> {
-        self.drivers.read().iter().find(|d| d.id() == id).cloned()
+        self.drivers
+            .read()
+            .iter()
+            .find(|r| r.key == id)
+            .map(|r| r.driver.clone())
     }
 
     pub fn list(&self) -> Vec<DriverInfo> {
         self.drivers
             .read()
             .iter()
-            .map(|d| DriverInfo {
-                id: d.id().to_owned(),
-                label: d.label(),
-                roots: d.roots(),
+            .map(|r| DriverInfo {
+                id: r.key.clone(),
+                label: r.driver.label(),
+                roots: r.driver.roots(),
             })
             .collect()
     }
@@ -185,6 +221,48 @@ mod tests {
         local.remove(&d.join("a"), false).unwrap();
         assert!(!d.join("a").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-3 判据面）字面测试名优先于 rustc 命名惯例
+    fn registerAs_dynamicKey_neverTouchesLocal() {
+        // 承重① 顶替红线的注册表侧机检：动态键 `remote:…` 入表后，
+        // "local" 条目原封不动（同 id 顶替域只在 key 相等时生效）
+        struct FakeRemote;
+        impl StorageDriver for FakeRemote {
+            fn id(&self) -> &'static str {
+                "webdav"
+            }
+            fn label(&self) -> String {
+                "远端假驱动".into()
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                vec![]
+            }
+            fn list(&self, _p: &Path) -> Result<Vec<FileEntry>, AppError> {
+                Ok(vec![])
+            }
+            fn mkdir(&self, _p: &Path) -> Result<(), AppError> {
+                Ok(())
+            }
+            fn remove(&self, _p: &Path, _r: bool) -> Result<(), AppError> {
+                Ok(())
+            }
+            fn rename(&self, _f: &Path, _t: &Path) -> Result<(), AppError> {
+                Ok(())
+            }
+        }
+        let reg = DriverRegistry::new();
+        let local_before = reg.get("local").unwrap().label();
+        reg.register_as("remote:alpha", Arc::new(FakeRemote));
+        // 第二枚同为 webdav 自报 id 的动态驱动：互不顶替（去重域是 key 不是 id()）
+        reg.register_as("remote:beta", Arc::new(FakeRemote));
+        assert_eq!(reg.get("local").unwrap().label(), local_before);
+        assert_eq!(reg.list().len(), 3);
+        assert!(reg.get("webdav").is_none(), "自报静态 id 不是寻址键");
+        assert!(reg.unregister("remote:alpha"));
+        assert!(!reg.unregister("remote:alpha"), "幂等注销回 false");
+        assert_eq!(reg.list().len(), 2);
     }
 
     #[test]

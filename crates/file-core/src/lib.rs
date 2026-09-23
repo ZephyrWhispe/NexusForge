@@ -2,7 +2,7 @@
 //!
 //! 分层：browse（F1）→ conflict（F3）→ ops（F2 队列/断点续传）→ preview（F4）
 //! → search（F5 USN 优先/遍历降级）→ driver（F6 存储抽象）→ rename（F7 DSL）
-//! → service（门面）→ module（Module trait 壳）。
+//! → profile/remote（B6 档案与远端驱动，09 §6.2）→ service（门面）→ module（Module trait 壳）。
 
 pub mod browse;
 pub mod conflict;
@@ -12,6 +12,7 @@ pub mod module;
 pub mod ops;
 pub mod preview;
 pub mod profile;
+pub mod remote;
 pub mod rename;
 pub mod search;
 pub mod service;
@@ -32,6 +33,10 @@ pub use ops::{
 pub use preview::Preview;
 pub use profile::{
     profile_id_of, validate_profile, AuthKind, ProfileStore, RemoteProfile, RemoteProtocol,
+};
+pub use remote::{
+    webdav::{join_remote_url, parse_propfind_responses, percent_decode, propfind_body},
+    AuthSecret, RemoteDriverInfo, RemoteEntry, WebDavDriver,
 };
 pub use rename::{apply_plan, build_plan, CaseMode, RenamePlan, RenameRule};
 pub use search::{SearchOpts, SearchResult};

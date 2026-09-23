@@ -290,3 +290,53 @@ pub async fn file_remote_profile_delete(
         .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
         .map_err(file_err)
 }
+
+// ---------------- B6 远端连接（09 §6.2 T-B6-3）----------------
+// 口令走本命令面的 `secret` 逐次入参（AuthSecret 只进不出：类型层面没有
+// Serialize，返回值不可能带出凭据；连接态进程内不落盘，重启即"未连接"）。
+// CSP 复核登记：tauri.conf.json connect-src 只管 WebView 发起的请求，
+// Rust 侧 reqwest 不经 CSP——本行只记事实，不放松 CSP。
+
+/// 凭据 DTO：手写 Deserialize（serde deny_unknown_fields），永不 Serialize
+pub type AuthSecretDto = file_core::AuthSecret;
+/// 已连接驱动的对外描述（键集恒等 RemoteDriverInfo 字段集，无凭据位）
+pub type RemoteDriverDto = file_core::RemoteDriverInfo;
+
+/// 连接档案（本行只认 webdav；其余协议 FILE_REMOTE_004 点名后续行，禁假就绪）
+#[tauri::command]
+pub async fn file_remote_connect(
+    profile_id: String,
+    secret: Option<AuthSecretDto>,
+    state: State<'_, HostState>,
+) -> Result<RemoteDriverDto, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.connect(&profile_id, secret))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+        .map_err(file_err)
+}
+
+/// 远端列目录（独立子视图：不走 file_list/本地浏览链，见 09 §6.2 T-B6-3 落地补记）
+#[tauri::command]
+pub async fn file_remote_browse(
+    driver_id: String,
+    path: String,
+    state: State<'_, HostState>,
+) -> Result<Vec<file_core::RemoteEntry>, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.remote_list(&driver_id, &path))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+        .map_err(file_err)
+}
+
+/// 已连接远端列表（进程内事实源；未连接 = 空表，与档案列表 file_remote_profiles 分面）
+#[tauri::command]
+pub async fn file_remote_drivers(
+    state: State<'_, HostState>,
+) -> Result<Vec<RemoteDriverDto>, AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(svc.remote_drivers()))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+}

@@ -99,3 +99,18 @@ commands.allow = ["file_remote_profile_save"]
 identifier = "allow-file-remote-profile-delete"
 description = "允许前端调用 file_remote_profile_delete 命令（D-28 按窗最小授权）"
 commands.allow = ["file_remote_profile_delete"]
+
+[[permission]]
+identifier = "allow-file-remote-connect"
+description = "允许前端调用 file_remote_connect 命令（D-28 按窗最小授权；口令逐次入参，只进不出）"
+commands.allow = ["file_remote_connect"]
+
+[[permission]]
+identifier = "allow-file-remote-browse"
+description = "允许前端调用 file_remote_browse 命令（D-28 按窗最小授权）"
+commands.allow = ["file_remote_browse"]
+
+[[permission]]
+identifier = "allow-file-remote-drivers"
+description = "允许前端调用 file_remote_drivers 命令（D-28 按窗最小授权；连接态只读描述，无凭据位）"
+commands.allow = ["file_remote_drivers"]

@@ -1708,7 +1708,9 @@ dependencies = [
  "host-core",
  "image",
  "parking_lot",
+ "quick-xml",
  "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
@@ -1717,6 +1719,7 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
+ "zeroize",
  "zip 2.4.2",
 ]
 

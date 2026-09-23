@@ -1206,3 +1206,39 @@ fn auxWindows_neverGrantRemoteProfileCommands() {
         );
     }
 }
+
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-3）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantRemoteConnectAndBrowse() {
+    // B6 T-B6-3 红线负例：connect 携带逐次口令、browse 暴露远端目录树、
+    // drivers 暴露内网主机形状——三命令全为 main-only，
+    // 辅助窗（热键可在任意上下文呼出）永不持有。
+    let caps = load_capabilities();
+    for ident in [
+        "allow-file-remote-connect",
+        "allow-file-remote-browse",
+        "allow-file-remote-drivers",
+    ] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（远端连接面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}

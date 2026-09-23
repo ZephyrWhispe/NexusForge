@@ -20,3 +20,7 @@ sha2.workspace = true
 image.workspace = true
 walkdir.workspace = true
 zip.workspace = true
+# B6 远端面（09 §6.2 T-B6-3）：两枚均为已锁包（reqwest 经 proxy-core、quick-xml 经 plist 在 Cargo.lock）
+reqwest = { workspace = true }
+quick-xml = { workspace = true }
+zeroize = { workspace = true }
