@@ -344,6 +344,8 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-file-enqueue",
         // T-B7-14 执行历史读取（历史含错误明文证据，aux 不触达）
         "allow-automation-runs-get",
+        // T-B7-15 一钮全清死信=抹证据（干跑 dry_run 可给，此枚不给辅助窗）
+        "allow-automation-dead-clear",
     ];
     for (name, cap) in &caps {
         if name == "main" {
@@ -396,6 +398,7 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-term-sftp-rename",
         "allow-term-sftp-stat",
         "allow-automation-runs-get",
+        "allow-automation-dead-clear",
     ] {
         assert!(
             main_perms.contains(&expect),

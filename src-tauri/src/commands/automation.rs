@@ -93,6 +93,38 @@ pub async fn automation_runs_get(
     Ok(state.automation.runs(limit.map(|l| l as usize)))
 }
 
+/// 干跑预览（T-B7-15）：纯规划零端口触达——不发事件、不 exec、不触 handler；
+/// 清单逐动作标注"仅展示/真执行风险"，供"干跑→清单确认→执行"闸门前展示。
+#[tauri::command]
+pub async fn automation_dry_run(
+    rule_id: String,
+    sample_event: serde_json::Value,
+    state: State<'_, HostState>,
+) -> Result<Vec<automation_core::ActionPlan>, AppError> {
+    let rule = state
+        .automation
+        .rules()
+        .into_iter()
+        .find(|r| r.id == rule_id)
+        .ok_or_else(|| AppError::module("AUTO_RULE_001", format!("规则 {rule_id} 不存在"), None))?;
+    Ok(automation_core::plan_rule(
+        &rule,
+        &automation_core::EventCtx {
+            payload: sample_event,
+        },
+    ))
+}
+
+/// 一钮全清死信（T-B7-15：内存 + dead_letters.json 同清）。
+/// 权限面注：清历史 = 抹证据，此命令**不给辅助窗**（security_config 负例钉住）。
+#[tauri::command]
+pub async fn automation_dead_clear(state: State<'_, HostState>) -> Result<(), AppError> {
+    if let Some(engine) = state.automation.engine() {
+        engine.clear_dead();
+    }
+    Ok(())
+}
+
 /// 插件清单（A6：扫描插件库）
 #[tauri::command]
 pub async fn automation_plugins_list(

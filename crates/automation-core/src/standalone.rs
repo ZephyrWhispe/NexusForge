@@ -27,10 +27,10 @@ pub fn run_rule_standalone(
     };
     // T-B7-14：独立进程同样落历史环（runs.json 与 rules.json 同目录；
     // 与主程序并发的窄窗口为整文件 last-writer-wins，观测面宽限，见 history.rs 模块头）
-    let history = Arc::new(History::open(
-        rules_path.parent().unwrap_or_else(|| Path::new(".")),
-    ));
-    let engine = RuleEngine::new(handler, history);
+    let auto_dir = rules_path.parent().unwrap_or_else(|| Path::new("."));
+    let history = Arc::new(History::open(auto_dir));
+    // T-B7-15：死信盘同目录（引擎构造即读回，落败动作不再随进程退出蒸发）
+    let engine = RuleEngine::new(handler, history, auto_dir.join("dead_letters.json"));
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

@@ -4,6 +4,7 @@
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,15 +34,21 @@ pub trait ActionHandler: Send + Sync {
     fn run_wasm(&self, path: &str, func: &str) -> Result<()>;
 }
 
-/// 死信条目（IPC DTO）
+/// 死信条目（IPC DTO）。`#[serde(default)]`：T-B7-15 落盘后旧盘/缺字段
+/// 兼容读入（内存旧态无盘 = 首载空，与 runs.json 同裁决）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeadLetter {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub rule_id: String,
+    #[serde(default)]
     pub rule_name: String,
     pub action: Action,
+    #[serde(default)]
     pub error: String,
     /// 最后尝试时刻毫秒
+    #[serde(default)]
     pub at_ms: i64,
 }
 
@@ -131,22 +138,62 @@ fn run_action(
     }
 }
 
-/// 规则引擎：执行单条规则的全部动作（规则内串行），死信收集 + 执行历史落环
+/// 首载死信盘（不存在 = 空；坏盘 = warn + 改名 `.corrupt` 留证 + 空载，与 runs.json 同谱）
+fn load_dead(path: &std::path::Path) -> Vec<DeadLetter> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    match serde_json::from_slice::<Vec<DeadLetter>>(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            let corrupt = path.with_extension("json.corrupt");
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "dead_letters.json 不可解析——改名留证后以空队列启动（死信=可观测补救队列，非信任面）"
+            );
+            let _ = std::fs::rename(path, &corrupt);
+            Vec::new()
+        }
+    }
+}
+
+/// 整表原子落盘（tmp + sync_all + rename，沿 B6 profiles 形制）
+fn write_dead(path: &std::path::Path, queue: &[DeadLetter]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(AutomationError::Io)?;
+    }
+    let bytes = serde_json::to_vec_pretty(queue)
+        .map_err(|e| AutomationError::BadRule(format!("死信序列化失败: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    use std::io::Write;
+    let mut f = std::fs::File::create(&tmp).map_err(AutomationError::Io)?;
+    f.write_all(&bytes).map_err(AutomationError::Io)?;
+    f.sync_all().map_err(AutomationError::Io)?;
+    std::fs::rename(&tmp, path).map_err(AutomationError::Io)
+}
+
+/// 规则引擎：执行单条规则的全部动作（规则内串行），死信收集 + 执行历史落环。
+/// T-B7-15：死信落 `dead_letters.json`（重启不丢），写形制沿 runs.json
+/// （tmp + sync_all + rename 原子替换；坏盘 warn+改名留证+空载）。
 pub struct RuleEngine {
     handler: Arc<dyn ActionHandler>,
     dead: Mutex<Vec<DeadLetter>>,
     cooldown: CooldownTable,
     /// T-B7-14：每轮 fire（过 when + 过冷却后）记一条 RunRecord
     history: Arc<History>,
+    dead_path: PathBuf,
 }
 
 impl RuleEngine {
-    pub fn new(handler: Arc<dyn ActionHandler>, history: Arc<History>) -> Self {
+    pub fn new(handler: Arc<dyn ActionHandler>, history: Arc<History>, dead_path: PathBuf) -> Self {
         Self {
             handler,
-            dead: Mutex::new(Vec::new()),
+            dead: Mutex::new(load_dead(&dead_path)),
             cooldown: CooldownTable::new(),
             history,
+            dead_path,
         }
     }
 
@@ -198,12 +245,15 @@ impl RuleEngine {
             error: first_error,
         });
         if !dead.is_empty() {
-            let mut queue = self.dead.lock();
-            queue.extend(dead);
-            let overflow = queue.len().saturating_sub(DEAD_LETTER_CAP);
-            if overflow > 0 {
-                queue.drain(0..overflow);
+            {
+                let mut queue = self.dead.lock();
+                queue.extend(dead);
+                let overflow = queue.len().saturating_sub(DEAD_LETTER_CAP);
+                if overflow > 0 {
+                    queue.drain(0..overflow);
+                }
             }
+            self.persist_dead();
         }
     }
 
@@ -237,7 +287,22 @@ impl RuleEngine {
         if !dead.is_empty() {
             self.dead.lock().extend(dead);
         }
+        self.persist_dead();
         Ok(())
+    }
+
+    /// 内存队列快照落盘（落盘失败只 warn，不影响内存态）
+    fn persist_dead(&self) {
+        let snapshot = self.dead.lock().clone();
+        if let Err(e) = write_dead(&self.dead_path, &snapshot) {
+            tracing::warn!(path = %self.dead_path.display(), error = %e, "死信落盘失败（内存队列不受影响）");
+        }
+    }
+
+    /// 一钮全清死信（T-B7-15）：内存 + 盘同清空
+    pub fn clear_dead(&self) {
+        self.dead.lock().clear();
+        self.persist_dead();
     }
 }
 
@@ -246,6 +311,7 @@ mod tests {
     use super::*;
     use crate::rule::Expr;
     use serde_json::json;
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     /// 假宿主：记录调用；对含 "fail" 的 URL 报错（fail_open_url=false 时成功）
@@ -285,10 +351,20 @@ mod tests {
         }
     }
 
-    fn hist(tag: &str) -> Arc<History> {
-        Arc::new(History::open(
-            &std::env::temp_dir().join(format!("nf-eng-{tag}-{}", uuid::Uuid::now_v7())),
-        ))
+    fn tmp(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("nf-eng-{tag}-{}", uuid::Uuid::now_v7()))
+    }
+
+    fn engine_in(h: Arc<FakeHandler>, dir: &Path) -> RuleEngine {
+        RuleEngine::new(
+            h,
+            Arc::new(History::open(dir)),
+            dir.join("dead_letters.json"),
+        )
+    }
+
+    fn engine(h: Arc<FakeHandler>, tag: &str) -> RuleEngine {
+        engine_in(h, &tmp(tag))
     }
 
     fn rule(id: &str, actions: Vec<Action>) -> Rule {
@@ -321,7 +397,7 @@ mod tests {
     #[test]
     fn fire_runs_serially_and_success_swallows() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone(), hist("fire-serial"));
+        let engine = engine(h.clone(), "fire-serial");
         let r = rule(
             "r1",
             vec![
@@ -346,7 +422,7 @@ mod tests {
     #[test]
     fn when_filter_blocks_execution() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone(), hist("when-block"));
+        let engine = engine(h.clone(), "when-block");
         let r = rule(
             "r2",
             vec![Action::OpenUrl {
@@ -361,7 +437,7 @@ mod tests {
     #[test]
     fn failing_action_retries_then_dead_letter() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone(), hist("retry-dead"));
+        let engine = engine(h.clone(), "retry-dead");
         let r = rule(
             "r3",
             vec![Action::OpenUrl {
@@ -380,7 +456,7 @@ mod tests {
     #[test]
     fn replay_removes_on_success_keeps_on_failure() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone(), hist("replay"));
+        let engine = engine(h.clone(), "replay");
         let r = rule(
             "r4",
             vec![Action::OpenUrl {
@@ -404,7 +480,7 @@ mod tests {
     #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-14）字面测试名优先于 rustc 命名惯例
     fn history_partialOutcome_recordsFailedIndices() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone(), hist("partial"));
+        let engine = engine(h.clone(), "partial");
         let r = rule(
             "r5",
             vec![
@@ -458,5 +534,35 @@ mod tests {
         assert!(
             matches!(&last.outcome, RunOutcome::Partial { failed_indices } if failed_indices == &[1])
         );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-15）字面测试名优先于 rustc 命名惯例
+    fn deadClear_emptiesDiskAndMemory() {
+        let h = Arc::new(FakeHandler::new());
+        let dir = tmp("dead-clear");
+        let r = rule(
+            "r7",
+            vec![Action::OpenUrl {
+                url: "https://fail".into(),
+            }],
+        );
+        let engine = engine_in(h.clone(), &dir);
+        engine.fire(&r, &json!({ "entry": { "kind": "url" } }), 0);
+        assert_eq!(engine.dead_letters().len(), 1);
+        // 重启不丢（落盘正证）：同路径重开引擎读回同一死信
+        let reopened = engine_in(h.clone(), &dir);
+        assert_eq!(reopened.dead_letters().len(), 1);
+        assert_eq!(reopened.dead_letters()[0].rule_id, "r7");
+        drop(reopened);
+        // 一钮全清：内存 + 盘同空
+        engine.clear_dead();
+        assert!(engine.dead_letters().is_empty(), "清后内存必须空");
+        let after_restart = engine_in(h, &dir);
+        assert!(
+            after_restart.dead_letters().is_empty(),
+            "清后盘态必须空——抹证据一钮是真清而非内存遮眼"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

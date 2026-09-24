@@ -7,6 +7,7 @@
 //! - A5 WASM 插件运行时：wasmtime 沙箱（64MB 限额 + fuel + 宿主函数白名单）
 //! - A6 插件管理器：manifest 校验（api_version/权限/sha256）+ 本地安装/删除
 
+pub mod dryrun;
 pub mod engine;
 pub mod error;
 pub mod history;
@@ -16,6 +17,7 @@ pub mod rule;
 pub mod standalone;
 pub mod wasm;
 
+pub use dryrun::{plan_rule, ActionPlan, EventCtx};
 pub use engine::{DeadLetter, RuleEngine};
 pub use error::{AutomationError, Result};
 pub use history::{History, RunOutcome, RunRecord, HISTORY_CAP};

@@ -2118,6 +2118,13 @@ export interface RunRecordDto {
   error: string | null;
 }
 
+/** 干跑单动作计划（T-B7-15；纯规划零端口触达，will_execute=真执行风险臂） */
+export interface ActionPlanDto {
+  kind: string;
+  preview: string;
+  will_execute: boolean;
+}
+
 export function automationRulesList(): Promise<RuleDto[]> {
   return invoke("automation_rules_list");
 }
@@ -2138,6 +2145,12 @@ export function automationReplay(deadId: string, ruleId: string): Promise<void> 
 }
 export function automationRunsGet(limit?: number): Promise<RunRecordDto[]> {
   return invoke("automation_runs_get", { limit });
+}
+export function automationDryRun(ruleId: string, sampleEvent: unknown): Promise<ActionPlanDto[]> {
+  return invoke("automation_dry_run", { ruleId, sampleEvent });
+}
+export function automationDeadClear(): Promise<void> {
+  return invoke("automation_dead_clear");
 }
 
 // 插件管理（M14 A6）

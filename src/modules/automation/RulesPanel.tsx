@@ -10,8 +10,10 @@ import {
   Spinner,
 } from "@fluentui/react-components";
 import {
+  automationDeadClear,
   automationDeadLetters,
   automationDeleteRule,
+  automationDryRun,
   automationPluginInstall,
   automationPluginRemove,
   automationPluginsList,
@@ -35,13 +37,17 @@ import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import DryRunDialog, { type DryRunItem } from "../../components/DryRunDialog";
 
 /**
- * 自动化面板（docs/impl/07 A1–A3 + T-B7-13 多动作编辑器 + T-B7-14 执行历史）：
+ * 自动化面板（docs/impl/07 A1–A3 + T-B7-13 多动作编辑器 + T-B7-14 执行历史
+ * + T-B7-15 干跑/死信清空）：
  * - 规则：事件/启动/每日定时触发 + 可选 when（一层 And/Or 组 UI；深层树逐字
  *   携带不回造，触碰降级须显式确认）+ **then 数组**（增删/上下移/五类动作全
- *   含 ipc_command）+ 冷却
- * - 死信：动作重试耗尽的死信队列（可重放；重放仍失败以新 id 重新入队）
+ *   含 ipc_command）+ 冷却 + **干跑**（纯规划清单「仅展示/真执行风险」两标）
+ * - 死信：动作重试耗尽的死信队列（可重放；重放仍失败以新 id 重新入队；
+ *   dead_letters.json 落盘重启不丢；批量重放走 DryRunDialog 三步闸 +
+ *   逐条结果汇总；一钮全清 = D-18 抹证据显式确认）
  * - 插件：wasmtime 沙箱插件库
  * - 历史：执行历史环（后端 ≤500 条落 runs.json；rule_fired 事件只作门铃，
  *   回调重取命令、不读 payload 字段——B6 T-B6-9 纪律镜像）
@@ -378,6 +384,14 @@ export default function RulesPanel() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [form, setForm] = useState<FormState | null>(null);
+  // T-B7-15「干跑预览→清单确认→执行」闸（共性③首例的宿主侧状态）：
+  // items=待展示清单，run=确认后动作（干跑=记要；批量重放=循环既有 replay）
+  const [dryRun, setDryRun] = useState<{
+    title: string;
+    items: DryRunItem[];
+    confirmLabel?: string;
+    run: () => Promise<void>;
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -520,6 +534,76 @@ export default function RulesPanel() {
     try {
       await automationReplay(deadId, ruleId);
       setNotice("重放完成（仍失败会以新死信保留）");
+      await load();
+    } catch (e) {
+      setError(parseAppError(e)?.data.message ?? String(e));
+    }
+  };
+
+  /** T-B7-15 干跑：纯规划命令取回动作清单 → DryRunDialog 展示两标（零端口触达） */
+  const dryRunRule = async (r: RuleDto) => {
+    try {
+      const plans = await automationDryRun(r.id, {});
+      setDryRun({
+        title: `干跑预览 · ${r.name}`,
+        items: plans.map((p) => ({ text: p.preview, risky: p.will_execute })),
+        confirmLabel: "确认清单",
+        run: async () => {
+          const risky = plans.filter((p) => p.will_execute).length;
+          setDryRun(null);
+          setNotice(`干跑清单已确认：${risky} 项标注真执行风险；真触发按事件流经冷却与串行执行`);
+        },
+      });
+    } catch (e) {
+      setError(parseAppError(e)?.data.message ?? String(e));
+    }
+  };
+
+  /** T-B7-15 批量重放：干跑形制三步——预览（逐条死信清单）→ 确认 → 执行（循环既有 replay，逐条结果汇总） */
+  const openBulkReplay = () => {
+    const letters = [...dead];
+    setDryRun({
+      title: `批量重放 · ${letters.length} 条死信`,
+      items: letters.map((d) => ({
+        text: `${d.rule_name} · ${actionLabel(d.action)} · ${d.error}`,
+        risky: true,
+      })),
+      confirmLabel: "确认重放全部",
+      run: async () => {
+        let ok = 0;
+        let failed = 0;
+        for (const d of letters) {
+          try {
+            await automationReplay(d.id, d.rule_id);
+            ok += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+        setDryRun(null);
+        setNotice(`批量重放汇总：成功 ${ok} · 失败 ${failed}（失败仍以新死信保留，可逐条重放）`);
+        await load();
+      },
+    });
+  };
+
+  /** T-B7-15 一钮全清死信（内存 + dead_letters.json 同清；抹证据 = D-18 显式确认闸） */
+  const clearDeadAll = async () => {
+    if (
+      !(await confirmAction({
+        title: "清空全部死信",
+        impact: [
+          `将一次性清除 ${dead.length} 条死信（含各动作失败错误明文）`,
+          "内存队列与 dead_letters.json 同清空，重启后不再出现",
+        ],
+        detail: "死信 = 失败动作的证据与补救入口；清空即抹证据，不可恢复。可先「批量重放」逐条补救。",
+        confirmLabel: "清空全部",
+      }))
+    )
+      return;
+    try {
+      await automationDeadClear();
+      setNotice("死信已全部清空");
       await load();
     } catch (e) {
       setError(parseAppError(e)?.data.message ?? String(e));
@@ -899,6 +983,9 @@ export default function RulesPanel() {
                       <Button size="small" onClick={() => setForm(ruleToForm(r))}>
                         编辑
                       </Button>
+                      <Button size="small" onClick={() => void dryRunRule(r)}>
+                        干跑
+                      </Button>
                       <Button size="small" appearance="subtle" onClick={() => void remove(r)}>
                         删除
                       </Button>
@@ -941,36 +1028,55 @@ export default function RulesPanel() {
           )}
         </Section>
       ) : tab === "dead" ? (
-        <Section
-          title="死信队列"
-          actions={<Badge appearance="outline">动作重试耗尽后进入此处</Badge>}
-        >
-          {dead.length === 0 ? (
-            <EmptyState text="队列为空——所有动作执行成功。" />
-          ) : (
-            <div className={styles.list}>
-              {dead.map((d) => (
-                <div key={d.id} className={styles.item}>
-                  <div className={styles.itemBody}>
-                    <Text weight="semibold" size={300}>
-                      {d.rule_name}
-                    </Text>
-                    <Text className={styles.dead}>
-                      {actionLabel(d.action)}
-                      {"\n"}
-                      {d.error}
-                      {"\n"}
-                      {new Date(d.at_ms).toLocaleString()}
-                    </Text>
+        <>
+          <div className={styles.row}>
+            <Button
+              appearance="primary"
+              size="small"
+              disabled={dead.length === 0}
+              onClick={openBulkReplay}
+            >
+              批量重放
+            </Button>
+            <Button
+              size="small"
+              disabled={dead.length === 0}
+              onClick={() => void clearDeadAll()}
+            >
+              清空全部
+            </Button>
+          </div>
+          <Section
+            title="死信队列"
+            actions={<Badge appearance="outline">重试耗尽入死信 · dead_letters.json 落盘重启不丢</Badge>}
+          >
+            {dead.length === 0 ? (
+              <EmptyState text="队列为空——所有动作执行成功。" />
+            ) : (
+              <div className={styles.list}>
+                {dead.map((d) => (
+                  <div key={d.id} className={styles.item}>
+                    <div className={styles.itemBody}>
+                      <Text weight="semibold" size={300}>
+                        {d.rule_name}
+                      </Text>
+                      <Text className={styles.dead}>
+                        {actionLabel(d.action)}
+                        {"\n"}
+                        {d.error}
+                        {"\n"}
+                        {new Date(d.at_ms).toLocaleString()}
+                      </Text>
+                    </div>
+                    <Button size="small" onClick={() => void replay(d.id, d.rule_id)}>
+                      重放
+                    </Button>
                   </div>
-                  <Button size="small" onClick={() => void replay(d.id, d.rule_id)}>
-                    重放
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        </Section>
+                ))}
+              </div>
+            )}
+          </Section>
+        </>
       ) : (
         <Section
           title="插件管理"
@@ -1025,6 +1131,15 @@ export default function RulesPanel() {
           )}
         </Section>
       )}
+
+      <DryRunDialog
+        open={dryRun !== null}
+        title={dryRun?.title ?? ""}
+        items={dryRun?.items ?? []}
+        confirmLabel={dryRun?.confirmLabel}
+        onCancel={() => setDryRun(null)}
+        onConfirm={() => (dryRun ? dryRun.run() : Promise.resolve())}
+      />
     </div>
   );
 }

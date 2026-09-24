@@ -36,6 +36,16 @@ description = "允许前端调用 automation_runs_get 命令（执行历史读�
 commands.allow = ["automation_runs_get"]
 
 [[permission]]
+identifier = "allow-automation-dry-run"
+description = "允许前端调用 automation_dry_run 命令（干跑纯规划零端口触达，T-B7-15；D-28 按窗最小授权）"
+commands.allow = ["automation_dry_run"]
+
+[[permission]]
+identifier = "allow-automation-dead-clear"
+description = "允许前端调用 automation_dead_clear 命令（一钮全清死信=抹证据，T-B7-15；仅主窗，D-28 按窗最小授权）"
+commands.allow = ["automation_dead_clear"]
+
+[[permission]]
 identifier = "allow-automation-plugins-list"
 description = "允许前端调用 automation_plugins_list 命令（D-28 按窗最小授权）"
 commands.allow = ["automation_plugins_list"]

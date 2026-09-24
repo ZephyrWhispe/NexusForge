@@ -6,8 +6,10 @@
     "main"
   ],
   "permissions": [
+    "allow-automation-dead-clear",
     "allow-automation-dead-letters",
     "allow-automation-delete-rule",
+    "allow-automation-dry-run",
     "allow-automation-plugin-install",
     "allow-automation-plugin-remove",
     "allow-automation-plugins-list",

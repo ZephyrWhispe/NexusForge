@@ -527,7 +527,13 @@ impl Module for AutomationModule {
                 .expect("rules.json 应有父目录（automation 数据目录）"),
         ));
         *self.history.write() = Some(history.clone());
-        *self.engine.write() = Some(Arc::new(RuleEngine::new(handler, history)));
+        // T-B7-15：死信落盘与 runs.json 同目录（重启不丢）
+        let dead_path = self
+            .rules_path
+            .parent()
+            .expect("rules.json 应有父目录（automation 数据目录）")
+            .join("dead_letters.json");
+        *self.engine.write() = Some(Arc::new(RuleEngine::new(handler, history, dead_path)));
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.load_rules();
         self.state.set(ModuleState::Stopped);
@@ -595,9 +601,11 @@ mod tests {
         let m = AutomationModule::new(&dir);
         let bus = Arc::new(EventBus::new());
         let handler = Arc::new(HostActionHandler::new(bus.clone()));
+        let auto_dir = dir.join("automation");
         *m.engine.write() = Some(Arc::new(RuleEngine::new(
             handler,
-            Arc::new(History::open(&dir.join("automation"))),
+            Arc::new(History::open(&auto_dir)),
+            auto_dir.join("dead_letters.json"),
         )));
         *m.bus.write() = Some(bus.clone());
 
