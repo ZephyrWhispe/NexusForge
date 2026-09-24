@@ -1370,6 +1370,36 @@ fn auxWindows_neverGrantSshExec() {
 }
 
 #[test]
+#[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-3）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantSshConfigHosts() {
+    // B7 T-B7-3：config 导入读的是用户私目录下的 ~/.ssh/config（可含
+    // 主机清单与密钥路径），整张读面按 main-only 处理（D-28 按窗最小授权）。
+    let caps = load_capabilities();
+    let ident = "allow-term-ssh-config-hosts";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（用户私目录读面是 main-only）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 {ident}，否则本负例是空洞"
+    );
+}
+
+#[test]
 #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-1）字面测试名优先于 rustc 命名惯例
 fn auxWindows_neverGrantSshFingerprintAck() {
     // B7 T-B7-1 红线负例：term 侧 TOFU 首见指纹确认写的是两域共享的信任表

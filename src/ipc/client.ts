@@ -1802,6 +1802,17 @@ export function termSshExec(
 ): Promise<SshExecResultDto> {
   return invoke("term_ssh_exec", { target, command, timeoutMs: timeoutMs ?? null });
 }
+/** T-B7-3：~/.ssh/config 只读导入候选（后端读，前端无 fs 权；键缺位 = null） */
+export interface SshHostEntryDto {
+  alias: string;
+  host_name: string | null;
+  user: string | null;
+  port: number | null;
+  identity_file: string | null;
+}
+export function termSshConfigHosts(): Promise<SshHostEntryDto[]> {
+  return invoke("term_ssh_config_hosts");
+}
 export function termSshKnownHosts(): Promise<SshKnownHostDto[]> {
   return invoke("term_ssh_known_hosts");
 }

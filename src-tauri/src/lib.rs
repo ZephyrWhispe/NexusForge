@@ -327,6 +327,7 @@ pub fn run() {
             commands::term_ssh_exec,
             commands::term_ssh_known_hosts,
             commands::term_ssh_fingerprint_ack,
+            commands::term_ssh_config_hosts,
             commands::term_ssh_forget_host,
             commands::term_sftp_list,
             commands::term_sftp_download,

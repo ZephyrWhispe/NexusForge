@@ -207,6 +207,7 @@
     "allow-term-sftp-upload",
     "allow-term-spawn-local",
     "allow-term-spawn-wsl",
+    "allow-term-ssh-config-hosts",
     "allow-term-ssh-connect",
     "allow-term-ssh-exec",
     "allow-term-ssh-fingerprint-ack",

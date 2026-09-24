@@ -61,6 +61,11 @@ description = "允许前端调用 term_ssh_fingerprint_ack 命令（D-28 按窗�
 commands.allow = ["term_ssh_fingerprint_ack"]
 
 [[permission]]
+identifier = "allow-term-ssh-config-hosts"
+description = "允许前端调用 term_ssh_config_hosts 命令（D-28 按窗最小授权）"
+commands.allow = ["term_ssh_config_hosts"]
+
+[[permission]]
 identifier = "allow-term-ssh-forget-host"
 description = "允许前端调用 term_ssh_forget_host 命令（D-28 按窗最小授权）"
 commands.allow = ["term_ssh_forget_host"]

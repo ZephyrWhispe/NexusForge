@@ -230,6 +230,14 @@ pub async fn term_ssh_fingerprint_ack(
         .map_err(term_err)
 }
 
+/// T-B7-3：`~/.ssh/config` **只读导入**候选列表（裁决：后端读——前端无 fs 权）。
+/// 缺席/不可读一律空表非错误；ignored 点名留在 term-core 侧（预填面不消费）。
+#[tauri::command]
+pub async fn term_ssh_config_hosts() -> Result<Vec<term_core::SshHostEntry>, AppError> {
+    let (entries, _ignored) = term_core::sshconfig::load_default_config();
+    Ok(entries)
+}
+
 /// exec 结果线上形状（term_core::ExecResult 同名单）
 #[derive(serde::Serialize)]
 pub struct ExecResultDto {

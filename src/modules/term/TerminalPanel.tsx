@@ -38,6 +38,7 @@ import {
   termSftpUpload,
   termSpawnLocal,
   termSpawnWsl,
+  termSshConfigHosts,
   termSshConnect,
   termSshExec,
   termSshFingerprintAck,
@@ -50,6 +51,7 @@ import {
   type SftpEntryDto,
   type SshAuthDto,
   type SshExecResultDto,
+  type SshHostEntryDto,
   type SshKnownHostDto,
   type TermSessionDto,
 } from "../../ipc/client";
@@ -151,6 +153,8 @@ export default function TerminalPanel() {
   const [sshPass, setSshPass] = useState("");
   const [sshKeyPath, setSshKeyPath] = useState("");
   const [useKey, setUseKey] = useState(false);
+  // ~/.ssh/config 只读导入（T-B7-3）：懒载——下拉未开前零后端读（null=未加载）
+  const [cfgHosts, setCfgHosts] = useState<SshHostEntryDto[] | null>(null);
   // 已知主机管理（T-B1-8）：host 串含 [h]:port 复合形态一律原样回传，
   // parse_host_port（commands/term.rs:195-203）依赖该形状，前端禁止拆解重组。
   const [khOpen, setKhOpen] = useState(false);
@@ -517,6 +521,33 @@ export default function TerminalPanel() {
     }
   }, [execCmd, sftpTarget, fail]);
 
+  // ---- ~/.ssh/config 只读导入（T-B7-3）----
+  const loadCfgHosts = useCallback(async () => {
+    try {
+      setCfgHosts(await termSshConfigHosts());
+    } catch (e) {
+      setCfgHosts([]);
+      fail(e);
+    }
+  }, [fail]);
+
+  // 预填不是提交：只覆盖表单字段，用户仍可逐格改（host_name 缺席回落 alias）
+  const applyCfg = useCallback(
+    (alias: string) => {
+      const h = cfgHosts?.find((x) => x.alias === alias);
+      if (!h) return;
+      setSshHost(h.host_name ?? h.alias);
+      if (h.user) setSshUser(h.user);
+      if (h.port != null) setSshPort(String(h.port));
+      if (h.identity_file) {
+        setSshKeyPath(h.identity_file);
+        setUseKey(true);
+      }
+      setMsg(`已导入「${alias}」（仍可修改）`);
+    },
+    [cfgHosts],
+  );
+
   return (
     <div className={styles.root}>
       <Tabs
@@ -558,6 +589,25 @@ export default function TerminalPanel() {
             <Input className={styles.grow} placeholder="SSH 主机" value={sshHost} onChange={(_, d) => setSshHost(d.value)} />
             <Input style={{ maxWidth: 80 }} placeholder="端口" value={sshPort} onChange={(_, d) => setSshPort(d.value)} />
             <Input style={{ maxWidth: 120 }} placeholder="用户" value={sshUser} onChange={(_, d) => setSshUser(d.value)} />
+            <Dropdown
+              placeholder="从 ~/.ssh/config 导入"
+              value=""
+              selectedOptions={[]}
+              onOpenChange={() => {
+                // 懒载：首次展开才读后端（未展开零调用），之后再开用缓存
+                if (cfgHosts === null) void loadCfgHosts();
+              }}
+              onOptionSelect={(_, d) => applyCfg(String(d.optionValue ?? ""))}
+            >
+              {(cfgHosts ?? []).map((h) => (
+                <Option key={h.alias} value={h.alias} text={h.alias}>
+                  {h.alias}
+                </Option>
+              ))}
+              {cfgHosts !== null && cfgHosts.length === 0 && (
+                <Option value="_none" text="（无可导入主机）">（无可导入主机）</Option>
+              )}
+            </Dropdown>
             <Button
               size="small"
               appearance="outline"
