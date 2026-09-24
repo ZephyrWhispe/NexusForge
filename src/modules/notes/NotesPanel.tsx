@@ -27,6 +27,7 @@ import {
   notesReindex,
   notesReviewGrade,
   notesReviewQueue,
+  notesSearch,
   notesSync,
   notesWrite,
   parseAppError,
@@ -36,6 +37,7 @@ import {
   type NoteCardDto,
   type NoteLinkDto,
   type NoteMetaDto,
+  type NoteSearchHitDto,
   type NoteSyncResultDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
@@ -152,6 +154,8 @@ export default function NotesPanel() {
   // ---- 笔记列表 ----
   const [all, setAll] = useState<NoteMetaDto[]>([]);
   const [filter, setFilter] = useState("");
+  // T-B7-21：搜索走后端 FTS5（null=未在搜索态）
+  const [hits, setHits] = useState<NoteSearchHitDto[] | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -193,6 +197,29 @@ export default function NotesPanel() {
       setLoading(false);
     }
   }, []);
+
+  // T-B7-21：搜索词防抖后走后端全文索引（200ms；空串退出搜索态）
+  useEffect(() => {
+    const q = filter.trim();
+    if (!q) {
+      setHits(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      void notesSearch(q, 200)
+        .then((r) => {
+          if (!cancelled) setHits(r);
+        })
+        .catch((e) => {
+          if (!cancelled) fail(e);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [filter, fail]);
 
   const refreshReview = useCallback(async () => {
     try {
@@ -564,15 +591,21 @@ export default function NotesPanel() {
     setSelNode(null);
   }, [selNode, doc, saveCanvas]);
 
-  const shown = all.filter((n) => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      n.path.toLowerCase().includes(q) ||
-      n.title.toLowerCase().includes(q) ||
-      n.tags.some((t) => t.toLowerCase().includes(q))
-    );
-  });
+  // T-B7-21：搜索走后端后按 title/path/body 三列分组（先命中列归属；组内保持 rank 序）；
+  // 标签列仍内存补搜（tags 不进 fts，旧标签搜索语义不丢）
+  const q = filter.trim().toLowerCase();
+  const searching = q.length > 0;
+  const hitList = hits ?? [];
+  const hitPaths = new Set(hitList.map((h) => h.path));
+  const groupOf = (h: NoteSearchHitDto) =>
+    h.title.toLowerCase().includes(q) ? "标题" : h.path.toLowerCase().includes(q) ? "路径" : "正文";
+  const groups = (["标题", "路径", "正文"] as const).map((g) => ({
+    g,
+    rows: hitList.filter((h) => groupOf(h) === g),
+  }));
+  const tagExtra = searching
+    ? all.filter((n) => !hitPaths.has(n.path) && n.tags.some((t) => t.toLowerCase().includes(q)))
+    : [];
 
   return (
     <div className={styles.root}>
@@ -611,7 +644,7 @@ export default function NotesPanel() {
           <div className={styles.row}>
             <Input
               className={styles.grow}
-              placeholder="搜索标题/路径/标签"
+              placeholder="搜索标题/路径/标签/正文（后端全文索引）"
               value={filter}
               onChange={(_, d) => setFilter(d.value)}
             />
@@ -639,30 +672,92 @@ export default function NotesPanel() {
           </div>
           <div className={styles.split}>
             <div className={styles.list}>
-              {shown.map((n) => (
-                <div
-                  key={n.path}
-                  className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
-                  onClick={() => void openNote(n.path)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={keyActivate(() => void openNote(n.path))}
-                >
-                  <Text size={300} weight="semibold">
-                    {n.title}
-                    {n.tags.slice(0, 3).map((t) => (
-                      <Badge key={t} size="small" appearance="outline" style={{ marginLeft: 6 }}>
-                        {t}
-                      </Badge>
-                    ))}
-                  </Text>
+              {!searching &&
+                all.map((n) => (
+                  <div
+                    key={n.path}
+                    className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
+                    onClick={() => void openNote(n.path)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={keyActivate(() => void openNote(n.path))}
+                  >
+                    <Text size={300} weight="semibold">
+                      {n.title}
+                      {n.tags.slice(0, 3).map((t) => (
+                        <Badge key={t} size="small" appearance="outline" style={{ marginLeft: 6 }}>
+                          {t}
+                        </Badge>
+                      ))}
+                    </Text>
+                    <Text size={100} className={styles.muted}>
+                      {n.path} · {new Date(n.mtime_ms).toLocaleString()}
+                    </Text>
+                  </div>
+                ))}
+              {searching &&
+                groups.map(({ g, rows }) =>
+                  rows.length === 0 ? null : (
+                    <div key={g}>
+                      <Text size={100} className={styles.muted}>
+                        {g}命中（{rows.length}）
+                      </Text>
+                      {rows.map((h) => (
+                        <div
+                          key={h.path}
+                          className={`${styles.item} ${active === h.path ? styles.itemActive : ""}`}
+                          onClick={() => void openNote(h.path)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={keyActivate(() => void openNote(h.path))}
+                        >
+                          <Text size={300} weight="semibold">
+                            {h.title || h.path}
+                          </Text>
+                          <Text size={100} className={styles.muted}>
+                            {h.path}
+                            {g === "正文" ? ` · ${h.snippet}` : ""}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  ),
+                )}
+              {searching && tagExtra.length > 0 && (
+                <div>
                   <Text size={100} className={styles.muted}>
-                    {n.path} · {new Date(n.mtime_ms).toLocaleString()}
+                    标签命中（{tagExtra.length}）
                   </Text>
+                  {tagExtra.map((n) => (
+                    <div
+                      key={n.path}
+                      className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
+                      onClick={() => void openNote(n.path)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={keyActivate(() => void openNote(n.path))}
+                    >
+                      <Text size={300} weight="semibold">
+                        {n.title}
+                      </Text>
+                      <Text size={100} className={styles.muted}>
+                        {n.path}
+                      </Text>
+                    </div>
+                  ))}
                 </div>
-              ))}
-              {(loading || shown.length === 0) && (
-                <EmptyState text="暂无笔记：在上方输入名称新建，或点「重建索引」扫描磁盘 .md" loading={loading} />
+              )}
+              {(loading ||
+                (!searching && all.length === 0) ||
+                (searching && hitList.length === 0 && tagExtra.length === 0)) && (
+                <EmptyState
+                  text={
+                    searching
+                      ? "无匹配：搜索已走后端全文索引（标题/路径/正文/标签）"
+                      : "暂无笔记：在上方输入名称新建，或点「重建索引」扫描磁盘 .md"
+                  }
+                  loading={loading}
+                />
               )}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>

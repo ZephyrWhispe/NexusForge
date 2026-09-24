@@ -15,7 +15,7 @@ use crate::canvas;
 use crate::error::{NoteError, Result};
 use crate::frontmatter::{extract_links, extract_tags, first_h1, split_frontmatter};
 use crate::index::{NoteIndex, NoteIndexRow};
-use crate::model::{Backlink, CanvasDoc, Card, NoteMeta, SyncResult};
+use crate::model::{Backlink, CanvasDoc, Card, NoteMeta, SearchHit, SyncResult};
 use crate::review::{grade as sm2_grade, CardStore};
 
 /// 笔记库
@@ -136,6 +136,7 @@ impl NoteLibrary {
             size,
             tags,
             links,
+            body: body.to_string(),
         })
     }
 
@@ -239,10 +240,17 @@ impl NoteLibrary {
         })
     }
 
-    /// 全量重建（清索引三表后 sync；cards 保留）
+    /// 全量重建（清索引四表含 fts 后 sync；cards 保留）
     pub fn reindex(&self) -> Result<SyncResult> {
         self.index.clear()?;
         self.sync()
+    }
+
+    // ---------- T-B7-21：正文搜索 ----------
+
+    /// FTS5 全文检索（path/title/body 三列；上限 200 由索引层钳位）
+    pub fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
+        self.index.search(query, limit)
     }
 
     // ---------- N1：CRUD ----------
@@ -647,6 +655,24 @@ mod tests {
         assert_eq!(r.updated, 1);
         let meta = l.index().get("todo.md").unwrap().unwrap();
         assert!(meta.tags.contains(&"urgent".into()));
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-21）字面测试名优先于 rustc 命名惯例
+    fn notesSearch_reindexTwice_idempotentCount() {
+        let l = lib("fts_reindex");
+        l.create("a.md", "# 标题\n同步失败的备份与恢复\n").unwrap();
+        l.create("sub/b.md", "同步失败的故障记录\n").unwrap();
+        l.reindex().unwrap();
+        let first = l.search("同步失败", 50).unwrap();
+        assert_eq!(first.len(), 2, "{first:?}");
+        l.reindex().unwrap();
+        let second = l.search("同步失败", 50).unwrap();
+        assert_eq!(second.len(), 2, "重索引两次计数不变（fts 幂等）");
+        assert_eq!(
+            second.iter().map(|h| h.path.clone()).collect::<Vec<_>>(),
+            first.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -111,6 +111,17 @@ impl Default for CanvasDoc {
     }
 }
 
+/// 正文搜索命中（N1 检索 / T-B7-21 FTS5）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub path: String,
+    pub title: String,
+    /// FTS5 snippet() 对正文列的片段（CJK 已回并空格）
+    pub snippet: String,
+    /// bm25 rank，越小越优
+    pub rank: f64,
+}
+
 /// sync/reindex 结果
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncResult {

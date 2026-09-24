@@ -258,6 +258,23 @@ pub async fn notes_reindex(
         .map_err(notes_err)
 }
 
+/// 正文全文搜索（T-B7-21 FTS5；只读，不发变更事件）
+#[tauri::command]
+pub async fn notes_search(
+    query: String,
+    limit: u32,
+    state: State<'_, HostState>,
+) -> Result<Vec<notes_core::model::SearchHit>, AppError> {
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    tauri::async_runtime::spawn_blocking(move || m.search(&query, limit))
+        .await
+        .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
+        .map_err(notes_err)
+}
+
 // ---- N4 复习 ----
 
 /// 全部卡片

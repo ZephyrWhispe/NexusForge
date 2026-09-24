@@ -130,6 +130,7 @@
     "allow-notes-rename",
     "allow-notes-review-grade",
     "allow-notes-review-queue",
+    "allow-notes-search",
     "allow-notes-sync",
     "allow-notes-write",
     "allow-ocr-config-get",

@@ -351,6 +351,8 @@ fn aux_windows_never_reach_main_only_commands() {
         // T-B7-18 编码/EOL 切换与草稿恢复同属内容触盘面（编辑器只存在于 main）
         "allow-editor-set-encoding",
         "allow-editor-recover-draft",
+        // T-B7-21 正文搜索读全盘笔记正文（notes 面板只存在于 main）
+        "allow-notes-search",
     ];
     for (name, cap) in &caps {
         if name == "main" {
@@ -408,6 +410,8 @@ fn aux_windows_never_reach_main_only_commands() {
         // T-B7-18 两枚新命令的正对照（aux 禁持 + main 真持=负例不空洞）
         "allow-editor-set-encoding",
         "allow-editor-recover-draft",
+        // T-B7-21 notes_search 正对照
+        "allow-notes-search",
     ] {
         assert!(
             main_perms.contains(&expect),

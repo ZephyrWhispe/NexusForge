@@ -1732,6 +1732,16 @@ export function notesSync(): Promise<NoteSyncResultDto> {
 export function notesReindex(): Promise<NoteSyncResultDto> {
   return invoke("notes_reindex");
 }
+/** FTS5 正文搜索命中（T-B7-21；字段与 notes-core SearchHit serde 形一致） */
+export type NoteSearchHitDto = {
+  path: string;
+  title: string;
+  snippet: string;
+  rank: number;
+};
+export function notesSearch(query: string, limit = 200): Promise<NoteSearchHitDto[]> {
+  return invoke("notes_search", { query, limit });
+}
 export function notesCards(): Promise<NoteCardDto[]> {
   return invoke("notes_cards");
 }
