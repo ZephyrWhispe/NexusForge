@@ -141,6 +141,36 @@ const ENCODING_OPTIONS: Array<{ value: EditorEncodingKind; label: string }> = [
   { value: "latin1", label: "Latin-1" },
 ];
 
+/**
+ * 解析前端页码区间串（T-B7-19）：与 Rust `editor_core::pdf::parse_page_ranges` 同语义，
+ * 前端据此解析后以 `number[]` 经 IPC 传入（后端只收已解析数组）。
+ * "2-4,7" → [2,3,4,7]（升序去重）；畸形项逐条抛错并点名原项，不静默截断。
+ */
+export function parse_page_ranges(text: string): number[] {
+  const parseOne = (s: string, from: string): number => {
+    const trimmed = s.trim();
+    const n = /^\d+$/.test(trimmed) ? Number(trimmed) : NaN;
+    if (Number.isNaN(n)) throw new Error(`非法页码 '${trimmed}'（项：'${from}'）`);
+    if (n === 0) throw new Error(`页码从 1 起，'${from}' 含 0`);
+    return n;
+  };
+  const pages = new Set<number>();
+  for (const raw of text.split(",")) {
+    const token = raw.trim();
+    if (token === "") throw new Error(`空页码项（串：'${text}'）`);
+    const dash = token.indexOf("-");
+    if (dash > 0) {
+      const a = parseOne(token.slice(0, dash), token);
+      const b = parseOne(token.slice(dash + 1), token);
+      if (a > b) throw new Error(`页码区间倒序：'${token}'（${a}>${b}）`);
+      for (let p = a; p <= b; p++) pages.add(p);
+    } else {
+      pages.add(parseOne(token, token));
+    }
+  }
+  return [...pages].sort((x, y) => x - y);
+}
+
 export default function EditorPanel() {
   const styles = useStyles();
   const [openPath, setOpenPath] = useState("");
@@ -446,6 +476,7 @@ export default function EditorPanel() {
 
   // ---------------- PDF 工具状态 ----------------
   const [pdfPath, setPdfPath] = useState("");
+  const [splitPages, setSplitPages] = useState("");
   const [pdfInputs, setPdfInputs] = useState("");
   const [pdfOut, setPdfOut] = useState("");
   const [pdfInfoState, setPdfInfoState] = useState<PdfInfoDto | null>(null);
@@ -675,13 +706,26 @@ export default function EditorPanel() {
           >
             信息
           </Button>
+          <Input
+            className={styles.grow}
+            placeholder="拆分页码区间（空=全部，如 2-4,7）"
+            value={splitPages}
+            onChange={(_, d) => setSplitPages(d.value)}
+            size="small"
+          />
           <Button
             size="small"
             disabled={busy !== "" || pdfPath.trim() === ""}
             onClick={() =>
               pdfRun("pdf-split", async () => {
-                const r = await pdfSplit(pdfPath.trim(), pdfPath.trim() + "_pages");
-                setStatus(`拆分完成：${r.length} 个单页文件`);
+                const trimmed = splitPages.trim();
+                const pages = trimmed === "" ? undefined : parse_page_ranges(trimmed);
+                const r = await pdfSplit(pdfPath.trim(), pdfPath.trim() + "_pages", pages);
+                setStatus(
+                  pages
+                    ? `拆分完成：${r.length} 个单页文件（第 ${pages.join(",")} 页）`
+                    : `拆分完成：${r.length} 个单页文件`,
+                );
               })
             }
           >

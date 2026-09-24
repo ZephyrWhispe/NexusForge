@@ -1616,8 +1616,13 @@ export function pdfInfo(path: string): Promise<PdfInfoDto> {
 export function pdfMerge(inputs: string[], output: string): Promise<PdfOpResultDto> {
   return invoke("pdf_merge", { inputs, output });
 }
-export function pdfSplit(path: string, outDir: string): Promise<PdfOpResultDto[]> {
-  return invoke("pdf_split", { path, outDir });
+/** 拆分（T-B7-19）：pages 省略=全拆；列出页=只拆这些页（越界由 pdf 层点名拒） */
+export function pdfSplit(
+  path: string,
+  outDir: string,
+  pages?: number[],
+): Promise<PdfOpResultDto[]> {
+  return invoke("pdf_split", { path, outDir, pages: pages ?? null });
 }
 export function pdfCompress(path: string): Promise<PdfOpResultDto> {
   return invoke("pdf_compress", { path });

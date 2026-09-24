@@ -167,17 +167,18 @@ pub async fn pdf_merge(
     .map_err(editor_err)
 }
 
-/// PDF 拆分为单页
+/// PDF 拆分为单页（T-B7-19：pages=None 全拆，Some(list) 只拆列出页，越界 pdf 层点名拒）
 #[tauri::command]
 pub async fn pdf_split(
     path: std::path::PathBuf,
     out_dir: std::path::PathBuf,
+    pages: Option<Vec<u32>>,
     state: State<'_, HostState>,
 ) -> Result<Vec<editor_core::PdfOpResult>, AppError> {
     let m = state.editor.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _ = m;
-        editor_core::pdf::split(&path, &out_dir)
+        editor_core::pdf::split(&path, &out_dir, pages.as_deref())
     })
     .await
     .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?

@@ -76,6 +76,51 @@ pub fn info(path: &Path) -> Result<PdfInfo> {
     })
 }
 
+/// 解析前端页码区间串（T-B7-19）："2-4,7" → `[2,3,4,7]`（升序去重）。
+/// 每个畸形项**点名裁决**（返 `Err(String)` 携原项），不猜不静默跳：
+///
+/// - `"a"` 非数字、`"0"` 页码从 1 起、`"-2"` 空起点、`"4-"` 空终点、`"7-3"` 区间倒序。
+///
+/// 与 TS 侧 `parse_page_ranges` 同语义——前端据此解析后以 `Vec<u32>` 经 IPC 传入。
+pub fn parse_page_ranges(text: &str) -> std::result::Result<Vec<u32>, String> {
+    let mut pages: Vec<u32> = Vec::new();
+    let push = |p: u32, acc: &mut Vec<u32>| {
+        if !acc.contains(&p) {
+            acc.push(p);
+        }
+    };
+    for raw in text.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            return Err(format!("空页码项（串：'{text}'）"));
+        }
+        let parse_one = |s: &str| -> std::result::Result<u32, String> {
+            let n: u32 = s
+                .trim()
+                .parse()
+                .map_err(|_| format!("非法页码 '{s}'（项：'{token}'）"))?;
+            if n == 0 {
+                return Err(format!("页码从 1 起，'{token}' 含 0"));
+            }
+            Ok(n)
+        };
+        if let Some((a_s, b_s)) = token.split_once('-') {
+            let a = parse_one(a_s)?;
+            let b = parse_one(b_s)?;
+            if a > b {
+                return Err(format!("页码区间倒序：'{token}'（{a}>{b}）"));
+            }
+            for p in a..=b {
+                push(p, &mut pages);
+            }
+        } else {
+            push(parse_one(token)?, &mut pages);
+        }
+    }
+    pages.sort_unstable();
+    Ok(pages)
+}
+
 /// 合并多个 PDF → 输出到 output（页序按输入顺序）
 pub fn merge(inputs: &[std::path::PathBuf], output: &Path) -> Result<PdfOpResult> {
     if inputs.len() < 2 {
@@ -89,18 +134,43 @@ pub fn merge(inputs: &[std::path::PathBuf], output: &Path) -> Result<PdfOpResult
     finish(acc, output)
 }
 
-/// 拆分为单页 PDF 输出到目录（`{stem}_1.pdf`…）
-pub fn split(path: &Path, out_dir: &Path) -> Result<Vec<PdfOpResult>> {
+/// 拆分 PDF 输出到目录（`{stem}_{原页号}.pdf`，T-B7-19）。
+/// `pages=None` 全拆；`Some(list)` 只拆列出的页——页号用**原文档页号**（拆 5-7 得
+/// `_5/_6/_7` 不用序号），越界 ⇒ `Err` 点名"共 N 页，请求了第 M 页"（禁静默截断），
+/// 空列表 ⇒ `Err`（None 才是全拆语义，空列表是输入事故不是意图）。
+pub fn split(path: &Path, out_dir: &Path, pages: Option<&[u32]>) -> Result<Vec<PdfOpResult>> {
     let doc = load(path)?;
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
     std::fs::create_dir_all(out_dir).map_err(EditorError::Io)?;
 
+    let all = doc.get_pages();
+    let total = all.len() as u32;
+    let targets: Vec<u32> = match pages {
+        None => (1..=total).collect(),
+        Some(list) => {
+            if list.is_empty() {
+                return Err(EditorError::BadParam(
+                    "拆分页码列表为空：全拆请不传页码（None），空列表不是意图".into(),
+                ));
+            }
+            for &p in list {
+                if p == 0 || p > total {
+                    return Err(EditorError::BadParam(format!(
+                        "共 {total} 页，请求了第 {p} 页"
+                    )));
+                }
+            }
+            list.to_vec()
+        }
+    };
+
     let mut results = Vec::new();
-    for (i, page_id) in doc.get_pages().values().enumerate() {
+    for page_no in targets {
+        let page_id = all[&page_no];
         // 单页文档 = 独立构建目录 + Pages 树，把该页整棵引用树克隆进去
         let mut one = Document::with_version("1.5");
         let mut map: std::collections::HashMap<ObjectId, ObjectId> = Default::default();
-        let cloned = clone_object_tree(&doc, *page_id, &mut one, &mut map);
+        let cloned = clone_object_tree(&doc, page_id, &mut one, &mut map);
         let new_pages = one.add_object(dictionary! {
             "Type" => "Pages",
             "Kids" => Object::Array(vec![Object::Reference(cloned)]),
@@ -116,7 +186,7 @@ pub fn split(path: &Path, out_dir: &Path) -> Result<Vec<PdfOpResult>> {
         });
         one.trailer.set("Root", Object::Reference(catalog));
 
-        let out = out_dir.join(format!("{stem}_{}.pdf", i + 1));
+        let out = out_dir.join(format!("{stem}_{page_no}.pdf"));
         one.save(&out)
             .map_err(|e| EditorError::Pdf(format!("写入 {} 失败: {e}", out.display())))?;
         results.push(PdfOpResult {
@@ -479,12 +549,88 @@ mod tests {
         let a = dir.join("a.pdf");
         make_pdf(&a, 3, "S");
         let out_dir = dir.join("pages");
-        let results = split(&a, &out_dir).unwrap();
+        let results = split(&a, &out_dir, None).unwrap();
         assert_eq!(results.len(), 3);
         for (i, r) in results.iter().enumerate() {
             assert!(r.output.contains(&format!("a_{}.pdf", i + 1)));
             assert_eq!(info(Path::new(&r.output)).unwrap().pages, 1);
         }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-19）字面测试名优先于 rustc 命名惯例
+    fn split_subset_namedByOriginalPageNumbers() {
+        let dir = tmpdir("split-subset");
+        let a = dir.join("doc.pdf");
+        make_pdf(&a, 7, "P");
+        let out_dir = dir.join("pages");
+        // 拆 5-7：文件名用原文档页号 _5/_6/_7，不是序号 _1/_2/_3
+        let results = split(&a, &out_dir, Some(&[5, 6, 7])).unwrap();
+        assert_eq!(results.len(), 3);
+        for (idx, page_no) in [5u32, 6, 7].into_iter().enumerate() {
+            let r = &results[idx];
+            assert!(
+                r.output.ends_with(&format!("doc_{page_no}.pdf")),
+                "输出名须带原文档页号：{}",
+                r.output
+            );
+            assert!(Path::new(&r.output).exists());
+            assert_eq!(info(Path::new(&r.output)).unwrap().pages, 1);
+        }
+        assert!(
+            !out_dir.join("doc_1.pdf").exists(),
+            "未请求的页不得陪跑落盘"
+        );
+        // 乱序请求按请求序输出（区间解析在前端，Rust 只按列表逐页拆）
+        let shuffled = split(&a, &out_dir, Some(&[2, 1])).unwrap();
+        assert!(shuffled[0].output.ends_with("doc_2.pdf"));
+        assert!(shuffled[1].output.ends_with("doc_1.pdf"));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn split_outOfRange_errsNamingTotal() {
+        let dir = tmpdir("split-range");
+        let a = dir.join("doc.pdf");
+        make_pdf(&a, 3, "R");
+        let out_dir = dir.join("pages");
+        // 三臂：单页越界 / 全越界 / 空列表——都要点名总数，禁静默截断
+        let e1 = split(&a, &out_dir, Some(&[2, 9])).unwrap_err().to_string();
+        assert!(e1.contains("共 3 页") && e1.contains("第 9 页"), "e1={e1}");
+        let e2 = split(&a, &out_dir, Some(&[4, 5])).unwrap_err().to_string();
+        assert!(e2.contains("共 3 页") && e2.contains("第 4 页"), "e2={e2}");
+        let e3 = split(&a, &out_dir, Some(&[])).unwrap_err().to_string();
+        assert!(e3.contains("空"), "e3={e3}");
+        // 页号 0 同属越界（PDF 页号从 1 起）
+        let e4 = split(&a, &out_dir, Some(&[0])).unwrap_err().to_string();
+        assert!(e4.contains("共 3 页") && e4.contains("第 0 页"), "e4={e4}");
+        // 越界拒后不得留半截输出
+        assert_eq!(
+            std::fs::read_dir(&out_dir).map(|d| d.count()).unwrap_or(0),
+            0
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn parseRanges_malformed_named() {
+        // 正臂：区间+单页混排、乱序输入升序去重输出
+        assert_eq!(parse_page_ranges("2-4,7").unwrap(), vec![2, 3, 4, 7]);
+        assert_eq!(parse_page_ranges("7,2-4,3").unwrap(), vec![2, 3, 4, 7]);
+        assert_eq!(parse_page_ranges(" 5 , 2-3 ").unwrap(), vec![2, 3, 5]);
+        // 畸形五臂逐条裁决，错误须点名原项
+        for bad in ["4-", "a", "0", "-2", "7-3"] {
+            let e = parse_page_ranges(bad).unwrap_err();
+            assert!(
+                e.contains(bad) || e.contains("空页码项"),
+                "'{bad}' 的错误未点名：{e}"
+            );
+        }
+        // 混在合法项里也不许漏网（整串拒，不做"能解析多少算多少"的静默截断）
+        assert!(parse_page_ranges("2-4,a,7").is_err());
+        // 全空/空项
+        assert!(parse_page_ranges("").is_err());
+        assert!(parse_page_ranges("2,,3").is_err());
     }
 
     #[test]
