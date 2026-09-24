@@ -86,6 +86,11 @@ description = "允许前端调用 notes_review_grade 命令（D-28 按窗最小�
 commands.allow = ["notes_review_grade"]
 
 [[permission]]
+identifier = "allow-notes-review-stats"
+description = "允许前端调用 notes_review_stats 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_review_stats"]
+
+[[permission]]
 identifier = "allow-notes-canvas-get"
 description = "允许前端调用 notes_canvas_get 命令（D-28 按窗最小授权）"
 commands.allow = ["notes_canvas_get"]

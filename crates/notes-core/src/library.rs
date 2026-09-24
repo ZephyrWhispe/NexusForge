@@ -15,8 +15,8 @@ use crate::canvas;
 use crate::error::{NoteError, Result};
 use crate::frontmatter::{extract_links, extract_tags, first_h1, split_frontmatter};
 use crate::index::{NoteIndex, NoteIndexRow};
-use crate::model::{Backlink, CanvasDoc, Card, NoteMeta, SearchHit, SyncResult};
-use crate::review::{grade as sm2_grade, CardStore};
+use crate::model::{Backlink, CanvasDoc, Card, NoteMeta, ReviewStats, SearchHit, SyncResult};
+use crate::review::{grade as sm2_grade, stats_from_cards, CardStore};
 
 /// 笔记库
 pub struct NoteLibrary {
@@ -476,6 +476,11 @@ impl NoteLibrary {
 
     pub fn review_queue(&self, now_ms: i64) -> Result<Vec<Card>> {
         self.cards.queue(now_ms)
+    }
+
+    /// T-B7-24 统计卡：全表行喂纯聚合函数，时间注入口径与 queue 同源
+    pub fn review_stats(&self, now_ms: i64) -> Result<ReviewStats> {
+        Ok(stats_from_cards(&self.cards.list()?, now_ms))
     }
 
     pub fn grade_card(&self, id: &str, quality: u32, now_ms: i64) -> Result<Card> {

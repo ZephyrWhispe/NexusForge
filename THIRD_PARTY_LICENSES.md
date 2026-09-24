@@ -1,7 +1,7 @@
 # 第三方依赖许可清单（THIRD_PARTY_LICENSES）
 
 > 本文件由 `node tools/gen-third-party-licenses.mjs` 生成，请勿手工编辑。
-> 生成日期：2026-09-22 ｜ Rust 依赖（x86_64-pc-windows-msvc 解析）580 个 ｜ npm 依赖 498 个
+> 生成日期：2026-09-24 ｜ Rust 依赖（x86_64-pc-windows-msvc 解析）581 个 ｜ npm 依赖 498 个
 
 项目本身以 GPL-3.0-only 发布（见 [LICENSE](LICENSE)）。下列依赖的许可证均与 GPL-3.0 分发兼容；`(未声明)` 条目由批次 2 的 cargo-deny 门禁复核。
 
@@ -10,7 +10,7 @@
 | 许可证 | Rust 包数 |
 |---|---|
 | MIT OR Apache-2.0 | 261 |
-| MIT | 96 |
+| MIT | 97 |
 | Apache-2.0 OR MIT | 66 |
 | MIT/Apache-2.0 | 35 |
 | Apache-2.0 WITH LLVM-exception | 25 |
@@ -255,6 +255,7 @@
 | http | 1.5.0 | MIT OR Apache-2.0 |
 | http-body | 1.1.0 | MIT |
 | http-body-util | 0.1.5 | MIT |
+| http-range | 0.1.5 | MIT |
 | httparse | 1.10.1 | MIT OR Apache-2.0 |
 | hyper | 1.11.1 | MIT |
 | hyper-rustls | 0.27.9 | Apache-2.0 OR ISC OR MIT |

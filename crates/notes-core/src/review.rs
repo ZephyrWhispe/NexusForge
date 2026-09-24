@@ -11,10 +11,54 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{NoteError, Result};
-use crate::model::Card;
+use crate::model::{Card, ReviewStats};
 
 /// 一天毫秒
 const DAY_MS: i64 = 86_400_000;
+
+/// 复习统计聚合（T-B7-24 纯函数，时间注入防断言随机灯——B3 ⑬ 教训）。
+///
+/// 日粒度用 UTC epoch 天（`ms / DAY_MS`）：本仓无本地时区事实源，
+/// 统计口径自洽即可，跨月界与是否闰年对 epoch 天连续性与普通天完全同权。
+pub fn stats_from_cards(cards: &[Card], now_ms: i64) -> ReviewStats {
+    let today = now_ms.div_euclid(DAY_MS);
+    let due_today = cards
+        .iter()
+        .filter(|c| c.due_ms < (today + 1) * DAY_MS)
+        .count();
+    let mut by_bucket = [0usize; 4];
+    for c in cards {
+        let b = if c.reps == 0 {
+            0
+        } else if c.interval_days < 7 {
+            1
+        } else if c.interval_days <= 30 {
+            2
+        } else {
+            3
+        };
+        by_bucket[b] += 1;
+    }
+    let due_days: std::collections::BTreeSet<i64> =
+        cards.iter().map(|c| c.due_ms.div_euclid(DAY_MS)).collect();
+    // 今天允许缺席（当天可能尚未复习），锚点=今天有卡则今天、否则昨天起回溯。
+    let mut d = if due_days.contains(&today) {
+        today
+    } else {
+        today - 1
+    };
+    let mut streak_days = 0i64;
+    while due_days.contains(&d) {
+        streak_days += 1;
+        d -= 1;
+    }
+    ReviewStats {
+        total: cards.len(),
+        due_today,
+        by_bucket,
+        streak_days,
+    }
+}
 
 /// SM-2 评分（纯函数，便于单测）
 pub fn grade(card: &Card, quality: u32, now_ms: i64) -> Result<Card> {
@@ -283,6 +327,74 @@ mod tests {
     #[test]
     fn quality_out_of_range() {
         assert!(grade(&card(), 6, 0).is_err());
+    }
+
+    fn day_noon(d: i64) -> i64 {
+        d * DAY_MS + DAY_MS / 2
+    }
+
+    fn bcard(id: &str, reps: i64, interval: i64, due_ms: i64) -> Card {
+        Card {
+            id: id.into(),
+            due_ms,
+            reps,
+            interval_days: interval,
+            ..card()
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-24）字面测试名优先于 rustc 命名惯例
+    fn statsFromCards_bucketCounts_nowInjected() {
+        let now = day_noon(20_486); // 固定夹具日，跨断言零时钟依赖
+        let cards = vec![
+            bcard("new", 0, 0, now - 2 * DAY_MS), // 逾期新卡：桶0、计入 due_today
+            bcard("young", 1, 1, now),            // 今天到期：桶1、计入 due_today
+            bcard("mid", 3, 10, day_noon(20_488)), // 明天之后：不计
+            bcard("mature", 5, 60, day_noon(20_560)), // 远期：不计
+        ];
+        let s = stats_from_cards(&cards, now);
+        assert_eq!(s.total, 4);
+        assert_eq!(s.due_today, 2, "含逾期：due 落在今天末尾前都算该复习");
+        assert_eq!(s.by_bucket, [1, 1, 1, 1], "新/年幼/中年/成熟四臂各一");
+        // 空输入正对照：一切计数归零而非 panic
+        let e = stats_from_cards(&[], now);
+        assert_eq!(
+            e,
+            ReviewStats {
+                total: 0,
+                due_today: 0,
+                by_bucket: [0; 4],
+                streak_days: 0
+            }
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-24）字面测试名优先于 rustc 命名惯例
+    fn stats_streakCountsConsecutiveDays() {
+        // 跨月界夹具：2026 非闰年，epoch 日 20510/20511/20512 = 2026-02-26/27/28，
+        // 次日 20513 即 3 月 1 日——链条恰停在月界上；epoch 天连续性不受月历断档影响。
+        let now = day_noon(20512);
+        let cards = vec![
+            bcard("a", 1, 1, day_noon(20510)),   // 2/26
+            bcard("b", 1, 1, day_noon(20511)),   // 2/27——月界前一枚
+            bcard("c", 1, 1, day_noon(20512)),   // 2/28=今天
+            bcard("far", 2, 8, day_noon(20526)), // 远期干扰项：不断链也不入链
+        ];
+        assert_eq!(stats_from_cards(&cards, now).streak_days, 3);
+        // 今天缺席允许：锚点落昨天
+        let no_today = vec![
+            bcard("a", 1, 1, day_noon(20510)),
+            bcard("b", 1, 1, day_noon(20511)),
+        ];
+        assert_eq!(stats_from_cards(&no_today, now).streak_days, 2);
+        // 断链夹具：昨天有、前天无 → 只算 1
+        let broken = vec![bcard("y", 1, 1, day_noon(20511))];
+        assert_eq!(stats_from_cards(&broken, now).streak_days, 1);
+        // 锚点两日均空 → 0
+        let idle = vec![bcard("f", 1, 1, day_noon(20517))];
+        assert_eq!(stats_from_cards(&idle, now).streak_days, 0);
     }
 
     #[test]

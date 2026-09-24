@@ -1702,6 +1702,14 @@ export interface CanvasDocDto {
   edges: CanvasEdgeDto[];
 }
 
+/// T-B7-24 复习统计卡（wire 字段保持 Rust snake_case 原形——IPC 案形转换只发生在顶层参数名）
+export interface ReviewStatsDto {
+  total: number;
+  due_today: number;
+  by_bucket: [number, number, number, number];
+  streak_days: number;
+}
+
 export function notesList(): Promise<NoteMetaDto[]> {
   return invoke("notes_list");
 }
@@ -1756,6 +1764,9 @@ export function notesCardDelete(id: string): Promise<boolean> {
 }
 export function notesReviewQueue(): Promise<NoteCardDto[]> {
   return invoke("notes_review_queue");
+}
+export function notesReviewStats(): Promise<ReviewStatsDto> {
+  return invoke("notes_review_stats");
 }
 export function notesReviewGrade(id: string, quality: number): Promise<NoteCardDto> {
   return invoke("notes_review_grade", { id, quality });

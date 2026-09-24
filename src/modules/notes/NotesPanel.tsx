@@ -28,6 +28,7 @@ import {
   notesReindex,
   notesReviewGrade,
   notesReviewQueue,
+  notesReviewStats,
   notesSearch,
   notesSync,
   notesWrite,
@@ -40,7 +41,10 @@ import {
   type NoteMetaDto,
   type NoteSearchHitDto,
   type NoteSyncResultDto,
+  type ReviewStatsDto,
 } from "../../ipc/client";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { canvasImgSrc, deleteEdge, setNodeText } from "./canvasEdit";
 import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
@@ -235,6 +239,7 @@ export default function NotesPanel() {
   // ---- 复习 ----
   const [queue, setQueue] = useState<NoteCardDto[]>([]);
   const [allCards, setAllCards] = useState<NoteCardDto[]>([]);
+  const [stats, setStats] = useState<ReviewStatsDto | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [cardFront, setCardFront] = useState("");
   const [cardBack, setCardBack] = useState("");
@@ -244,6 +249,9 @@ export default function NotesPanel() {
   const [canvasDir, setCanvasDir] = useState("");
   const [doc, setDoc] = useState<CanvasDocDto>({ version: 1, nodes: [], edges: [] });
   const [selNode, setSelNode] = useState<string | null>(null);
+  const [selEdge, setSelEdge] = useState<string | null>(null);
+  const [editingNode, setEditingNode] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
   const linkMode = useRef<string | null>(null); // 连线模式：第一个端点
   // T-B7-23：textarea → Monaco markdown。B1 三 ref 桥同一形制——编辑器只建一次
   // （deps=存在性布尔），markdown model 共享一个，切篇经带闸 setValue 换内容不 dispose；
@@ -318,6 +326,12 @@ export default function NotesPanel() {
       setAllCards(a);
     } catch (e) {
       reportError(e, { context: "复习队列加载失败", dedupeKey: "notes-review", toast: false });
+    }
+    // 统计卡与队列分腿：读侧多一枚命令的失败不连坐既有队列渲染（写侧同源 library 门已在上方兜住）
+    try {
+      setStats(await notesReviewStats());
+    } catch (e) {
+      reportError(e, { context: "复习统计加载失败", dedupeKey: "notes-review-stats", toast: false });
     }
   }, []);
 
@@ -606,6 +620,8 @@ export default function NotesPanel() {
       try {
         setDoc(await notesCanvasGet(dir));
         setSelNode(null);
+        setSelEdge(null);
+        setEditingNode(null);
       } catch (e) {
         fail(e);
       }
@@ -700,6 +716,20 @@ export default function NotesPanel() {
       );
     }
   }, [canvasDir, doc]);
+
+  // T-B7-24：仅删选中边（节点原样保留——与 removeSelected 的"删节点连边"互补）
+  const removeSelectedEdge = useCallback(() => {
+    if (!selEdge) return;
+    void saveCanvas(deleteEdge(doc, selEdge));
+    setSelEdge(null);
+  }, [selEdge, doc, saveCanvas]);
+
+  // T-B7-24：节点双击就地改文——存回 CanvasNode.text，写盘走既有 notesCanvasSave
+  const commitTextEdit = useCallback(() => {
+    if (!editingNode) return;
+    void saveCanvas(setNodeText(doc, editingNode, editDraft));
+    setEditingNode(null);
+  }, [editingNode, doc, editDraft, saveCanvas]);
 
   const removeSelected = useCallback(async () => {
     if (!selNode) return;
@@ -1040,6 +1070,17 @@ export default function NotesPanel() {
               新建卡片{active ? `（关联 ${active}）` : ""}
             </Button>
           </div>
+          {stats && (
+            <div className={styles.row} data-stats-card>
+              <Text size={200} weight="semibold">
+                总 {stats.total} 张 · 今日到期 {stats.due_today} · 连续 {stats.streak_days} 天
+              </Text>
+              <Badge appearance="outline">新卡 {stats.by_bucket[0]}</Badge>
+              <Badge appearance="outline">年幼 {stats.by_bucket[1]}</Badge>
+              <Badge appearance="outline">中年 {stats.by_bucket[2]}</Badge>
+              <Badge appearance="outline">成熟 {stats.by_bucket[3]}</Badge>
+            </div>
+          )}
           {queue.length > 0 ? (
             <div className={styles.card}>
               <Text size={400} weight="semibold">
@@ -1136,33 +1177,76 @@ export default function NotesPanel() {
             <Button size="small" appearance="subtle" onClick={() => void removeSelected()}>
               删除选中
             </Button>
+            <Button
+              size="small"
+              appearance="subtle"
+              disabled={!selEdge}
+              onClick={removeSelectedEdge}
+            >
+              仅删选中边
+            </Button>
             <Button size="small" appearance="primary" onClick={() => void saveCanvas(doc)}>
               保存画布
             </Button>
           </div>
+          {/* 画布=自定义交互面（application 语义）：Delete 键删边是任务书字面承诺，
+              jsx-a11y 不认自定义角色交互（同 Tabs.tsx 字面 ARIA 纪律处例外登记） */}
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
           <div
             ref={wrapRef}
             className={styles.canvasWrap}
+            role="application"
+            aria-label="画布：点选边后 Delete 或右键删除，双击节点改文"
+            // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Delete" && selEdge) removeSelectedEdge();
+            }}
             onPointerMove={onWrapPointerMove}
             onPointerUp={onWrapPointerUp}
-            onPointerDown={() => setSelNode(null)}
+            onPointerDown={() => {
+              setSelNode(null);
+              setSelEdge(null);
+            }}
           >
             <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
               {doc.edges.map((e) => {
                 const a = doc.nodes.find((n) => n.id === e.from);
                 const b = doc.nodes.find((n) => n.id === e.to);
                 if (!a || !b) return null;
+                const selected = selEdge === e.id;
+                const common = {
+                  x1: a.x + a.w / 2,
+                  y1: a.y + a.h / 2,
+                  x2: b.x + b.w / 2,
+                  y2: b.y + b.h / 2,
+                };
                 return (
-                  <line
-                    key={e.id}
-                    x1={a.x + a.w / 2}
-                    y1={a.y + a.h / 2}
-                    x2={b.x + b.w / 2}
-                    y2={b.y + b.h / 2}
-                    stroke={tokens.colorBrandForeground1}
-                    strokeWidth={1.5}
-                    markerEnd=""
-                  />
+                  <g key={e.id}>
+                    <line
+                      {...common}
+                      stroke={selected ? tokens.colorPaletteYellowForeground1 : tokens.colorBrandForeground1}
+                      strokeWidth={selected ? 3 : 1.5}
+                      markerEnd=""
+                    />
+                    {/* 透明加宽命中腿：细线不可点的问题结构性收口（命中区纪律同 00-spec） */}
+                    <line
+                      {...common}
+                      stroke="transparent"
+                      strokeWidth={14}
+                      style={{ pointerEvents: "stroke", cursor: "pointer" }}
+                      onPointerDown={(ev) => {
+                        ev.stopPropagation();
+                        setSelEdge(e.id);
+                      }}
+                      onContextMenu={(ev) => {
+                        // 右键删边：立即仅删此边（节点原样）
+                        ev.preventDefault();
+                        void saveCanvas(deleteEdge(doc, e.id));
+                        setSelEdge(null);
+                      }}
+                    />
+                  </g>
                 );
               })}
             </svg>
@@ -1172,16 +1256,64 @@ export default function NotesPanel() {
                 className={`${styles.node} ${selNode === n.id ? styles.nodeSelected : ""} ${n.kind === "sticky" ? styles.nodeSticky : ""}`}
                 style={{ left: n.x, top: n.y, width: n.w, height: n.h }}
                 onPointerDown={(e) => onNodePointerDown(e, n)}
+                onDoubleClick={() => {
+                  setEditingNode(n.id);
+                  setEditDraft(n.text ?? "");
+                }}
               >
                 {n.kind === "note" ? (
                   <Text size={200} weight="semibold">
                     📄 {n.ref}
                   </Text>
+                ) : n.kind === "image" ? (
+                  <img
+                    src={canvasImgSrc(n.src ?? "", convertFileSrc)}
+                    alt={n.label ?? "画布图片"}
+                    draggable={false}
+                    style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                  />
                 ) : (
                   <Text size={200}>{n.text}</Text>
                 )}
               </div>
             ))}
+            {editingNode &&
+              (() => {
+                const n = doc.nodes.find((x) => x.id === editingNode);
+                if (!n) return null;
+                return (
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: n.x,
+                      top: n.y,
+                      width: Math.max(n.w, 240),
+                      zIndex: 10,
+                      background: tokens.colorNeutralBackground1,
+                      border: `1px solid ${tokens.colorBrandStroke1}`,
+                      padding: 6,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                    }}
+                  >
+                    <textarea
+                      data-node-text-editor
+                      rows={4}
+                      value={editDraft}
+                      onChange={(e) => setEditDraft(e.target.value)}
+                    />
+                    <div className={styles.row}>
+                      <Button size="small" appearance="primary" onClick={commitTextEdit}>
+                        保存文本
+                      </Button>
+                      <Button size="small" onClick={() => setEditingNode(null)}>
+                        取消
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })()}
             {doc.nodes.length === 0 && (
               <Text className={styles.muted} style={{ position: "absolute", left: 16, top: 16 }}>
                 空画布——添加便签或笔记引用节点，拖动布局，保存为目录内 .nforge-canvas.json

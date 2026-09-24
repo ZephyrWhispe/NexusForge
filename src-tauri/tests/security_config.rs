@@ -355,6 +355,8 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-notes-search",
         // T-B7-22 标签后端查询同属笔记数据面
         "allow-notes-by-tag",
+        // T-B7-24 复习统计属笔记数据面（notes 面板只存在于 main）
+        "allow-notes-review-stats",
     ];
     for (name, cap) in &caps {
         if name == "main" {
@@ -416,6 +418,8 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-notes-search",
         // T-B7-22 notes_by_tag 正对照
         "allow-notes-by-tag",
+        // T-B7-24 notes_review_stats 正对照
+        "allow-notes-review-stats",
     ] {
         assert!(
             main_perms.contains(&expect),

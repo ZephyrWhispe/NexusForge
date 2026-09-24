@@ -48,6 +48,18 @@ pub struct Card {
     pub due_ms: i64,
 }
 
+/// 复习统计卡（T-B7-24）：由 `stats_from_cards` 纯函数聚合，时间外注防断言随机灯。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewStats {
+    pub total: usize,
+    /// 到期时刻落在今天末尾之前的卡数（含逾期——「今天该复习」的自然语义）
+    pub due_today: usize,
+    /// 按掌握度分档计数：[新卡(reps==0), 年幼(interval<7), 中年(7..=30), 成熟(>30)]
+    pub by_bucket: [usize; 4],
+    /// 连续到期日天数（今天缺席允许，自昨日起回溯连算）
+    pub streak_days: i64,
+}
+
 /// 画布节点（N3）：kind=note 引用笔记 / sticky 便签 / image 图片
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CanvasNode {

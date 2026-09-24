@@ -314,6 +314,7 @@ pub fn run() {
             commands::notes_card_create,
             commands::notes_card_delete,
             commands::notes_review_queue,
+            commands::notes_review_stats,
             commands::notes_review_grade,
             commands::notes_canvas_get,
             commands::notes_canvas_save,

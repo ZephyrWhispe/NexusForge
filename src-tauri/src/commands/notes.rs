@@ -362,6 +362,22 @@ pub async fn notes_review_queue(
         .map_err(notes_err)
 }
 
+/// 复习统计卡（T-B7-24）：total/due_today/by_bucket/streak_days 纯聚合
+#[tauri::command]
+pub async fn notes_review_stats(
+    state: State<'_, HostState>,
+) -> Result<notes_core::model::ReviewStats, AppError> {
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    let now = now_ms();
+    tauri::async_runtime::spawn_blocking(move || m.review_stats(now))
+        .await
+        .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
+        .map_err(notes_err)
+}
+
 /// SM-2 评分（quality 0-5；UI 四档映射 1/3/4/5）
 #[tauri::command]
 pub async fn notes_review_grade(
