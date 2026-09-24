@@ -39,6 +39,7 @@ import {
   termSpawnLocal,
   termSpawnWsl,
   termSshConnect,
+  termSshExec,
   termSshFingerprintAck,
   termSshForgetHost,
   termSshKnownHosts,
@@ -48,6 +49,7 @@ import {
   type DockerContainerDto,
   type SftpEntryDto,
   type SshAuthDto,
+  type SshExecResultDto,
   type SshKnownHostDto,
   type TermSessionDto,
 } from "../../ipc/client";
@@ -154,6 +156,12 @@ export default function TerminalPanel() {
   const [khOpen, setKhOpen] = useState(false);
   const [khList, setKhList] = useState<SshKnownHostDto[] | null>(null);
   const [khBusy, setKhBusy] = useState(false);
+  // 一次性远端命令（T-B7-2）：无 PTY exec，stdout/stderr/exit 三分区呈现
+  // ——独立对话框结果区，不冒充终端回显
+  const [execOpen, setExecOpen] = useState(false);
+  const [execCmd, setExecCmd] = useState("");
+  const [execBusy, setExecBusy] = useState(false);
+  const [execResult, setExecResult] = useState<SshExecResultDto | null>(null);
   // SFTP
   const [sftpPath, setSftpPath] = useState("/root");
   const [sftpEntries, setSftpEntries] = useState<SftpEntryDto[]>([]);
@@ -492,6 +500,23 @@ export default function TerminalPanel() {
     [fail, loadKnownHosts],
   );
 
+  // 一次性非交互 exec（T-B7-2）：连接入参复用既有表单形状；结果三分区
+  // 呈现，exit_code=null（未获退出码）与 0 严格两立，超时只认 timed_out
+  const runExec = useCallback(async () => {
+    if (!execCmd.trim()) return;
+    setExecBusy(true);
+    setErr(null);
+    try {
+      setExecResult(
+        await termSshExec({ ...sftpTarget(), cols: 80, rows: 24 }, execCmd.trim()),
+      );
+    } catch (e) {
+      fail(e);
+    } finally {
+      setExecBusy(false);
+    }
+  }, [execCmd, sftpTarget, fail]);
+
   return (
     <div className={styles.root}>
       <Tabs
@@ -557,6 +582,17 @@ export default function TerminalPanel() {
               }}
             >
               已知主机
+            </Button>
+            <Button
+              size="small"
+              appearance="outline"
+              title="一次性非交互远端命令（exec，无 PTY；结果三分区呈现，不进终端回显）"
+              onClick={() => {
+                setExecResult(null);
+                setExecOpen(true);
+              }}
+            >
+              一次性远端命令
             </Button>
           </div>
 
@@ -763,6 +799,87 @@ export default function TerminalPanel() {
             </DialogContent>
             <DialogActions>
               <Button appearance="subtle" onClick={() => setKhOpen(false)}>
+                关闭
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+      {/* 一次性远端命令 Dialog（T-B7-2）：exit 徽标+stdout/stderr 三分区，
+          结果永不回灌终端——exec 不是 shell 会话 */}
+      <Dialog
+        open={execOpen}
+        onOpenChange={(_, d) => {
+          if (!d.open) setExecOpen(false);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>一次性远端命令（exec，无 PTY）</DialogTitle>
+            <DialogContent>
+              <div className={styles.row}>
+                <Input
+                  className={styles.grow}
+                  placeholder="非交互命令，如 hostname -s"
+                  value={execCmd}
+                  onChange={(_, d) => setExecCmd(d.value)}
+                />
+                <Button
+                  size="small"
+                  appearance="primary"
+                  disabled={execBusy || !execCmd.trim()}
+                  onClick={() => void runExec()}
+                >
+                  执行
+                </Button>
+                {execBusy && <Spinner size="tiny" />}
+              </div>
+              {execResult && (
+                <div>
+                  <span
+                    data-exit-tone={
+                      execResult.timed_out || (execResult.exit_code !== null && execResult.exit_code !== 0)
+                        ? "danger"
+                        : execResult.exit_code === 0
+                          ? "ok"
+                          : "none"
+                    }
+                  >
+                    <Badge
+                      size="small"
+                      appearance="filled"
+                      color={
+                        execResult.timed_out ||
+                        (execResult.exit_code !== null && execResult.exit_code !== 0)
+                          ? "danger"
+                          : execResult.exit_code === 0
+                            ? "success"
+                            : "subtle"
+                      }
+                    >
+                      {execResult.timed_out
+                        ? "超时（终态以 timed_out 为准）"
+                        : execResult.exit_code === null
+                          ? "未获退出码"
+                          : `退出码 ${execResult.exit_code}`}
+                    </Badge>
+                  </span>
+                  <Text size={200} weight="semibold">
+                    stdout
+                  </Text>
+                  <div className={styles.logs}>{execResult.stdout || "（空）"}</div>
+                  <Text size={200} weight="semibold">
+                    stderr
+                  </Text>
+                  <div className={styles.logs}>{execResult.stderr || "（空）"}</div>
+                </div>
+              )}
+              {!execResult && !execBusy && (
+                <EmptyState text="执行后按 stdout / stderr / 退出码三分区呈现（不冒充终端回显）" />
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setExecOpen(false)}>
                 关闭
               </Button>
             </DialogActions>

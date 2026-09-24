@@ -46,6 +46,11 @@ description = "允许前端调用 term_ssh_connect 命令（D-28 按窗最小授
 commands.allow = ["term_ssh_connect"]
 
 [[permission]]
+identifier = "allow-term-ssh-exec"
+description = "允许前端调用 term_ssh_exec 命令（D-28 按窗最小授权）"
+commands.allow = ["term_ssh_exec"]
+
+[[permission]]
 identifier = "allow-term-ssh-known-hosts"
 description = "允许前端调用 term_ssh_known_hosts 命令（D-28 按窗最小授权）"
 commands.allow = ["term_ssh_known_hosts"]

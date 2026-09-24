@@ -230,6 +230,54 @@ pub async fn term_ssh_fingerprint_ack(
         .map_err(term_err)
 }
 
+/// exec 结果线上形状（term_core::ExecResult 同名单）
+#[derive(serde::Serialize)]
+pub struct ExecResultDto {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+/// exec 超时夹取：默认 15s，上限 120s，下限 1s（0=立即超时是误用不是语义）
+const EXEC_TIMEOUT_DEFAULT_MS: u64 = 15_000;
+const EXEC_TIMEOUT_MAX_MS: u64 = 120_000;
+
+/// 一次性非交互远端命令（T-B7-2）：连接入参复用 SshConnectDto 形状
+/// （cols/rows 对 exec 无意义，忽略）。exit_code=None=未获退出码（超时/
+/// 信号），与 0 严格区分；timed_out 是超时唯一终态证据。
+#[tauri::command]
+pub async fn term_ssh_exec(
+    target: SshConnectDto,
+    command: String,
+    timeout_ms: Option<u64>,
+    state: State<'_, HostState>,
+) -> Result<ExecResultDto, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let ms = timeout_ms
+        .unwrap_or(EXEC_TIMEOUT_DEFAULT_MS)
+        .clamp(1_000, EXEC_TIMEOUT_MAX_MS);
+    let t = term_core::SshTarget {
+        host: target.host,
+        port: target.port,
+        user: target.user,
+        auth: target.auth,
+    };
+    let r = ssh
+        .exec(&t, &command, std::time::Duration::from_millis(ms))
+        .await
+        .map_err(term_err)?;
+    Ok(ExecResultDto {
+        exit_code: r.exit_code,
+        stdout: r.stdout,
+        stderr: r.stderr,
+        timed_out: r.timed_out,
+    })
+}
+
 fn parse_host_port(host: &str) -> (String, u16) {
     // "[h]:port" / "h"（缺省 22）
     if let Some(rest) = host.strip_prefix('[') {

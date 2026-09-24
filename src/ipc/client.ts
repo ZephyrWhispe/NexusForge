@@ -1789,6 +1789,19 @@ export function termSshFingerprintAck(
 ): Promise<void> {
   return invoke("term_ssh_fingerprint_ack", { host, port, fingerprint });
 }
+/** 一次性非交互 exec 结果（B7 T-B7-2）：exit_code=null 是"未获退出码"，不是 0 */
+export interface SshExecResultDto {
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out: boolean;
+}
+export function termSshExec(
+  target: { host: string; port: number; user: string; auth: SshAuthDto; cols: number; rows: number },
+  command: string, timeoutMs?: number,
+): Promise<SshExecResultDto> {
+  return invoke("term_ssh_exec", { target, command, timeoutMs: timeoutMs ?? null });
+}
 export function termSshKnownHosts(): Promise<SshKnownHostDto[]> {
   return invoke("term_ssh_known_hosts");
 }

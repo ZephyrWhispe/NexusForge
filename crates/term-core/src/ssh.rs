@@ -5,6 +5,8 @@
 //! - known_hosts 单一事实源 `{app_data}/ssh/known_hosts.json`（term 与 file
 //!   两域共读一表，构造与旧表迁移在 host-core `ssh_trust`）；坏文件 fail-closed
 //! - 终端会话：request_pty + request_shell → 输出泵入统一 SessionState
+//! - 一次性 exec（T-B7-2）：无 PTY 通道，stdout/stderr/exit 三分收口，
+//!   超时只立 `timed_out` 不编造退出码
 //! - SFTP：每次操作独立 channel + sftp subsystem（v1 简化，不复用连接池）
 //! - 私钥走路径引用（不复制内容进 vault）；密码由 UI 现场输入不入库
 
@@ -47,6 +49,65 @@ pub struct SshTarget {
     pub port: u16,
     pub user: String,
     pub auth: SshAuth,
+}
+
+/// 一次性非交互 exec 结果（T-B7-2）：`exit_code = None` 是"未收到退出码
+/// 消息"（超时/信号终止/通道早关）——**不是 0**；`timed_out` 是超时的
+/// 唯一终态证据，超时臂保留已收集的 partial 输出但绝不编造退出码
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+/// exec 入参守卫（空命令拒在连接之前——不产生任何出站请求）
+fn exec_guard(command: &str) -> Result<()> {
+    if command.trim().is_empty() {
+        return Err(TermError::BadParam(
+            "exec 命令不得为空（也不得只有空白）".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// 录制帧夹具的落点：逐帧消费 russh ChannelMsg 的纯累加器（零 IO 零时钟）。
+/// Data→stdout；ExtendedData→stderr（ext=1 是标准错误；其余扩展数据也进
+/// stderr 档——不冒充终端回显，也不另立第三出路）；ExitStatus 记码；
+/// Eof/Close/ExitSignal 终结（ExitSignal 无退出码=如实 None）。
+#[derive(Debug, Default)]
+struct ExecAccumulator {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: Option<i32>,
+    done: bool,
+}
+
+impl ExecAccumulator {
+    fn on_msg(&mut self, msg: ChannelMsg) {
+        match msg {
+            ChannelMsg::Data { data } => self.stdout.extend_from_slice(&data),
+            ChannelMsg::ExtendedData { data, .. } => self.stderr.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status } => {
+                // 超 i32 范围的"退出码"不是退出码——如实 None，不截断伪造
+                self.exit_code = i32::try_from(exit_status).ok();
+            }
+            ChannelMsg::Eof | ChannelMsg::Close | ChannelMsg::ExitSignal { .. } => {
+                self.done = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(self, timed_out: bool) -> ExecResult {
+        ExecResult {
+            exit_code: self.exit_code,
+            stdout: String::from_utf8_lossy(&self.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
+            timed_out,
+        }
+    }
 }
 
 /// known_hosts 单源视图（host-core `ssh_trust` 共享存储；路径构造与旧表
@@ -420,6 +481,47 @@ impl SshService {
             .map_err(|e| TermError::Sftp(e.to_string()))?;
         Ok(n)
     }
+
+    /// 一次性非交互远端命令（T-B7-2）：无 PTY 的 exec 通道，输出按
+    /// stdout/stderr/exit 三分收口——**不冒充终端回显**。TOFU 门复用
+    /// T-B7-1 的 connect 臂：首见主机在 KEX 即拒，通道打开与 exec 请求
+    /// 结构性地发生在认证通过之后（首见 = 零出站 exec 请求）。
+    /// 超时=到点停收：partial 输出保留、`timed_out` 立牌，退出码不编造。
+    pub async fn exec(
+        &self,
+        target: &SshTarget,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<ExecResult> {
+        exec_guard(command)?;
+        let handle = connect_ssh(target, self.known.clone()).await?;
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| TermError::Ssh(format!("打开会话通道失败: {e}")))?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| TermError::Ssh(format!("发送 exec 请求失败: {e}")))?;
+        let mut acc = ExecAccumulator::default();
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut timed_out = false;
+        while !acc.done {
+            match tokio::time::timeout_at(deadline, channel.wait()).await {
+                Err(_elapsed) => {
+                    timed_out = true;
+                    break;
+                }
+                Ok(None) => break, // 通道关闭：EOF 即终局
+                Ok(Some(msg)) => acc.on_msg(msg),
+            }
+        }
+        // best-effort 断连：exec 是一次性会话，不等 inactivity_timeout 收尸
+        let _ = handle
+            .disconnect(russh::Disconnect::ByApplication, "exec done", "en")
+            .await;
+        Ok(acc.finish(timed_out))
+    }
 }
 
 /// 打开 sftp subsystem 通道
@@ -593,5 +695,90 @@ mod tests {
         // 任务书"废除 22 省略"经 §7.1 核账修正为维持，落地补记在册
         assert_eq!(host_core::ssh_trust::canonical_key("h", 22), "h");
         assert_eq!(host_core::ssh_trust::canonical_key("h", 2200), "[h]:2200");
+    }
+
+    // ---- T-B7-2 一次性非交互 exec（录制帧夹具谱：累加器逐帧消费） ----
+
+    fn data_msg(b: &[u8]) -> ChannelMsg {
+        ChannelMsg::Data {
+            data: b.to_vec().into(),
+        }
+    }
+    fn ext_msg(b: &[u8]) -> ChannelMsg {
+        ChannelMsg::ExtendedData {
+            ext: 1, // SSH_EXTENDED_DATA_STDERR
+            data: b.to_vec().into(),
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-2）字面测试名优先于 rustc 命名惯例
+    fn exec_returnsExitCodeAndStreams() {
+        let mut acc = ExecAccumulator::default();
+        for msg in [
+            data_msg(b"out-1"),
+            ext_msg(b"err-1"),
+            data_msg(b"out-2"),
+            ChannelMsg::ExitStatus { exit_status: 7 },
+            ChannelMsg::Close,
+        ] {
+            acc.on_msg(msg);
+        }
+        assert!(acc.done, "Close 帧必须置终");
+        let r = acc.finish(false);
+        assert_eq!(r.exit_code, Some(7));
+        assert_eq!(r.stdout, "out-1out-2", "stdout 只收 Data 帧");
+        assert_eq!(r.stderr, "err-1", "stderr 只收 ExtendedData 帧，两档不混流");
+        assert!(!r.timed_out);
+        // 无退出码消息 = None 而非 0（"没拿到"与"拿到 0"是两回事）
+        let mut acc2 = ExecAccumulator::default();
+        acc2.on_msg(data_msg(b"partial"));
+        acc2.on_msg(ChannelMsg::Eof);
+        let r2 = acc2.finish(false);
+        assert_eq!(r2.exit_code, None, "无 ExitStatus 帧不得伪造 0");
+        assert_eq!(r2.stdout, "partial");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-2）字面测试名优先于 rustc 命名惯例
+    fn exec_timeout_setsTimedOutNotZero() {
+        // 超时臂：到点只有一枚 partial stdout、无 ExitStatus——终态证据
+        // 只有 timed_out，退出码保持 None（不谎报 0）
+        let mut acc = ExecAccumulator::default();
+        acc.on_msg(data_msg(b"slow-out"));
+        let r = acc.finish(true);
+        assert!(r.timed_out);
+        assert_eq!(r.exit_code, None, "超时终态禁止编造退出码");
+        assert_eq!(r.stdout, "slow-out", "partial 输出必须保留");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-2）字面测试名优先于 rustc 命名惯例
+    fn exec_emptyCommand_rejected() {
+        for cmd in ["", "   ", "\t\n"] {
+            let e = exec_guard(cmd).unwrap_err();
+            assert!(
+                matches!(e, TermError::BadParam(_)),
+                "空命令必须 BadParam 拒在连接之前（零出站），实得 {e:?}"
+            );
+        }
+        exec_guard("hostname").unwrap();
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-2）字面测试名优先于 rustc 命名惯例
+    fn exec_tofuUnknown_refusesBeforeChannelOpen() {
+        // 任务书 fallback（"两枚不可得则登记为冒烟项并以 Handler 单测替代"）：
+        // exec 与 shell 共用 connect_ssh 的同一道 TOFU 门（唯一牌面，本文件
+        // 不存在第二处裁决构造）；通道打开/认证/exec 请求结构性地排在
+        // KEX 裁决之后——首见 = KEX 即拒 = 零出站 exec 请求。此处钉死门
+        // 本身：Unknown → TERM_SSH_004 且信任表零写。真实服务器的
+        // "零出站 exec 包"抓包为人工冒烟项（批次尾登记）。
+        let d = tmpdir("execgate");
+        let kh = KnownHosts::open(&d).unwrap();
+        let e = tofu_verdict(&kh, "never.seen", 22, "ssh-ed25519 SHA256:zzz").unwrap_err();
+        assert_eq!(e.code(), "TERM_SSH_004");
+        assert!(!KnownHosts::shared_path(&d).exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
