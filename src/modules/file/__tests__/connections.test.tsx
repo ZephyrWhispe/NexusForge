@@ -587,3 +587,68 @@ describe("文件三档分派（T-B6-10）", () => {
     expect(container.textContent).toContain("当前没有进行中或近期的传输");
   });
 });
+
+describe("文件七档全拆（T-B7-27）", () => {
+  it("fileSubPanel_sevenWay_dispatch_movesExistingViewsUnchanged：七档各自在场互不越档，每档首屏不空", async () => {
+    vi.mocked(fileOpsActive).mockResolvedValue([opRow("disp-7")]);
+
+    // 文件档：目录表+面包屑在场；搜索框/批量工具钮/三枚徽标已随档挪出（负例）
+    useSession.setState({ fileSubPanel: "browse" });
+    await mount(<FilePanel />);
+    expect(rowByText("a.txt")).toBeDefined();
+    expect(container.querySelector('input[aria-label="全局搜索关键词"]')).toBeNull();
+    expect(buttonByText("批量重命名")).toBeUndefined();
+    expect(container.textContent).not.toContain("· 延后");
+    unmount();
+
+    // 搜索档：搜索框+共用预览分栏在场，目录表不渲染
+    useSession.setState({ fileSubPanel: "search" });
+    await mount(<FilePanel />);
+    expect(container.querySelector('input[aria-label="全局搜索关键词"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="文件预览"]')).not.toBeNull();
+    expect(rowByText("a.txt")).toBeUndefined();
+    expect((container.textContent ?? "").length).toBeGreaterThan(0);
+    unmount();
+
+    // 批量工具档：重命名工作台+压缩/解压+diff 徽标在场，目录表不渲染
+    useSession.setState({ fileSubPanel: "batch" });
+    await mount(<FilePanel />);
+    expect(buttonByText("批量重命名")).toBeDefined();
+    expect(buttonByText("压缩为 zip")).toBeDefined();
+    expect(buttonByText("解压")).toBeDefined();
+    expect(container.textContent).toContain("diff/镜像工作台 · 延后");
+    expect(rowByText("a.txt")).toBeUndefined();
+    unmount();
+
+    // 传输档：T-B6-9 队列原样在场（与三档时判据一字未动）
+    useSession.setState({ fileSubPanel: "transfers" });
+    await mount(<FilePanel />);
+    expect(container.querySelector('[data-op-id="disp-7"]')).not.toBeNull();
+    expect(rowByText("a.txt")).toBeUndefined();
+    unmount();
+
+    // 连接档：站点管理器在场（同上，原判据零裁减）
+    useSession.setState({ fileSubPanel: "connections" });
+    await mount(<FilePanel />);
+    expect(container.textContent).toContain("站点");
+    expect(container.textContent).toContain("远端浏览");
+    unmount();
+
+    // 网盘档：整页=诚实标注+徽标（panels/04 §2「就绪前整页 DeferredBadge」），无表无队列，首屏不空
+    useSession.setState({ fileSubPanel: "netdisk" });
+    await mount(<FilePanel />);
+    expect(container.textContent).toContain("网盘 · 延后");
+    expect((container.textContent ?? "").length).toBeGreaterThan(40);
+    expect(rowByText("a.txt")).toBeUndefined();
+    expect(container.querySelector('[data-op-id="disp-7"]')).toBeNull();
+    unmount();
+
+    // 设置档：固定行为如实陈述 + treemap/找回徽标；不设任何无后端假开关
+    useSession.setState({ fileSubPanel: "settings" });
+    await mount(<FilePanel />);
+    expect(container.textContent).toContain("treemap/回收站找回 · 延后");
+    expect(container.textContent).toContain("恒移入系统回收站");
+    expect(container.textContent).toContain("截断限额由服务端固定");
+    expect(container.querySelectorAll('input[type="checkbox"], button[disabled]')).toHaveLength(0);
+  });
+});

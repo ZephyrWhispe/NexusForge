@@ -6,7 +6,7 @@ import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 
 import screenshotSrc from "../../modules/screenshot/ScreenshotPanel.tsx?raw";
 import ocrSrc from "../../modules/ocr/OcrPanel.tsx?raw";
-import fileSrc from "../../modules/file/FilePanel.tsx?raw";
+import netdiskSrc from "../../modules/file/NetdiskSection.tsx?raw";
 import DeferredBadge, { deferredTooltipContent } from "../DeferredBadge";
 
 // D-29 B0/T-B0-5 回归：延后范围必须以"看得见但不可点"的形式登记，
@@ -74,6 +74,8 @@ describe("DeferredBadge（T-B0-5）", () => {
     expect(String(ocrSrc)).toContain('label="PaddleOCR 引擎" decisionRef="D-08"');
     // T-B6-13 随行：file 域"网盘"挂点出处从批次号 `B6` 改钉 §6.3 档号（批次号会
     // 随批次完工过期成死引用，B5 同纪律）；本测试的"必须带出处"本质一条未动。
-    expect(String(fileSrc)).toContain('label="网盘" decisionRef="09 §6.3-(c)"');
+    // T-B7-27 随行换锚：网盘徽标随七档全拆从 FilePanel 挪进 NetdiskSection，
+    // 徽标字面逐字未改（判据随事实走，B6 补记③纪律）。
+    expect(String(netdiskSrc)).toContain('label="网盘" decisionRef="09 §6.3-(c)"');
   });
 });

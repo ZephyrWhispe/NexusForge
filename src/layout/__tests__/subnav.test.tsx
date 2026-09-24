@@ -153,7 +153,7 @@ describe("SubNav 双维度（T-B3-1）", () => {
     expect(subnavSelect("sync", "filter", "nope")).toBeUndefined();
     expect(subnavSelect("sync", "view", "overview")).toBeUndefined();
 
-    // T-B6-10：文件三档走 view 维度 + 第四枚分键 fileSubPanel（此前各档分键从无到有）
+    // T-B6-10 立档（T-B7-27 扩至七档）：文件档走 view 维度 + 第四枚分键 fileSubPanel
     expect(subnavActive("file", "view", ST)).toBe("connections");
     expect(subnavActive("file", "filter", ST)).toBeUndefined();
     expect(subnavSelect("file", "view", "transfers")).toEqual({
@@ -191,5 +191,45 @@ describe("SubNav 双维度（T-B3-1）", () => {
     const highlighted = items.filter((i) => cls(i.label) !== offOverview);
     expect(highlighted.map((i) => i.label)).toEqual(["数据集"]);
     expect(cls("活动")).toBe(offActivity);
+  });
+
+  it("deferredGates_sevenSubnavLabelsStable：文件七档 label 与 panels/04 §2 字面恰等且逐项渲染", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <SubNav moduleId="file" active={{ view: "browse" }} onSelect={() => {}} counts={{}} />,
+      );
+    });
+    const items = SUBNAV.file.flatMap((s) => s.items);
+    expect(items.map((i) => i.label)).toEqual([
+      "文件",
+      "传输",
+      "搜索",
+      "批量工具",
+      "远程连接",
+      "网盘",
+      "设置",
+    ]);
+    // id 集与 session store FileSubPanel 联合恰等（穷尽性：多一档少一档都判红）
+    expect(items.map((i) => i.id).sort()).toEqual([
+      "batch",
+      "browse",
+      "connections",
+      "netdisk",
+      "search",
+      "settings",
+      "transfers",
+    ]);
+    // 七档全走 view 维度（SUBNAV_KEYS.file 单分键形状零变）
+    expect(items.every((i) => i.scope === "view")).toBe(true);
+    for (const item of items)
+      expect(buttonByLabel(item.label), `缺导航项 ${item.label}`).toBeInstanceOf(HTMLButtonElement);
+    // 路由表随批扩：新四档 id 各自落 fileSubPanel 键（野值仍拒）
+    expect(subnavSelect("file", "view", "netdisk")).toEqual({ key: "fileSubPanel", value: "netdisk" });
+    expect(subnavSelect("file", "view", "settings")).toEqual({
+      key: "fileSubPanel",
+      value: "settings",
+    });
+    expect(subnavSelect("file", "view", "nope")).toBeUndefined();
   });
 });

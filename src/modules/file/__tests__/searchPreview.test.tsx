@@ -13,10 +13,13 @@ import {
   type PreviewDto,
   type SearchResultDto,
 } from "../../../ipc/client";
+import { useSession } from "../../../stores/session";
 
 // D-29 B1/T-B1-4 回归：全局搜索必须显式携带降级标注（后端无持久索引，USN 端口
 // 缺失即 walkdir，不标注就是在谎称全量），且空查询/加载中不得残留上一轮结果；
 // 双击文件行开预览分栏（今天 openEntry 对文件什么都不做）。
+// T-B7-27 七档全拆：搜索面判据逐字未动，只加切档步骤（搜索框/结果随搜索档挪出
+// browse，纯挪移零裁减）；预览分栏是文件/搜索两档共用的同一份状态。
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -114,6 +117,7 @@ afterEach(() => {
     }
   });
   container.remove();
+  useSession.setState({ fileSubPanel: "browse" });
   vi.clearAllMocks();
 });
 
@@ -131,6 +135,7 @@ describe("FilePanel 搜索 + 预览分栏（T-B1-4）", () => {
       hits: [{ path: "C:\\Users\\me\\notes.txt", score: 9 }],
       degraded: true,
     });
+    useSession.setState({ fileSubPanel: "search" }); // T-B7-27：搜索面随搜索档挪出 browse
     await mount();
     await typeInto(searchInput()!, "notes");
     await click(buttonByText("搜索")!);
@@ -152,6 +157,7 @@ describe("FilePanel 搜索 + 预览分栏（T-B1-4）", () => {
       hits: [{ path: "C:\\dir\\old-hit.txt", score: 5 }],
       degraded: false,
     });
+    useSession.setState({ fileSubPanel: "search" }); // T-B7-27：同上
     await mount();
     await typeInto(searchInput()!, "old");
     await click(buttonByText("搜索")!);

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import FilePanel, { renameConflictReasons, zipTarget } from "../FilePanel";
+import FilePanel from "../FilePanel";
+import { renameConflictReasons, zipTarget } from "../BatchSection";
 import {
   fileBreadcrumbs,
   fileDrives,
@@ -26,6 +27,8 @@ import { useSession } from "../../../stores/session";
 
 // D-29 B1/T-B1-5 回归：批量重命名（预览表+前端推导冲突原因+勾选应用）、等待队列
 // 丢弃、压缩/解压入队 kind 字面透传（TS 联合放开到 FileOpKind 的接线证明）。
+// T-B7-27 七档全拆：本文件判据逐字未动，只补切档步骤（重命名工作台/压缩/解压
+// 随批量工具档挪出 browse，纯挪移零裁减）。
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -108,6 +111,14 @@ async function click(el: Element) {
   await act(async () => {});
 }
 
+// T-B7-27：FilePanel 恒挂载、档间切换只翻分键——选中集/目标目录输入跨档不丢
+async function gotoArm(v: "browse" | "batch" | "transfers") {
+  await act(async () => {
+    useSession.setState({ fileSubPanel: v });
+  });
+  await act(async () => {});
+}
+
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
@@ -163,6 +174,7 @@ describe("FilePanel 批量重命名+等待队列+压缩解压（T-B1-5）", () =
       plan("e.txt", "e.txt", false),
     ]);
     vi.mocked(fileRenameApply).mockResolvedValue(1);
+    useSession.setState({ fileSubPanel: "batch" }); // T-B7-27：重命名工作台随批量工具档挪出
     await mount();
     await click(buttonByText("批量重命名")!);
     await click(buttonByText("生成预览")!);
@@ -203,6 +215,7 @@ describe("FilePanel 批量重命名+等待队列+压缩解压（T-B1-5）", () =
       kind: "Module",
       data: { code: "FILE_RENAME_001", message: "重命名规则错误: 未知变量: {unknown}" },
     });
+    useSession.setState({ fileSubPanel: "batch" }); // T-B7-27：同上
     await mount();
     await click(buttonByText("批量重命名")!);
     const tpl = document.querySelector<HTMLInputElement>('input[aria-label="重命名模板"]');
@@ -224,23 +237,27 @@ describe("FilePanel 批量重命名+等待队列+压缩解压（T-B1-5）", () =
 
   it("compressExtract_enqueueKindLiteralPassThrough：fileEnqueue 实收 kind 字面 compress/extract（负例式）", async () => {
     await mount();
-    // 选中 a.txt → 压缩：目标输入留空 → 当前目录自动 <主名>.zip
+    // 文件档选中 a.txt → 批量工具档压缩：目标输入留空 → 当前目录自动 <主名>.zip
     await click(rowByText("a.txt")!);
+    await gotoArm("batch");
     await click(buttonByText("压缩为 zip")!);
     expect(confirmAction).toHaveBeenCalledTimes(1);
     const specC = vi.mocked(fileEnqueue).mock.calls[0][0];
     expect(specC.kind).toBe("compress");
     expect(specC.srcs).toEqual(["C:\\dir\\a.txt"]);
     expect(specC.dst).toBe("C:\\a.zip");
-    // 换选 pack.zip → 解压：显式 rename 策略（后端解压冲突安全默认），源恰为该 zip
+    // 回文件档换选 pack.zip → 批量工具档解压：显式 rename 策略（后端解压冲突安全默认），源恰为该 zip
+    await gotoArm("browse");
     await click(rowByText("a.txt")!);
     await click(rowByText("pack.zip")!);
+    await gotoArm("batch");
     await click(buttonByText("解压")!);
     const specX = vi.mocked(fileEnqueue).mock.calls[1][0];
     expect(specX.kind).toBe("extract");
     expect(specX.srcs).toEqual(["C:\\dir\\pack.zip"]);
     expect(specX.policy).toBe("rename");
-    // 行内重命名走 file_rename_entry（单项、非队列）：此刻选中集仍是 pack.zip
+    // 行内重命名走 file_rename_entry（单项、非队列，留文件档）：此刻选中集仍是 pack.zip
+    await gotoArm("browse");
     const dst = container.querySelector<HTMLInputElement>(
       'input[placeholder="目标目录（复制/移动用）"]',
     );

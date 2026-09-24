@@ -122,15 +122,20 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
     },
   ],
   vault: [],
-  // T-B6-10（09 §6.2，panels/04 §2）：文件三档子面板，id 与 session store fileSubPanel 一一对应
-  // （view 维度第四枚分键；网盘/treemap 等延后档不在此开栏——§6.3 归 DeferredBadge）
+  // T-B6-10 立三档，T-B7-27（09 §6.3 档 j）扩七档：id 与 session store fileSubPanel 一一对应
+  // （view 维度单分键不变；档名以 panels/04 §2 字面为准；远程设置并入 connections 档内表单，
+  // 网盘/设置档现为 DeferredBadge 诚实面——§6.3 归徽标不假实现）
   file: [
     {
       group: "文件",
       items: [
-        { id: "browse", label: "浏览与搜索", scope: "view" },
-        { id: "transfers", label: "传输队列", scope: "view" },
+        { id: "browse", label: "文件", scope: "view" },
+        { id: "transfers", label: "传输", scope: "view" },
+        { id: "search", label: "搜索", scope: "view" },
+        { id: "batch", label: "批量工具", scope: "view" },
         { id: "connections", label: "远程连接", scope: "view" },
+        { id: "netdisk", label: "网盘", scope: "view" },
+        { id: "settings", label: "设置", scope: "view" },
       ],
     },
   ],

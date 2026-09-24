@@ -5,13 +5,6 @@ import {
   Text,
   Badge,
   Button,
-  Checkbox,
-  Dialog,
-  DialogActions,
-  DialogBody,
-  DialogContent,
-  DialogSurface,
-  DialogTitle,
   Input,
   Select,
   Table,
@@ -34,10 +27,7 @@ import {
   fileOpPause,
   fileOpResume,
   filePreview,
-  fileRenameApply,
   fileRenameEntry,
-  fileRenamePlan,
-  fileSearch,
   fileRemoteDrivers,
   fileRemotePresets,
   fileRemoteProfiles,
@@ -54,9 +44,6 @@ import {
   type OpProgressDto,
   type PendingOpDto,
   type PreviewDto,
-  type RenameCaseDto,
-  type RenamePlanDto,
-  type SearchResultDto,
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
@@ -65,15 +52,21 @@ import { isFileSubPanel, useSession } from "../../stores/session";
 import { parse_magic_target } from "./magicTarget";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
-import DeferredBadge from "../../components/DeferredBadge";
+import BatchSection, { zipTarget } from "./BatchSection";
 import ConnectionsSection from "./ConnectionsSection";
+import FileSettingsSection from "./FileSettingsSection";
+import NetdiskSection from "./NetdiskSection";
+import SearchSection from "./SearchSection";
 
 /**
- * 文件与存储面板（docs/impl/05 F，M6 v1）：
+ * 文件与存储面板（docs/impl/05 F，M6 v1；T-B7-27 七档分派）：
  * ① 盘符/面包屑/目录列表导航 ② 选中复制/移动/删除入队（Ask 冲突预扫描）
- * ③ operation.progress 事件驱动的操作队列 ④ 新建目录
- * ⑤ 全局搜索（F5：USN 优先，降级遍历必须显式标注）⑥ 右侧预览分栏（F4 四形态）。
+ * ③ operation.progress 事件驱动的操作队列 ④ 新建目录 ⑤ 右侧预览分栏（F4 四形态）。
  * 删除与「全部覆盖」属破坏性操作，一律经 confirmAction 二次确认（审查 D-18）。
+ * 七档（panels/04 §2）：文件=本体内导航/操作/表格/预览；搜索·批量工具·网盘·设置
+ * 拆出同名 Section；传输=transfersArm；连接=ConnectionsSection。**只挪分派不重写**
+ * （T-B5-8/T-B6-10 同纪律）：跨档共享的 cwd/selected/dstInput/预览状态留在本组件
+ * （FilePanel 恒挂载，切档不丢选中集与位置）。
  */
 const useStyles = makeStyles({
   root: {
@@ -110,7 +103,6 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     fontFamily: "Consolas, Menlo, monospace",
   },
-  hitRow: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 },
   pathLine: {
     color: tokens.colorNeutralForeground3,
     fontSize: tokens.fontSizeBase200,
@@ -142,15 +134,6 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
   },
   opRow: { display: "flex", alignItems: "center", gap: "8px" },
-  rnField: { display: "flex", flexDirection: "column", gap: "2px" },
-  rnPlanRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    minWidth: 0,
-    fontSize: tokens.fontSizeBase200,
-  },
-  rnPath: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "180px" },
   bar: { flex: 1, minWidth: "120px" },
   conflictBox: {
     border: `1px solid ${tokens.colorPaletteYellowBorder1}`,
@@ -202,45 +185,10 @@ const OP_STATE_LABEL: Record<string, string> = {
   canceled: "已取消",
 };
 
-/**
- * 冲突原因前端推导（T-B1-5）：后端 conflict 是单一布尔、两种成因不可分辨
- * （rename.rs:141-149 目标已存在 || 计划内重复），故"表内重复"由计划内同名
- * 目标计数（>1）判出，其余冲突如实标"目标已存在"。键=from 路径。
- */
-export function renameConflictReasons(plans: RenamePlanDto[]): Map<string, string> {
-  const targetCount = new Map<string, number>();
-  for (const p of plans) {
-    if (p.from === p.to) continue;
-    const k = p.to.toLowerCase();
-    targetCount.set(k, (targetCount.get(k) ?? 0) + 1);
-  }
-  const out = new Map<string, string>();
-  for (const p of plans) {
-    if (!p.conflict) continue;
-    out.set(p.from, (targetCount.get(p.to.toLowerCase()) ?? 0) > 1 ? "表内重复" : "目标已存在");
-  }
-  return out;
-}
-
-/**
- * zip 目标路径推导：目标输入留空 → 当前目录\<主名>.zip；以 \ 结尾或裸盘符
- * 视作目录拼自动名；其余按完整 zip 文件路径原样使用（run_compress 的 dst 是
- * zip 文件本体而非目录，ops.rs:916）。
- */
-export function zipTarget(cwd: string, dstInput: string, stem: string): string {
-  const d = dstInput.trim();
-  const name = `${stem}.zip`;
-  const base = cwd.replace(/\\+$/, "");
-  if (!d) return `${base}\\${name}`;
-  if (/\\$/.test(d)) return `${d}${name}`;
-  if (/^[A-Za-z]:$/.test(d)) return `${d}\\${name}`;
-  return d;
-}
-
 export default function FilePanel() {
   const styles = useStyles();
-  // T-B6-10 三档分派（第四枚分键 fileSubPanel）：浏览/传输/连接各占一档，
-  // 既有浏览·搜索·重命名代码原样进 browse（只挪分派不重写，T-B5-8 同纪律）；
+  // T-B6-10 立三档，T-B7-27 扩七档（第四枚分键 fileSubPanel）：文件/传输/搜索/批量工具/
+  // 远程连接/网盘/设置各占一档，既有代码原样进各档 Section（只挪分派不重写，T-B5-8 同纪律）；
   // 野值确定性回落 browse（面板侧收窄，store 侧已拒落）
   const storedSub = useSession((s) => s.fileSubPanel);
   const sub = isFileSubPanel(storedSub) ? storedSub : "browse";
@@ -268,28 +216,14 @@ export default function FilePanel() {
   const [drives, setDrives] = useState<[string, string][]>([]);
   const opsRef = useRef<Map<string, OpProgressDto>>(new Map());
   const resumeFocusRef = useRef<string | null>(null);
-  // ---- T-B1-4 搜索 + 预览 ----
-  const [query, setQuery] = useState("");
-  const [searching, setSearching] = useState(false);
-  const [searchRes, setSearchRes] = useState<SearchResultDto | null>(null);
-  const searchSeq = useRef(0);
+  // ---- T-B1-4 预览（搜索面随 T-B7-27 拆入 SearchSection，其状态归该档自持）----
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewDto | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
   const previewSeq = useRef(0);
-  // ---- T-B1-5 等待队列 + 批量重命名 ----
+  // ---- T-B1-5 等待队列（批量重命名工作台随 T-B7-27 拆入 BatchSection）----
   const [pending, setPending] = useState<PendingOpDto[]>([]);
-  const [rnOpen, setRnOpen] = useState(false);
-  const [rnTemplate, setRnTemplate] = useState("{name}{ext}");
-  const [rnRegex, setRnRegex] = useState("");
-  const [rnReplacement, setRnReplacement] = useState("");
-  const [rnCase, setRnCase] = useState<RenameCaseDto>("none");
-  const [rnStart, setRnStart] = useState("1");
-  const [rnBusy, setRnBusy] = useState(false);
-  const [rnPlans, setRnPlans] = useState<RenamePlanDto[] | null>(null);
-  const [rnErr, setRnErr] = useState<string | null>(null);
-  const [rnChecked, setRnChecked] = useState<Set<string>>(new Set());
 
   const applyError = useCallback((e: unknown, fallback: string) => {
     const err = parseAppError(e);
@@ -430,37 +364,6 @@ export default function FilePanel() {
   const openEntry = (e: FileEntryDto) => {
     if (e.is_dir) void loadDir(e.path);
     else void openPreview(e.path);
-  };
-
-  // 全局搜索（F5）：limit 取默认档位 50；root 传 null → 降级遍历走后端默认用户主目录，
-  // 不随当前 cwd（否则站在 C:\ 会把降级遍历扩成整盘扫描）。
-  const runSearch = async () => {
-    const q = query.trim();
-    if (!q) {
-      setSearchRes(null);
-      return;
-    }
-    const seq = ++searchSeq.current;
-    setSearching(true);
-    setSearchRes(null);
-    try {
-      const res = await fileSearch(q, 50, null);
-      if (seq === searchSeq.current) setSearchRes(res);
-    } catch (e) {
-      if (seq === searchSeq.current) applyError(e, "搜索失败");
-    } finally {
-      if (seq === searchSeq.current) setSearching(false);
-    }
-  };
-
-  const onQueryChange = (v: string) => {
-    setQuery(v);
-    if (!v.trim()) {
-      // 清空即作废在途请求并撤下结果区（负例判据：空查询不残留旧命中）
-      searchSeq.current += 1;
-      setSearching(false);
-      setSearchRes(null);
-    }
   };
 
   // 魔术栏消费点（magicTarget.ts 的 T-B6-10 交付形状由本行接线）：drive 与
@@ -754,74 +657,6 @@ export default function FilePanel() {
     }
   };
 
-  // ---- 批量重命名 Dialog（F7：预览→勾选→应用，冲突条目后端兜底跳过）----
-  const openRename = () => {
-    setRnPlans(null);
-    setRnErr(null);
-    setRnOpen(true);
-  };
-
-  const doRenamePlan = async () => {
-    if (!cwd) return;
-    // 只交文件主名：显式 names 不做目录过滤（rename.rs:78-86），目录必须由前端挡下
-    const names = entries.filter((e) => selected.has(e.path) && !e.is_dir).map((e) => e.name);
-    if (selected.size > 0 && names.length === 0) {
-      setRnErr("所选条目全是目录：仅文件参与批量重命名");
-      return;
-    }
-    const parsed = Number.parseInt(rnStart, 10);
-    setRnBusy(true);
-    setRnErr(null);
-    setRnPlans(null);
-    try {
-      const plans = await fileRenamePlan(cwd, names, {
-        template: rnTemplate,
-        regex: rnRegex.trim() ? rnRegex : null,
-        replacement: rnReplacement,
-        case: rnCase,
-        start: Number.isNaN(parsed) || parsed < 0 ? 1 : parsed,
-      });
-      setRnPlans(plans);
-      // 默认只勾非冲突、非 no-op 条目（服务端对冲突条目也会再次跳过，双保险）
-      setRnChecked(new Set(plans.filter((p) => !p.conflict && p.from !== p.to).map((p) => p.from)));
-    } catch (e) {
-      const err = parseAppError(e);
-      setRnErr(err ? `${err.data.code}: ${err.data.message}` : "生成重命名预览失败");
-    } finally {
-      setRnBusy(false);
-    }
-  };
-
-  const doRenameApply = async () => {
-    if (!cwd || !rnPlans) return;
-    const checked = rnPlans.filter((p) => rnChecked.has(p.from));
-    if (checked.length === 0) {
-      setRnErr("未勾选任何可执行条目");
-      return;
-    }
-    try {
-      const n = await fileRenameApply(checked);
-      notify("success", "批量重命名完成", `已重命名 ${n} 项；冲突与未勾选条目未执行。`);
-      setRnOpen(false);
-      setRnPlans(null);
-      void loadDir(cwd);
-    } catch (e) {
-      const err = parseAppError(e);
-      setRnErr(err ? `${err.data.code}: ${err.data.message}` : "应用重命名失败");
-    }
-  };
-
-  const toggleRn = (from: string) => {
-    setRnChecked((prev) => {
-      const next = new Set(prev);
-      if (next.has(from)) next.delete(from);
-      else next.add(from);
-      return next;
-    });
-  };
-
-  const rnReasons = rnPlans ? renameConflictReasons(rnPlans) : null;
-
   const activeOps = ops.filter((p) =>
     ["queued", "running", "paused"].includes(p.state),
   );
@@ -932,10 +767,49 @@ export default function FilePanel() {
     </div>
   );
 
+  // 预览分栏（F4）：browse 与 search 两档共用的同一份预览状态（openPreview 留本组件，
+  // 命中点击与表格双击走同一口）
+  const previewPane = (
+    <aside className={styles.previewPane} aria-label="文件预览">
+      {!previewPath && (
+        <EmptyState text="双击列表中的文件即可在此预览（搜索命中点击同效）" />
+      )}
+      {previewPath && (
+        <>
+          <Text className={styles.pathLine}>{previewPath}</Text>
+          {previewLoading && <EmptyState text="预览加载中…" loading />}
+          {!previewLoading && previewErr && <InlineError text={previewErr} />}
+          {!previewLoading && preview?.kind === "text" && (
+            <>
+              {preview.truncated && (
+                <Text className={styles.warn}>
+                  内容较大：仅显示开头部分（截断限额由服务端固定）
+                </Text>
+              )}
+              <pre className={styles.pre}>{preview.content || "（文件内容为空）"}</pre>
+            </>
+          )}
+          {!previewLoading && (preview?.kind === "image" || preview?.kind === "shell") && (
+            <>
+              <img src={preview.data_url} alt={`${previewPath} 预览`} className={styles.previewImg} />
+              <Text className={styles.muted}>
+                {preview.kind === "image"
+                  ? `原图 ${preview.width}×${preview.height}（超阈值时缩略显示）`
+                  : `系统缩略图 ${preview.width}×${preview.height}`}
+              </Text>
+            </>
+          )}
+          {!previewLoading && preview?.kind === "unsupported" && (
+            <Text>无法预览：{preview.reason}</Text>
+          )}
+        </>
+      )}
+    </aside>
+  );
+
   return (
     <div className={styles.root}>
     {sub === "browse" && (
-      <>
       <div className={styles.split}>
         <div className={styles.leftCol}>
       {/* 导航栏 */}
@@ -970,22 +844,7 @@ export default function FilePanel() {
             </option>
           ))}
         </Select>
-        {/* T-B6-13 明示不做（09 §6.3 双向钉）：徽标只说"没做"，不扮"禁用的就绪" */}
-        <DeferredBadge label="网盘" decisionRef="09 §6.3-(c)" />
-        <DeferredBadge label="diff/镜像工作台" decisionRef="09 §6.3-(d)" />
-        <DeferredBadge label="treemap/回收站找回" decisionRef="09 §6.3-(h)" />
-        <Input
-          size="small"
-          placeholder="搜索文件名（全局）"
-          value={query}
-          onChange={(_, d) => onQueryChange(d.value)}
-          onKeyDown={(ev) => ev.key === "Enter" && void runSearch()}
-          aria-label="全局搜索关键词"
-          style={{ maxWidth: "180px" }}
-        />
-        <Button size="small" onClick={() => void runSearch()}>
-          搜索
-        </Button>
+        {/* T-B7-27 七档分派：搜索框/批量工具/三枚徽标随各自档挪出本导航栏，判据未动 */}
         <Input
           size="small"
           placeholder="新建目录名"
@@ -1003,47 +862,7 @@ export default function FilePanel() {
         <Button size="small" onClick={() => void doMkdir()}>
           新建
         </Button>
-        <Button size="small" onClick={openRename}>
-          批量重命名
-        </Button>
       </div>
-
-      {/* 搜索结果条（F5）：加载/空查询不残留旧命中；降级必须显式标注 */}
-      {searching && (
-        <div className={styles.queue} role="status">
-          <Text className={styles.muted}>正在全局搜索…</Text>
-        </div>
-      )}
-      {searchRes && !searching && (
-        <div className={styles.queue}>
-          {searchRes.degraded && (
-            <Text className={styles.warn}>索引降级：本次为目录遍历（深度≤6）</Text>
-          )}
-          {searchRes.hits.length === 0 && (
-            <Text className={styles.muted}>
-              没有名称匹配「{query.trim()}」的命中
-              {searchRes.degraded ? "（降级遍历仅覆盖用户主目录）" : ""}
-            </Text>
-          )}
-          {searchRes.hits.slice(0, 12).map((h) => (
-            <div key={h.path} className={styles.hitRow}>
-              <Button
-                appearance="subtle"
-                size="small"
-                className={styles.crumbBtn}
-                title={h.path}
-                onClick={() => void openPreview(h.path)}
-              >
-                {h.path}
-              </Button>
-              <Badge appearance="outline">{h.score}</Badge>
-            </div>
-          ))}
-          {searchRes.hits.length > 12 && (
-            <Text className={styles.muted}>共 {searchRes.hits.length} 条，仅显示前 12 条</Text>
-          )}
-        </div>
-      )}
 
       {/* 操作栏 */}
       <div className={styles.toolbar}>
@@ -1079,22 +898,6 @@ export default function FilePanel() {
           onClick={() => void doRenameOne()}
         >
           重命名
-        </Button>
-        <Button
-          size="small"
-          appearance="secondary"
-          disabled={selected.size === 0}
-          onClick={() => void doCompress()}
-        >
-          压缩为 zip
-        </Button>
-        <Button
-          size="small"
-          appearance="secondary"
-          disabled={selected.size !== 1}
-          onClick={() => void doExtract()}
-        >
-          解压
         </Button>
         <span style={{ flex: 1 }} />
         <InlineError text={error} />
@@ -1197,179 +1000,32 @@ export default function FilePanel() {
         </Table>
       </div>
         </div>
-
-        {/* 预览分栏（F4：文本/图片/系统缩略图/不支持 四形态；限额服务端固定，UI 不承诺可调） */}
-        <aside className={styles.previewPane} aria-label="文件预览">
-          {!previewPath && (
-            <EmptyState text="双击列表中的文件即可在此预览（搜索命中点击同效）" />
-          )}
-          {previewPath && (
-            <>
-              <Text className={styles.pathLine}>{previewPath}</Text>
-              {previewLoading && <EmptyState text="预览加载中…" loading />}
-              {!previewLoading && previewErr && <InlineError text={previewErr} />}
-              {!previewLoading && preview?.kind === "text" && (
-                <>
-                  {preview.truncated && (
-                    <Text className={styles.warn}>
-                      内容较大：仅显示开头部分（截断限额由服务端固定）
-                    </Text>
-                  )}
-                  <pre className={styles.pre}>{preview.content || "（文件内容为空）"}</pre>
-                </>
-              )}
-              {!previewLoading && (preview?.kind === "image" || preview?.kind === "shell") && (
-                <>
-                  <img
-                    src={preview.data_url}
-                    alt={`${previewPath} 预览`}
-                    className={styles.previewImg}
-                  />
-                  <Text className={styles.muted}>
-                    {preview.kind === "image"
-                      ? `原图 ${preview.width}×${preview.height}（超阈值时缩略显示）`
-                      : `系统缩略图 ${preview.width}×${preview.height}`}
-                  </Text>
-                </>
-              )}
-              {!previewLoading && preview?.kind === "unsupported" && (
-                <Text>无法预览：{preview.reason}</Text>
-              )}
-            </>
-          )}
-        </aside>
+        {previewPane}
       </div>
-
-      {/* 批量重命名 Dialog（F7：规则表单 → 预览表 → 勾选应用；冲突原因前端推导） */}
-      <Dialog open={rnOpen} onOpenChange={(_, d) => !d.open && setRnOpen(false)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>批量重命名</DialogTitle>
-            <DialogContent>
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                <Text size={200} className={styles.muted}>
-                  仅文件，目录不参与。
-                  {selected.size === 0
-                    ? "未选中文件：将对当前目录全部文件生成计划。"
-                    : `已选 ${entries.filter((e) => selected.has(e.path) && !e.is_dir).length} 个文件参与。`}
-                </Text>
-                <div className={styles.rnField}>
-                  <Text size={200} className={styles.muted}>
-                    模板（变量仅 {"{name}"} {"{ext}"} {"{n}"} {"{n:0N}"}，N≤10）
-                  </Text>
-                  <Input
-                    size="small"
-                    aria-label="重命名模板"
-                    value={rnTemplate}
-                    onChange={(_, d) => setRnTemplate(d.value)}
-                  />
-                </div>
-                <div className={styles.rnField}>
-                  <Text size={200} className={styles.muted}>
-                    正则（作用于主名，留空不处理）
-                  </Text>
-                  <Input
-                    size="small"
-                    aria-label="重命名正则"
-                    value={rnRegex}
-                    onChange={(_, d) => setRnRegex(d.value)}
-                  />
-                </div>
-                <div className={styles.rnField}>
-                  <Text size={200} className={styles.muted}>
-                    替换串（$1 组引用）
-                  </Text>
-                  <Input
-                    size="small"
-                    aria-label="重命名替换串"
-                    value={rnReplacement}
-                    onChange={(_, d) => setRnReplacement(d.value)}
-                  />
-                </div>
-                <div className={styles.rnField}>
-                  <Text size={200} className={styles.muted}>
-                    大小写
-                  </Text>
-                  <Select
-                    size="small"
-                    aria-label="大小写转换"
-                    value={rnCase}
-                    onChange={(_, d) => setRnCase((d.value || "none") as RenameCaseDto)}
-                  >
-                    <option value="none">不转换</option>
-                    <option value="lower">全部小写</option>
-                    <option value="upper">全部大写</option>
-                  </Select>
-                </div>
-                <div className={styles.rnField}>
-                  <Text size={200} className={styles.muted}>
-                    序号起始值
-                  </Text>
-                  <Input
-                    size="small"
-                    type="number"
-                    aria-label="序号起始值"
-                    value={rnStart}
-                    onChange={(_, d) => setRnStart(d.value)}
-                    style={{ maxWidth: "100px" }}
-                  />
-                </div>
-                {rnErr && <InlineError text={rnErr} />}
-                {rnBusy && (
-                  <Text size={200} role="status" className={styles.muted}>
-                    正在生成预览…
-                  </Text>
-                )}
-                {rnPlans &&
-                  rnPlans.map((p) => (
-                    <div key={p.from} className={styles.rnPlanRow}>
-                      <Checkbox
-                        checked={rnChecked.has(p.from)}
-                        onChange={() => toggleRn(p.from)}
-                        aria-label={`选择 ${p.from}`}
-                      />
-                      <span className={styles.rnPath} title={p.from}>
-                        {p.from.split(/[\\/]/).pop()}
-                      </span>
-                      <span>→</span>
-                      <span className={styles.rnPath} title={p.to}>
-                        {p.to.split(/[\\/]/).pop()}
-                      </span>
-                      {p.from === p.to && <Badge appearance="outline">不变</Badge>}
-                      {rnReasons?.get(p.from) && (
-                        <Badge appearance="tint" color="warning">
-                          {rnReasons.get(p.from)}
-                        </Badge>
-                      )}
-                    </div>
-                  ))}
-                {rnPlans && rnPlans.length === 0 && (
-                  <Text size={200} className={styles.muted}>
-                    计划为 0 条
-                  </Text>
-                )}
-              </div>
-            </DialogContent>
-            <DialogActions>
-              <Button onClick={() => void doRenamePlan()}>生成预览</Button>
-              <Button
-                appearance="primary"
-                disabled={!rnPlans || rnBusy}
-                onClick={() => void doRenameApply()}
-              >
-                应用（勾选 {rnChecked.size} 项）
-              </Button>
-              <Button appearance="subtle" onClick={() => setRnOpen(false)}>
-                关闭
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
-      </>
+    )}
+    {sub === "search" && (
+      <div className={styles.split}>
+        <div className={styles.leftCol}>
+          <SearchSection onOpenPreview={(p) => void openPreview(p)} />
+        </div>
+        {previewPane}
+      </div>
+    )}
+    {sub === "batch" && (
+      <BatchSection
+        cwd={cwd}
+        entries={entries}
+        selected={selected}
+        error={error}
+        onReload={(p) => void loadDir(p)}
+        onCompress={() => void doCompress()}
+        onExtract={() => void doExtract()}
+      />
     )}
     {sub === "transfers" && transfersArm}
     {sub === "connections" && <ConnectionsSection />}
+    {sub === "netdisk" && <NetdiskSection />}
+    {sub === "settings" && <FileSettingsSection />}
     </div>
   );
 }

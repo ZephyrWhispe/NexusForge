@@ -36,7 +36,7 @@ import InlineError from "../../components/InlineError";
  * **只**出自 file_remote_drivers 的 roots——本地盘符表（fileDrivers）是另一张
  * 脸，混表即把"未连接的远端"假称在场。队列远端执行器已接线（09 §6.2 T-B6-11），
  * 这里的"下载/上传"是把 OpEndpoint 投进 fileEnqueue 的真钮：只入队不搬运，
- * 进度与断点归『传输队列』档——本面板不自建第二套传输事实源。
+ * 进度与断点归『传输』档——本面板不自建第二套传输事实源。
  * T-B7-25 添属性弹窗：权限位/符号链接只渲染列表带回的事实源，写回走
  * fileRemoteChmod 唯一口（term 档同一枚命令，此处不做第二份）。
  */
@@ -107,7 +107,7 @@ export default function RemoteBrowser() {
     try {
       const res = await fileEnqueue(spec);
       if (res.op_id) {
-        notify("success", `${what}已入队`, "进度与断点见『传输队列』档");
+        notify("success", `${what}已入队`, "进度与断点见『传输』档");
       } else {
         setError(`未入队${what}：目标有未决议的同名冲突（${res.conflicts.length} 条），先在传输面板决议`);
       }
@@ -262,7 +262,7 @@ export default function RemoteBrowser() {
         {driver && <Badge appearance="outline">凭据来源 {driver.auth_source}</Badge>}
       </div>
       <div className={styles.toolbar}>
-        {/* 传输投递（T-B6-11）：只入队，进度/断点归『传输队列』档——本行不建第二套事实源 */}
+        {/* 传输投递（T-B6-11）：只入队，进度/断点归『传输』档——本行不建第二套事实源 */}
         <Input
           size="small"
           aria-label="本地落点目录"

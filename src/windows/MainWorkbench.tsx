@@ -105,7 +105,7 @@ export default function MainWorkbench() {
   // T-B5-8：同步五档再分一键（第三枚分键，理由同上）
   const syncSub = useSession((s) => s.syncSubPanel);
   const setSyncSub = useSession((s) => s.setSyncSubPanel);
-  // T-B6-10：文件三档再分一键（第四枚分键，理由同上）
+  // T-B6-10 立档（T-B7-27 扩七档）：文件档选择态再分一键（第四枚分键，理由同上）
   const fileSub = useSession((s) => s.fileSubPanel);
   const setFileSub = useSession((s) => s.setFileSubPanel);
   const search = useSession((s) => s.clipSearch);

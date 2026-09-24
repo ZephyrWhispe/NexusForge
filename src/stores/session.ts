@@ -44,11 +44,27 @@ export function isSyncSubPanel(v: string): v is SyncSubPanel {
   return SYNC_SUB_PANEL_IDS.includes(v);
 }
 
-/** 文件子面板 id（T-B6-10，09 §6.2）：与 SUBNAV[file] 三项一一对应
- *  （panels/04 §2 三档：浏览/传输/连接站点；网盘与 treemap 属 §6.3 延后档，不开空档占位） */
-export type FileSubPanel = "browse" | "transfers" | "connections";
+/** 文件子面板 id（T-B6-10 立三档，T-B7-27 扩七档，09 §6.3 档 j）：与 SUBNAV[file]
+ *  七项一一对应（panels/04 §2 七档字面：文件/传输/搜索/批量工具/远程连接/网盘/设置）。
+ *  旧 "browse" id 保留 ⇒ 已持久化的 "browse" 快照值零迁移、零失效。 */
+export type FileSubPanel =
+  | "browse"
+  | "transfers"
+  | "search"
+  | "batch"
+  | "connections"
+  | "netdisk"
+  | "settings";
 
-const FILE_SUB_PANEL_IDS: readonly string[] = ["browse", "transfers", "connections"];
+const FILE_SUB_PANEL_IDS: readonly string[] = [
+  "browse",
+  "transfers",
+  "search",
+  "batch",
+  "connections",
+  "netdisk",
+  "settings",
+];
 
 export function isFileSubPanel(v: string): v is FileSubPanel {
   return FILE_SUB_PANEL_IDS.includes(v);
@@ -123,7 +139,7 @@ export const useSession = create<SessionState>()(
       setClipView: (id) => set(isClipView(id) ? { clipView: id } : {}),
       // 同上（T-B5-8）：第三枚分键——同步的五档与代理/剪切板的选择态互不覆写
       setSyncSubPanel: (id) => set(isSyncSubPanel(id) ? { syncSubPanel: id } : {}),
-      // 同上（T-B6-10）：第四枚分键——文件三档与其余模块选择态互不覆写
+      // 同上（T-B6-10 立档，T-B7-27 扩七档）：第四枚分键——文件七档与其余模块选择态互不覆写
       setFileSubPanel: (id) => set(isFileSubPanel(id) ? { fileSubPanel: id } : {}),
     }),
     {

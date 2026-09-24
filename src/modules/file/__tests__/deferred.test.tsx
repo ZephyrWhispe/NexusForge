@@ -41,7 +41,9 @@ describe("file deferred items (T-B6-13)", () => {
 
     // ① 延后档的实现形状词：剥掉徽标（徽标按设计提到这些词）后零命中
     // （T-B7-25 摘除 "chmod"/"permission"：权限位面已真交付，禁词表随实装收缩——
-    //   留着就是对已兑现承诺的假报警）
+    //   留着就是对已兑现承诺的假报警。
+    //  T-B7-27 摘除 "netdisk"：词转正为七档路由 id（FilePanel 分派字面 `sub === "netdisk"`），
+    //   网盘的实现形状仍由 rclone/mount/quota_used 三词钉住——摘的是路由名不是诚实面。）
     const stripped = all.replace(BADGE, "");
     for (const forbidden of [
       "rclone",
@@ -53,7 +55,6 @@ describe("file deferred items (T-B6-13)", () => {
       "recycleView",
       "presign",
       "quota_used",
-      "netdisk",
     ])
       expect(stripped, `出现未登记的实现形状"${forbidden}"`).not.toContain(forbidden);
 
@@ -74,6 +75,18 @@ describe("file deferred items (T-B6-13)", () => {
     expect(labels.sort()).toEqual(
       ["网盘", "diff/镜像工作台", "treemap/回收站找回"].slice().sort(),
     );
+  });
+
+  it("netdiskSection_badgeOnlyNoDisabledButtons：网盘档只有徽标+诚实文案，零按钮形态伪装（T-B7-27 deferred 纪律镜像）", () => {
+    const src = sources.find(([rel]) => rel.includes("NetdiskSection"))?.[1];
+    expect(src, "NetdiskSection 未落进扫描面（glob 面不对＝正对照失效）").toBeTruthy();
+    // 无按钮即无"禁用的就绪"；连 disabled 属性都不许出现
+    expect(src).not.toContain("<Button");
+    expect(src).not.toMatch(/disabled=\{|\bdisabled\b/);
+    // 徽标逐字保留 T-B6-13 形状（挪档不重写：label/decisionRef 一字未动）
+    expect(src).toContain('<DeferredBadge label="网盘" decisionRef="09 §6.3-(c)" />');
+    for (const talk of ["即将上线", "敬请期待", "下个版本"])
+      expect(src, `不许有画饼话术「${talk}」`).not.toContain(talk);
   });
 
   it("panels04_promised_words_match_wired_commands", () => {
