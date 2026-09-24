@@ -39,7 +39,8 @@ import EmptyState from "../../components/EmptyState";
  * 桌面效率面板（docs/impl/05 D3+D4，M8 v1）：
  * ① 随记管理（列表/新增/完成/删除）② 桌面整理（预览→应用→还原）
  * ③ 启动器索引重建（D1：core 内 build 后重放内置动作）
- * ④ T-B7-16 分类映射编辑表（tidy_map 唯一写口；保存即热生效，无需重启）。
+ * ④ T-B7-16 分类映射编辑表（tidy_map 唯一写口；保存即热生效，无需重启）
+ * ⑤ T-B7-17 随记 #标签点选过滤（设/撤同口；精确匹配在 store 层，前端只透传 tag 参）。
  * 提醒到期横幅读 `useDesktopReminders` 缓冲（订阅在 MainWorkbench 级，面板外事件不丢）；
  * 刻意不调 `desktop_notes_due`——该命令 take_due 是破坏性消费，会抢走后台轮询的事件。
  * 启动器（D1/D2）为全局 Alt+Q 独立窗口，不内嵌。
@@ -58,10 +59,17 @@ const useStyles = makeStyles({
   grow: { flex: 1, minWidth: "240px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   tag: {
+    // T-B7-17：#标签可点设/撤过滤——button 元素复位为内联文本观感
+    background: "none",
+    border: "none",
+    padding: "0",
+    cursor: "pointer",
+    font: "inherit",
     fontSize: tokens.fontSizeBase100,
     color: tokens.colorBrandForeground1,
     marginRight: "4px",
   },
+  tagActive: { textDecoration: "underline", fontWeight: tokens.fontWeightSemibold },
   remind: { color: tokens.colorPaletteMarigoldForeground1, fontSize: tokens.fontSizeBase200 },
   noteRow: {
     display: "flex",
@@ -165,6 +173,8 @@ export default function DesktopPanel() {
   const styles = useStyles();
   const [notes, setNotes] = useState<DesktopNoteDto[]>([]);
   const [showDone, setShowDone] = useState(false);
+  // T-B7-17 标签过滤态（精确匹配标签值，不含 # 前缀；null=不过滤）
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [plan, setPlan] = useState<DesktopTidyPlanDto | null>(null);
   const [hasManifest, setHasManifest] = useState(false);
@@ -181,14 +191,26 @@ export default function DesktopPanel() {
   const [loaded, setLoaded] = useState(false);
   const mounted = useRef(true);
 
+  // 过滤走 ref 而非 useCallback 依赖：切换标签只重取列表，不触发整面板 refresh
+  // （refresh 依赖变化会连带重置整理映射编辑态——两 Section 互不牵连）
+  const tagFilterRef = useRef<string | null>(null);
+
   const refreshNotes = useCallback(async () => {
     try {
-      const list = await desktopNoteList(showDone);
+      const list = await desktopNoteList(showDone, tagFilterRef.current ?? undefined);
       if (mounted.current) setNotes(list);
     } catch (e) {
       if (mounted.current) setError(parseAppError(e)?.data.message ?? String(e));
     }
   }, [showDone]);
+
+  /** 点 #标签=设过滤、再点同标=撤（T-B7-17 精确匹配在 store 层，前端只透传） */
+  const toggleTag = (t: string) => {
+    const next = tagFilterRef.current === t ? null : t;
+    tagFilterRef.current = next;
+    setTagFilter(next);
+    void refreshNotes();
+  };
 
   /**
    * 分类映射读盘（读-改-写的「读」半边）。失败回退 null（=内置六类显示）而非抛：
@@ -400,8 +422,19 @@ export default function DesktopPanel() {
             onChange={(_, d) => setShowDone(d.checked === true)}
           />
         </div>
+        {tagFilter && (
+          <div className={styles.row}>
+            <Badge appearance="outline" color="brand">
+              过滤：#{tagFilter}
+            </Badge>
+            <Button size="small" title="清除标签过滤" onClick={() => toggleTag(tagFilter)}>
+              ✕
+            </Button>
+            <span className={styles.muted}>点标签即过滤、再点取消；后端精确匹配，不中子串</span>
+          </div>
+        )}
         {notes.length === 0 ? (
-          <EmptyState text="暂无随记——在上方输入框记录待办，支持 #标签 与提醒" loading={!loaded} />
+          <EmptyState text={tagFilter ? `没有带 #${tagFilter} 的随记` : "暂无随记——在上方输入框记录待办，支持 #标签 与提醒"} loading={!loaded} />
         ) : (
           notes.map((n) => (
             <div key={n.id} className={styles.noteRow}>
@@ -418,7 +451,14 @@ export default function DesktopPanel() {
                 <div className={n.done ? styles.done : undefined}>{n.content}</div>
                 <div>
                   {n.tags.map((t) => (
-                    <span key={t} className={styles.tag}>#{t}</span>
+                    <button
+                      key={t}
+                      className={tagFilter === t ? `${styles.tag} ${styles.tagActive}` : styles.tag}
+                      title={`#${t}：点击过滤 / 再点取消`}
+                      onClick={() => toggleTag(t)}
+                    >
+                      #{t}
+                    </button>
                   ))}
                   {n.remind_at && <span className={styles.remind}>{fmtRemind(n.remind_at)}</span>}
                   <span className={styles.muted}> · {fmtTime(n.created_ms)}</span>

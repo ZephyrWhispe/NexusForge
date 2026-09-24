@@ -93,8 +93,13 @@ impl NoteStore {
         Ok(note)
     }
 
-    /// 列表（新→旧；include_done=false 排除已完成）
-    pub fn list(&self, include_done: bool) -> Result<Vec<Note>> {
+    /// 列表（新→旧；include_done=false 排除已完成；tag=Some 精确匹配标签）
+    ///
+    /// 过滤形制登记（T-B7-17 防误判）：存储实为 SQLite `desktop.db` 的 notes 表，
+    /// tags 列存 JSON 数组字符串（任务书行文假定"JSON 文件存储"，按代码事实收口）。
+    /// tag 过滤在**反序列化后的 Vec<String> 上全等匹配**——tag 值不进 SQL、无 LIKE，
+    /// 既无注入面，也兑现"精确匹配禁子串"（SQL LIKE 会让 `work` 命中 `workshop`）。
+    pub fn list(&self, include_done: bool, tag: Option<&str>) -> Result<Vec<Note>> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(if include_done {
@@ -103,11 +108,14 @@ impl NoteStore {
                 "SELECT id, content, tags, remind_at, reminded, done, created_ms FROM notes WHERE done = 0 ORDER BY created_ms DESC"
             })
             .map_err(|e| DesktopError::Db(e.to_string()))?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map([], row_to_note)
             .map_err(|e| DesktopError::Db(e.to_string()))?
             .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(t) = tag {
+            rows.retain(|n| n.tags.iter().any(|x| x == t));
+        }
         Ok(rows)
     }
 
@@ -386,7 +394,7 @@ mod tests {
         assert_eq!(n.remind_at, None);
         assert!(!n.done);
 
-        let list = store.list(true).unwrap();
+        let list = store.list(true, None).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].content, "买牛奶 #生活 #采购 额外加鸡蛋");
         assert_eq!(list[0].tags.len(), 2);
@@ -405,12 +413,61 @@ mod tests {
         let n2 = store.add("任务B", now()).unwrap();
 
         store.set_done(&n.id, true).unwrap();
-        assert_eq!(store.list(false).unwrap().len(), 1, "未完成只剩 B");
-        assert_eq!(store.list(true).unwrap().len(), 2);
+        assert_eq!(store.list(false, None).unwrap().len(), 1, "未完成只剩 B");
+        assert_eq!(store.list(true, None).unwrap().len(), 2);
 
         assert!(store.remove(&n2.id).unwrap());
         assert!(!store.remove(&n2.id).unwrap(), "重复删除返回 false");
-        assert_eq!(store.list(true).unwrap().len(), 1);
+        assert_eq!(store.list(true, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-17）字面测试名优先于 rustc 命名惯例
+    fn noteList_tagFilter_exactMatch_notSubstring() {
+        let store = NoteStore::open(&tmpdb("tagfilter")).unwrap();
+        store.add("周会材料 #work 记得带", now()).unwrap();
+        store.add("兴趣班 #workshop", now()).unwrap();
+        store.add("无标签一条", now()).unwrap();
+
+        let hit = store.list(true, Some("work")).unwrap();
+        assert_eq!(hit.len(), 1, "近名标签 #workshop 不得被子串误中");
+        assert_eq!(hit[0].tags, vec!["work"]);
+        // 精确匹配是双向的：全名标签照常命中，且不含 "#" 前缀（extract_tags 已剥）
+        assert_eq!(store.list(true, Some("workshop")).unwrap().len(), 1);
+        assert!(
+            store.list(true, Some("#work")).unwrap().is_empty(),
+            "带 # 的展示形不是存储形，不应命中"
+        );
+        assert!(store.list(true, Some("nope")).unwrap().is_empty());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-17）字面测试名优先于 rustc 命名惯例
+    fn noteList_tagNone_returnsAll() {
+        let store = NoteStore::open(&tmpdb("tagnone")).unwrap();
+        store.add("一条 #a", now()).unwrap();
+        store.add("两条 #b", now() + 1_000).unwrap();
+        // 正对照：tag=None 与旧调用逐字同集（新→旧序）
+        let all = store.list(true, None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].content, "两条 #b", "新→旧序不因过滤参数而变");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-17）字面测试名优先于 rustc 命名惯例
+    fn noteList_tagAbsentFromDoneSet_stillFiltered() {
+        let store = NoteStore::open(&tmpdb("tagdone")).unwrap();
+        let done = store.add("已办事项 #proj", now()).unwrap();
+        store.add("在办事项 #other", now()).unwrap();
+        store.set_done(&done.id, true).unwrap();
+        // done 维与 tag 维交臂：#proj 只在已完成集里——
+        // 不含已完成的列表必须仍过滤为空（漏了 done=0 谓词或漏了 tag 谓词都会假绿）
+        assert!(store.list(false, Some("proj")).unwrap().is_empty());
+        // 放开 done 维则命中——证明空集来自 done 谓词而非 tag 谓词失灵
+        assert_eq!(store.list(true, Some("proj")).unwrap().len(), 1);
+        // 两维都不命中同样为空（无一泄漏）
+        assert!(store.list(true, Some("zzz")).unwrap().is_empty());
+        assert!(store.list(false, Some("zzz")).unwrap().is_empty());
     }
 
     #[test]

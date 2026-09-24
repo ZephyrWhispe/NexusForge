@@ -120,10 +120,11 @@ pub async fn desktop_note_add(
     .map_err(desktop_err)
 }
 
-/// 随记列表
+/// 随记列表（T-B7-17 加**可选参** tag：精确匹配标签，None/缺省=不过滤，旧调用零扰动）
 #[tauri::command]
 pub async fn desktop_note_list(
     include_done: bool,
+    tag: Option<String>,
     state: State<'_, HostState>,
 ) -> Result<Vec<desktop_core::Note>, AppError> {
     let m = desktop_module(&state);
@@ -131,7 +132,7 @@ pub async fn desktop_note_list(
         let store = m
             .note_store()
             .ok_or_else(|| desktop_core::DesktopError::BadState("随记库未初始化".into()))?;
-        store.list(include_done)
+        store.list(include_done, tag.as_deref())
     })
     .await
     .map_err(|e| AppError::module("DESKTOP_IPC_001", e.to_string(), None))?

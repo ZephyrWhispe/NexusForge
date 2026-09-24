@@ -1513,8 +1513,8 @@ export function desktopTidyStatus(): Promise<boolean> {
 export function desktopNoteAdd(content: string): Promise<DesktopNoteDto> {
   return invoke("desktop_note_add", { content });
 }
-export function desktopNoteList(includeDone: boolean): Promise<DesktopNoteDto[]> {
-  return invoke("desktop_note_list", { includeDone });
+export function desktopNoteList(includeDone: boolean, tag?: string): Promise<DesktopNoteDto[]> {
+  return invoke("desktop_note_list", { includeDone, tag: tag ?? null });
 }
 export function desktopNoteDone(id: string, done: boolean): Promise<boolean> {
   return invoke("desktop_note_done", { id, done });
