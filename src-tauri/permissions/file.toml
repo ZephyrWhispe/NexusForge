@@ -111,6 +111,11 @@ description = "允许前端调用 file_remote_browse 命令（D-28 按窗最小�
 commands.allow = ["file_remote_browse"]
 
 [[permission]]
+identifier = "allow-file-remote-chmod"
+description = "允许前端调用 file_remote_chmod 命令（D-28 按窗最小授权；T-B7-25 唯一权限位写口，写的是远端站点的文件模式）"
+commands.allow = ["file_remote_chmod"]
+
+[[permission]]
 identifier = "allow-file-remote-drivers"
 description = "允许前端调用 file_remote_drivers 命令（D-28 按窗最小授权；连接态只读描述，无凭据位）"
 commands.allow = ["file_remote_drivers"]

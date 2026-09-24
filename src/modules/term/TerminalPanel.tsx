@@ -26,6 +26,9 @@ import "@xterm/xterm/css/xterm.css";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
+  fileRemoteChmod,
+  fileRemoteDrivers,
+  parseAppError,
   termAck,
   termDockerContainers,
   termDockerLifecycle,
@@ -49,8 +52,8 @@ import {
   termSshKnownHosts,
   termWslList,
   termWrite,
-  parseAppError,
   type DockerContainerDto,
+  type RemoteDriverDto,
   type SftpEntryDto,
   type SshAuthDto,
   type SshExecResultDto,
@@ -190,6 +193,13 @@ export default function TerminalPanel() {
   const [sftpMkDir, setSftpMkDir] = useState("");
   const [sftpRenaming, setSftpRenaming] = useState<{ from: string; to: string } | null>(null);
   const [sftpDeleteArm, setSftpDeleteArm] = useState<string | null>(null);
+  // T-B7-25 权限弹窗：写回**不**走 term-core（那里零 chmod）——宿主桥=直调
+  // file 域 fileRemoteChmod 唯一口，目标驱动取自 file-core 已连接 SFTP 站点。
+  // 两域会话互不共享是既有事实源形状，故这里选的是"哪条已连接远端"而非本终端会话。
+  const [permFor, setPermFor] = useState<string | null>(null);
+  const [permDrivers, setPermDrivers] = useState<RemoteDriverDto[] | null>(null);
+  const [permDriver, setPermDriver] = useState("");
+  const [permOctal, setPermOctal] = useState("");
 
   // ---- Docker ----
   const [containers, setContainers] = useState<DockerContainerDto[] | null>(null);
@@ -518,6 +528,47 @@ export default function TerminalPanel() {
     },
     [sftpTarget, sftpMutate, joinRemote],
   );
+
+  // T-B7-25 权限写回唯一通路：fileRemoteChmod（file-core 是全app唯一 chmod 口，
+  // term-core 零第二份实现）。目标驱动只出自 file 域已连接远端表——本终端的
+  // SSH 会话不是权限位的落点事实源，弹窗不假称"这条会话的权限"。
+  const openPerm = useCallback(
+    async (name: string) => {
+      setPermFor(joinRemote(name));
+      setPermOctal("");
+      setErr(null);
+      try {
+        const list = (await fileRemoteDrivers()).filter((d) => d.protocol === "sftp");
+        setPermDrivers(list);
+        setPermDriver(list[0]?.driver_id ?? "");
+      } catch (e) {
+        setPermDrivers([]);
+        fail(e);
+      }
+    },
+    [joinRemote, fail],
+  );
+
+  const applyPerm = useCallback(async () => {
+    if (!permFor || !permDriver) return;
+    const text = permOctal.trim();
+    const mode = /^[0-7]{1,4}$/.test(text) ? Number.parseInt(text, 8) : Number.NaN;
+    if (Number.isNaN(mode)) {
+      setErr("八进制权限位须为 1-4 位 0-7 数字（≤7777）");
+      return;
+    }
+    setSftpBusy(true);
+    setErr(null);
+    try {
+      await fileRemoteChmod(permDriver, permFor, mode);
+      setMsg(`权限位已写回 ${permFor} → 0o${mode.toString(8)}`);
+      setPermFor(null);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setSftpBusy(false);
+    }
+  }, [permFor, permDriver, permOctal, fail]);
 
   const showLogs = useCallback(
     async (id: string) => {
@@ -955,6 +1006,16 @@ export default function TerminalPanel() {
                             删除
                           </Button>
                         )}
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            void openPerm(e.name);
+                          }}
+                        >
+                          权限
+                        </Button>
                       </span>
                     </>
                   )}
@@ -987,6 +1048,57 @@ export default function TerminalPanel() {
                 上传
               </Button>
             </div>
+          )}
+          {permFor && (
+            <Dialog open onOpenChange={(_, d) => !d.open && setPermFor(null)}>
+              <DialogSurface>
+                <DialogBody>
+                  <DialogTitle>远端权限位</DialogTitle>
+                  <DialogContent>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                      <Text size={200}>目标 {permFor}</Text>
+                      {permDrivers && permDrivers.length === 0 && (
+                        <Text size={200} className={styles.muted}>
+                          无已连接的 SFTP 远端：权限写回只认文件域『连接』档建立的
+                          驱动事实源，请先在那里连接同站点
+                        </Text>
+                      )}
+                      {permDrivers && permDrivers.length > 0 && (
+                        <Dropdown
+                          value={permDrivers.find((d) => d.driver_id === permDriver)?.label ?? ""}
+                          selectedOptions={[permDriver]}
+                          onOptionSelect={(_, o) => setPermDriver(o.optionValue ?? "")}
+                        >
+                          {permDrivers.map((d) => (
+                            <Option key={d.driver_id} value={d.driver_id} text={d.label}>
+                              {d.label}（{d.driver_id}）
+                            </Option>
+                          ))}
+                        </Dropdown>
+                      )}
+                      {permDrivers && permDrivers.length > 0 && (
+                        <div className={styles.row}>
+                          <Input
+                            className={styles.grow}
+                            placeholder="新八进制权限位（如 644 / 7777）"
+                            value={permOctal}
+                            onChange={(_, d) => setPermOctal(d.value)}
+                          />
+                          <Button size="small" disabled={sftpBusy} onClick={() => void applyPerm()}>
+                            写回
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button appearance="subtle" onClick={() => setPermFor(null)}>
+                      关闭
+                    </Button>
+                  </DialogActions>
+                </DialogBody>
+              </DialogSurface>
+            </Dialog>
           )}
         </Section>
       )}

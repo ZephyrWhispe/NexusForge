@@ -40,13 +40,13 @@ describe("file deferred items (T-B6-13)", () => {
       expect(all, `扫描面缺 ${marker}`).toContain(marker);
 
     // ① 延后档的实现形状词：剥掉徽标（徽标按设计提到这些词）后零命中
+    // （T-B7-25 摘除 "chmod"/"permission"：权限位面已真交付，禁词表随实装收缩——
+    //   留着就是对已兑现承诺的假报警）
     const stripped = all.replace(BADGE, "");
     for (const forbidden of [
       "rclone",
       "mount",
       "treemap",
-      "chmod",
-      "permission",
       "mirror",
       "diff",
       "sftp-sync",

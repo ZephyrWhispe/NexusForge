@@ -1844,13 +1844,18 @@ mod tests {
                 "file 侧缺 {file_pat}（对照表破形）"
             );
         }
-        // 行范围钉：无 chmod——权限位单归 T-B7-25，两域不得先立一面
-        // （禁串拼接构造：本断言自身在场，字面量写死会自指导弹）
+        // 行范围钉翻正（T-B7-25 落地时兑现）：当年"两域不得先立一面"的
+        // 权限位面如期只立了一枚口——file-core 的 chmod 唯一口在场，
+        // term 侧仍零 sftp chmod 动词（属性弹窗经宿主桥直调 file 域命令）。
+        // 禁串拼接构造：本断言自身在场，字面量写死会自指导弹
         let chmod = ["ch", "mod"].concat();
         assert!(
-            !term_src.contains(&format!("fn sftp_{chmod}"))
-                && !file_src.contains(&format!("fn {chmod}")),
-            "chmod 提前落地属越权（T-B7-25 专属）"
+            file_src.contains(&format!("fn {chmod}")),
+            "T-B7-25 的 chmod 唯一口须在 file-core 在场（缺=单口没立住）"
+        );
+        assert!(
+            !term_src.contains(&format!("fn sftp_{chmod}")),
+            "term 侧长出第二份 chmod＝越权（宿主桥红线）"
         );
     }
 }

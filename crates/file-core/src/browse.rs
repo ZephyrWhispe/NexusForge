@@ -65,6 +65,15 @@ fn entry_from_metadata(path: PathBuf, md: &std::fs::Metadata) -> FileEntry {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let hidden = md.file_attributes() & 0x2 != 0; // FILE_ATTRIBUTE_HIDDEN
+                                                  // T-B7-25 双键：本地 Windows 面无 POSIX 权限位事实源（file_attributes 是
+                                                  // Win32 属性位，不是 mode）⇒ mode 恒 None；符号链接目标是真事实源
+    let symlink_target = if md.file_type().is_symlink() {
+        std::fs::read_link(&path)
+            .ok()
+            .map(|t| display_path(&t).to_string_lossy().into_owned())
+    } else {
+        None
+    };
     FileEntry {
         name,
         path: display_path(&path),
@@ -73,6 +82,8 @@ fn entry_from_metadata(path: PathBuf, md: &std::fs::Metadata) -> FileEntry {
         modified_ms,
         ext: if is_dir { String::new() } else { ext },
         hidden,
+        mode: None,
+        symlink_target,
     }
 }
 

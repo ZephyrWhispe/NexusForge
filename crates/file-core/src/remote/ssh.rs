@@ -191,6 +191,12 @@ pub(crate) enum SshRpc {
         from: String,
         to: String,
     },
+    /// T-B7-25 权限位写回（全模块唯一 chmod 腿）：mode 已在 service 层过
+    /// ≤0o7777 校验，协议臂不重复裁决只送信
+    Chmod {
+        path: String,
+        mode: u32,
+    },
     Download {
         path: String,
         dst: PathBuf,
@@ -471,6 +477,20 @@ impl SftpDriver {
             to: to.to_owned(),
         })?;
         Ok(())
+    }
+
+    /// 权限位写回（SETSTAT 只带 permissions 一旗）：service 层的
+    /// `remote_chmod` 是全模块唯一 chmod 口，本方法是它的 SFTP 腿
+    pub(crate) fn chmod(&self, path: &str, mode: u32) -> Result<(), FileError> {
+        match self.rpc(SshRpc::Chmod {
+            path: path.to_owned(),
+            mode,
+        })? {
+            SshReply::Ok => Ok(()),
+            _ => Err(FileError::BadState(
+                "协议内部矛盾：Chmod 臂必须回 Ok".into(),
+            )),
+        }
     }
 
     /// 远端文件总大小（`download_to` 的算式前置；队列消费接线归 T-B6-7）
@@ -786,6 +806,26 @@ async fn auth_russh(
     }
 }
 
+/// SFTP 属性 → RemoteEntry 的纯映射（`sftpStat_modePopulated_matchesAttrs`
+/// 的落点）：mode 取 attributes.permissions 的**低 12 位**——高位是文件型
+/// （S_IFREG/S_IFDIR 等展示性事实），权限位语义只在低 12 位；permissions
+/// 缺席即 None（无事实源就无文案）。mtime 缺失回 0，绝不回当前时刻。
+fn sftp_entry_from_attrs(
+    name: String,
+    path: String,
+    md: &russh_sftp::client::fs::Metadata,
+) -> RemoteEntry {
+    RemoteEntry {
+        name,
+        path,
+        is_dir: md.is_dir(),
+        size: md.size.unwrap_or(0),
+        modified_ms: md.mtime.map_or(0, |s| s as i64 * 1000),
+        mode: md.permissions.map(|p| p & 0o7777),
+        symlink_target: None,
+    }
+}
+
 async fn open_sftp_session(
     handle: &mut Handle<FileSshHandler>,
 ) -> Result<russh_sftp::client::SftpSession, FileError> {
@@ -900,14 +940,11 @@ impl RusshBackend {
                         continue;
                     }
                     let m = e.metadata();
-                    out.push(RemoteEntry {
-                        name: name.clone(),
-                        path: join_remote_url(&path, &name),
-                        is_dir: m.is_dir(),
-                        size: m.size.unwrap_or(0),
-                        // 无事实源就无时间：mtime 缺失回 0，绝不回当前时刻
-                        modified_ms: m.mtime.map_or(0, |s| s as i64 * 1000),
-                    });
+                    out.push(sftp_entry_from_attrs(
+                        name.clone(),
+                        join_remote_url(&path, &name),
+                        &m,
+                    ));
                 }
                 Ok(SshReply::Entries(out))
             }
@@ -948,6 +985,19 @@ impl RusshBackend {
                 sftp.rename(&from, &to)
                     .await
                     .map_err(|e| sftp_err("重命名", e))?;
+                Ok(SshReply::Ok)
+            }
+            SshRpc::Chmod { path, mode } => {
+                let mut handle = self.ops_handle().await?;
+                let sftp = open_sftp_session(&mut handle).await?;
+                // 只带 permissions 一旗的 SETSTAT（其余字段 None=不动）
+                let attrs = russh_sftp::client::fs::Metadata {
+                    permissions: Some(mode),
+                    ..Default::default()
+                };
+                sftp.set_metadata(&path, attrs)
+                    .await
+                    .map_err(|e| sftp_err("权限位写回", e))?;
                 Ok(SshReply::Ok)
             }
             SshRpc::Download { path, dst, offset } => {
@@ -1180,6 +1230,10 @@ impl SshBackend for FakeSsh {
             }
             SshRpc::Rename { .. } => {
                 self.record("Rename");
+                Ok(SshReply::Ok)
+            }
+            SshRpc::Chmod { mode, .. } => {
+                self.record(&format!("Chmod@{mode:04o}"));
                 Ok(SshReply::Ok)
             }
             SshRpc::Download { path, dst, offset } => {
@@ -1545,6 +1599,8 @@ mod tests {
                 is_dir: false,
                 size: 3,
                 modified_ms: 0,
+                mode: None,
+                symlink_target: None,
             },
             RemoteEntry {
                 name: "sub".into(),
@@ -1552,6 +1608,8 @@ mod tests {
                 is_dir: true,
                 size: 0,
                 modified_ms: 0,
+                mode: None,
+                symlink_target: None,
             },
         ]));
         let calls = fake.calls.clone();
@@ -1651,6 +1709,62 @@ mod tests {
         let up = drv.upload_from("/srv/up.bin", &dst2, 3).unwrap();
         assert_eq!(up, 10, "have=3 + 送 7");
         assert!(calls.lock().contains(&"Upload@3".to_owned()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B7-25）字面测试名优先于 rustc 命名惯例
+    fn sftpStat_modePopulated_matchesAttrs() {
+        // 属性→mode 的纯映射：低 12 位是权限位，高位文件型不得混进 mode；
+        // permissions 缺席 = 无事实源 → None（绝不回落 0o000 假装有值）
+        let entry = |attrs: russh_sftp::client::fs::Metadata| {
+            sftp_entry_from_attrs("f".into(), "/srv/f".into(), &attrs)
+        };
+        let regular = entry(russh_sftp::client::fs::Metadata {
+            permissions: Some(0o100644),
+            size: Some(42),
+            mtime: Some(1700000000),
+            ..Default::default()
+        });
+        assert_eq!(regular.mode, Some(0o644), "S_IFREG 高位须被掩掉");
+        assert!(!regular.is_dir);
+        assert_eq!(regular.size, 42);
+        assert_eq!(regular.modified_ms, 1700000000 * 1000);
+        let dir = entry(russh_sftp::client::fs::Metadata {
+            permissions: Some(0o040755),
+            ..Default::default()
+        });
+        assert_eq!(dir.mode, Some(0o755));
+        assert!(dir.is_dir, "S_IFDIR 形状须落 is_dir");
+        let bare = entry(russh_sftp::client::fs::Metadata::default());
+        assert_eq!(bare.mode, None, "无 permissions 事实源⇒None");
+        assert_eq!(bare.modified_ms, 0, "mtime 缺席回 0 不回当前时刻");
+        // 越界守卫正对照：0o7777 全位（setuid+sticky+全权限）原样保留
+        let full = entry(russh_sftp::client::fs::Metadata {
+            permissions: Some(0o107777),
+            ..Default::default()
+        });
+        assert_eq!(full.mode, Some(0o7777));
+
+        // 驱动侧 e2e（FakeSsh）：chmod 走协议臂一次、调用记录逐字含八进制
+        let d = tmpdir("chmod-e2e");
+        let store = load_known_hosts(&d.join("kh-view.json")).unwrap();
+        let fake = Arc::new(FakeSsh::new("ssh-ed25519 SHA256:c"));
+        let calls = fake.calls.clone();
+        let drv = SftpDriver::new(
+            sftp_profile("remote:chmod"),
+            fake_auth(),
+            fake.clone(),
+            Arc::clone(&store),
+        );
+        drv.chmod("/srv/f", 0o644).unwrap();
+        assert_eq!(
+            calls.lock().as_slice(),
+            ["Chmod@0644"],
+            "每调用独立建连的 v1 形制：只发这一条 RPC"
+        );
+        drv.chmod("/srv/g", 0o7777).unwrap();
+        assert!(calls.lock().contains(&"Chmod@7777".to_owned()));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

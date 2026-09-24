@@ -936,6 +936,9 @@ export interface FileEntryDto {
   modified_ms: number;
   ext: string;
   hidden: boolean;
+  /** T-B7-25：权限位低 12 位（None=无事实源，本地盘不冒充 mode 语义） */
+  mode?: number | null;
+  symlink_target?: string | null;
 }
 
 export type FileSortKey = "name" | "size" | "modified" | "type";
@@ -1194,6 +1197,9 @@ export interface RemoteEntryDto {
   is_dir: boolean;
   size: number;
   modified_ms: number;
+  /** T-B7-25：SFTP stat 有权限位事实源；WebDAV/FTP/HTTPS 恒 null（无事实源非 0） */
+  mode?: number | null;
+  symlink_target?: string | null;
 }
 
 export type AuthSecretDto = { header?: string | null; password?: string | null };
@@ -1215,6 +1221,11 @@ export function fileRemoteDrivers(): Promise<RemoteDriverDto[]> {
 }
 export function fileRemoteBrowse(driverId: string, path: string): Promise<RemoteEntryDto[]> {
   return invoke("file_remote_browse", { driverId, path });
+}
+/** T-B7-25 权限位写回：全app唯一 chmod 口（term SFTP 属性弹窗也调这一枚，
+ *  term-core 零第二份实现）；mode 是低 12 位语义，越界在 Rust 算式口拒 */
+export function fileRemoteChmod(driverId: string, path: string, mode: number): Promise<void> {
+  return invoke("file_remote_chmod", { driverId, path, mode });
 }
 /** 连接：凭据走逐次入参（只进不出）；allowPlaintextOnce 是明文第三闸的逐次明示
  *  ——缺省不传即拒（Rust 侧 unwrap_or(false)），确认不落任何记忆位 */

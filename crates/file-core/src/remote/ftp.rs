@@ -233,6 +233,10 @@ pub fn parse_mlsd(s: &str) -> Result<Vec<RemoteEntry>, FileError> {
             name: name.clone(),
             // path 由驱动侧接上请求目录；纯函数只给字面名
             path: name,
+            // MLSD 事实只有 type/size/mtime——权限位无源即 None（LIST 的 Unix
+            // 模式串不解析：无标准，解析=猜）
+            mode: None,
+            symlink_target: None,
         });
     }
     Ok(out)

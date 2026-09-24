@@ -16,6 +16,7 @@ import {
   fileOpsPending,
   filePreview,
   fileRemoteBrowse,
+  fileRemoteChmod,
   fileRemoteConnect,
   fileRemoteDisconnect,
   fileRemoteDrivers,
@@ -67,6 +68,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     fileRemotePresets: vi.fn(),
     fileRemoteDrivers: vi.fn(),
     fileRemoteBrowse: vi.fn(),
+    fileRemoteChmod: vi.fn(),
     fileRemoteConnect: vi.fn(),
     fileRemoteFingerprintAck: vi.fn(),
     fileRemoteDisconnect: vi.fn(),
@@ -238,6 +240,7 @@ beforeEach(() => {
   vi.mocked(fileRemoteFingerprintAck).mockResolvedValue(undefined);
   vi.mocked(fileRemoteDisconnect).mockResolvedValue(true);
   vi.mocked(fileRemoteBrowse).mockResolvedValue([]);
+  vi.mocked(fileRemoteChmod).mockResolvedValue(undefined);
   vi.mocked(fileRemoteConnect).mockResolvedValue(driverFixture());
   // FilePanel 侧缺省（三档分派测要用）
   vi.mocked(fileList).mockResolvedValue([entry("docs", true), entry("a.txt", false)]);
@@ -465,6 +468,81 @@ describe("远端浏览事实源（T-B6-10 承重⑮）", () => {
     expect(fileDrives).not.toHaveBeenCalled();
     // auth_source 只报来源档位
     expect(document.body.textContent).toContain("凭据来源 session");
+  });
+});
+
+describe("远端权限位面（T-B7-25）", () => {
+  it("propertiesPanel_showsOctalAndSymlinkTarget：mode 在场渲八进制+链接目标，mode=None 两行不渲", async () => {
+    vi.mocked(fileRemoteDrivers).mockResolvedValue([
+      driverFixture({ driver_id: "dv", roots: ["/srv"], protocol: "sftp" }),
+    ]);
+    vi.mocked(fileRemoteBrowse).mockResolvedValue([
+      {
+        name: "app.sh",
+        path: "/srv/app.sh",
+        is_dir: false,
+        size: 8,
+        modified_ms: 0,
+        mode: 0o755,
+        symlink_target: "/usr/bin/sh",
+      },
+      {
+        name: "plain.txt",
+        path: "/srv/plain.txt",
+        is_dir: false,
+        size: 1,
+        modified_ms: 0,
+        mode: null,
+        symlink_target: null,
+      },
+    ]);
+    await mount(<RemoteBrowser />);
+    await click(buttonByText("浏览")!);
+
+    // ① mode/symlink 在场：两行上屏（0o 前缀显式，不裸写三位让人猜进制）
+    await click(rowByText("app.sh")!.querySelector("[data-properties]")!);
+    expect(document.body.textContent).toContain("权限位（八进制）0o755");
+    expect(document.body.textContent).toContain("符号链接目标 /usr/bin/sh");
+    // ② 越界输入本地即拒（后端算式闸是第二道，不是唯一 UX）
+    await setInput(inputById("remote-props-octal"), "97777");
+    await click(buttonByText("写回")!);
+    expect(fileRemoteChmod).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("1-4 位");
+    // ③ 合法写回：唯一口逐字对参，成功后关窗并重新列目录（显示即事实）
+    await setInput(inputById("remote-props-octal"), "644");
+    await click(buttonByText("写回")!);
+    expect(fileRemoteChmod).toHaveBeenCalledWith("dv", "/srv/app.sh", 0o644);
+    expect(document.body.textContent).not.toContain("属性：app.sh");
+    expect(fileRemoteBrowse).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it("propertiesPanel_modeNull_rendersNoOctalNoSymlinkRows：无事实源两行不渲染", async () => {
+    vi.mocked(fileRemoteDrivers).mockResolvedValue([
+      driverFixture({ driver_id: "dv", roots: ["/srv"], protocol: "webdav" }),
+    ]);
+    vi.mocked(fileRemoteBrowse).mockResolvedValue([
+      {
+        name: "plain.txt",
+        path: "/srv/plain.txt",
+        is_dir: false,
+        size: 1,
+        modified_ms: 0,
+        mode: null,
+        symlink_target: null,
+      },
+    ]);
+    await mount(<RemoteBrowser />);
+    await click(buttonByText("浏览")!);
+    await click(rowByText("plain.txt")!.querySelector("[data-properties]")!);
+    // 正对照：弹窗本体在场（不是整个属性面都没立）
+    expect(document.body.textContent).toContain("属性：plain.txt");
+    // mode=None：八进制行与可编辑位不渲染、链接目标行不渲染——只给归因句
+    expect(document.body.textContent).not.toContain("权限位（八进制）");
+    expect(document.body.textContent).not.toContain("符号链接目标");
+    expect(document.body.textContent).not.toContain("写回");
+    expect(document.body.textContent).toContain("无权限位事实源");
+    unmount();
   });
 });
 

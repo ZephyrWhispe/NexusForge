@@ -28,6 +28,14 @@ pub struct FileEntry {
     /// 小写扩展名（不含点，目录为空）
     pub ext: String,
     pub hidden: bool,
+    /// Unix 权限位（低 12 位，含 setuid/setgid/sticky）。None = 无事实源
+    /// （Windows 本地盘与无权限语义的协议腿）——面板属性页该行不显示。
+    /// `serde(default)`：加键=旧快照可读（T-B7-25 双域旧读兼容）。
+    #[serde(default)]
+    pub mode: Option<u32>,
+    /// 符号链接目标（字面路径串）。None = 非链接或无事实源。
+    #[serde(default)]
+    pub symlink_target: Option<String>,
 }
 
 /// 续传档位（T-B6-11 自 file-core::remote::http 上移——[`DriverCapabilities`]
@@ -156,4 +164,36 @@ pub struct DriverInfo {
 pub trait StoragePort: Port {
     fn driver(&self, id: &str) -> Option<Arc<dyn StorageDriver>>;
     fn list_drivers(&self) -> Vec<DriverInfo>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-B7-25 双域旧读兼容（host-core 侧一枚；RemoteEntry 侧同名测在
+    /// file-core remote/mod.rs）：**手写的旧七键字节**必须原样读进新结构，
+    /// 新两键落 None=无事实源（不是 0、不是空串——那都是假装有值）。
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-25）字面测试名优先于 rustc 命名惯例
+    fn mode_serdeDefault_legacyEntriesJson_stillReads() {
+        let legacy = r#"{"name":"a.txt","path":"C:\\x\\a.txt","is_dir":false,"size":3,
+            "modified_ms":1700000000000,"ext":"txt","hidden":false}"#;
+        let e: FileEntry = serde_json::from_str(legacy).expect("旧七键快照必须可读（零迁移红线）");
+        assert_eq!(e.name, "a.txt");
+        assert_eq!(e.mode, None, "旧数据无权限位事实源⇒None，不得回落 0o000");
+        assert_eq!(e.symlink_target, None);
+        // 正对照：新键在场则原样读出（写侧字节夹具回环）
+        let with = serde_json::to_string(&e).unwrap();
+        let back: FileEntry = serde_json::from_str(&with).unwrap();
+        assert_eq!(back.mode, None);
+        let e2 = FileEntry {
+            mode: Some(0o644),
+            symlink_target: Some("/etc/passwd".into()),
+            ..e.clone()
+        };
+        let json = serde_json::to_string(&e2).unwrap();
+        let back2: FileEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back2.mode, Some(0o644));
+        assert_eq!(back2.symlink_target.as_deref(), Some("/etc/passwd"));
+    }
 }

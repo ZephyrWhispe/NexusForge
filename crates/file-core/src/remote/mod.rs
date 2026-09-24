@@ -146,6 +146,14 @@ pub struct RemoteEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified_ms: i64,
+    /// Unix 权限位（低 12 位）：仅 SFTP 臂有事实源（stat 的 permissions）；
+    /// WebDAV/FTP/HTTPS 恒 None——无事实源就无文案。`serde(default)`=旧快照可读
+    /// （T-B7-25 与 host-core FileEntry 同谱双域兼容）。
+    #[serde(default)]
+    pub mode: Option<u32>,
+    /// 符号链接目标：v1 无 readlink 腿，恒 None（字段先行=形状契约，非假装有值）
+    #[serde(default)]
+    pub symlink_target: Option<String>,
 }
 
 fn ext_of(name: &str) -> String {
@@ -167,6 +175,8 @@ impl RemoteEntry {
             modified_ms: self.modified_ms,
             ext: ext_of(&self.name),
             hidden: self.name.starts_with('.'),
+            mode: self.mode,
+            symlink_target: self.symlink_target.clone(),
         }
     }
 }
@@ -610,6 +620,8 @@ mod tests {
             is_dir: false,
             size: 7,
             modified_ms: 0,
+            mode: None,
+            symlink_target: None,
         };
         let fe = e.to_file_entry();
         assert_eq!(fe.path.to_string_lossy(), e.path, "边界只回显，不重排斜杠");
@@ -620,6 +632,37 @@ mod tests {
             Some(std::io::ErrorKind::NotFound),
             "物化路径不得被当作本地事实源（它只是展示形状）"
         );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-25）字面测试名优先于 rustc 命名惯例
+    fn mode_serdeDefault_legacyEntriesJson_stillReads() {
+        // 双域旧读兼容的 file-core 侧（host-core FileEntry 同名测各一枚）：
+        // RemoteEntry 的旧五键字节快照必须原样读进新七键结构，
+        // 新两键落 None=无事实源（远端协议无权限位语义的诚实形状）。
+        let legacy =
+            r#"{"name":"a.txt","path":"/dav/a.txt","is_dir":false,"size":3,"modified_ms":0}"#;
+        let e: RemoteEntry =
+            serde_json::from_str(legacy).expect("旧五键快照必须可读（零迁移红线）");
+        assert_eq!(e.name, "a.txt");
+        assert_eq!(e.mode, None);
+        assert_eq!(e.symlink_target, None);
+        // 透传面：to_file_entry 把两键原样带回 FileEntry（不猜默认 0o644）
+        let fe = e.to_file_entry();
+        assert_eq!(fe.mode, None);
+        assert_eq!(fe.symlink_target, None);
+        // 正对照：在场则逐字透传
+        let e2 = RemoteEntry {
+            mode: Some(0o755),
+            symlink_target: Some("/dav/b".into()),
+            ..e.clone()
+        };
+        let fe2 = e2.to_file_entry();
+        assert_eq!(fe2.mode, Some(0o755));
+        assert_eq!(fe2.symlink_target.as_deref(), Some("/dav/b"));
+        // 序列化回环（事件/快照消费面）
+        let back: RemoteEntry = serde_json::from_str(&serde_json::to_string(&e2).unwrap()).unwrap();
+        assert_eq!(back, e2);
     }
 
     #[test]

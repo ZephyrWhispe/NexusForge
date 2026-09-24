@@ -82,6 +82,7 @@
     "allow-file-ops-pending",
     "allow-file-preview",
     "allow-file-remote-browse",
+    "allow-file-remote-chmod",
     "allow-file-remote-connect",
     "allow-file-remote-disconnect",
     "allow-file-remote-drivers",

@@ -1288,6 +1288,37 @@ fn auxWindows_neverGrantRemoteProfileCommands() {
 }
 
 #[test]
+#[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-25）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantRemoteChmod() {
+    // T-B7-25 红线负例：chmod 写的是**远端站点的文件模式**——把 0o644 变
+    // 0o777 就是放开执行位。六个辅助窗没有任何远端浏览入口，给它们这一枚 =
+    // 任意上下文可呼出的窗口能静默改服务器文件权限。main 正对照防空洞。
+    let caps = load_capabilities();
+    let ident = "allow-file-remote-chmod";
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&ident);
+            continue;
+        }
+        assert!(
+            !perms.contains(&ident),
+            "辅助窗 capability {name} 不得持有 {ident}（远端权限位写回 main-only）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 {ident}，否则本负例是空洞"
+    );
+}
+
+#[test]
 #[allow(non_snake_case)] // 任务书（09 §6.2 T-B6-6）字面测试名优先于 rustc 命名惯例
 fn auxWindows_neverGrantRemotePresetsAndDrivers() {
     // B6 T-B6-6 红线负例：预设表暴露"用户可能连哪些站"的意图面，drivers 暴露

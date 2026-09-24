@@ -361,6 +361,8 @@ mod tests {
                 modified_ms: 0,
                 ext: "txt".into(),
                 hidden: false,
+                mode: None,
+                symlink_target: None,
             }])
         }
         fn mkdir(&self, _p: &Path) -> Result<(), AppError> {

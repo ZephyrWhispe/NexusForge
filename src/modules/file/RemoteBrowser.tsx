@@ -2,6 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Badge,
   Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Input,
   makeStyles,
   Select,
@@ -15,6 +21,7 @@ import {
 import {
   fileEnqueue,
   fileRemoteBrowse,
+  fileRemoteChmod,
   fileRemoteDrivers,
   parseAppError,
   type RemoteDriverDto,
@@ -30,6 +37,8 @@ import InlineError from "../../components/InlineError";
  * 脸，混表即把"未连接的远端"假称在场。队列远端执行器已接线（09 §6.2 T-B6-11），
  * 这里的"下载/上传"是把 OpEndpoint 投进 fileEnqueue 的真钮：只入队不搬运，
  * 进度与断点归『传输队列』档——本面板不自建第二套传输事实源。
+ * T-B7-25 添属性弹窗：权限位/符号链接只渲染列表带回的事实源，写回走
+ * fileRemoteChmod 唯一口（term 档同一枚命令，此处不做第二份）。
  */
 
 const useStyles = makeStyles({
@@ -64,6 +73,35 @@ export default function RemoteBrowser() {
   // 传输投递的两侧路径输入：无事实源即拒——不猜 Downloads、不猜默认文件名
   const [dlDst, setDlDst] = useState("");
   const [ulSrc, setUlSrc] = useState("");
+  // T-B7-25 权限位面：属性弹窗只认列表带回来的 mode/symlink_target——
+  // 弹窗不自造查询第二事实源，None 即不渲染可编辑位（无事实源就无控件）
+  const [propsEntry, setPropsEntry] = useState<RemoteEntryDto | null>(null);
+  const [propsOctal, setPropsOctal] = useState("");
+
+  const octalOf = (mode: number) => mode.toString(8).padStart(3, "0");
+
+  const applyChmod = async () => {
+    if (!propsEntry || !driver) return;
+    const text = propsOctal.trim();
+    const parsed = /^[0-7]{1,4}$/.test(text) ? Number.parseInt(text, 8) : Number.NaN;
+    if (Number.isNaN(parsed)) {
+      setError("八进制权限须为 1-4 位 0-7 数字（≤7777）");
+      return;
+    }
+    try {
+      await fileRemoteChmod(driver.driver_id, propsEntry.path, parsed);
+      notify("success", "权限位已写回", `${propsEntry.name} → 0o${octalOf(parsed)}`);
+      setPropsEntry(null);
+      void browse(path);
+    } catch (e) {
+      const ae = parseAppError(e);
+      if (ae) setError(`${ae.data.code}: ${ae.data.message}`);
+      else {
+        reportError(e, { context: "权限位写回异常" });
+        setError("权限位写回失败（非典形错误，已上报宿主日志）");
+      }
+    }
+  };
 
   const enqueueTransfer = async (spec: Parameters<typeof fileEnqueue>[0], what: string) => {
     try {
@@ -277,6 +315,17 @@ export default function RemoteBrowser() {
                     <Button size="small" appearance="subtle" onClick={() => download(e)}>
                       下载
                     </Button>
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      data-properties
+                      onClick={() => {
+                        setPropsEntry(e);
+                        setPropsOctal(e.mode != null ? octalOf(e.mode) : "");
+                      }}
+                    >
+                      属性
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -290,6 +339,51 @@ export default function RemoteBrowser() {
             </TableBody>
           </Table>
         </div>
+      )}
+      {propsEntry && (
+        <Dialog open onOpenChange={(_, d) => !d.open && setPropsEntry(null)}>
+          <DialogSurface>
+            <DialogBody>
+              <DialogTitle>属性：{propsEntry.name}</DialogTitle>
+              <DialogContent>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <Text size={200}>路径 {propsEntry.path}</Text>
+                  {propsEntry.mode != null && (
+                    <Text size={200}>权限位（八进制）0o{octalOf(propsEntry.mode)}</Text>
+                  )}
+                  {propsEntry.symlink_target != null && (
+                    <Text size={200}>符号链接目标 {propsEntry.symlink_target}</Text>
+                  )}
+                  {propsEntry.mode == null && (
+                    <Text className={styles.muted}>
+                      该条目无权限位事实源（列目录不带回 mode 的协议即不渲染可编辑位）
+                    </Text>
+                  )}
+                  {propsEntry.mode != null && (
+                    <div className={styles.toolbar}>
+                      <Input
+                        id="remote-props-octal"
+                        size="small"
+                        aria-label="新八进制权限位"
+                        value={propsOctal}
+                        onChange={(_, d) => setPropsOctal(d.value)}
+                        style={{ maxWidth: "120px" }}
+                      />
+                      <Button size="small" onClick={() => void applyChmod()}>
+                        写回
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </DialogContent>
+              <DialogActions>
+                <Button appearance="subtle" onClick={() => setPropsEntry(null)}>
+                  关闭
+                </Button>
+              </DialogActions>
+            </DialogBody>
+          </DialogSurface>
+        </Dialog>
       )}
     </div>
   );

@@ -571,6 +571,8 @@ mod tests {
                         .unwrap_or_default(),
                     name,
                     path: e.path(),
+                    mode: None,
+                    symlink_target: None,
                 });
             }
             Ok(out)

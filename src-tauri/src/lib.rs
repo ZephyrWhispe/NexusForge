@@ -244,6 +244,7 @@ pub fn run() {
             commands::file_remote_profile_delete,
             commands::file_remote_connect,
             commands::file_remote_browse,
+            commands::file_remote_chmod,
             commands::file_remote_disconnect,
             commands::file_remote_drivers,
             commands::file_remote_fingerprint_ack,

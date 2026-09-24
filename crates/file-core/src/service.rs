@@ -108,6 +108,19 @@ impl ConnectedDriver {
         }
     }
 
+    /// T-B7-25 禁假实现臂：三腿无权限位事实源，唯一的诚实动作是**点名协议**
+    /// 拒绝（`chmod_unsupportedProtocols_errsNamingEach` 逐臂断言消息含名）
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), FileError> {
+        match self {
+            ConnectedDriver::Sftp(d) => d.chmod(path, mode),
+            ConnectedDriver::WebDav(_) => {
+                Err(no_chmod_err("WebDAV（PROPFIND 属性集无权限位概念）"))
+            }
+            ConnectedDriver::Ftp(_) => Err(no_chmod_err("FTP（MLSD 事实只有 type/size/mtime）")),
+            ConnectedDriver::Https(_) => Err(no_chmod_err("HTTPS（该档案只有下载腿）")),
+        }
+    }
+
     fn as_dyn(&self) -> Arc<dyn host_core::storage::StorageDriver> {
         match self {
             ConnectedDriver::WebDav(d) => d.clone(),
@@ -116,6 +129,28 @@ impl ConnectedDriver {
             ConnectedDriver::Ftp(d) => d.clone(),
         }
     }
+}
+
+/// 无权限位语义腿的统一拒形（T-B7-25）：消息必须同时含协议点名与
+/// "该协议无权限位语义"字面——禁静默 no-op，禁"稍后再支持"式含糊
+fn no_chmod_err(why: &str) -> FileError {
+    FileError::Remote {
+        code: FILE_REMOTE_FIELD,
+        msg: format!("该协议无权限位语义：{why}——chmod 拒绝（不存在先收下再丢掉的假兼容）"),
+    }
+}
+
+/// 位上限纯裁决（`chmod_bitSanity_upperLimit_rejects` 的落点）：可入网的
+/// 权限位只有低 12 位（rwx ×3 + setuid/setgid/sticky）；文件型高位与
+/// >0o7777 的一切形状都在发 RPC 之前拒死
+pub fn chmod_mode_within_limit(mode: u32) -> Result<(), FileError> {
+    if mode > 0o7777 {
+        return Err(FileError::Remote {
+            code: FILE_REMOTE_FIELD,
+            msg: format!("权限位越界：0o{mode:o} > 0o7777（低 12 位之外没有可写的位）"),
+        });
+    }
+    Ok(())
 }
 
 pub struct FileService {
@@ -557,6 +592,23 @@ impl FileService {
         connected.list_entries(path)
     }
 
+    /// 远端权限位写回（**全模块唯一 chmod 口**，09 §7.2 T-B7-25）：先过位
+    /// 上限，再查连接表（未连接不回落空操作），分派后仅 SFTP 腿真送信，
+    /// 三臂点名拒（禁假实现）。term 域的 chmod 一律经本口，禁第二份。
+    pub fn remote_chmod(&self, driver_id: &str, path: &str, mode: u32) -> Result<(), FileError> {
+        chmod_mode_within_limit(mode)?;
+        let connected = self
+            .connections
+            .read()
+            .get(driver_id)
+            .cloned()
+            .ok_or_else(|| FileError::Remote {
+                code: FILE_REMOTE_MISSING,
+                msg: format!("远端驱动未连接: {driver_id}（权限位写回不对未连接站点空操作）"),
+            })?;
+        connected.chmod(path, mode)
+    }
+
     pub fn remote_drivers(&self) -> Vec<RemoteDriverInfo> {
         let mut v: Vec<RemoteDriverInfo> =
             self.connections.read().values().map(|c| c.info()).collect();
@@ -851,6 +903,85 @@ mod tests {
         assert!(svc.driver("local").is_some());
         // last_used 已 touch（连接只留时刻，不留凭据）
         assert!(svc.profiles().get("remote:dav1").unwrap().last_used_ms > 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- T-B7-25 权限位面（09 §6.2 字面测名）----
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B7-25）字面测试名优先于 rustc 命名惯例
+    fn chmod_bitSanity_upperLimit_rejects() {
+        // 唯一算式在算式口拒，不在协议臂各拒一遍：低 12 位之外没有可写的位
+        chmod_mode_within_limit(0o644).unwrap();
+        chmod_mode_within_limit(0o7777).unwrap();
+        let e = chmod_mode_within_limit(0o10000).unwrap_err();
+        assert!(
+            matches!(&e, FileError::Remote { code, msg } if *code == FILE_REMOTE_FIELD && msg.contains("0o10000")),
+            "越界须点名实际值，实得 {e}"
+        );
+        let (svc, root) = svc_fixture("chmod-limit");
+        // 校验先于查表：越界模式对未连接站点也报越界（不是先报没连上）——
+        // 两错都真，但算式错与寻址错的归因不得互撞
+        let e = svc.remote_chmod("remote:ghost", "/x", 0o10000).unwrap_err();
+        assert!(
+            matches!(&e, FileError::Remote { msg, .. } if msg.contains("0o10000")),
+            "算式闸须在查表闸之前，实得 {e}"
+        );
+        let e = svc.remote_chmod("remote:ghost", "/x", 0o644).unwrap_err();
+        assert!(
+            matches!(&e, FileError::Remote { code, msg } if *code == FILE_REMOTE_MISSING && msg.contains("未连接")),
+            "合法模式对未连接站点报 001 点名未连接，实得 {e}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B7-25）字面测试名优先于 rustc 命名惯例
+    fn chmod_unsupportedProtocols_errsNamingEach() {
+        // 三臂各回各的归因句（禁共文案——"该协议无权限位语义"是结论，
+        // 括注才是事实源）；SFTP 正对照在 ssh.rs `sftpStat_modePopulated_matchesAttrs`
+        let (svc, root) = svc_fixture("chmod-proto");
+        svc.profiles()
+            .save(remote_sample(
+                "remote:dav-c",
+                crate::profile::RemoteProtocol::WebDav,
+            ))
+            .unwrap();
+        svc.profiles()
+            .save(remote_sample(
+                "remote:dl-c",
+                crate::profile::RemoteProtocol::Https,
+            ))
+            .unwrap();
+        svc.profiles()
+            .save(remote_sample(
+                "remote:ftp-c",
+                crate::profile::RemoteProtocol::Ftp,
+            ))
+            .unwrap();
+        for id in ["remote:dav-c", "remote:dl-c", "remote:ftp-c"] {
+            // 回环 FTP 不过三闸（looks_like_loopback 放行），其余两腿本就无凭据面
+            svc.connect(id, None, false).unwrap();
+        }
+        let mut msgs = vec![];
+        for (id, tag) in [
+            ("remote:dav-c", "PROPFIND"),
+            ("remote:ftp-c", "MLSD"),
+            ("remote:dl-c", "下载"),
+        ] {
+            let e = svc.remote_chmod(id, "/x", 0o644).unwrap_err();
+            assert!(
+                matches!(&e, FileError::Remote { code, msg } if *code == FILE_REMOTE_FIELD
+                    && msg.contains("该协议无权限位语义") && msg.contains(tag)),
+                "{id} 臂须点名本协议的事实源缺位（{tag}），实得 {e}"
+            );
+            msgs.push(e.to_string());
+        }
+        assert_eq!(
+            msgs.iter().collect::<std::collections::HashSet<_>>().len(),
+            3,
+            "三臂归因句必须各不相同——共文案=没在归因"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

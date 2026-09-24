@@ -474,6 +474,24 @@ pub async fn file_remote_browse(
         .map_err(file_err)
 }
 
+/// 远端权限位写回（T-B7-25 全模块唯一 chmod 口的前端面）：位上限与三臂
+/// 禁假实现裁决都在 file-core `remote_chmod`——本层只送信不重复裁决。
+/// term SFTP 属性弹窗同样调这一枚命令（宿主桥=前端直调 file 域命令，
+/// term-core 零第二份 chmod）。
+#[tauri::command]
+pub async fn file_remote_chmod(
+    driver_id: String,
+    path: String,
+    mode: u32,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let svc = file_service(&state)?;
+    tauri::async_runtime::spawn_blocking(move || svc.remote_chmod(&driver_id, &path, mode))
+        .await
+        .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?
+        .map_err(file_err)
+}
+
 /// 已连接远端列表（进程内事实源；未连接 = 空表，与档案列表 file_remote_profiles 分面）
 #[tauri::command]
 pub async fn file_remote_drivers(

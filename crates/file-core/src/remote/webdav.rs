@@ -275,6 +275,9 @@ pub fn parse_propfind_responses(xml: &str) -> Result<Vec<RemoteEntry>, FileError
                             is_dir,
                             size,
                             modified_ms,
+                            // WebDAV propfind 无权限位事实源（RFC4918 属性集中没有它）
+                            mode: None,
+                            symlink_target: None,
                         });
                     }
                     _ => {}

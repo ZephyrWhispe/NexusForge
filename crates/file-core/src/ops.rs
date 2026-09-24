@@ -3584,6 +3584,8 @@ mod remote_exec_tests {
                             modified_ms: 0,
                             ext: name.rsplit('.').next().unwrap_or("").to_owned(),
                             hidden: false,
+                            mode: None,
+                            symlink_target: None,
                         });
                     }
                 }
