@@ -20,12 +20,46 @@ use serde::{Deserialize, Serialize};
 
 use host_core::ports::{RawInput, ScreenRect};
 
-/// 共享边（本端视角；v1 仅左右，上下边留扩展）
+/// 共享边（本端视角；T-B7-7 起四值，边角同帧命中由 [`corner_edge`] 对角线裁决）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Edge {
     Left,
     Right,
+    Up,
+    Down,
+}
+
+impl Edge {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Edge::Left => "left",
+            Edge::Right => "right",
+            Edge::Up => "up",
+            Edge::Down => "down",
+        }
+    }
+}
+
+/// 边角归属唯一裁决（T-B7-7）：`(x, y)` 为屏内坐标（0..w × 0..h），鼠标同帧
+/// 落入垂直缘与水平缘两条容差带时，按过该角的 45° 对角线分割归属——到垂直缘
+/// 的水平距离 **严格小于** 到水平缘的垂直距离 → Left/Right，否则 Up/Down；
+/// 恰在对角线上（距离相等）→ 水平缘取胜（Left/Right）。裁决纯函数、无状态，
+/// 两缘同帧触发不可能。
+pub fn corner_edge(x: i32, y: i32, w: i32, h: i32) -> Edge {
+    let dx = x.min(w - 1 - x);
+    let dy = y.min(h - 1 - y);
+    if dx <= dy {
+        if x <= w - 1 - x {
+            Edge::Left
+        } else {
+            Edge::Right
+        }
+    } else if y <= h - 1 - y {
+        Edge::Up
+    } else {
+        Edge::Down
+    }
 }
 
 /// ControlTake 载荷（JSON）
@@ -184,22 +218,46 @@ impl EdgeSwitch {
                 Decision::Forward
             }
             ControlState::Idle => {
-                let RawInput::MouseMove { x, .. } = ev else {
+                let RawInput::MouseMove { x, y } = ev else {
                     return Decision::Passthrough;
                 };
-                // re-arm：离开左右边缘禁区后才允许再次切换
+                // re-arm：离开四侧边缘禁区后才允许再次切换
                 let tol = self.config.tolerance_px;
                 let left_edge = own.x;
                 let right_edge = own.x + own.w - 1;
-                if *x > left_edge + tol && *x < right_edge - tol {
+                let top_edge = own.y;
+                let bottom_edge = own.y + own.h - 1;
+                let hit_left = *x <= left_edge + tol;
+                let hit_right = *x >= right_edge - tol;
+                let hit_up = *y <= top_edge + tol;
+                let hit_down = *y >= bottom_edge - tol;
+                if !hit_left && !hit_right && !hit_up && !hit_down {
                     self.armed = true;
                 }
-                let candidate = if *x <= left_edge + tol {
+                // T-B7-7：垂直缘与水平缘同帧命中 → corner_edge 对角线唯一裁决
+                let v_edge = if hit_left {
                     Some(Edge::Left)
-                } else if *x >= right_edge - tol {
+                } else if hit_right {
                     Some(Edge::Right)
                 } else {
                     None
+                };
+                let h_edge = if hit_up {
+                    Some(Edge::Up)
+                } else if hit_down {
+                    Some(Edge::Down)
+                } else {
+                    None
+                };
+                let candidate = match (v_edge, h_edge) {
+                    (Some(e), None) | (None, Some(e)) => Some(e),
+                    (Some(_), Some(_)) => Some(corner_edge(
+                        *x - left_edge,
+                        *y - top_edge,
+                        own.w.max(1),
+                        own.h.max(1),
+                    )),
+                    (None, None) => None,
                 };
                 let Some(edge) = candidate else {
                     return Decision::Passthrough;
@@ -257,7 +315,8 @@ impl EdgeSwitch {
     }
 
     /// 边缘回移判定：最近转发坐标换算到对端像素，抵达对端回移边（容差内）即释放。
-    /// 本端 Right ↔ 对端 Left；本端 Left ↔ 对端 Right。
+    /// 本端 Right ↔ 对端 Left；本端 Left ↔ 对端 Right；本端 Up ↔ 对端 Down；
+    /// 本端 Down ↔ 对端 Up（T-B7-7 扩上下）。
     pub fn should_release(&self, peer_screen: &ScreenRect) -> bool {
         let ControlState::Controlling { edge, .. } = &self.state else {
             return false;
@@ -271,6 +330,14 @@ impl EdgeSwitch {
         match edge {
             Edge::Right => px <= peer_screen.x + tol,
             Edge::Left => px >= peer_screen.x + peer_screen.w - 1 - tol,
+            Edge::Up => {
+                let py = Self::to_peer_px(self.last_forwarded.1, peer_screen, false);
+                py >= peer_screen.y + peer_screen.h - 1 - tol
+            }
+            Edge::Down => {
+                let py = Self::to_peer_px(self.last_forwarded.1, peer_screen, false);
+                py <= peer_screen.y + tol
+            }
         }
     }
 
@@ -397,13 +464,70 @@ mod tests {
 
     #[test]
     fn edge_serde_roundtrip() {
-        for e in [Edge::Left, Edge::Right] {
+        for e in [Edge::Left, Edge::Right, Edge::Up, Edge::Down] {
             let json = serde_json::to_string(&e).unwrap();
             assert_eq!(serde_json::from_str::<Edge>(&json).unwrap(), e);
+            assert_eq!(json, format!("\"{}\"", e.as_str()));
         }
         assert_eq!(
             serde_json::from_str::<Edge>("\"left\"").unwrap(),
             Edge::Left
         );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-8）字面测试名优先于 rustc 命名惯例
+    fn cornerEdge_diagonalSplit_deterministic() {
+        let (w, h) = (1920i32, 1080i32);
+        // 四角坐标臂：恰在角点（dx=dy=0）→ tie 归水平缘
+        assert_eq!(corner_edge(0, 0, w, h), Edge::Left);
+        assert_eq!(corner_edge(w - 1, 0, w, h), Edge::Right);
+        assert_eq!(corner_edge(0, h - 1, w, h), Edge::Left);
+        assert_eq!(corner_edge(w - 1, h - 1, w, h), Edge::Right);
+        // 左上角邻域：贴垂直缘 → Left，贴水平缘 → Up
+        assert_eq!(corner_edge(1, 5, w, h), Edge::Left);
+        assert_eq!(corner_edge(5, 1, w, h), Edge::Up);
+        // 右上角邻域
+        assert_eq!(corner_edge(w - 2, 6, w, h), Edge::Right);
+        assert_eq!(corner_edge(w - 6, 2, w, h), Edge::Up);
+        // 左下角邻域
+        assert_eq!(corner_edge(2, h - 6, w, h), Edge::Left);
+        assert_eq!(corner_edge(6, h - 2, w, h), Edge::Down);
+        // 右下角邻域
+        assert_eq!(corner_edge(w - 2, h - 6, w, h), Edge::Right);
+        assert_eq!(corner_edge(w - 6, h - 2, w, h), Edge::Down);
+        // 对角线上（dx==dy）恒归水平缘：重复调用逐位一致（确定性）
+        assert_eq!(corner_edge(5, 5, w, h), corner_edge(5, 5, w, h));
+        assert_eq!(corner_edge(5, 5, w, h), Edge::Left);
+    }
+
+    #[test]
+    fn vertical_edge_switch_and_return_release() {
+        // 对端屏在本端上方 (0,-1080,1920,1080)：本端上缘交出控制权
+        let mut m = HashMap::new();
+        m.insert("dev-up".to_string(), Edge::Up);
+        let mut es = EdgeSwitch::new(m);
+        let own = own();
+        let mv2 = |x: i32, y: i32| RawInput::MouseMove { x, y };
+        assert_eq!(
+            es.on_local_event(&mv2(960, 540), &own),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            es.on_local_event(&mv2(960, 1), &own),
+            Decision::SwitchTo("dev-up".into())
+        );
+        assert_eq!(es.on_local_event(&mv2(960, 500), &own), Decision::Forward);
+        // 回移判定：转发 y 归一化到底 → 对端下缘（本端 Up ↔ 对端 Down 对面）
+        let peer_above = ScreenRect {
+            x: 0,
+            y: -1080,
+            w: 1920,
+            h: 1080,
+        };
+        es.last_forwarded = (32768, 65535);
+        assert!(es.should_release(&peer_above), "对端下缘应释放");
+        es.last_forwarded = (32768, 32768);
+        assert!(!es.should_release(&peer_above));
     }
 }

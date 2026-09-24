@@ -503,6 +503,8 @@ export default function KvmPanel() {
                       <option value="">未设置</option>
                       <option value="left">本机左缘</option>
                       <option value="right">本机右缘</option>
+                      <option value="up">本机顶缘</option>
+                      <option value="down">本机底缘</option>
                     </Select>
                   </TableCell>
                   <TableCell>

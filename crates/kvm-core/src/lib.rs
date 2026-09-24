@@ -5,6 +5,7 @@
 //! 通道）→ 输入捕获/注入经 host-core 的 InputHookPort / InputInjectPort
 //! （win-integration 实现）。模块本体见 module.rs（实现 host-core::Module）。
 
+pub mod config;
 pub mod discovery;
 pub mod edge;
 pub mod module;
@@ -12,8 +13,11 @@ pub mod pairing;
 pub mod session;
 pub mod transfer;
 
+pub use config::{EdgeMapConfig, KvmConfig};
 pub use discovery::{DiscoveryService, PeerEvent, PeerInfo};
-pub use edge::{ControlReleasePayload, ControlTakePayload, Decision, Edge, EdgeSwitch};
+pub use edge::{
+    corner_edge, ControlReleasePayload, ControlTakePayload, Decision, Edge, EdgeSwitch,
+};
 pub use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
 pub use module::KvmModule;
 pub use pairing::PairCodeManager;

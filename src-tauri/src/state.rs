@@ -231,7 +231,8 @@ impl HostState {
         registry.register_ability::<dyn HotkeyProvider>(ocr.clone());
 
         // ---- P1 键鼠共享（M4，docs/impl/05 K1–K7）----
-        let kvm = Arc::new(KvmModule::new());
+        // T-B7-8：带 ConfigStore 句柄构造——边缘映射 config set 即落 kvm 段
+        let kvm = Arc::new(KvmModule::new_with_config(config.clone()));
         config.register_schema("kvm", kvm.config_schema());
         registry.register(kvm.clone())?;
 
