@@ -353,6 +353,8 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-editor-recover-draft",
         // T-B7-21 正文搜索读全盘笔记正文（notes 面板只存在于 main）
         "allow-notes-search",
+        // T-B7-22 标签后端查询同属笔记数据面
+        "allow-notes-by-tag",
     ];
     for (name, cap) in &caps {
         if name == "main" {
@@ -412,6 +414,8 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-editor-recover-draft",
         // T-B7-21 notes_search 正对照
         "allow-notes-search",
+        // T-B7-22 notes_by_tag 正对照
+        "allow-notes-by-tag",
     ] {
         assert!(
             main_perms.contains(&expect),

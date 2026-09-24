@@ -56,6 +56,11 @@ description = "允许前端调用 notes_search 命令（D-28 按窗最小授权�
 commands.allow = ["notes_search"]
 
 [[permission]]
+identifier = "allow-notes-by-tag"
+description = "允许前端调用 notes_by_tag 命令（D-28 按窗最小授权）"
+commands.allow = ["notes_by_tag"]
+
+[[permission]]
 identifier = "allow-notes-cards"
 description = "允许前端调用 notes_cards 命令（D-28 按窗最小授权）"
 commands.allow = ["notes_cards"]

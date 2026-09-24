@@ -115,6 +115,7 @@
     "allow-kvm-set-edge-map",
     "allow-kvm-unpair",
     "allow-notes-backlinks",
+    "allow-notes-by-tag",
     "allow-notes-canvas-dirs",
     "allow-notes-canvas-get",
     "allow-notes-canvas-save",

@@ -1742,6 +1742,9 @@ export type NoteSearchHitDto = {
 export function notesSearch(query: string, limit = 200): Promise<NoteSearchHitDto[]> {
   return invoke("notes_search", { query, limit });
 }
+export function notesByTag(tag: string): Promise<NoteMetaDto[]> {
+  return invoke("notes_by_tag", { tag });
+}
 export function notesCards(): Promise<NoteCardDto[]> {
   return invoke("notes_cards");
 }

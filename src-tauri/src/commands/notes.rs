@@ -275,6 +275,22 @@ pub async fn notes_search(
         .map_err(notes_err)
 }
 
+/// 按标签精确查询（T-B7-22；只读）
+#[tauri::command]
+pub async fn notes_by_tag(
+    tag: String,
+    state: State<'_, HostState>,
+) -> Result<Vec<notes_core::model::NoteMeta>, AppError> {
+    let m = state
+        .notes
+        .library()
+        .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
+    tauri::async_runtime::spawn_blocking(move || m.by_tag(&tag))
+        .await
+        .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
+        .map_err(notes_err)
+}
+
 // ---- N4 复习 ----
 
 /// 全部卡片

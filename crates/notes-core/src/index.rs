@@ -281,6 +281,47 @@ impl NoteIndex {
         Ok(self.list()?.into_iter().find(|n| n.path == path))
     }
 
+    /// 按标签精确查询（T-B7-22：tags 表 JOIN，SQLite TEXT 等值即区分大小写，
+    /// work 永不命中 workshop；行序 = path 字典序与 list 一致）
+    pub fn list_by_tag(&self, tag: &str) -> Result<Vec<NoteMeta>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT n.path, n.title, n.mtime_ms, n.size FROM notes n
+                 JOIN tags t ON t.note_path = n.path
+                 WHERE t.tag = ?1
+                 GROUP BY n.path ORDER BY n.path",
+            )
+            .map_err(db)?;
+        let rows: Vec<(String, String, i64, i64)> = stmt
+            .query_map(params!(tag), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(db)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(db)?;
+        drop(stmt);
+        let mut out = Vec::with_capacity(rows.len());
+        for (path, title, mtime_ms, size) in rows {
+            let mut stmt2 = conn
+                .prepare("SELECT tag FROM tags WHERE note_path = ?1 ORDER BY tag")
+                .map_err(db)?;
+            let tags = stmt2
+                .query_map(params!(path), |r| r.get::<_, String>(0))
+                .map_err(db)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db)?;
+            out.push(NoteMeta {
+                tags,
+                path,
+                title,
+                mtime_ms,
+                size: size.max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn paths(&self) -> Result<Vec<String>> {
         let conn = self.lock();
         let mut stmt = conn.prepare("SELECT path FROM notes").map_err(db)?;
@@ -534,5 +575,42 @@ mod tests {
         let a: Vec<(&str, f64)> = first.iter().map(|h| (h.path.as_str(), h.rank)).collect();
         let b: Vec<(&str, f64)> = second.iter().map(|h| (h.path.as_str(), h.rank)).collect();
         assert_eq!(a, b);
+    }
+
+    // ---------- T-B7-22：标签后端查询 ----------
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-22）字面测试名优先于 rustc 命名惯例
+    fn notesByTag_exactMatch_excludesWorkshop() {
+        let idx = NoteIndex::open(&tmpdb("tag_exact")).unwrap();
+        let mut a = row("a.md", vec![]);
+        a.tags = vec!["work".into()];
+        let mut b = row("b.md", vec![]);
+        b.tags = vec!["workshop".into()];
+        let mut c = row("c.md", vec![]);
+        c.tags = vec!["work".into(), "urgent".into()];
+        idx.upsert(a).unwrap();
+        idx.upsert(b).unwrap();
+        idx.upsert(c).unwrap();
+        let hits = idx.list_by_tag("work").unwrap();
+        let paths: Vec<&str> = hits.iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.md", "c.md"], "workshop 必须被精确等值排除");
+        // 命中行的 tags 全量随行（非只回查询词）
+        assert_eq!(hits[1].tags, vec!["urgent", "work"]);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    fn notesByTag_deletedNote_excluded() {
+        let idx = NoteIndex::open(&tmpdb("tag_del")).unwrap();
+        let mut a = row("a.md", vec![]);
+        a.tags = vec!["work".into()];
+        idx.upsert(a).unwrap();
+        assert_eq!(idx.list_by_tag("work").unwrap().len(), 1);
+        idx.remove("a.md").unwrap();
+        assert!(
+            idx.list_by_tag("work").unwrap().is_empty(),
+            "删除后标签行不得残留"
+        );
     }
 }

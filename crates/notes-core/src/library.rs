@@ -253,6 +253,11 @@ impl NoteLibrary {
         self.index.search(query, limit)
     }
 
+    /// 按标签精确查询（T-B7-22）
+    pub fn by_tag(&self, tag: &str) -> Result<Vec<NoteMeta>> {
+        self.index.list_by_tag(tag)
+    }
+
     // ---------- N1：CRUD ----------
 
     pub fn create(&self, rel: &str, content: &str) -> Result<NoteMeta> {

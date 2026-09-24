@@ -309,6 +309,7 @@ pub fn run() {
             commands::notes_sync,
             commands::notes_reindex,
             commands::notes_search,
+            commands::notes_by_tag,
             commands::notes_cards,
             commands::notes_card_create,
             commands::notes_card_delete,

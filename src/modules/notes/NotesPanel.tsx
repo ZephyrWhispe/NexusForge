@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   makeStyles,
   tokens,
@@ -12,6 +12,7 @@ import {
 import { marked } from "marked";
 import {
   notesBacklinks,
+  notesByTag,
   notesCanvasDirs,
   notesCanvasGet,
   notesCanvasSave,
@@ -70,7 +71,7 @@ const useStyles = makeStyles({
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "160px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  split: { display: "grid", gridTemplateColumns: "300px 1fr", gap: "12px", alignItems: "start" },
+  split: { display: "grid", gridTemplateColumns: "280px 1fr 170px", gap: "12px", alignItems: "start" },
   list: {
     display: "flex",
     flexDirection: "column",
@@ -87,6 +88,24 @@ const useStyles = makeStyles({
     gap: "2px",
   },
   itemActive: { backgroundColor: tokens.colorNeutralBackground3Hover },
+  outline: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+    maxHeight: "480px",
+    overflowY: "auto",
+    borderLeft: `1px solid ${tokens.colorNeutralStroke1}`,
+    paddingLeft: "8px",
+    minWidth: 0,
+  },
+  outlineItem: {
+    cursor: "pointer",
+    padding: "2px 4px",
+    borderRadius: tokens.borderRadiusSmall,
+    whiteSpace: "nowrap",
+    textOverflow: "ellipsis",
+    overflow: "hidden",
+  },
   editorArea: {
     width: "100%",
     minHeight: "380px",
@@ -147,6 +166,53 @@ const GRADES: { q: number; label: string }[] = [
   { q: 5, label: "简单" },
 ];
 
+/** 大纲条目（T-B7-22 前端纯函数产物；line 为 1 基） */
+export type NoteHeading = { level: number; text: string; line: number };
+
+/**
+ * 提取大纲（任务书：不进后端——内容在 read 手里）：ATX + Setext 两式；
+ * 代码围栏（``` / ~~~）内的 `#` 不算；frontmatter 块整体跳过。
+ */
+export function extractHeadings(md: string): NoteHeading[] {
+  const lines = md.split(/\r?\n/);
+  const out: NoteHeading[] = [];
+  let fence: string | null = null;
+  let i = 0;
+  if (lines[0]?.trim() === "---") {
+    for (let j = 1; j < lines.length; j++) {
+      const t = lines[j].trim();
+      if (t === "---" || t === "...") {
+        i = j + 1;
+        break;
+      }
+    }
+  }
+  for (; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (fence) {
+      if (t.startsWith(fence)) fence = null;
+      continue;
+    }
+    if (t.startsWith("```") || t.startsWith("~~~")) {
+      fence = t.slice(0, 3);
+      continue;
+    }
+    const atx = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(t);
+    if (atx) {
+      out.push({ level: atx[1].length, text: atx[2].trim() || "(无题)", line: i + 1 });
+      continue;
+    }
+    // Setext：独占一行的 === / --- 下划线，且上一行是非空段落行
+    if (/^=+$/.test(t) || /^-{3,}$/.test(t)) {
+      const prev = i > 0 ? lines[i - 1].trim() : "";
+      if (prev && !/^(#{1,6}\s|>)/.test(prev)) {
+        out.push({ level: t.startsWith("=") ? 1 : 2, text: prev, line: i });
+      }
+    }
+  }
+  return out;
+}
+
 export default function NotesPanel() {
   const styles = useStyles();
   const [tab, setTab] = useState<TabId>("notes");
@@ -156,6 +222,9 @@ export default function NotesPanel() {
   const [filter, setFilter] = useState("");
   // T-B7-21：搜索走后端 FTS5（null=未在搜索态）
   const [hits, setHits] = useState<NoteSearchHitDto[] | null>(null);
+  // T-B7-22：标签过滤走后端精确查询（tagList=null 即未过滤）
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [tagList, setTagList] = useState<NoteMetaDto[] | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -180,6 +249,7 @@ export default function NotesPanel() {
   const [doc, setDoc] = useState<CanvasDocDto>({ version: 1, nodes: [], edges: [] });
   const [selNode, setSelNode] = useState<string | null>(null);
   const linkMode = useRef<string | null>(null); // 连线模式：第一个端点
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -220,6 +290,22 @@ export default function NotesPanel() {
       clearTimeout(t);
     };
   }, [filter, fail]);
+
+  // T-B7-22：标签芯片点选=后端精确查询；再点同一芯片退出
+  const toggleTag = useCallback(
+    (t: string) => {
+      if (activeTag === t) {
+        setActiveTag(null);
+        setTagList(null);
+        return;
+      }
+      setActiveTag(t);
+      void notesByTag(t)
+        .then(setTagList)
+        .catch(fail);
+    },
+    [activeTag, fail],
+  );
 
   const refreshReview = useCallback(async () => {
     try {
@@ -606,6 +692,26 @@ export default function NotesPanel() {
   const tagExtra = searching
     ? all.filter((n) => !hitPaths.has(n.path) && n.tags.some((t) => t.toLowerCase().includes(q)))
     : [];
+  // T-B7-22：标签芯片行（全库标签并集）+ 过滤态基础列表
+  const allTags = useMemo(
+    () => Array.from(new Set(all.flatMap((n) => n.tags))).sort((a, b) => a.localeCompare(b, "zh")),
+    [all],
+  );
+  const baseList = tagList ?? all;
+  // T-B7-22：大纲（当前笔记正文的纯函数投影）
+  const headings = useMemo(() => (active ? extractHeadings(content) : []), [active, content]);
+  const jumpToLine = (line: number) => {
+    if (preview) {
+      setPreview(false); // 预览态先回编辑态；再次点击即定位
+      return;
+    }
+    const ta = editorRef.current;
+    if (!ta) return;
+    const pos = content.split("\n").slice(0, line - 1).join("\n").length + (line > 1 ? 1 : 0);
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    ta.scrollTop = Math.max(0, (line - 3) * 20);
+  };
 
   return (
     <div className={styles.root}>
@@ -670,10 +776,30 @@ export default function NotesPanel() {
               {syncBusy ? "同步中…" : "手动同步"}
             </Button>
           </div>
+          {allTags.length > 0 && (
+            <div className={styles.row} style={{ marginTop: 8 }}>
+              {allTags.map((t) => (
+                <Button
+                  key={t}
+                  size="small"
+                  appearance={activeTag === t ? "primary" : "subtle"}
+                  aria-pressed={activeTag === t}
+                  onClick={() => toggleTag(t)}
+                >
+                  #{t}
+                </Button>
+              ))}
+              {activeTag && (
+                <Text size={100} className={styles.muted}>
+                  标签「{activeTag}」{tagList ? `：${tagList.length} 篇（后端精确查询）` : "：查询中…"}
+                </Text>
+              )}
+            </div>
+          )}
           <div className={styles.split}>
             <div className={styles.list}>
               {!searching &&
-                all.map((n) => (
+                baseList.map((n) => (
                   <div
                     key={n.path}
                     className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
@@ -748,13 +874,15 @@ export default function NotesPanel() {
                 </div>
               )}
               {(loading ||
-                (!searching && all.length === 0) ||
+                (!searching && baseList.length === 0) ||
                 (searching && hitList.length === 0 && tagExtra.length === 0)) && (
                 <EmptyState
                   text={
                     searching
                       ? "无匹配：搜索已走后端全文索引（标题/路径/正文/标签）"
-                      : "暂无笔记：在上方输入名称新建，或点「重建索引」扫描磁盘 .md"
+                      : activeTag
+                        ? `标签「${activeTag}」下暂无笔记`
+                        : "暂无笔记：在上方输入名称新建，或点「重建索引」扫描磁盘 .md"
                   }
                   loading={loading}
                 />
@@ -784,6 +912,7 @@ export default function NotesPanel() {
                   ) : (
                     <textarea
                       className={styles.editorArea}
+                      ref={editorRef}
                       value={content}
                       onChange={(e) => {
                         setContent(e.target.value);
@@ -826,6 +955,32 @@ export default function NotesPanel() {
                 </>
               ) : (
                 <Text className={styles.muted}>选择左侧笔记，或新建一篇（[[双链]] 语法可在任意笔记中引用其他笔记）</Text>
+              )}
+            </div>
+            <div className={styles.outline}>
+              <Text size={200} weight="semibold">
+                大纲
+              </Text>
+              {headings.map((h) => (
+                <div
+                  key={`${h.line}-${h.text}`}
+                  role="button"
+                  tabIndex={0}
+                  className={styles.outlineItem}
+                  style={{ paddingLeft: 8 + (h.level - 1) * 10 }}
+                  title={h.text}
+                  onClick={() => jumpToLine(h.line)}
+                  onKeyDown={keyActivate(() => jumpToLine(h.line))}
+                >
+                  <Text size={200}>
+                    {h.text}
+                  </Text>
+                </div>
+              ))}
+              {active && headings.length === 0 && (
+                <Text size={100} className={styles.muted}>
+                  无标题
+                </Text>
               )}
             </div>
           </div>
