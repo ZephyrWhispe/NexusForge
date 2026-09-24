@@ -7,6 +7,7 @@ import {
   automationDeadLetters,
   automationPluginsList,
   automationRulesList,
+  automationRunsGet,
   automationSaveRule,
   type ExprDto,
   type RuleDto,
@@ -23,6 +24,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
     ...actual,
     automationRulesList: vi.fn(),
     automationDeadLetters: vi.fn(),
+    automationRunsGet: vi.fn(),
     automationPluginsList: vi.fn(),
     automationSaveRule: vi.fn(),
   };
@@ -94,6 +96,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   vi.mocked(automationDeadLetters).mockResolvedValue([]);
+  vi.mocked(automationRunsGet).mockResolvedValue([]);
   vi.mocked(automationPluginsList).mockResolvedValue([]);
   vi.mocked(automationSaveRule).mockResolvedValue(undefined);
   vi.mocked(confirmAction).mockResolvedValue(true);

@@ -358,6 +358,7 @@ pub fn run() {
             commands::automation_toggle_rule,
             commands::automation_dead_letters,
             commands::automation_replay,
+            commands::automation_runs_get,
             // 插件管理（M14 A6）
             commands::automation_plugins_list,
             commands::automation_plugin_install,

@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AutomationError, Result};
+use crate::history::{History, RunOutcome, RunRecord};
 use crate::rule::{Action, Rule};
 
 /// 默认冷却（秒）：cooldown_secs=0 时使用
@@ -78,14 +79,15 @@ impl CooldownTable {
     }
 }
 
-/// 执行单个动作（含 retry 指数退避；全部失败 → DeadLetter）
+/// 执行单个动作（含 retry 指数退避；全部失败 → DeadLetter）。
+/// 返回 `Some(错误文本)` = 该动作最终失败（已入死信草稿），`None` = 成功。
 fn run_action(
     handler: &dyn ActionHandler,
     action: &Action,
     rule: &Rule,
     now_ms: i64,
     dead: &mut Vec<DeadLetter>,
-) {
+) -> Option<String> {
     let mut attempt = 0u32;
     loop {
         let action = action.clone();
@@ -106,7 +108,7 @@ fn run_action(
                     "automation.rule_fired",
                     serde_json::json!({ "rule_id": rule.id, "rule_name": rule.name }),
                 );
-                return;
+                return None;
             }
             Err(e) if attempt < ACTION_RETRIES => {
                 attempt += 1;
@@ -114,33 +116,37 @@ fn run_action(
                 tracing::warn!(rule = %rule.id, attempt, error = %e, "动作重试");
             }
             Err(e) => {
+                let msg = e.to_string();
                 dead.push(DeadLetter {
                     id: uuid::Uuid::now_v7().to_string(),
                     rule_id: rule.id.clone(),
                     rule_name: rule.name.clone(),
                     action: action.clone(),
-                    error: e.to_string(),
+                    error: msg.clone(),
                     at_ms: now_ms,
                 });
-                return;
+                return Some(msg);
             }
         }
     }
 }
 
-/// 规则引擎：执行单条规则的全部动作（规则内串行），死信收集
+/// 规则引擎：执行单条规则的全部动作（规则内串行），死信收集 + 执行历史落环
 pub struct RuleEngine {
     handler: Arc<dyn ActionHandler>,
     dead: Mutex<Vec<DeadLetter>>,
     cooldown: CooldownTable,
+    /// T-B7-14：每轮 fire（过 when + 过冷却后）记一条 RunRecord
+    history: Arc<History>,
 }
 
 impl RuleEngine {
-    pub fn new(handler: Arc<dyn ActionHandler>) -> Self {
+    pub fn new(handler: Arc<dyn ActionHandler>, history: Arc<History>) -> Self {
         Self {
             handler,
             dead: Mutex::new(Vec::new()),
             cooldown: CooldownTable::new(),
+            history,
         }
     }
 
@@ -148,7 +154,12 @@ impl RuleEngine {
         &self.cooldown
     }
 
-    /// 触发规则（when 求值 + 冷却通过后串行执行全部动作）
+    /// 执行历史（旧 → 新，limit 有界）
+    pub fn runs(&self, limit: Option<usize>) -> Vec<RunRecord> {
+        self.history.runs(limit)
+    }
+
+    /// 触发规则（when 求值 + 冷却通过后串行执行全部动作），死信收集 + 历史落环
     pub fn fire(&self, rule: &Rule, payload: &serde_json::Value, now_ms: i64) {
         if !rule.when_passes(payload) {
             return;
@@ -156,10 +167,36 @@ impl RuleEngine {
         if !self.cooldown.try_fire(&rule.id, rule.cooldown_secs, now_ms) {
             return;
         }
+        let started = std::time::Instant::now();
         let mut dead = Vec::new();
-        for action in &rule.then {
-            run_action(self.handler.as_ref(), action, rule, now_ms, &mut dead);
+        let mut failed: Vec<u32> = Vec::new();
+        let mut first_error: Option<String> = None;
+        for (i, action) in rule.then.iter().enumerate() {
+            if let Some(err) = run_action(self.handler.as_ref(), action, rule, now_ms, &mut dead) {
+                failed.push(i as u32);
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
         }
+        let total = rule.then.len() as u32;
+        let outcome = if failed.is_empty() {
+            RunOutcome::Success
+        } else if failed.len() as u32 == total {
+            RunOutcome::Failure
+        } else {
+            RunOutcome::Partial {
+                failed_indices: failed,
+            }
+        };
+        self.history.push(RunRecord {
+            rule_id: rule.id.clone(),
+            fired_ms: now_ms,
+            outcome,
+            actions_executed: total,
+            duration_ms: started.elapsed().as_millis() as u64,
+            error: first_error,
+        });
         if !dead.is_empty() {
             let mut queue = self.dead.lock();
             queue.extend(dead);
@@ -195,7 +232,8 @@ impl RuleEngine {
             let mut queue = self.dead.lock();
             queue.retain(|d| d.id != dead_id);
         }
-        run_action(self.handler.as_ref(), &action, rule, now_ms, &mut dead);
+        // 重放不另记历史：历史环记的是规则触发轮次，死信重放是人工补救动作
+        let _ = run_action(self.handler.as_ref(), &action, rule, now_ms, &mut dead);
         if !dead.is_empty() {
             self.dead.lock().extend(dead);
         }
@@ -247,6 +285,12 @@ mod tests {
         }
     }
 
+    fn hist(tag: &str) -> Arc<History> {
+        Arc::new(History::open(
+            &std::env::temp_dir().join(format!("nf-eng-{tag}-{}", uuid::Uuid::now_v7())),
+        ))
+    }
+
     fn rule(id: &str, actions: Vec<Action>) -> Rule {
         Rule {
             id: id.into(),
@@ -277,7 +321,7 @@ mod tests {
     #[test]
     fn fire_runs_serially_and_success_swallows() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone());
+        let engine = RuleEngine::new(h.clone(), hist("fire-serial"));
         let r = rule(
             "r1",
             vec![
@@ -302,7 +346,7 @@ mod tests {
     #[test]
     fn when_filter_blocks_execution() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone());
+        let engine = RuleEngine::new(h.clone(), hist("when-block"));
         let r = rule(
             "r2",
             vec![Action::OpenUrl {
@@ -317,7 +361,7 @@ mod tests {
     #[test]
     fn failing_action_retries_then_dead_letter() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone());
+        let engine = RuleEngine::new(h.clone(), hist("retry-dead"));
         let r = rule(
             "r3",
             vec![Action::OpenUrl {
@@ -336,7 +380,7 @@ mod tests {
     #[test]
     fn replay_removes_on_success_keeps_on_failure() {
         let h = Arc::new(FakeHandler::new());
-        let engine = RuleEngine::new(h.clone());
+        let engine = RuleEngine::new(h.clone(), hist("replay"));
         let r = rule(
             "r4",
             vec![Action::OpenUrl {
@@ -354,5 +398,65 @@ mod tests {
         let new_id = engine.dead_letters()[0].id.clone();
         engine.replay(&new_id, &r).unwrap();
         assert!(engine.dead_letters().is_empty());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-14）字面测试名优先于 rustc 命名惯例
+    fn history_partialOutcome_recordsFailedIndices() {
+        let h = Arc::new(FakeHandler::new());
+        let engine = RuleEngine::new(h.clone(), hist("partial"));
+        let r = rule(
+            "r5",
+            vec![
+                Action::OpenUrl {
+                    url: "https://ok/1".into(),
+                },
+                Action::OpenUrl {
+                    url: "https://fail/x".into(),
+                },
+                Action::Notify {
+                    title: "还活着".into(),
+                    body: "".into(),
+                },
+            ],
+        );
+        engine.fire(&r, &json!({ "entry": { "kind": "url" } }), 7000);
+        let runs = engine.runs(None);
+        assert_eq!(runs.len(), 1, "一轮 fire 恰记一条");
+        let rec = &runs[0];
+        assert_eq!(rec.rule_id, "r5");
+        assert_eq!(rec.fired_ms, 7000);
+        assert_eq!(
+            rec.actions_executed, 3,
+            "串行全试=then 长度（部分失败不中断后续）"
+        );
+        match &rec.outcome {
+            RunOutcome::Partial { failed_indices } => {
+                assert_eq!(failed_indices, &[1], "部分成功必须点名失败位序");
+            }
+            other => panic!("期望 Partial，实得 {other:?}"),
+        }
+        assert!(rec
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("open 失败")));
+        // 全成臂收口：Success 无 error
+        let ok_rule = rule(
+            "r6",
+            vec![Action::OpenUrl {
+                url: "https://ok/2".into(),
+            }],
+        );
+        engine.fire(&ok_rule, &json!({ "entry": { "kind": "url" } }), 8000);
+        let ok_rec = &engine.runs(Some(1))[0];
+        assert_eq!(ok_rec.outcome, RunOutcome::Success);
+        assert_eq!(ok_rec.error, None);
+        // r5 冷却窗（默认 5s=5000ms）后再来一轮：仍失败 → 仍 Partial 同位点名
+        engine.fire(&r, &json!({ "entry": { "kind": "url" } }), 13_000);
+        let last = &engine.runs(Some(1))[0];
+        assert_eq!(last.rule_id, "r5", "13s 已过冷却，本轮必须落环");
+        assert!(
+            matches!(&last.outcome, RunOutcome::Partial { failed_indices } if failed_indices == &[1])
+        );
     }
 }

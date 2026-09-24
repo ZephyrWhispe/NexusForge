@@ -31,6 +31,11 @@ description = "允许前端调用 automation_replay 命令（D-28 按窗最小�
 commands.allow = ["automation_replay"]
 
 [[permission]]
+identifier = "allow-automation-runs-get"
+description = "允许前端调用 automation_runs_get 命令（执行历史读取，T-B7-14；D-28 按窗最小授权）"
+commands.allow = ["automation_runs_get"]
+
+[[permission]]
 identifier = "allow-automation-plugins-list"
 description = "允许前端调用 automation_plugins_list 命令（D-28 按窗最小授权）"
 commands.allow = ["automation_plugins_list"]

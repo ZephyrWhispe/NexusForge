@@ -17,6 +17,7 @@ import {
   automationPluginsList,
   automationReplay,
   automationRulesList,
+  automationRunsGet,
   automationSaveRule,
   automationToggleRule,
   parseAppError,
@@ -24,6 +25,8 @@ import {
   type ExprDto,
   type PluginInfoDto,
   type RuleDto,
+  type RunOutcomeDto,
+  type RunRecordDto,
   type TriggerDto,
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
@@ -34,11 +37,14 @@ import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 
 /**
- * 自动化面板（docs/impl/07 A1–A3 + T-B7-13 多动作编辑器）：
+ * 自动化面板（docs/impl/07 A1–A3 + T-B7-13 多动作编辑器 + T-B7-14 执行历史）：
  * - 规则：事件/启动/每日定时触发 + 可选 when（一层 And/Or 组 UI；深层树逐字
  *   携带不回造，触碰降级须显式确认）+ **then 数组**（增删/上下移/五类动作全
  *   含 ipc_command）+ 冷却
  * - 死信：动作重试耗尽的死信队列（可重放；重放仍失败以新 id 重新入队）
+ * - 插件：wasmtime 沙箱插件库
+ * - 历史：执行历史环（后端 ≤500 条落 runs.json；rule_fired 事件只作门铃，
+ *   回调重取命令、不读 payload 字段——B6 T-B6-9 纪律镜像）
  * - 风暴防护：automation 自产事件不再触发规则（防自环）；默认冷却 5s/规则
  */
 const useStyles = makeStyles({
@@ -86,7 +92,7 @@ const useStyles = makeStyles({
   },
 });
 
-type TabId = "rules" | "dead" | "plugins";
+type TabId = "rules" | "dead" | "plugins" | "runs";
 
 type ActionKind = "notify" | "open_url" | "publish" | "ipc_command" | "run_script";
 
@@ -187,6 +193,18 @@ function actionLabel(a: ActionDto): string {
       return `IPC · ${a.module}.${a.cmd}`;
     case "run_script":
       return `插件 · ${a.path}${a.func ? `:${a.func}` : ""}`;
+  }
+}
+
+/** 执行结果摘要（T-B7-14 历史页；failed_indices 为 0 基位序，展示转 1 基） */
+function outcomeLabel(o: RunOutcomeDto): string {
+  switch (o.kind) {
+    case "success":
+      return "成功";
+    case "partial":
+      return `部分成功 · 失败动作 ${o.failed_indices.map((i) => i + 1).join("、")}`;
+    case "failure":
+      return "失败";
   }
 }
 
@@ -353,6 +371,7 @@ export default function RulesPanel() {
   const [tab, setTab] = useState<TabId>("rules");
   const [rules, setRules] = useState<RuleDto[]>([]);
   const [dead, setDead] = useState<import("../../ipc/client").DeadLetterDto[]>([]);
+  const [runs, setRuns] = useState<RunRecordDto[]>([]);
   const [plugins, setPlugins] = useState<PluginInfoDto[]>([]);
   const [installDir, setInstallDir] = useState("");
   const [loading, setLoading] = useState(true);
@@ -362,9 +381,10 @@ export default function RulesPanel() {
 
   const load = useCallback(async () => {
     try {
-      const [rs, ds, ps] = await Promise.all([
+      const [rs, ds, us, ps] = await Promise.all([
         automationRulesList(),
         automationDeadLetters(),
+        automationRunsGet(),
         automationPluginsList().catch((e) => {
           reportError(e, { context: "插件列表加载失败（已降级为空）", dedupeKey: "plugins-list", toast: false });
           return [] as PluginInfoDto[];
@@ -372,6 +392,7 @@ export default function RulesPanel() {
       ]);
       setRules(rs);
       setDead(ds);
+      setRuns(us);
       setPlugins(ps);
       setError("");
     } catch (e) {
@@ -383,6 +404,34 @@ export default function RulesPanel() {
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  // T-B7-14：rule_fired 事件只作门铃——回调唯一读取的是 envelope topic，
+  // 事实源恒为命令重取（load 内 automationRunsGet；不读 payload 字段）。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<{ topic: string }>("nf:event", (e) => {
+          const topic = e.payload?.topic;
+          if (topic === "automation.rule_fired") {
+            void load();
+          }
+        }),
+      )
+      .then((u) => {
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      })
+      .catch((e) => reportError(e, { context: "自动化历史门铃注册失败", toast: false }));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [load]);
 
   const set = (patch: Partial<FormState>) => setForm((f) => (f ? { ...f, ...patch } : f));
@@ -528,6 +577,7 @@ export default function RulesPanel() {
             { id: "rules", label: `规则（${rules.length}）` },
             { id: "dead", label: `死信（${dead.length}）` },
             { id: "plugins", label: `插件（${plugins.length}）` },
+            { id: "runs", label: `历史（${runs.length}）` },
           ]}
         />
         <div style={{ flex: 1 }} />
@@ -859,6 +909,37 @@ export default function RulesPanel() {
             )}
           </Section>
         </>
+      ) : tab === "runs" ? (
+        <Section
+          title="执行历史"
+          actions={<Badge appearance="outline">环 ≤500 条 · 溢出丢最旧 · runs.json 落盘重启不丢</Badge>}
+        >
+          {runs.length === 0 ? (
+            <EmptyState text="暂无历史——规则每次触发（过冷却）执行一轮即记一条。" />
+          ) : (
+            <div className={styles.list}>
+              {[...runs].reverse().map((rec, i) => (
+                <div key={`${rec.rule_id}-${rec.fired_ms}-${i}`} className={styles.item}>
+                  <div className={styles.itemBody}>
+                    <div className={styles.row}>
+                      <Text weight="semibold" size={300}>
+                        {rules.find((r) => r.id === rec.rule_id)?.name ?? rec.rule_id}
+                      </Text>
+                      <Badge appearance={rec.outcome.kind === "success" ? "outline" : "filled"}>
+                        {outcomeLabel(rec.outcome)}
+                      </Badge>
+                    </div>
+                    <Text className={styles.muted}>
+                      {new Date(rec.fired_ms).toLocaleString()} · 动作 {rec.actions_executed} 个 ·{" "}
+                      {rec.duration_ms}ms
+                    </Text>
+                    {rec.error && <Text className={styles.dead}>{rec.error}</Text>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Section>
       ) : tab === "dead" ? (
         <Section
           title="死信队列"

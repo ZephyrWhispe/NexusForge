@@ -2103,6 +2103,21 @@ export interface DeadLetterDto {
   at_ms: number;
 }
 
+/** 执行历史结果形状（T-B7-14；serde tag="kind" 形态） */
+export type RunOutcomeDto =
+  | { kind: "success" }
+  | { kind: "partial"; failed_indices: number[] }
+  | { kind: "failure" };
+
+export interface RunRecordDto {
+  rule_id: string;
+  fired_ms: number;
+  outcome: RunOutcomeDto;
+  actions_executed: number;
+  duration_ms: number;
+  error: string | null;
+}
+
 export function automationRulesList(): Promise<RuleDto[]> {
   return invoke("automation_rules_list");
 }
@@ -2120,6 +2135,9 @@ export function automationDeadLetters(): Promise<DeadLetterDto[]> {
 }
 export function automationReplay(deadId: string, ruleId: string): Promise<void> {
   return invoke("automation_replay", { deadId, ruleId });
+}
+export function automationRunsGet(limit?: number): Promise<RunRecordDto[]> {
+  return invoke("automation_runs_get", { limit });
 }
 
 // 插件管理（M14 A6）

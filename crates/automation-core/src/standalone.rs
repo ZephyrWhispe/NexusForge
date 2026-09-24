@@ -9,6 +9,7 @@ use serde_json::json;
 
 use crate::engine::{ActionHandler, RuleEngine};
 use crate::error::Result;
+use crate::history::History;
 use crate::rule::Rule;
 
 /// 从 rules.json 执行指定规则（规则不存在/停用返回 false；fire 后动作失败不报错——死信随进程退出丢弃）
@@ -24,7 +25,12 @@ pub fn run_rule_standalone(
     let Some(rule) = rules.iter().find(|r| r.id == rule_id && r.enabled) else {
         return Ok(false);
     };
-    let engine = RuleEngine::new(handler);
+    // T-B7-14：独立进程同样落历史环（runs.json 与 rules.json 同目录；
+    // 与主程序并发的窄窗口为整文件 last-writer-wins，观测面宽限，见 history.rs 模块头）
+    let history = Arc::new(History::open(
+        rules_path.parent().unwrap_or_else(|| Path::new(".")),
+    ));
+    let engine = RuleEngine::new(handler, history);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

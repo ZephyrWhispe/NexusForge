@@ -13,6 +13,7 @@
     "allow-automation-plugins-list",
     "allow-automation-replay",
     "allow-automation-rules-list",
+    "allow-automation-runs-get",
     "allow-automation-save-rule",
     "allow-automation-toggle-rule",
     "allow-clipboard-capture-get",

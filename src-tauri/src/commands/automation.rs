@@ -84,6 +84,15 @@ pub async fn automation_replay(
     engine.replay(&dead_id, &rule).map_err(auto_err)
 }
 
+/// 执行历史（T-B7-14：旧→新；limit 有界取最近 n 条，缺省整环 ≤500）
+#[tauri::command]
+pub async fn automation_runs_get(
+    limit: Option<u32>,
+    state: State<'_, HostState>,
+) -> Result<Vec<automation_core::RunRecord>, AppError> {
+    Ok(state.automation.runs(limit.map(|l| l as usize)))
+}
+
 /// 插件清单（A6：扫描插件库）
 #[tauri::command]
 pub async fn automation_plugins_list(

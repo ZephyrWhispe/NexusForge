@@ -9,6 +9,7 @@
 
 pub mod engine;
 pub mod error;
+pub mod history;
 pub mod module;
 pub mod plugins;
 pub mod rule;
@@ -17,6 +18,7 @@ pub mod wasm;
 
 pub use engine::{DeadLetter, RuleEngine};
 pub use error::{AutomationError, Result};
+pub use history::{History, RunOutcome, RunRecord, HISTORY_CAP};
 pub use module::{AutomationModule, HostActionHandler};
 pub use plugins::{PluginInfo, PluginManifest, PluginStore, PLUGIN_API_VERSION};
 pub use rule::{Action, CmpOp, Expr, Rule, Trigger};

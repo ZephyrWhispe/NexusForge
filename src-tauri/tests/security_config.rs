@@ -342,6 +342,8 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-term-sftp-rename",
         "allow-term-sftp-stat",
         "allow-file-enqueue",
+        // T-B7-14 执行历史读取（历史含错误明文证据，aux 不触达）
+        "allow-automation-runs-get",
     ];
     for (name, cap) in &caps {
         if name == "main" {
@@ -380,8 +382,8 @@ fn aux_windows_never_reach_main_only_commands() {
         8,
         "quickpanel 权限面只增不减，扩张须显式改此断言"
     );
-    // 负例不空洞正对照：main 必须真持有 T-B7-6 SFTP 变更族四枚（禁改后 aux
-    // 全空但 main 也没接 = 假绿）
+    // 负例不空洞正对照：main 必须真持有 T-B7-6 SFTP 变更族四枚 + T-B7-14 历史
+    // 读取一枚（禁改后 aux 全空但 main 也没接 = 假绿）
     let main_perms: Vec<&str> = caps.iter().find(|(n, _)| n == "main").unwrap().1["permissions"]
         .as_array()
         .unwrap()
@@ -393,6 +395,7 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-term-sftp-mkdir",
         "allow-term-sftp-rename",
         "allow-term-sftp-stat",
+        "allow-automation-runs-get",
     ] {
         assert!(
             main_perms.contains(&expect),
@@ -1732,6 +1735,47 @@ fn events_are_bell_only() {
     assert!(
         !panel.contains("file.xfer_") && !panel.contains("xfer_watch"),
         "门铃形状不建 watch 口（裁决非遗漏，见 09 §6.2 T-B6-9）"
+    );
+}
+
+/// T-B7-14 新判据（09 §7.2）：RulesPanel 的 `nf:event` 回调**只作门铃**
+/// （events_are_bell_only 同谱扫形）——事件对象上唯一允许读取的是 topic，
+/// 事实源恒为命令重取（load → automation_runs_get）。正对照防空洞：
+/// 禁了 payload 读取之后区域必须仍有真重取，且 load 体内真调命令。
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-14）字面测试名优先于 rustc 命名惯例
+fn automation_history_events_are_bell_only() {
+    let panel = read("../src/modules/automation/RulesPanel.tsx");
+    let start = panel.find("nf:event\"").expect("nf:event 门铃订阅必须在场");
+    let tail = &panel[start..];
+    let end_rel = tail
+        .find("自动化历史门铃注册失败")
+        .expect("同效应失败处理者必须在场（切片界锚）");
+    let region = &tail[..end_rel];
+    let residual = region.replace("e.payload?.topic", "");
+    for word in [
+        "payload",
+        "rule_id",
+        "rule_name",
+        "outcome",
+        "fired_ms",
+        "duration_ms",
+    ] {
+        assert!(
+            !residual.contains(word),
+            "门铃回调区域内出现 {word:?} 读取——事件只作门铃，事实源必须是命令重取"
+        );
+    }
+    assert!(
+        region.contains("void load();"),
+        "rule_fired 门铃必须触发 load 重取（历史行事实源=automation_runs_get）"
+    );
+    let lstart = panel.find("const load =").expect("load 定义必须在场");
+    let ltail = &panel[lstart..];
+    let lend = ltail.find("}, []);").expect("useCallback 结束锚");
+    assert!(
+        ltail[..lend].contains("automationRunsGet()"),
+        "正对照：load 体内必须真调 automationRunsGet（非空洞禁读区）"
     );
 }
 

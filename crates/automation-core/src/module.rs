@@ -22,6 +22,7 @@ use host_core::ports::TaskSchdPort;
 
 use crate::engine::{ActionHandler, RuleEngine};
 use crate::error::AutomationError;
+use crate::history::History;
 use crate::plugins::PluginStore;
 use crate::rule::Rule;
 use crate::wasm::{WasmHost, WasmRuntime};
@@ -174,6 +175,8 @@ pub struct AutomationModule {
     rules: Arc<RwLock<Vec<Rule>>>,
     /// 规则库文件 {appData}/automation/rules.json
     rules_path: PathBuf,
+    /// T-B7-14：执行历史环（runs.json 与 rules.json 同目录）
+    history: RwLock<Option<Arc<History>>>,
     handler: RwLock<Option<Arc<HostActionHandler>>>,
     /// A4：Windows 计划任务端口（未注册时跳过同步，仅应用内定时生效）
     taskschd: RwLock<Option<Arc<dyn TaskSchdPort>>>,
@@ -195,6 +198,7 @@ impl AutomationModule {
             engine: RwLock::new(None),
             rules: Arc::new(RwLock::new(Vec::new())),
             rules_path: app_data_dir.join("automation").join("rules.json"),
+            history: RwLock::new(None),
             handler: RwLock::new(None),
             taskschd: RwLock::new(None),
             plugins: RwLock::new(None),
@@ -212,6 +216,15 @@ impl AutomationModule {
 
     pub fn engine(&self) -> Option<Arc<RuleEngine>> {
         self.engine.read().clone()
+    }
+
+    /// T-B7-14 IPC 层入口：执行历史（旧 → 新，limit 有界）
+    pub fn runs(&self, limit: Option<usize>) -> Vec<crate::history::RunRecord> {
+        self.history
+            .read()
+            .clone()
+            .map(|h| h.runs(limit))
+            .unwrap_or_default()
     }
 
     pub fn plugin_store(&self) -> Option<Arc<PluginStore>> {
@@ -507,7 +520,14 @@ impl Module for AutomationModule {
         // A4：计划任务端口（未注册仅告警——应用内定时仍生效）
         *self.taskschd.write() = ctx.ports.get::<dyn TaskSchdPort>();
         *self.handler.write() = Some(handler.clone());
-        *self.engine.write() = Some(Arc::new(RuleEngine::new(handler)));
+        // T-B7-14：历史环与 rules.json 同目录（{appData}/automation/runs.json）
+        let history = Arc::new(History::open(
+            self.rules_path
+                .parent()
+                .expect("rules.json 应有父目录（automation 数据目录）"),
+        ));
+        *self.history.write() = Some(history.clone());
+        *self.engine.write() = Some(Arc::new(RuleEngine::new(handler, history)));
         *self.bus.write() = Some(ctx.event_bus.clone());
         self.load_rules();
         self.state.set(ModuleState::Stopped);
@@ -575,7 +595,10 @@ mod tests {
         let m = AutomationModule::new(&dir);
         let bus = Arc::new(EventBus::new());
         let handler = Arc::new(HostActionHandler::new(bus.clone()));
-        *m.engine.write() = Some(Arc::new(RuleEngine::new(handler)));
+        *m.engine.write() = Some(Arc::new(RuleEngine::new(
+            handler,
+            Arc::new(History::open(&dir.join("automation"))),
+        )));
         *m.bus.write() = Some(bus.clone());
 
         let total = TOPIC_REGISTRY.len();
