@@ -342,6 +342,8 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-term-sftp-rename",
         "allow-term-sftp-stat",
         "allow-file-enqueue",
+        // T-B7-12 在线搜索（触网起进程面，SysPanel 只在 main；aux 负例并入既有循环）
+        "allow-sys-pkg-search",
         // T-B7-14 执行历史读取（历史含错误明文证据，aux 不触达）
         "allow-automation-runs-get",
         // T-B7-15 一钮全清死信=抹证据（干跑 dry_run 可给，此枚不给辅助窗）
@@ -397,6 +399,7 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-term-sftp-mkdir",
         "allow-term-sftp-rename",
         "allow-term-sftp-stat",
+        "allow-sys-pkg-search",
         "allow-automation-runs-get",
         "allow-automation-dead-clear",
     ] {

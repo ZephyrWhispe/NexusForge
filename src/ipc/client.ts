@@ -1946,6 +1946,13 @@ export interface PkgEntryDto {
   available: string | null;
   source: string;
 }
+/** 在线搜索结果行（T-B7-12；id=安装引用包 id） */
+export interface PkgSearchRowDto {
+  id: string;
+  name: string;
+  version: string;
+  source: string;
+}
 export interface CleanTargetDto {
   id: string;
   label: string;
@@ -1992,6 +1999,10 @@ export function sysPkgSources(): Promise<PkgSourceDto[]> {
 }
 export function sysPkgList(): Promise<PkgEntryDto[]> {
   return invoke("sys_pkg_list");
+}
+/** 在线搜索包（T-B7-12：argv 纯函数零 shell 拼接、CRLF 拒在 sys-core 层） */
+export function sysPkgSearch(source: string, query: string): Promise<PkgSearchRowDto[]> {
+  return invoke("sys_pkg_search", { source, query });
 }
 export function sysPkgCmdPreview(source: string, action: string, packageId: string): Promise<string> {
   return invoke("sys_pkg_cmd_preview", { source, action, packageId });

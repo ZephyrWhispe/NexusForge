@@ -11,6 +11,11 @@ description = "允许前端调用 sys_pkg_list 命令（D-28 按窗最小授权�
 commands.allow = ["sys_pkg_list"]
 
 [[permission]]
+identifier = "allow-sys-pkg-search"
+description = "允许前端调用 sys_pkg_search 命令（T-B7-12 在线搜索；main-only，见 security_config 负例循环）"
+commands.allow = ["sys_pkg_search"]
+
+[[permission]]
 identifier = "allow-sys-pkg-cmd-preview"
 description = "允许前端调用 sys_pkg_cmd_preview 命令（D-28 按窗最小授权）"
 commands.allow = ["sys_pkg_cmd_preview"]

@@ -345,6 +345,7 @@ pub fn run() {
             // 系统管理（M12 SY1–SY4）
             commands::sys_pkg_sources,
             commands::sys_pkg_list,
+            commands::sys_pkg_search,
             commands::sys_pkg_cmd_preview,
             commands::sys_pkg_action,
             commands::sys_clean_targets,

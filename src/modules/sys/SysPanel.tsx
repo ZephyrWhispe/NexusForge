@@ -30,6 +30,7 @@ import {
   sysPkgAction,
   sysPkgCmdPreview,
   sysPkgList,
+  sysPkgSearch,
   sysPkgSources,
   sysProcesses,
   winopsApply,
@@ -41,6 +42,7 @@ import {
   type CleanTargetDto,
   type MetricsPointDto,
   type PkgEntryDto,
+  type PkgSearchRowDto,
   type PkgSourceDto,
   type ProcessRowDto,
   type WinopsActionDto,
@@ -60,6 +62,9 @@ import { reportError } from "../../stores/notifications";
  * - T-B7-10 进程页红线：监控 Tab 内进程 Section（两拍差值 Top-N/排序头/搜索框），
  *   结束钮走「逐字复述进程名输入确认词 → confirmAction → sys_kill」双闸；
  *   保护名单与坏盘 fail-closed 在后端 sys-core ProcessTable，UI 闸不代替后端闸。
+ * - T-B7-12 包管理在线搜索：搜索源面走 sys_pkg_search（argv 纯函数零 shell 拼接），
+ *   结果表安装钮复用 doPkgAction 的确切命令行确认对话框（cmd_preview）；
+ *   已装表每行「升级」钮走单包 upgrade 动作。
  */
 
 /** 动作 type → 生效方式中文说明（前端纯函数；type 对照 winops.rs:52-105 serde tag） */
@@ -184,6 +189,10 @@ export default function SysPanel() {
   const [pkgFilter, setPkgFilter] = useState("");
   const [pkgsLoading, setPkgsLoading] = useState(false);
   const [output, setOutput] = useState<string[]>([]);
+  // T-B7-12 在线搜索：null=未搜索过（区分空结果态）
+  const [onlineQuery, setOnlineQuery] = useState("");
+  const [onlineResults, setOnlineResults] = useState<PkgSearchRowDto[] | null>(null);
+  const [onlineBusy, setOnlineBusy] = useState(false);
 
   // ---- 系统调整（WinOps Tweak，M16 W1）----
   const [tweaks, setTweaks] = useState<WinopsScanItemDto[]>([]);
@@ -314,9 +323,11 @@ export default function SysPanel() {
       setErr(null);
       try {
         const cmd = await sysPkgCmdPreview(source, action, id);
+        const actionLabel =
+          action === "install" ? "安装" : action === "uninstall" ? "卸载" : action === "upgrade" ? "单包升级" : "全部升级";
         if (
           !(await confirmAction({
-            title: `包管理操作（${action === "install" ? "安装" : action === "uninstall" ? "卸载" : "全部升级"}）`,
+            title: `包管理操作（${actionLabel}）`,
             impact: [`${source} · ${action}${id ? ` ${id}` : ""}`],
             command: cmd,
             danger: action !== "install",
@@ -325,7 +336,7 @@ export default function SysPanel() {
           return;
         setOutput([]);
         const lines = await sysPkgAction(source, action, id);
-        setMsg(`${action} 完成（${lines.length} 行输出）`);
+        setMsg(`${actionLabel} 完成（${lines.length} 行输出）`);
         if (action !== "upgrade_all") await loadPkgs();
       } catch (e) {
         fail(e);
@@ -333,6 +344,26 @@ export default function SysPanel() {
     },
     [loadPkgs, fail],
   );
+
+  // T-B7-12 在线搜索：源取首个可用（winget 优先，与合并清单同谱）
+  const doOnlineSearch = useCallback(async () => {
+    const q = onlineQuery.trim();
+    if (!q || onlineBusy) return;
+    const src = sources.find((s) => s.available);
+    if (!src) {
+      setErr("无可用包管理器（winget / scoop / choco）");
+      return;
+    }
+    setErr(null);
+    setOnlineBusy(true);
+    try {
+      setOnlineResults(await sysPkgSearch(src.id, q));
+    } catch (e) {
+      fail(e);
+    } finally {
+      setOnlineBusy(false);
+    }
+  }, [onlineQuery, onlineBusy, sources, fail]);
 
   // ---- 系统调整（WinOps）----
   const doTweakScan = useCallback(async () => {
@@ -821,6 +852,14 @@ export default function SysPanel() {
                 <Button
                   size="small"
                   appearance="subtle"
+                  title={`单包升级（${p.source} upgrade ${p.id}）`}
+                  onClick={() => void doPkgAction(p.source, "upgrade", p.id)}
+                >
+                  升级
+                </Button>
+                <Button
+                  size="small"
+                  appearance="subtle"
                   onClick={() => void doPkgAction(p.source, "uninstall", p.id)}
                 >
                   卸载
@@ -831,6 +870,50 @@ export default function SysPanel() {
               <Text className={styles.muted}>点击「刷新清单」获取已装软件（需要 winget/scoop/choco 至少一个可用）</Text>
             )}
           </div>
+          {/* T-B7-12 在线搜索：结果表安装钮复用确切命令行确认对话框（在线安装对话框） */}
+          <div className={styles.row}>
+            <Text size={200} weight="semibold">
+              在线搜索：
+            </Text>
+            <Input
+              style={{ maxWidth: 220 }}
+              placeholder="包名关键词（可含空格引号，换行拒）"
+              value={onlineQuery}
+              onChange={(_, d) => setOnlineQuery(d.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void doOnlineSearch();
+              }}
+            />
+            <Button size="small" appearance="primary" disabled={onlineBusy} onClick={() => void doOnlineSearch()}>
+              搜索
+            </Button>
+            {onlineBusy && <Spinner size="tiny" />}
+          </div>
+          {onlineResults !== null && (
+            <div className={styles.list} data-testid="pkg-search-results">
+              <Text className={styles.muted}>
+                搜索结果 {onlineResults.length} 项 · 安装走确切命令行确认（预览与执行同源）
+              </Text>
+              {onlineResults.slice(0, 100).map((r) => (
+                <div key={`${r.source}:${r.id}`} className={styles.item}>
+                  <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                    <Text size={200} weight="semibold">
+                      {r.name}
+                    </Text>
+                    <Text size={100} className={styles.muted}>
+                      {r.id} · {r.version} · {r.source}
+                    </Text>
+                  </div>
+                  <Button size="small" onClick={() => void doPkgAction(r.source, "install", r.id)}>
+                    安装
+                  </Button>
+                </div>
+              ))}
+              {onlineResults.length === 0 && (
+                <Text className={styles.muted}>无搜索结果（核对关键词；winget 无匹配时亦空表）</Text>
+              )}
+            </div>
+          )}
           {output.length > 0 && (
             <div className={styles.log}>{output.slice(-30).join("\n")}</div>
           )}

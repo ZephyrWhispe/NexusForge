@@ -55,6 +55,29 @@ pub async fn sys_pkg_list(
     .map_err(sys_err)
 }
 
+/// 在线搜索包（T-B7-12：搜索结果表→安装钮；argv 走 build_search_args 纯函数零 shell 拼接，
+/// CRLF 搜索词在 sys-core 层拒；未知源错误点名 winget/scoop/choco 三台）
+#[tauri::command]
+pub async fn sys_pkg_search(
+    source: String,
+    query: String,
+    state: State<'_, HostState>,
+) -> Result<Vec<sys_core::PkgSearchRow>, AppError> {
+    let m = state.sys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mgr = m.manager(&source).ok_or_else(|| {
+            AppError::module(
+                "SYS_IPC_002",
+                format!("未知包管理器: {source}（可用: winget / scoop / choco）"),
+                None,
+            )
+        })?;
+        mgr.search(&query).map_err(sys_err)
+    })
+    .await
+    .map_err(|e| AppError::module("SYS_IPC_001", e.to_string(), None))?
+}
+
 /// 变更命令行预览（UI 确认展示——docs/impl/06 SY1：列出将执行的确切命令行）
 #[tauri::command]
 pub async fn sys_pkg_cmd_preview(
@@ -70,7 +93,8 @@ pub async fn sys_pkg_cmd_preview(
     mgr.cmd_preview(&action, &package_id).map_err(sys_err)
 }
 
-/// 执行包变更（install/uninstall/upgrade_all；输出逐行发 sys.pkg_line 事件）
+/// 执行包变更（install/uninstall/upgrade/upgrade_all（T-B7-12 单包升级白名单 +一值）；
+/// 输出逐行发 sys.pkg_line 事件）
 #[tauri::command]
 pub async fn sys_pkg_action(
     source: String,

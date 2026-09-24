@@ -198,6 +198,7 @@
     "allow-sys-pkg-action",
     "allow-sys-pkg-cmd-preview",
     "allow-sys-pkg-list",
+    "allow-sys-pkg-search",
     "allow-sys-pkg-sources",
     "allow-sys-processes",
     "allow-term-ack",

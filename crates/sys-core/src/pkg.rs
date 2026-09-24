@@ -4,6 +4,9 @@
 //!   （sys.pkg_line 事件流式回传，docs/impl/06 SY1 风险标注）
 //! - winget 解析走 `--disable-interactivity`，JSON 输出可用时优先、失败回退表格
 //!   （docs/impl/06 SY 风险标注：进度条控制字符）
+//! - T-B7-12 纪律：一切进程拉起收敛到唯一入口 [`run_cmd`]（进程 spawn 本文件恒恰一处，
+//!   镜像 B4 Tesseract 单入口纪律）；搜索/变更 argv 一律经 [`build_search_args`] /
+//!   [`build_action_args`] 纯函数成形，query/包 id 作独立元素原样传递，零 shell 字符串拼接
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -24,6 +27,15 @@ pub struct PkgEntry {
     pub source: String,
 }
 
+/// 在线搜索结果行（T-B7-12，IPC DTO；id=安装引用包 id，scoop/choco 无独立 id 时同名）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PkgSearchRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub source: String,
+}
+
 /// 包管理器（SY1）
 pub trait PkgManager: Send + Sync {
     fn id(&self) -> &'static str;
@@ -32,7 +44,9 @@ pub trait PkgManager: Send + Sync {
     fn available(&self) -> bool;
     /// 已装清单
     fn list(&self) -> Result<Vec<PkgEntry>>;
-    /// 变更命令行预览（UI 确认展示）
+    /// 在线搜索（T-B7-12：argv 走 [`build_search_args`] 纯函数，解析各源异构输出）
+    fn search(&self, query: &str) -> Result<Vec<PkgSearchRow>>;
+    /// 变更命令行预览（UI 确认展示；与 [`build_action_args`] 同源派生，所见即所跑）
     fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String>;
     /// 变更操作（emit 逐行输出；docs/impl/06 SY1：输出流式回传 UI）
     fn run_action(
@@ -43,19 +57,19 @@ pub trait PkgManager: Send + Sync {
     ) -> Result<Vec<String>>;
 }
 
-/// PATH 查找（Windows where.exe）
-fn in_path(exe: &str) -> bool {
-    Command::new("where.exe")
-        .arg(exe)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// argv 成形辅助（&[&str] → Vec<String>，唯一入口的参形）
+fn argv(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
 }
 
-/// 跑外部命令并逐行回调 stdout（行同步收集）
-fn run_lines(exe: &str, args: &[&str], mut emit: impl FnMut(String)) -> Result<Vec<String>> {
+/// 全文件唯一进程拉起入口（T-B7-12 判据形制：本文件进程 spawn 恒恰一处，镜像 B4 Tesseract）——
+/// argv 数组原样传递零 shell 拼接；逐行读 stdout 并过滤进度条控制字符（\b \r，
+/// docs/impl/06 SY 风险标注），返回（非空行集, 是否成功退出）。
+fn run_cmd(
+    exe: &str,
+    args: &[String],
+    mut on_line: impl FnMut(String),
+) -> Result<(Vec<String>, bool)> {
     let mut child = Command::new(exe)
         .args(args)
         .stdout(Stdio::piped())
@@ -71,18 +85,29 @@ fn run_lines(exe: &str, args: &[&str], mut emit: impl FnMut(String)) -> Result<V
     for line in reader.lines() {
         match line {
             Ok(l) => {
-                // 进度条控制字符过滤（\b \r，docs/impl/06 SY 风险标注）
                 let clean = l.trim_matches(|c| c == '\u{8}' || c == '\r');
                 if !clean.is_empty() {
-                    emit(clean.to_string());
+                    on_line(clean.to_string());
                     lines.push(clean.to_string());
                 }
             }
             Err(_) => break,
         }
     }
-    let _ = child.wait();
-    Ok(lines)
+    let status = child.wait().map_err(SysError::Io)?;
+    Ok((lines, status.success()))
+}
+
+/// 静默跑（收集输出不 emit；解析型调用：list/search/探测）
+fn run_quiet(exe: &str, args: &[String]) -> Result<Vec<String>> {
+    Ok(run_cmd(exe, args, |_| {})?.0)
+}
+
+/// PATH 查找（Windows where.exe；经唯一入口，失败按不可用诚实降级）
+fn in_path(exe: &str) -> bool {
+    run_cmd("where.exe", &[exe.to_string()], |_| {})
+        .map(|(_, ok)| ok)
+        .unwrap_or(false)
 }
 
 /// winget 表格解析：Name / Id / Version / [Available /] [Source /]，列以 2+ 空格分隔
@@ -169,6 +194,199 @@ fn split_columns(line: &str) -> Vec<String> {
     out
 }
 
+/// 在线搜索 argv 纯函数装配（T-B7-12）。三源异构，差异点名：
+/// - winget：直跑 exe，`search --query X` 表格输出（Name Id Version Match Source）
+/// - scoop：shim 无独立 exe（PowerShell 函数），必经 `cmd /C scoop search X` 包装，
+///   query 仍作独立 argv 元素（cmd 只接固定三词，用户串不经 shell 解析成命令）；
+///   输出按 bucket 分节的 Name Version 小表
+/// - choco：直跑 exe，`list X -r --page 1` 机读输出（`name|version` 竖线分隔、无表头），
+///   钉首页防翻页
+///
+/// 处置红线：query 含 CR/LF（换行注入/参数走私面）直接拒；空白与引号作字面量原样传递。
+pub fn build_search_args(source: &str, query: &str) -> Result<(&'static str, Vec<String>)> {
+    if query.contains(['\r', '\n']) {
+        return Err(SysError::BadParam("搜索词含换行符，已拒绝".into()));
+    }
+    let q = query;
+    match source {
+        "winget" => Ok((
+            "winget.exe",
+            argv(&[
+                "search",
+                "--query",
+                q,
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ]),
+        )),
+        "scoop" => Ok(("cmd", argv(&["/C", "scoop", "search", q]))),
+        "choco" => Ok((
+            "choco.exe",
+            argv(&["list", q, "-r", "--page", "1", "--page-size", "50"]),
+        )),
+        other => Err(SysError::BadParam(format!(
+            "未知包管理器: {other}（可用: winget / scoop / choco）"
+        ))),
+    }
+}
+
+/// 变更操作 argv 纯函数装配（三适配器与 [`cmd_preview`] 的共同事实源——所见即所跑）。
+/// `upgrade` = 单包升级（T-B7-12 新增，package_id 必填，与全量 `upgrade_all` 分臂防误伤）。
+pub fn build_action_args(
+    source: &str,
+    action: &str,
+    package_id: &str,
+) -> Result<(&'static str, Vec<String>)> {
+    if matches!(action, "install" | "uninstall" | "upgrade") && package_id.trim().is_empty() {
+        return Err(SysError::BadParam(format!(
+            "{action} 是单包操作，必须提供包 id"
+        )));
+    }
+    let pkg = package_id;
+    match source {
+        "winget" => match action {
+            "install" => Ok((
+                "winget.exe",
+                argv(&[
+                    "install",
+                    "--id",
+                    pkg,
+                    "--exact",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--disable-interactivity",
+                ]),
+            )),
+            "uninstall" => Ok((
+                "winget.exe",
+                argv(&[
+                    "uninstall",
+                    "--id",
+                    pkg,
+                    "--silent",
+                    "--disable-interactivity",
+                ]),
+            )),
+            "upgrade" => Ok((
+                "winget.exe",
+                argv(&[
+                    "upgrade",
+                    "--id",
+                    pkg,
+                    "--exact",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--disable-interactivity",
+                ]),
+            )),
+            "upgrade_all" => Ok((
+                "winget.exe",
+                argv(&[
+                    "upgrade",
+                    "--all",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--disable-interactivity",
+                ]),
+            )),
+            _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
+        },
+        "scoop" => match action {
+            "install" => Ok(("cmd", argv(&["/C", "scoop", "install", pkg]))),
+            "uninstall" => Ok(("cmd", argv(&["/C", "scoop", "uninstall", pkg]))),
+            "upgrade" => Ok(("cmd", argv(&["/C", "scoop", "update", pkg]))),
+            "upgrade_all" => Ok(("cmd", argv(&["/C", "scoop", "update", "*"]))),
+            _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
+        },
+        "choco" => match action {
+            "install" => Ok(("choco.exe", argv(&["install", pkg, "-y", "--no-progress"]))),
+            "uninstall" => Ok((
+                "choco.exe",
+                argv(&["uninstall", pkg, "-y", "--no-progress"]),
+            )),
+            "upgrade" => Ok(("choco.exe", argv(&["upgrade", pkg, "-y", "--no-progress"]))),
+            "upgrade_all" => Ok((
+                "choco.exe",
+                argv(&["upgrade", "all", "-y", "--no-progress"]),
+            )),
+            _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
+        },
+        other => Err(SysError::BadParam(format!(
+            "未知包管理器: {other}（可用: winget / scoop / choco）"
+        ))),
+    }
+}
+
+/// 预览显示形：剥掉宿主实现细节（choco/winget 的 .exe 后缀、scoop 的 `cmd /C` 包装），
+/// 与 [`build_action_args`] 同源派生——预览不再另写字符串臂，所见即所跑。
+fn preview_command(exe: &str, args: &[String]) -> String {
+    if exe == "cmd" {
+        // args = ["/C", "scoop", …]：从 shim 名起展示
+        return args[1..].join(" ");
+    }
+    let mut parts = vec![exe.trim_end_matches(".exe").to_string()];
+    parts.extend(args.iter().cloned());
+    parts.join(" ")
+}
+
+/// scoop search 表解析：按 bucket 分节（"Search results in bucket 'x':" 后跟
+/// Name Version 小表，新版可带 Bucket/Updated 尾列）；与 list 单表差异=表头反复出现。
+fn parse_scoop_search_table(lines: &[String]) -> Vec<PkgSearchRow> {
+    let mut out = Vec::new();
+    let mut in_table = false;
+    for line in lines {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('-') {
+            continue;
+        }
+        if t.starts_with("Search results") || t.starts_with("Updating") || t.starts_with("WARN") {
+            in_table = false;
+            continue;
+        }
+        if t.starts_with("Name") && t.contains("Version") {
+            in_table = true;
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        let cells = split_columns(t);
+        if cells.len() >= 2 {
+            out.push(PkgSearchRow {
+                id: cells[0].clone(),
+                name: cells[0].clone(),
+                version: cells[1].clone(),
+                source: "scoop".into(),
+            });
+        }
+    }
+    out
+}
+
+/// choco `-r` 机读行解析：`name|version`（偶带第三列 approved 旗标）；无管道行的
+/// 版本横幅/统计句整行丢弃——与 winget/scoop 表格形差异=竖线分隔无表头。
+fn parse_choco_search_lines(lines: &[String]) -> Vec<PkgSearchRow> {
+    lines
+        .iter()
+        .filter_map(|l| {
+            let (name, rest) = l.trim().split_once('|')?;
+            let version = rest.split('|').next()?.trim();
+            if name.trim().is_empty() || version.is_empty() {
+                return None;
+            }
+            Some(PkgSearchRow {
+                id: name.trim().to_string(),
+                name: name.trim().to_string(),
+                version: version.to_string(),
+                source: "choco".into(),
+            })
+        })
+        .collect()
+}
+
 /// winget 适配器
 pub struct WingetManager;
 
@@ -187,14 +405,13 @@ impl PkgManager for WingetManager {
         if !self.available() {
             return Err(SysError::PkgUnavailable("winget".into()));
         }
-        let lines = run_lines(
+        let lines = run_quiet(
             "winget.exe",
-            &[
+            &argv(&[
                 "list",
                 "--accept-source-agreements",
                 "--disable-interactivity",
-            ],
-            |_| {},
+            ]),
         )?;
         let mut pkgs = parse_winget_table(&lines);
         for p in &mut pkgs {
@@ -207,15 +424,27 @@ impl PkgManager for WingetManager {
         Ok(pkgs)
     }
 
-    fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String> {
-        match action {
-            "install" => Ok(format!(
-                "winget install --id {package_id} --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity"
-            )),
-            "uninstall" => Ok(format!("winget uninstall --id {package_id} --silent --disable-interactivity")),
-            "upgrade_all" => Ok("winget upgrade --all --silent --accept-package-agreements --accept-source-agreements --disable-interactivity".into()),
-            _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
+    fn search(&self, query: &str) -> Result<Vec<PkgSearchRow>> {
+        if !self.available() {
+            return Err(SysError::PkgUnavailable("winget".into()));
         }
+        let (exe, args) = build_search_args(self.id(), query)?;
+        let lines = run_quiet(exe, &args)?;
+        // 搜索表与已装表同族形制（Name Id Version … Source），复用同一解析器
+        Ok(parse_winget_table(&lines)
+            .into_iter()
+            .map(|p| PkgSearchRow {
+                id: p.id,
+                name: p.name,
+                version: p.version,
+                source: "winget".into(),
+            })
+            .collect())
+    }
+
+    fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String> {
+        let (exe, args) = build_action_args(self.id(), action, package_id)?;
+        Ok(preview_command(exe, &args))
     }
 
     fn run_action(
@@ -224,46 +453,8 @@ impl PkgManager for WingetManager {
         package_id: &str,
         emit: &mut dyn FnMut(String),
     ) -> Result<Vec<String>> {
-        let (exe, args): (&str, Vec<String>) = match action {
-            "install" => (
-                "winget.exe",
-                vec![
-                    "install".into(),
-                    "--id".into(),
-                    package_id.into(),
-                    "--exact".into(),
-                    "--silent".into(),
-                    "--accept-package-agreements".into(),
-                    "--accept-source-agreements".into(),
-                    "--disable-interactivity".into(),
-                ],
-            ),
-            "uninstall" => (
-                "winget.exe",
-                vec![
-                    "uninstall".into(),
-                    "--id".into(),
-                    package_id.into(),
-                    "--silent".into(),
-                    "--disable-interactivity".into(),
-                ],
-            ),
-            "upgrade_all" => (
-                "winget.exe",
-                vec![
-                    "upgrade".into(),
-                    "--all".into(),
-                    "--silent".into(),
-                    "--accept-package-agreements".into(),
-                    "--accept-source-agreements".into(),
-                    "--disable-interactivity".into(),
-                ],
-            ),
-            _ => return Err(SysError::BadParam(format!("未知操作: {action}"))),
-        };
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let lines = run_lines(exe, &refs, emit)?;
-        Ok(lines)
+        let (exe, args) = build_action_args(self.id(), action, package_id)?;
+        Ok(run_cmd(exe, &args, emit)?.0)
     }
 }
 
@@ -285,7 +476,7 @@ impl PkgManager for ScoopManager {
         if !self.available() {
             return Err(SysError::PkgUnavailable("scoop".into()));
         }
-        let lines = run_lines("cmd", &["/C", "scoop", "list"], |_| {})?;
+        let lines = run_quiet("cmd", &argv(&["/C", "scoop", "list"]))?;
         // 表头 Name Version Source Updated Info；分隔线 -
         let mut out = Vec::new();
         let mut body = false;
@@ -310,13 +501,18 @@ impl PkgManager for ScoopManager {
         Ok(out)
     }
 
-    fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String> {
-        match action {
-            "install" => Ok(format!("scoop install {package_id}")),
-            "uninstall" => Ok(format!("scoop uninstall {package_id}")),
-            "upgrade_all" => Ok("scoop update *".into()),
-            _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
+    fn search(&self, query: &str) -> Result<Vec<PkgSearchRow>> {
+        if !self.available() {
+            return Err(SysError::PkgUnavailable("scoop".into()));
         }
+        let (exe, args) = build_search_args(self.id(), query)?;
+        let lines = run_quiet(exe, &args)?;
+        Ok(parse_scoop_search_table(&lines))
+    }
+
+    fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String> {
+        let (exe, args) = build_action_args(self.id(), action, package_id)?;
+        Ok(preview_command(exe, &args))
     }
 
     fn run_action(
@@ -325,23 +521,8 @@ impl PkgManager for ScoopManager {
         package_id: &str,
         emit: &mut dyn FnMut(String),
     ) -> Result<Vec<String>> {
-        let args: Vec<String> = match action {
-            "install" => vec!["/C", "scoop", "install", package_id]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            "uninstall" => vec!["/C", "scoop", "uninstall", package_id]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            "upgrade_all" => vec!["/C", "scoop", "update", "*"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            _ => return Err(SysError::BadParam(format!("未知操作: {action}"))),
-        };
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_lines("cmd", &refs, emit)
+        let (exe, args) = build_action_args(self.id(), action, package_id)?;
+        Ok(run_cmd(exe, &args, emit)?.0)
     }
 }
 
@@ -363,7 +544,7 @@ impl PkgManager for ChocoManager {
         if !self.available() {
             return Err(SysError::PkgUnavailable("choco".into()));
         }
-        let lines = run_lines("choco.exe", &["list"], |_| {})?;
+        let lines = run_quiet("choco.exe", &argv(&["list"]))?;
         let mut out = Vec::new();
         for line in lines {
             // "name x.y.z" 形式；表头与结尾计数行跳过
@@ -386,13 +567,18 @@ impl PkgManager for ChocoManager {
         Ok(out)
     }
 
-    fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String> {
-        match action {
-            "install" => Ok(format!("choco install {package_id} -y --no-progress")),
-            "uninstall" => Ok(format!("choco uninstall {package_id} -y --no-progress")),
-            "upgrade_all" => Ok("choco upgrade all -y --no-progress".into()),
-            _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
+    fn search(&self, query: &str) -> Result<Vec<PkgSearchRow>> {
+        if !self.available() {
+            return Err(SysError::PkgUnavailable("choco".into()));
         }
+        let (exe, args) = build_search_args(self.id(), query)?;
+        let lines = run_quiet(exe, &args)?;
+        Ok(parse_choco_search_lines(&lines))
+    }
+
+    fn cmd_preview(&self, action: &str, package_id: &str) -> Result<String> {
+        let (exe, args) = build_action_args(self.id(), action, package_id)?;
+        Ok(preview_command(exe, &args))
     }
 
     fn run_action(
@@ -401,23 +587,8 @@ impl PkgManager for ChocoManager {
         package_id: &str,
         emit: &mut dyn FnMut(String),
     ) -> Result<Vec<String>> {
-        let args: Vec<String> = match action {
-            "install" => vec!["install", package_id, "-y", "--no-progress"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            "uninstall" => vec!["uninstall", package_id, "-y", "--no-progress"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            "upgrade_all" => vec!["upgrade", "all", "-y", "--no-progress"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            _ => return Err(SysError::BadParam(format!("未知操作: {action}"))),
-        };
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_lines("choco.exe", &refs, emit)
+        let (exe, args) = build_action_args(self.id(), action, package_id)?;
+        Ok(run_cmd(exe, &args, emit)?.0)
     }
 }
 
@@ -526,5 +697,124 @@ mod tests {
         let _ = WingetManager.available();
         let _ = ScoopManager.available();
         let _ = ChocoManager.available();
+    }
+
+    // ======================== T-B7-12 任务书字面测试名 ========================
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-12）字面测试名优先于 rustc 命名惯例
+    fn searchArgs_queryNeverEntersShell_oneEntrypoint() {
+        // 判据形制：进程拉起原语在本文件生产面恒恰一处（镜像 B4 Tesseract 单入口纪律）
+        let src = include_str!("./pkg.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("测试模块标记在册");
+        let ctor = concat!("Command", "::new");
+        assert_eq!(
+            prod.matches(ctor).count(),
+            1,
+            "进程 spawn 必须收敛到 run_cmd 唯一入口"
+        );
+        // query 作独立 argv 元素原样传递（空白/引号/shell 元字符全部字面量入参，零拼接）
+        for (source, query) in [
+            ("winget", "7 zip \"quoted\""),
+            ("scoop", "nmap --main"),
+            ("choco", "git & | ^"),
+        ] {
+            let (_exe, args) = build_search_args(source, query).unwrap();
+            assert!(
+                args.iter().any(|a| a == query),
+                "{source}: query 应作独立 argv 元素原样在册"
+            );
+            assert!(
+                !args.iter().any(|a| a != query && a.contains(query)),
+                "{source}: query 不得被拼进任何其他参数"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-12）字面测试名优先于 rustc 命名惯例
+    fn searchArgs_crlfQuery_rejected() {
+        for source in ["winget", "scoop", "choco"] {
+            for q in [
+                "evil\r\nscoop install backdoor",
+                "line\nbreak",
+                "carriage\rreturn",
+            ] {
+                let e = build_search_args(source, q).unwrap_err();
+                assert!(
+                    matches!(e, SysError::BadParam(_)),
+                    "{source}: CRLF 搜索词必须 BadParam 拒（实际 {e}）"
+                );
+            }
+            // 合法形制不误伤：空白/制表/引号原样放行
+            assert!(build_search_args(source, "some pack\tage\"x\"").is_ok());
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-12）字面测试名优先于 rustc 命名惯例
+    fn upgrade_singlePackage_mapsCorrectArgs() {
+        let (exe, args) = build_action_args("winget", "upgrade", "Git.Git").unwrap();
+        assert_eq!(exe, "winget.exe");
+        assert_eq!(
+            args,
+            argv(&[
+                "upgrade",
+                "--id",
+                "Git.Git",
+                "--exact",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ])
+        );
+        let (_, args) = build_action_args("scoop", "upgrade", "git").unwrap();
+        assert_eq!(args, argv(&["/C", "scoop", "update", "git"]));
+        let (_, args) = build_action_args("choco", "upgrade", "git").unwrap();
+        assert_eq!(args, argv(&["upgrade", "git", "-y", "--no-progress"]));
+        // 单包无 id → 拒（防退化为全量面）；预览与 argv 同源（所见即所跑）
+        for source in ["winget", "scoop", "choco"] {
+            assert!(
+                matches!(
+                    build_action_args(source, "upgrade", "").unwrap_err(),
+                    SysError::BadParam(_)
+                ),
+                "{source}: 单包升级缺 id 必须拒"
+            );
+        }
+        assert!(WingetManager
+            .cmd_preview("upgrade", "Git.Git")
+            .unwrap()
+            .contains("winget upgrade --id Git.Git --exact --silent"));
+        assert_eq!(
+            ScoopManager.cmd_preview("upgrade", "git").unwrap(),
+            "scoop update git"
+        );
+        assert_eq!(
+            ChocoManager.cmd_preview("upgrade", "git").unwrap(),
+            "choco upgrade git -y --no-progress"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-12）字面测试名优先于 rustc 命名惯例
+    fn search_unknownSource_errsNamingThree() {
+        let e = build_search_args("apt", "vim").unwrap_err();
+        assert!(matches!(e, SysError::BadParam(_)));
+        let msg = e.to_string();
+        for name in ["winget", "scoop", "choco"] {
+            assert!(
+                msg.contains(name),
+                "未知源错误须点名三台可用管理器（实际: {msg}）"
+            );
+        }
+        // 变更面同谱：未知源同样点名三台
+        let msg = build_action_args("apt", "install", "vim")
+            .unwrap_err()
+            .to_string();
+        for name in ["winget", "scoop", "choco"] {
+            assert!(msg.contains(name), "变更面未知源须点名三台（实际: {msg}）");
+        }
     }
 }

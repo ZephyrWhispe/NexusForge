@@ -18,5 +18,5 @@ pub mod winops;
 pub use error::{Result, SysError};
 pub use metrics::{MetricsBuffer, MetricsPoint};
 pub use module::SysModule;
-pub use pkg::{PkgEntry, PkgManager};
+pub use pkg::{PkgEntry, PkgManager, PkgSearchRow};
 pub use process::{is_protected, KillAudit, ProcessRow, ProcessTable, PROCESS_SAMPLE_GAP_MS};
