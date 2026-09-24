@@ -371,6 +371,12 @@
 无 `edge_map` 键由新码 serde default 兜住（零迁移臂已在 `edgeMap_legacyTwoEdgeJson_stillLoads`
 钉死，人工只需验真机）——双端到位后，上下缘各做一次真机切换 + 对端回移释放，两臂才算关账。
 
+**冒烟清单登记（T-B7-9 修饰键同步，批次尾人工）**：两机 CapsLock **故意反相** → 跨缘切换
+成功即对齐（受控端向控制端灯态拍齐，切换时机臂）；首次配对时机=发起端向应答端单向对齐
+（应答端为权威，防双向各拍对方落回反相）。版本偏差两臂：旧对端 ControlTake/PairAccept 无
+`locks` 键 ⇒ None=未知不静默同步（`controlTake_legacyPayloadWithoutLocks_parsesNone` 夹具
+已钉解析臂，真机验"不炸且不对齐"）；读回校验不符须日志点名锁键+目标态（不谎报对齐）。
+
 **续跑序**：B7 代码批（T-B7-1..28）由本战役 goal 连续驱动；B8 与 D-31/D-32 放行仍待用户明示。
 
 ## 8. B3 剪贴板深化（蓝本 §3.1 Ortu 核心功能清单）

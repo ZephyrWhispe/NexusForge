@@ -12,7 +12,7 @@
 //!
 //! 后续会话（K3）以 paired.json 的指纹白名单为准入依据。
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +24,10 @@ use tokio::sync::watch;
 
 use host_core::device::DeviceIdentity;
 use host_core::error::AppError;
+use host_core::ports::{KeyboardLedPort, LockStates};
 use host_core::wire::{read_frame, write_frame, Frame, MsgType, HANDSHAKE_TIMEOUT};
+
+use crate::locksync::sync_toward;
 
 /// 一次性码有效期
 pub const CODE_TTL: Duration = Duration::from_secs(120);
@@ -149,6 +152,11 @@ struct PairReplyPayload {
     fingerprint: String,
     /// Reject 时的原因：code | fingerprint | self | busy
     reason: Option<String>,
+    /// 应答端锁键灯态（T-B7-9 首次配对时机；仅 PairAccept 携带，Reject 恒 None。
+    /// 版本偏差登记（§7.3 冒烟清单）：旧对端无此键 ⇒ None=未知不静默对齐；
+    /// 新帧多余键旧码 serde 忽略——发起端对齐应答端须双端到位）
+    #[serde(default)]
+    locks: Option<LockStates>,
 }
 
 /// 校验"指纹 = SHA256(公钥)"绑定（防伪造公钥/指纹组合）
@@ -164,6 +172,8 @@ pub struct PairingService {
     identity: Arc<DeviceIdentity>,
     codes: Arc<PairCodeManager>,
     store: Arc<PairStore>,
+    /// T-B7-9 修饰键同步端口（init 后经 set_led 注入；None=无键盘灯态面，配对帧不携带 locks）
+    led: RwLock<Option<Arc<dyn KeyboardLedPort>>>,
 }
 
 /// 配对成功回调（服务端接受 / 客户端完成均触发）
@@ -202,7 +212,18 @@ impl PairingService {
             identity,
             codes,
             store,
+            led: RwLock::new(None),
         })
+    }
+
+    /// 注入 LED 端口（kvm init 时经 Ports 查询后调用；既有测试零扰动）
+    pub fn set_led(&self, led: Option<Arc<dyn KeyboardLedPort>>) {
+        *self.led.write() = led;
+    }
+
+    /// 本机锁键灯态（端口缺失 ⇒ None=未知，配对帧不携带、对端不静默对齐）
+    fn led_states(&self) -> Option<LockStates> {
+        self.led.read().as_ref().map(|p| p.read_lock_states())
     }
 
     /// 配对请求接入循环（被配对端）：仅处理 PairRequest 帧
@@ -267,6 +288,7 @@ impl PairingService {
                         pubkey_b64: b64_encode(&self.identity.public_key()),
                         fingerprint: self.identity.pubkey_fingerprint.clone(),
                         reason: Some($reason.into()),
+                        locks: None,
                     };
                     let _ = write_frame(
                         &mut stream,
@@ -319,6 +341,7 @@ impl PairingService {
                 pubkey_b64: b64_encode(&self.identity.public_key()),
                 fingerprint: self.identity.pubkey_fingerprint.clone(),
                 reason: None,
+                locks: self.led_states(),
             };
             write_frame(
                 &mut stream,
@@ -395,6 +418,11 @@ impl PairingService {
                     "对端公钥与指纹不匹配（疑似伪造）",
                     None,
                 ));
+            }
+            // T-B7-9 首次配对时机：发起端对齐应答端灯态（应答端为准、单向对齐，
+            // 防双向各拍对方落回反相；locks=None=旧对端未知⇒诚实 no-op）
+            if let (Some(remote), Some(led)) = (reply.locks, self.led.read().clone()) {
+                sync_toward(led.as_ref(), &remote);
             }
             let peer = PairedPeer {
                 device_id: reply.device_id,

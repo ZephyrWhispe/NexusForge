@@ -16,7 +16,8 @@ use host_core::module::{
     priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
 };
 use host_core::ports::{
-    ClipContent, CryptoPort, InputHookPort, InputInjectPort, RawInput, ScreenInfoPort, ScreenRect,
+    ClipContent, CryptoPort, InputHookPort, InputInjectPort, KeyboardLedPort, RawInput,
+    ScreenInfoPort, ScreenRect,
 };
 
 use crate::config::{EdgeMapConfig, KvmConfig};
@@ -24,6 +25,7 @@ use crate::discovery::{
     DiscoveryConfig, DiscoveryHandle, DiscoveryService, OwnIdentity, PeerEvent,
 };
 use crate::edge::{ControlReleasePayload, ControlTakePayload, Decision, Edge, EdgeSwitch};
+use crate::locksync::sync_toward;
 use crate::pairing::{PairCodeManager, PairStore, PairedPeer, PairingService};
 use crate::session::{MsgType, SessionEvent, SessionHandle, SessionManager, SessionServeHandle};
 use crate::transfer::{self, AckPayload, ChunkOutcome, MetaOutcome, TransferManager};
@@ -74,6 +76,8 @@ pub struct KvmModule {
     hook: RwLock<Option<Arc<dyn InputHookPort>>>,
     inject: RwLock<Option<Arc<dyn InputInjectPort>>>,
     screen: RwLock<Option<Arc<dyn ScreenInfoPort>>>,
+    /// 锁键灯态端口（T-B7-9 修饰键同步；缺失=无同步面，两时机诚实 no-op）
+    led: RwLock<Option<Arc<dyn KeyboardLedPort>>>,
     /// 边缘切换状态机（钩子线程锁内决策；worker 释放判定亦经此锁）
     edge_switch: Arc<Mutex<EdgeSwitch>>,
     /// 受控端标志（收到 ControlTake 置位）
@@ -131,6 +135,7 @@ impl KvmModule {
             rt_handle: RwLock::new(None),
             hook: RwLock::new(None),
             inject: RwLock::new(None),
+            led: RwLock::new(None),
             screen: RwLock::new(None),
             edge_switch: Arc::new(Mutex::new(EdgeSwitch::new(HashMap::new()))),
             controlled: Arc::new(AtomicBool::new(false)),
@@ -443,6 +448,7 @@ impl Module for KvmModule {
         *self.hook.write() = ctx.ports.get::<dyn InputHookPort>();
         *self.inject.write() = ctx.ports.get::<dyn InputInjectPort>();
         *self.screen.write() = ctx.ports.get::<dyn ScreenInfoPort>();
+        *self.led.write() = ctx.ports.get::<dyn KeyboardLedPort>();
         let dir = Self::data_dir(&ctx);
         let identity = Arc::new(DeviceIdentity::load_or_create(&dir, crypto)?);
         tracing::info!(
@@ -499,6 +505,8 @@ impl Module for KvmModule {
             PairStore::load_or_default(&dir).map_err(|e| ModuleError::Init(e.to_string()))?,
         );
         let pairing = PairingService::new(identity.clone(), codes.clone(), store.clone());
+        // T-B7-9 首次配对时机：LED 端口下传配对服务（None=配对帧不携带 locks）
+        pairing.set_led(self.led.read().clone());
 
         // ③ K6 接收端状态机：incoming 根目录
         let incoming_dir = dir.join("incoming");
@@ -590,6 +598,8 @@ impl Module for KvmModule {
         let transfers_for_ev = transfers.clone();
         // K7 受控端：注入端口 + 受控标志（InputEvent/控制帧处理用）
         let inject_for_ev = self.inject.read().clone();
+        // T-B7-9：受控端收 ControlTake 携带 locks 时对齐本机灯态（None=旧对端不静默同步）
+        let led_for_ev = self.led.read().clone();
         let controlled_for_ev = self.controlled.clone();
         let edge_for_ev = self.edge_switch.clone();
         rt.spawn(async move {
@@ -755,6 +765,14 @@ impl Module for KvmModule {
                                         "kvm",
                                         serde_json::json!({ "role": "controlled", "by": p.by, "edge": p.edge }),
                                     ));
+                                    // T-B7-9 切换成功时机：向控制方灯态对齐
+                                    // （keybd_event+读回重试移出事件循环，同 FileMeta 慢操作纪律）
+                                    if let (Some(remote), Some(led)) = (p.locks, led_for_ev.clone())
+                                    {
+                                        tokio::task::spawn_blocking(move || {
+                                            sync_toward(led.as_ref(), &remote);
+                                        });
+                                    }
                                 }
                                 Err(e) => tracing::warn!(error = %e, "ControlTake 载荷非法"),
                             }
@@ -850,6 +868,7 @@ impl Module for KvmModule {
             let discovery_w = discovery.clone();
             let es_w = self.edge_switch.clone();
             let bus_w = bus.clone();
+            let led_w = self.led.read().clone();
             let own_id = own_device_id;
             rt.spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
@@ -905,6 +924,8 @@ impl Module for KvmModule {
                                     let payload = serde_json::to_vec(&ControlTakePayload {
                                         by: own_id.clone(),
                                         edge: edge.unwrap_or(Edge::Right),
+                                        // T-B7-9：顺带携带本机灯态，受控端据此对齐
+                                        locks: led_w.as_ref().map(|p| p.read_lock_states()),
                                     })
                                     .unwrap_or_default();
                                     let frame = crate::session::Frame {

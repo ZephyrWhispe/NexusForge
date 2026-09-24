@@ -11,9 +11,9 @@ use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
     CapturePort, ClipboardPort, ConptyPort, CryptoPort, DockerPipePort, HelloPort, HelperSpawnPort,
-    HotkeyWinPort, InputHookPort, InputInjectPort, MemLockPort, OcrPort, PerfPort, Ports, ProcPort,
-    RecycleBinPort, RegistryOps, ScreenInfoPort, ServiceCtlPort, ShellPort, SysProxyPort,
-    TaskSchdPort, TaskTogglePort, ThumbPort, UsnIndexPort,
+    HotkeyWinPort, InputHookPort, InputInjectPort, KeyboardLedPort, MemLockPort, OcrPort, PerfPort,
+    Ports, ProcPort, RecycleBinPort, RegistryOps, ScreenInfoPort, ServiceCtlPort, ShellPort,
+    SysProxyPort, TaskSchdPort, TaskTogglePort, ThumbPort, UsnIndexPort,
 };
 use host_core::registry::ModuleRegistry;
 use serde::Serialize;
@@ -130,6 +130,8 @@ impl HostState {
         ports.register::<dyn InputHookPort>(Arc::new(InputHookWin::new()?));
         ports.register::<dyn InputInjectPort>(Arc::new(InputInjectWin::new()));
         ports.register::<dyn ScreenInfoPort>(Arc::new(ScreenInfoWin::new()));
+        // T-B7-9 锁键灯态（kvm-core 修饰键同步的"做"侧）
+        ports.register::<dyn KeyboardLedPort>(Arc::new(win_integration::led::KeyboardLedWin));
         // F4 Shell 缩略图 / F2 回收站 / F5 USN 索引（file-core，docs/impl/05 F）
         ports.register::<dyn ThumbPort>(Arc::new(win_integration::shell::ShellThumb));
         ports.register::<dyn RecycleBinPort>(Arc::new(win_integration::shell::RecycleBin));

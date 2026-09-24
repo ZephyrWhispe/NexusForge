@@ -557,6 +557,31 @@ pub trait InputInjectPort: Port {
     fn inject(&self, events: &[RawInput]) -> Result<(), AppError>;
 }
 
+/// 锁键灯态（T-B7-9 修饰键状态同步；跨网络序列化，经 `#[serde(default)]` 挂
+/// ControlTake/PairAccept 载荷顺带携带——旧对端无 locks 键 ⇒ None=未知不静默同步，
+/// 旧对端读新帧则忽略未知键，零新帧型零 from_u8 触碰）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockStates {
+    pub caps: bool,
+    pub num: bool,
+    pub scroll: bool,
+}
+
+/// 可同步的锁键标识
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockKey {
+    Caps,
+    Num,
+    Scroll,
+}
+
+/// 锁键灯态读写（win-integration：GetKeyboardState LED 位 + keybd_event VK_ 一次）
+pub trait KeyboardLedPort: Port {
+    fn read_lock_states(&self) -> LockStates;
+    /// 施加目标态并**读回校验**：不符返回 Err 点名（调用方 warn，不谎报成功）。
+    fn apply_lock_state(&self, key: LockKey, on: bool) -> Result<(), String>;
+}
+
 /// 虚拟桌面矩形（屏幕原点 + 尺寸，副屏可为负坐标；K7 边缘切换与归一化共用）
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScreenRect {

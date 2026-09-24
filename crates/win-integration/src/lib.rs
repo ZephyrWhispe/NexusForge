@@ -22,6 +22,7 @@ pub mod hello;
 pub mod helper;
 pub mod hotkey;
 pub mod input;
+pub mod led;
 pub mod maintenance;
 pub mod memlock;
 pub mod ocr;

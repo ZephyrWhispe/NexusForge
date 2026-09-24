@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use host_core::ports::{RawInput, ScreenRect};
+use host_core::ports::{LockStates, RawInput, ScreenRect};
 
 /// 共享边（本端视角；T-B7-7 起四值，边角同帧命中由 [`corner_edge`] 对角线裁决）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +69,11 @@ pub struct ControlTakePayload {
     pub by: String,
     /// 控制方切换所用的本端边（对端的回移边为其对面）
     pub edge: Edge,
+    /// 控制方锁键灯态（T-B7-9 切换时机顺带携带；None=旧对端未知⇒不静默对齐）。
+    /// 版本偏差登记（§7.3 冒烟清单）：`#[serde(default)]` 旧帧新码可读；
+    /// 新帧多出的 locks 键被旧对端 serde 忽略——修饰键对齐须双端升级到位才生效。
+    #[serde(default)]
+    pub locks: Option<LockStates>,
 }
 
 /// ControlRelease 载荷（JSON）
@@ -473,6 +478,33 @@ mod tests {
             serde_json::from_str::<Edge>("\"left\"").unwrap(),
             Edge::Left
         );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-9）版本偏差夹具：手写旧格式字节
+    fn controlTake_legacyPayloadWithoutLocks_parsesNone() {
+        // 旧对端（T-B7-8 及以前）发的 ControlTake JSON 无 locks 键 ⇒ 新码可读且
+        // locks=None（未知⇒不静默对齐）。反向偏差：新帧多出的 locks 键被旧码
+        // serde 默认忽略（两侧皆不 deny_unknown_fields），灯态对齐须双端到位。
+        let legacy = r#"{"by":"dev-a","edge":"right"}"#;
+        let p: ControlTakePayload = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.by, "dev-a");
+        assert_eq!(p.edge, Edge::Right);
+        assert_eq!(p.locks, None);
+        // 新码自身往返：Some 态经 JSON 复原
+        let new = ControlTakePayload {
+            by: "dev-a".into(),
+            edge: Edge::Up,
+            locks: Some(LockStates {
+                caps: true,
+                num: false,
+                scroll: true,
+            }),
+        };
+        let back: ControlTakePayload =
+            serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back.locks, new.locks);
+        assert_eq!(back.edge, Edge::Up);
     }
 
     #[test]

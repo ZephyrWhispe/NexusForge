@@ -8,6 +8,7 @@
 pub mod config;
 pub mod discovery;
 pub mod edge;
+pub mod locksync;
 pub mod module;
 pub mod pairing;
 pub mod session;
@@ -19,6 +20,7 @@ pub use edge::{
     corner_edge, ControlReleasePayload, ControlTakePayload, Decision, Edge, EdgeSwitch,
 };
 pub use host_core::device::{DeviceIdentity, PairStore, PairedPeer};
+pub use locksync::{lock_diff, sync_toward};
 pub use module::KvmModule;
 pub use pairing::PairCodeManager;
 pub use session::{SessionEvent, SessionHandle, SessionManager};
