@@ -15,11 +15,15 @@ pub async fn editor_open(
     path: std::path::PathBuf,
     state: State<'_, HostState>,
 ) -> Result<editor_core::SessionInfo, AppError> {
-    let m = state.editor.clone();
-    tauri::async_runtime::spawn_blocking(move || m.sessions().open(&path))
+    let sessions = state.editor.sessions().clone();
+    let blocking = sessions.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || blocking.open(&path))
         .await
         .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
-        .map_err(editor_err)
+        .map_err(editor_err)?;
+    // T-B7-20：列表变更即落清单（warn-only，不阻塞主流程；下同）
+    sessions.save_manifest();
+    Ok(info)
 }
 
 /// 取会话内容（打开后拉取一次）
@@ -52,11 +56,15 @@ pub async fn editor_save(
     id: String,
     state: State<'_, HostState>,
 ) -> Result<editor_core::SessionInfo, AppError> {
-    let m = state.editor.clone();
-    tauri::async_runtime::spawn_blocking(move || m.sessions().save(&id))
+    let sessions = state.editor.sessions().clone();
+    let blocking = sessions.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || blocking.save(&id))
         .await
         .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
-        .map_err(editor_err)
+        .map_err(editor_err)?;
+    // 转码档位被 save 消费落盘——清单行同步收口
+    sessions.save_manifest();
+    Ok(info)
 }
 
 /// 另存为
@@ -66,35 +74,49 @@ pub async fn editor_save_as(
     target: std::path::PathBuf,
     state: State<'_, HostState>,
 ) -> Result<editor_core::SessionInfo, AppError> {
-    let m = state.editor.clone();
-    tauri::async_runtime::spawn_blocking(move || m.sessions().save_as(&id, &target))
+    let sessions = state.editor.sessions().clone();
+    let blocking = sessions.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || blocking.save_as(&id, &target))
         .await
         .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
-        .map_err(editor_err)
+        .map_err(editor_err)?;
+    sessions.save_manifest();
+    Ok(info)
 }
 
-/// 自动保存草稿（前端 3s 防抖调用；写 `<path>.nforge-autosave`）
+/// 自动保存草稿（前端 3s 防抖调用；写 `<path>.nforge-autosave`）。
+/// T-B7-20：可选 cursor_line 顺带更新清单里的定位锚（加可选参≠新命令，零新命令）。
 #[tauri::command]
 pub async fn editor_autosave(
     id: String,
     content: String,
+    cursor_line: Option<u32>,
     state: State<'_, HostState>,
 ) -> Result<bool, AppError> {
-    let m = state.editor.clone();
-    tauri::async_runtime::spawn_blocking(move || m.sessions().autosave(&id, &content))
-        .await
-        .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
-        .map_err(editor_err)
+    let sessions = state.editor.sessions().clone();
+    let blocking = sessions.clone();
+    let ok =
+        tauri::async_runtime::spawn_blocking(move || blocking.autosave(&id, &content, cursor_line))
+            .await
+            .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
+            .map_err(editor_err)?;
+    if ok {
+        sessions.save_manifest();
+    }
+    Ok(ok)
 }
 
 /// 关闭会话（清理草稿；返回关闭时是否脏——供 UI 提示）
 #[tauri::command]
 pub async fn editor_close(id: String, state: State<'_, HostState>) -> Result<bool, AppError> {
-    let m = state.editor.clone();
-    tauri::async_runtime::spawn_blocking(move || m.sessions().close(&id))
+    let sessions = state.editor.sessions().clone();
+    let blocking = sessions.clone();
+    let dirty = tauri::async_runtime::spawn_blocking(move || blocking.close(&id))
         .await
         .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
-        .map_err(editor_err)
+        .map_err(editor_err)?;
+    sessions.save_manifest();
+    Ok(dirty)
 }
 
 /// 会话列表
@@ -115,13 +137,17 @@ pub async fn editor_set_encoding(
     eol: editor_core::EolChoice,
     state: State<'_, HostState>,
 ) -> Result<editor_core::EncodingPreview, AppError> {
-    let m = state.editor.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        m.sessions().set_encoding(&session_id, encoding, eol)
+    let sessions = state.editor.sessions().clone();
+    let blocking = sessions.clone();
+    let preview = tauri::async_runtime::spawn_blocking(move || {
+        blocking.set_encoding(&session_id, encoding, eol)
     })
     .await
     .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
-    .map_err(editor_err)
+    .map_err(editor_err)?;
+    // 档位/行尾选择入清单（重启后切换未保存的语义随行回归）
+    sessions.save_manifest();
+    Ok(preview)
 }
 
 /// 恢复 autosave 草稿（T-B7-18 回读口）：仅当草稿比盘上文件新；恢复后置脏待用户保存

@@ -229,7 +229,8 @@ export default function EditorPanel() {
         // 3s 窗口内 model 可能随会话换绑/卸载被 dispose，getValue() 会抛
         // "Model is disposed!"（未捕获 → 全局错误通道刷日志）
         if (model.isDisposed()) return;
-        void editorAutosave(id, model.getValue()).catch((e) =>
+        // T-B7-20：光标行随 autosave 顺带落清单（重启定位的事实源，零新命令）
+        void editorAutosave(id, model.getValue(), ed.getPosition()?.lineNumber).catch((e) =>
           reportError(e, { context: "草稿自动保存失败", dedupeKey: "editor-autosave", toast: false }),
         );
       }, 3000);
@@ -264,6 +265,10 @@ export default function EditorPanel() {
               model.setValue(text);
             } finally {
               loadingLoadRef.current = false;
+            }
+            // T-B7-20：清单恢复行的光标定位在首载落盘内容后执行（切走页签则不抢焦点）
+            if (session.cursor_line > 1 && activeIdRef.current === session.id) {
+              ed.setPosition({ lineNumber: session.cursor_line, column: 1 });
             }
           }
         })

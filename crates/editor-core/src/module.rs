@@ -23,10 +23,12 @@ pub struct EditorModule {
 
 impl EditorModule {
     pub fn new(app_data_dir: &std::path::Path) -> Self {
+        let work_dir = app_data_dir.join("editor");
         Self {
             state: ModuleStateCell::new(),
-            sessions: Arc::new(EditorSessions::new()),
-            work_dir: app_data_dir.join("editor"),
+            // T-B7-20：清单目录=work_dir（session_list.json 与 autosave 日志同根）
+            sessions: Arc::new(EditorSessions::with_store(work_dir.clone())),
+            work_dir,
         }
     }
 
@@ -59,6 +61,15 @@ impl Module for EditorModule {
     }
 
     fn start(&self) -> Result<(), ModuleError> {
+        // T-B7-20：恢复标签行（只 stat 不读内容，懒经 content 首拉）；
+        // 清单=可观测数据谱，坏档弃行均不阻塞启动（warn 在 load_manifest 内）
+        let report = self.sessions.load_manifest();
+        tracing::info!(
+            restored = report.restored,
+            dropped = report.dropped.len(),
+            corrupt = report.corrupt,
+            "编辑器会话清单恢复"
+        );
         self.state.set(ModuleState::Running);
         Ok(())
     }

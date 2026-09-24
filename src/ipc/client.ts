@@ -1561,6 +1561,10 @@ export interface EditorSessionInfoDto {
   big_file: boolean;
   /** >50MB：只读 */
   readonly: boolean;
+  /** 光标所在行（1 起；T-B7-20 清单恢复后首载定位） */
+  cursor_line: number;
+  /** 打开时刻（Unix 毫秒；页签序锚） */
+  opened_ms: number;
 }
 
 export interface PdfInfoDto {
@@ -1589,8 +1593,13 @@ export function editorSave(id: string): Promise<EditorSessionInfoDto> {
 export function editorSaveAs(id: string, target: string): Promise<EditorSessionInfoDto> {
   return invoke("editor_save_as", { id, target });
 }
-export function editorAutosave(id: string, content: string): Promise<boolean> {
-  return invoke("editor_autosave", { id, content });
+/** 自动保存草稿（3s 防抖）；cursorLine=编辑器光标行，顺带更新重启定位锚（T-B7-20） */
+export function editorAutosave(
+  id: string,
+  content: string,
+  cursorLine?: number,
+): Promise<boolean> {
+  return invoke("editor_autosave", { id, content, cursorLine: cursorLine ?? null });
 }
 export function editorClose(id: string): Promise<boolean> {
   return invoke("editor_close", { id });

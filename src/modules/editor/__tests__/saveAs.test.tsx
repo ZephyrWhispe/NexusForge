@@ -94,6 +94,8 @@ const SESS_A: EditorSessionInfoDto = {
   size: 8,
   big_file: false,
   readonly: false,
+  cursor_line: 1,
+  opened_ms: 1000,
 };
 const SESS_B: EditorSessionInfoDto = {
   ...SESS_A,

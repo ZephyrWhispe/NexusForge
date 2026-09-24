@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use encoding_rs::{Encoding, UTF_8};
 
 use crate::error::{EditorError, Result};
+use crate::session_store::SessionMeta;
 
 /// 自动保存文件后缀（脏后由前端防抖调用 autosave 写入；正常保存后清理）
 pub const AUTOSAVE_SUFFIX: &str = ".nforge-autosave";
@@ -20,7 +21,7 @@ pub const BIG_FILE_HIGHLIGHT: u64 = 5 * 1024 * 1024;
 pub const HUGE_FILE_READONLY: u64 = 50 * 1024 * 1024;
 
 /// 文本编码（保存时按原编码回写）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EncodingKind {
     Utf8,
@@ -55,7 +56,7 @@ impl EncodingKind {
 }
 
 /// 行尾（检测：出现 \r\n → Crlf；否则 Lf）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Eol {
     Crlf,
@@ -129,6 +130,10 @@ pub struct SessionInfo {
     pub big_file: bool,
     /// >50MB 只读（前端禁止编辑提交）
     pub readonly: bool,
+    /// 光标所在行（1 起；T-B7-20 随 autosave 更新、清单恢复后首载定位）
+    pub cursor_line: u32,
+    /// 打开时刻（Unix 毫秒；T-B7-20 清单排序锚，兼页签序）
+    pub opened_ms: i64,
 }
 
 struct Session {
@@ -143,11 +148,19 @@ struct Session {
     dirty: bool,
     size: u64,
     content: String,
+    /// T-B7-20 懒读：清单恢复的行=true 前不触碰文件内容（点开首拉时才读盘+检测）
+    loaded: bool,
+    /// 光标行（1 起；随 autosave 顺带更新）
+    cursor_line: u32,
+    /// 打开时刻（Unix 毫秒）；页签序锚
+    opened_ms: i64,
 }
 
 /// 全部会话管理（模块级单例；RwLock 串行化——文本编辑低频重操作）
 pub struct EditorSessions {
     sessions: RwLock<HashMap<String, Session>>,
+    /// 清单目录（None=纯内存不落清单，既有测试/无宿主形态零扰动）
+    store_dir: Option<PathBuf>,
 }
 
 impl Default for EditorSessions {
@@ -160,6 +173,15 @@ impl EditorSessions {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            store_dir: None,
+        }
+    }
+
+    /// 带清单目录的构造（EditorModule 用 `{app_data}/editor`）
+    pub fn with_store(store_dir: PathBuf) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            store_dir: Some(store_dir),
         }
     }
 
@@ -167,7 +189,7 @@ impl EditorSessions {
     /// 若存在比盘上文件更新的 autosave 草稿，置 `autosave_draft`（承重⑨"写了没人读"
     /// 死面收口：open 只探测不改内容，恢复经 `recover_draft` 显式口，UI 提示二选一）
     pub fn open(&self, path: &Path) -> Result<SessionInfo> {
-        let raw = std::fs::read(path)?;
+        let raw = read_source(path)?;
         let size = raw.len() as u64;
         let (encoding, content) = decode(&raw)?;
         let (eol, eol_mixed) = detect_eol(&content);
@@ -191,6 +213,8 @@ impl EditorSessions {
             size,
             big_file: size > BIG_FILE_HIGHLIGHT,
             readonly: size > HUGE_FILE_READONLY,
+            cursor_line: 1,
+            opened_ms: now_ms(),
         };
         self.sessions.write().insert(
             id,
@@ -204,13 +228,19 @@ impl EditorSessions {
                 dirty: false,
                 size,
                 content,
+                loaded: true,
+                cursor_line: 1,
+                opened_ms: info.opened_ms,
             },
         );
         Ok(info)
     }
 
-    /// 取内容（前端打开后拉取一次；>50MB 只读也返回——查看器分片由前端处理）
+    /// 取内容（前端打开后拉取一次；>50MB 只读也返回——查看器分片由前端处理）。
+    /// T-B7-20 懒读口：清单恢复的行在此**首拉才读盘**（此前只 stat 过），
+    /// 读+检测完成后行为与 open() 会话全等。
     pub fn content(&self, id: &str) -> Result<String> {
+        self.ensure_loaded(id)?;
         let map = self.lock();
         let s = map
             .get(id)
@@ -218,8 +248,40 @@ impl EditorSessions {
         Ok(s.content.clone())
     }
 
+    /// 懒读收口：未载入 → 读盘+解码+EOL/草稿探测回填（清单恢复行的唯一文件读点）
+    fn ensure_loaded(&self, id: &str) -> Result<()> {
+        let path = {
+            let map = self.lock();
+            let s = map
+                .get(id)
+                .ok_or_else(|| EditorError::NotFound(id.to_string()))?;
+            if s.loaded {
+                return Ok(());
+            }
+            s.path.clone()
+        };
+        // 读+解码在锁外（IO 不持锁，与 save 同纪律）
+        let raw = read_source(&path)?;
+        let size = raw.len() as u64;
+        let (encoding, content) = decode(&raw)?;
+        let (_, eol_mixed) = detect_eol(&content);
+        let autosave_draft = draft_newer_than(&path);
+        let mut map = self.lock();
+        if let Some(s) = map.get_mut(id) {
+            s.encoding = encoding;
+            // eol 保留清单里的用户选择档（检测只补 mixed 事实）
+            s.eol_mixed = eol_mixed;
+            s.autosave_draft = autosave_draft;
+            s.size = size;
+            s.content = content;
+            s.loaded = true;
+        }
+        Ok(())
+    }
+
     /// 更新内容并置脏标记
     pub fn update(&self, id: &str, content: &str) -> Result<bool> {
+        self.ensure_loaded(id)?;
         let mut s = self.get_mut(id)?;
         if s.size > HUGE_FILE_READONLY {
             return Err(EditorError::BadParam(
@@ -234,6 +296,8 @@ impl EditorSessions {
     /// 保存：按**生效编码**回写（preferred 未设=保持原编码恒等）；EOL 按会话统一
     /// （混合时整文件统一——UI 已明示）。成功后清脏标记 + 删除 autosave 文件。
     pub fn save(&self, id: &str) -> Result<SessionInfo> {
+        // 懒读防线：未载入的清单行直接保存=拿空缓冲覆盖盘上真文，必须先读
+        self.ensure_loaded(id)?;
         let (raw, info) = {
             let mut map = self.lock();
             let s = map
@@ -266,6 +330,7 @@ impl EditorSessions {
 
     /// 另存为（生效编码回写；不改动原会话绑定的路径语义之外的脏状态）
     pub fn save_as(&self, id: &str, target: &Path) -> Result<SessionInfo> {
+        self.ensure_loaded(id)?;
         let raw = {
             let map = self.lock();
             let s = map
@@ -302,6 +367,7 @@ impl EditorSessions {
         encoding: EncodingKindDto,
         eol: EolChoice,
     ) -> Result<EncodingPreview> {
+        self.ensure_loaded(id)?;
         let to = encoding.to_kind();
         let mut map = self.lock();
         let s = map
@@ -368,11 +434,15 @@ impl EditorSessions {
         s.content = text;
         s.dirty = true;
         s.autosave_draft = false;
+        // 草稿内容已进驻：清单恢复行不得再被首拉覆盖（loaded 收口）
+        s.loaded = true;
         Ok(session_info(id, s))
     }
 
-    /// 自动保存草稿（脏内容写 `<path>.nforge-autosave`；崩溃恢复入口）
-    pub fn autosave(&self, id: &str, content: &str) -> Result<bool> {
+    /// 自动保存草稿（脏内容写 `<path>.nforge-autosave`；崩溃恢复入口）。
+    /// T-B7-20：顺带携光标行（Some=更新，清单里重启定位的事实源；None=不动）
+    pub fn autosave(&self, id: &str, content: &str, cursor_line: Option<u32>) -> Result<bool> {
+        self.ensure_loaded(id)?;
         let p = {
             let mut map = self.lock();
             let s = map
@@ -383,6 +453,9 @@ impl EditorSessions {
             }
             s.dirty = true;
             s.content = content.to_string();
+            if let Some(line) = cursor_line {
+                s.cursor_line = line.max(1);
+            }
             autosave_path(&s.path)
         };
         // 草稿恒 UTF-8（恢复时重新检测，无需保持原编码）
@@ -407,12 +480,96 @@ impl EditorSessions {
         Ok(was_dirty)
     }
 
-    /// 全部会话列表
+    /// 全部会话列表（T-B7-20：按 opened_ms 升序=页签序，HashMap 随机序不再外泄）
     pub fn list(&self) -> Vec<SessionInfo> {
-        self.lock()
+        let mut out: Vec<SessionInfo> = self
+            .lock()
             .iter()
             .map(|(id, s)| session_info(id, s))
-            .collect()
+            .collect();
+        out.sort_by_key(|i| i.opened_ms);
+        out
+    }
+
+    /// 把当前标签行写清单（T-B7-20）。store 未装配 ⇒ no-op（纯内存形态零扰动）；
+    /// 写失败仅 warn——清单=可观测数据谱（T-B7-14 裁决族），编辑主流程不许被它阻塞。
+    /// 由 src-tauri 命令层在列表变更后调用（open/close/save/save_as/autosave/set_encoding）。
+    pub fn save_manifest(&self) {
+        let Some(dir) = self.store_dir.clone() else {
+            return;
+        };
+        let rows: Vec<SessionMeta> = {
+            let map = self.lock();
+            let mut rows: Vec<SessionMeta> = map
+                .values()
+                .map(|s| SessionMeta {
+                    path: s.path.display().to_string(),
+                    cursor_line: s.cursor_line,
+                    eol: s.eol,
+                    preferred_encoding: s.preferred_encoding,
+                    opened_ms: s.opened_ms,
+                })
+                .collect();
+            rows.sort_by_key(|r| r.opened_ms);
+            rows
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(error = %e, "会话清单目录创建失败");
+            return;
+        }
+        if let Err(e) = crate::session_store::write_manifest(&dir, &rows) {
+            tracing::warn!(error = %e, "会话清单写入失败（不阻塞编辑）");
+        }
+    }
+
+    /// 启动恢复标签行（EditorModule::start 调用；承"恢复的是行非内容"）。
+    /// 盘上已删 ⇒ 弃行 + warn 点名（不显示死标签）；坏档 ⇒ `.corrupt` 留证 + 空继续；
+    /// 已在表的同路径行跳过（幂等：二次 start 不双份）。
+    pub fn load_manifest(&self) -> crate::session_store::ManifestReport {
+        let Some(dir) = self.store_dir.clone() else {
+            return Default::default();
+        };
+        let (rows, corrupt) = crate::session_store::read_manifest(&dir);
+        let mut report = crate::session_store::ManifestReport {
+            corrupt,
+            ..Default::default()
+        };
+        let mut map = self.lock();
+        for meta in rows {
+            let path = PathBuf::from(&meta.path);
+            let already = map.values().any(|s| s.path == path);
+            if already {
+                continue;
+            }
+            // stat 校验（不读内容）：文件已删的行不恢复
+            let Ok(md) = std::fs::metadata(&path) else {
+                tracing::warn!(path = %meta.path, "会话清单行对应文件已不在盘上，弃行");
+                report.dropped.push(meta.path);
+                continue;
+            };
+            let size = md.len();
+            let id = uuid::Uuid::now_v7().to_string();
+            map.insert(
+                id,
+                Session {
+                    path,
+                    // 检测档待首拉回填：未载入期 effective=preferred.unwrap_or(Utf8)
+                    encoding: meta.preferred_encoding.unwrap_or(EncodingKind::Utf8),
+                    preferred_encoding: meta.preferred_encoding,
+                    autosave_draft: false,
+                    eol: meta.eol,
+                    eol_mixed: false,
+                    dirty: false,
+                    size,
+                    content: String::new(),
+                    loaded: false,
+                    cursor_line: meta.cursor_line.max(1),
+                    opened_ms: meta.opened_ms,
+                },
+            );
+            report.restored += 1;
+        }
+        report
     }
 
     fn get_mut(&self, id: &str) -> Result<SessionMutGuard<'_>> {
@@ -478,7 +635,43 @@ fn session_info(id: &str, s: &Session) -> SessionInfo {
         size: s.size,
         big_file: s.size > BIG_FILE_HIGHLIGHT,
         readonly: s.size > HUGE_FILE_READONLY,
+        cursor_line: s.cursor_line,
+        opened_ms: s.opened_ms,
     }
+}
+
+/// 打开时刻（Unix 毫秒）。系统时钟早于 epoch 的理论臂归 0——排序锚退化不影响正确性。
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+// 文件内容**唯一读点**计数（任务书行"FakeFS 计"的收口形态：不引入文件抽象层，
+// 懒读判据「首开前零内容读」以漏斗计数在 cfg(test) 下机检——偏已在提交信息登记）。
+// thread_local：cargo 测试并行，进程级计数会被其他用例如 open() 污染。
+// （普通注释而非 ///：doc 注释挂 macro 调用项上会被 rustc 判 unused doc comment）
+#[cfg(test)]
+thread_local! {
+    static TEST_SOURCE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_source_reads() -> usize {
+    TEST_SOURCE_READS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_source_reads() {
+    TEST_SOURCE_READS.with(|c| c.set(0));
+}
+
+/// 读原始字节（一切文件内容读取都过此口；stat/mtime 探测不算内容读）
+fn read_source(path: &Path) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    TEST_SOURCE_READS.with(|c| c.set(c.get() + 1));
+    Ok(std::fs::read(path)?)
 }
 
 fn autosave_path(path: &Path) -> PathBuf {
@@ -685,7 +878,9 @@ mod tests {
         let sessions = EditorSessions::new();
         let info = sessions.open(&path).unwrap();
         sessions.update(&info.id, "# title\nchanged").unwrap();
-        sessions.autosave(&info.id, "# title\nchanged").unwrap();
+        sessions
+            .autosave(&info.id, "# title\nchanged", None)
+            .unwrap();
         assert!(path.with_file_name("note.md.nforge-autosave").is_file());
 
         // 正常保存清理草稿
@@ -922,5 +1117,128 @@ mod tests {
         sessions.save(&info.id).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), "草稿内容".as_bytes());
         assert!(!draft.exists(), "正常保存清草稿（既有纪律同源）");
+    }
+
+    // ======================== T-B7-20 会话持久化（标签行清单） ========================
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-20）字面测试名优先于 rustc 命名惯例
+    fn sessionManifest_roundTripsReopen() {
+        let dir = tmpdir("manifest");
+        let store = dir.join("store");
+        let path = dir.join("note.txt");
+        let path2 = dir.join("second.md");
+        std::fs::write(&path, "第一行\n第二行\n第三行\n".as_bytes()).unwrap();
+        std::fs::write(&path2, b"# doc").unwrap();
+
+        let s1 = EditorSessions::with_store(store.clone());
+        let info = s1.open(&path).unwrap();
+        // 毫秒级排序锚：两连开可能同 ms（HashMap 序退化非确定），睡一拍钉死页签序
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        s1.open(&path2).unwrap();
+        // 光标行随 autosave 顺带更新（零新命令承载）；档位切换入清单
+        s1.autosave(&info.id, "改后内容", Some(7)).unwrap();
+        s1.set_encoding(&info.id, EncodingKindDto::Gbk, EolChoice::Crlf)
+            .unwrap();
+        s1.save_manifest();
+        assert!(crate::session_store::manifest_path(&store).is_file());
+
+        // 新进程形态：全新实例只读清单——两标签关重开列表在场
+        let s2 = EditorSessions::with_store(store);
+        let report = s2.load_manifest();
+        assert_eq!(report.restored, 2);
+        assert!(report.dropped.is_empty());
+        assert!(!report.corrupt);
+        let rows = s2.list();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "note.txt");
+        assert_eq!(rows[1].name, "second.md", "opened_ms 升序=页签序");
+        assert_eq!(rows[0].path, path.display().to_string());
+        assert_eq!(rows[0].cursor_line, 7, "重启定位的事实源在清单里");
+        assert_eq!(rows[0].preferred_encoding, Some(EncodingKind::Gbk));
+        assert_eq!(rows[0].eol, Eol::Crlf, "用户行尾选择随行回归");
+        assert_eq!(rows[1].cursor_line, 1, "未动过的行回到默认位");
+        // 点开首拉：恢复的是行非内容——内容=盘上真相（未保存的编辑器缓冲不在
+        // 清单职责内，较新草稿经 autosave_draft 提示通道走 recover_draft）
+        assert_eq!(s2.content(&rows[0].id).unwrap(), "第一行\n第二行\n第三行\n");
+        assert_eq!(s2.list()[0].size, "第一行\n第二行\n第三行\n".len() as u64);
+        // 幂等：二次 load 不双份
+        assert_eq!(s2.load_manifest().restored, 0);
+        assert_eq!(s2.list().len(), 2);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn sessionManifest_deletedOnDisk_rowDroppedWithWarn() {
+        let dir = tmpdir("manifest-dead");
+        let store = dir.join("store");
+        let path = dir.join("doomed.txt");
+        std::fs::write(&path, b"x").unwrap();
+
+        let s1 = EditorSessions::with_store(store.clone());
+        s1.open(&path).unwrap();
+        s1.save_manifest();
+        std::fs::remove_file(&path).unwrap();
+
+        let s2 = EditorSessions::with_store(store);
+        let report = s2.load_manifest();
+        assert_eq!(report.restored, 0);
+        assert_eq!(
+            report.dropped,
+            vec![path.display().to_string()],
+            "弃行必须点名"
+        );
+        assert!(s2.list().is_empty(), "死标签不上屏");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn sessionRestore_lazyRead_noFileAccessUntilOpen() {
+        let dir = tmpdir("manifest-lazy");
+        let store = dir.join("store");
+        let path = dir.join("big.txt");
+        std::fs::write(&path, "内容字节").unwrap();
+
+        let s1 = EditorSessions::with_store(store.clone());
+        s1.open(&path).unwrap();
+        s1.save_manifest();
+
+        reset_test_source_reads();
+        let s2 = EditorSessions::with_store(store);
+        assert_eq!(s2.load_manifest().restored, 1);
+        assert_eq!(s2.list().len(), 1);
+        assert_eq!(
+            test_source_reads(),
+            0,
+            "恢复只 stat 不读内容——启动扫大盘是任务书行点名的负形"
+        );
+        // 点开才读：首拉恰一次内容读
+        let id = s2.list()[0].id.clone();
+        s2.content(&id).unwrap();
+        assert_eq!(test_source_reads(), 1);
+        // 已载入后再次取内容不再触盘
+        s2.content(&id).unwrap();
+        assert_eq!(test_source_reads(), 1);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn sessionManifest_corruptFile_emptyWithWarn() {
+        let dir = tmpdir("manifest-corrupt");
+        let store = dir.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(crate::session_store::manifest_path(&store), b"{{{ broken").unwrap();
+
+        let s = EditorSessions::with_store(store.clone());
+        let report = s.load_manifest();
+        assert!(report.corrupt, "损坏必须上报（静默=谎报）");
+        assert_eq!(report.restored, 0);
+        assert!(s.list().is_empty(), "坏档按空清单继续，不锁死启动");
+        assert!(
+            crate::session_store::manifest_path(&store)
+                .with_extension("json.corrupt")
+                .exists(),
+            "损坏档改名留证"
+        );
     }
 }

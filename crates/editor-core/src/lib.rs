@@ -10,6 +10,7 @@ pub mod error;
 pub mod module;
 pub mod pdf;
 pub mod session;
+pub mod session_store;
 
 pub use error::{EditorError, Result};
 pub use module::EditorModule;

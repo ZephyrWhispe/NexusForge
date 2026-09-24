@@ -25,6 +25,7 @@ const stub = vi.hoisted(() => ({
   editors: [] as Array<{
     handlers: Array<() => void>;
     current: { setValue: (v: string) => void; getValue: () => string; dispose: () => void } | null;
+    positionCalls: Array<{ lineNumber: number; column: number }>;
   }>,
 }));
 
@@ -63,6 +64,7 @@ vi.mock("../../../monaco/setup", () => {
           const editor = {
             handlers: [] as Array<() => void>,
             current: null as FakeModel | null,
+            positionCalls: [] as Array<{ lineNumber: number; column: number }>,
           };
           stub.editors.push(editor as unknown as (typeof stub.editors)[number]);
           return {
@@ -80,6 +82,11 @@ vi.mock("../../../monaco/setup", () => {
             getScrollHeight: () => 1,
             getLayoutInfo: () => ({ height: 100 }),
             setScrollTop: () => {},
+            // T-B7-20：autosave 顺带上报光标行（重启定位锚）
+            getPosition: () => ({ lineNumber: 7, column: 1 }),
+            setPosition: (p: { lineNumber: number; column: number }) => {
+              editor.positionCalls.push(p);
+            },
             dispose: () => {},
           };
         },
@@ -127,12 +134,15 @@ const SESS_A: EditorSessionInfoDto = {
   size: 8,
   big_file: false,
   readonly: false,
+  cursor_line: 1,
+  opened_ms: 1000,
 };
 const SESS_B: EditorSessionInfoDto = {
   ...SESS_A,
   id: "s2",
   path: "C:\\notes\\b.txt",
   name: "b.txt",
+  opened_ms: 2000,
 };
 
 let container: HTMLDivElement;
@@ -238,7 +248,7 @@ describe("EditorPanel 脏标记/autosave 纪律（B1 批次尾冒烟缺陷）", 
     expect(editorAutosave).not.toHaveBeenCalled(); // 防抖未满不抢跑
     await advance(1500);
     expect(editorAutosave).toHaveBeenCalledTimes(1);
-    expect(editorAutosave).toHaveBeenCalledWith("s1", "用户输入");
+    expect(editorAutosave).toHaveBeenCalledWith("s1", "用户输入", 7);
   });
 
   it("editorUnmountClearsPendingAutosave：卸载后在途定时器不得复活", async () => {
@@ -298,5 +308,28 @@ describe("EditorPanel 脏标记/autosave 纪律（B1 批次尾冒烟缺陷）", 
     expect(stub.createCount).toBe(1);
     expect(container.textContent).toContain("b.txt");
     expect(container.textContent).toContain("●"); // a.txt 在编辑中置的脏点不因切会话丢失
+  });
+
+  it("editorPanel_reopenTabs_surviveRefresh：清单恢复行挂载即上页签条，点开首载定位光标行", async () => {
+    // 后端 editor 模块 start 已 load_manifest 恢复行（前端零 open 动作）：
+    // 面板挂载只经 editorSessions 真相源拉取——页签条即清单的投影
+    liveList = [{ ...SESS_A, cursor_line: 5 }, SESS_B];
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<EditorPanel />);
+    });
+    await act(async () => {}); // 挂载拉取落定
+    const tabs = [...container.querySelectorAll('[role="tab"]')].map((t) =>
+      t.textContent?.trim(),
+    );
+    expect(tabs).toEqual(["a.txt", "b.txt"]); // opened_ms 升序=页签序
+    expect(editorOpen).not.toHaveBeenCalled(); // 恢复不重开文件
+    expect(editorContent).not.toHaveBeenCalled(); // 懒读：未点开的行不触内容拉取
+    // 点开恢复行 → 首拉内容后按清单锚定位光标（cursor_line=5>1 才动，1 不抢位）
+    await click(container.querySelectorAll('[role="tab"]')[0]);
+    await act(async () => {}); // editorContent 微任务链落定
+    expect(editorContent).toHaveBeenCalledWith("s1");
+    const ed = stub.editors[stub.editors.length - 1];
+    expect(ed.positionCalls).toEqual([{ lineNumber: 5, column: 1 }]);
   });
 });
