@@ -290,6 +290,8 @@ pub fn run() {
             commands::editor_autosave,
             commands::editor_close,
             commands::editor_sessions,
+            commands::editor_set_encoding,
+            commands::editor_recover_draft,
             commands::pdf_info,
             commands::pdf_merge,
             commands::pdf_split,

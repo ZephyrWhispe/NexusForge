@@ -4,7 +4,9 @@ import {
   tokens,
   Badge,
   Button,
+  Dropdown,
   Input,
+  Option,
   Spinner,
 } from "@fluentui/react-components";
 import { marked } from "marked";
@@ -13,8 +15,10 @@ import {
   editorClose,
   editorContent,
   editorOpen,
+  editorRecoverDraft,
   editorSave,
   editorSaveAs,
+  editorSetEncoding,
   editorSessions,
   pdfCompress,
   pdfInfo,
@@ -22,6 +26,8 @@ import {
   pdfSplit,
   pdfWatermark,
   parseAppError,
+  type EditorEncodingKind,
+  type EditorEolChoice,
   type EditorSessionInfoDto,
   type PdfInfoDto,
 } from "../../ipc/client";
@@ -42,6 +48,9 @@ import EmptyState from "../../components/EmptyState";
  * - D-18：脏缓冲区关闭、PDF 原地改写（压缩/水印）一律经 confirmAction 二次确认
  * - T-B1-10：另存为——目标路径 Input 沿用打开惯例，后端 save_as 换绑会话 path，
  *   页签名经 refreshSessions（同 editorSessions 真相源）刷新
+ * - T-B7-18：编码/EOL 徽标改可点下拉（真切换回写档位，保存时转码不落中间盘；
+ *   有损切换复述「将丢失 N 个字符」，拒绝即退回原档）；open 时较新
+ *   .nforge-autosave 草稿提示恢复（写了没人读死面收口，恢复口 editor_recover_draft）
  */
 const useStyles = makeStyles({
   root: {
@@ -119,6 +128,18 @@ const useStyles = makeStyles({
 function baseName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
+
+/**
+ * 编码五档下拉词表（value=serde 线上名，label 与 Rust `EncodingKind::label()`
+ * 一一对应——改档两侧同步，镜像纪律同 SchemaForm）
+ */
+const ENCODING_OPTIONS: Array<{ value: EditorEncodingKind; label: string }> = [
+  { value: "utf8", label: "UTF-8" },
+  { value: "utf8bom", label: "UTF-8 BOM" },
+  { value: "utf16le", label: "UTF-16 LE" },
+  { value: "gbk", label: "GBK" },
+  { value: "latin1", label: "Latin-1" },
+];
 
 export default function EditorPanel() {
   const styles = useStyles();
@@ -299,9 +320,27 @@ export default function EditorPanel() {
   const doOpen = () =>
     run("open", async () => {
       const info = await editorOpen(openPath.trim());
-      await refreshSessions();
+      // T-B7-18 草稿回读：open 检测到较新 .nforge-autosave → 先提示恢复再绑编辑区
+      // （顺序即判据：恢复走后端口改内存 content+置脏，模型 effect 首载就拿到草稿，
+      //   不存在"盘内容覆盖草稿"的竞态；不恢复则草稿留盘、下次 open 再提示）
+      if (info.autosave_draft) {
+        const restored = await confirmAction({
+          title: "发现未保存草稿",
+          impact: [`「${info.name}」存在比磁盘文件更新的自动保存草稿`],
+          detail: "上次可能有未保存的编辑。恢复将把草稿载入编辑区（标记未保存）；不恢复则磁盘内容不变，草稿留待下次。",
+          confirmLabel: "恢复草稿",
+        });
+        if (restored) {
+          await editorRecoverDraft(info.id);
+          setStatus(`已恢复「${info.name}」的未保存草稿（保存前不落盘）`);
+        } else {
+          setStatus(`已打开 ${info.name}（草稿保留，下次打开再提示）`);
+        }
+      } else {
+        setStatus(`已打开 ${info.name}（${info.encoding_label}）`);
+      }
       setActiveId(info.id);
-      setStatus(`已打开 ${info.name}（${info.encoding_label}）`);
+      await refreshSessions();
     });
 
   const doSave = (id: string) =>
@@ -363,6 +402,47 @@ export default function EditorPanel() {
   }, [activeId]);
 
   const active = sessions.find((s) => s.id === activeId);
+
+  // T-B7-18 编码切换：后端转码前算丢失数→只改内存档位（不落中间盘）→有损必复述
+  // 「将丢失 N 个字符」，用户拒绝即退回原档（静默丢字与谎称成功同罪）。
+  const doSetEncoding = (next: EditorEncodingKind) =>
+    run(`encoding-${next}`, async () => {
+      if (!active || next === active.encoding) return;
+      const prev = active.encoding;
+      const p = await editorSetEncoding(active.id, next, "preserve");
+      await refreshSessions();
+      const toLabel = ENCODING_OPTIONS.find((o) => o.value === p.to)?.label ?? p.to;
+      if (p.replacement_char_count > 0) {
+        if (
+          !(await confirmAction({
+            title: "有损编码切换确认",
+            impact: [
+              `切到 ${toLabel} 将丢失 ${p.replacement_char_count} 个不可映射字符（保存时按目标编码兜底规则改写）`,
+              `缓冲区 ${p.chars_before} 字符 → 转码后 ${p.chars_after} 字符`,
+            ],
+            detail: "取消＝退回原编码档位。切换只改内存档位，保存前不落盘。",
+            confirmLabel: "保留新编码",
+          }))
+        ) {
+          await editorSetEncoding(active.id, prev, "preserve");
+          await refreshSessions();
+          setStatus("已退回原编码（未做有损转换）");
+          return;
+        }
+        setStatus(`已切到 ${toLabel}：保存时 ${p.replacement_char_count} 个不可映射字符将丢失改写`);
+      } else {
+        setStatus(`保存编码已切到 ${toLabel}（保存时转码，不落中间盘）`);
+      }
+    });
+
+  // T-B7-18 EOL 切换（同一命令的 eol 臂）：preserve＝不动，lf/crlf＝保存时整文件统一
+  const doSetEol = (choice: EditorEolChoice) =>
+    run(`eol-${choice}`, async () => {
+      if (!active || choice === "preserve" || choice === active.eol) return;
+      await editorSetEncoding(active.id, active.encoding, choice);
+      await refreshSessions();
+      setStatus(`行尾将在下次保存时统一为 ${choice.toUpperCase()}`);
+    });
 
   // ---------------- PDF 工具状态 ----------------
   const [pdfPath, setPdfPath] = useState("");
@@ -427,8 +507,44 @@ export default function EditorPanel() {
           <>
             {active && (
               <>
-                <Badge appearance="outline">{active.encoding_label}</Badge>
-                <Badge appearance="outline">{active.eol.toUpperCase()}</Badge>
+                {/* T-B7-18：编码/EOL 徽标改可点下拉（点开的档=生效视图） */}
+                <Dropdown
+                  size="small"
+                  aria-label="切换保存编码"
+                  style={{ minWidth: "110px" }}
+                  value={active.encoding_label}
+                  selectedOptions={[active.encoding]}
+                  onOptionSelect={(_, d) => void doSetEncoding(String(d.optionValue ?? "") as EditorEncodingKind)}
+                >
+                  {ENCODING_OPTIONS.map((o) => (
+                    <Option key={o.value} value={o.value} text={o.label}>
+                      {o.label}
+                    </Option>
+                  ))}
+                </Dropdown>
+                <Dropdown
+                  size="small"
+                  aria-label="切换行尾"
+                  style={{ minWidth: "84px" }}
+                  value={active.eol.toUpperCase()}
+                  selectedOptions={[active.eol]}
+                  onOptionSelect={(_, d) => void doSetEol(String(d.optionValue ?? "preserve") as EditorEolChoice)}
+                >
+                  <Option value="preserve" text="保留当前行尾">
+                    保留当前行尾
+                  </Option>
+                  <Option value="lf" text="LF">
+                    LF
+                  </Option>
+                  <Option value="crlf" text="CRLF">
+                    CRLF
+                  </Option>
+                </Dropdown>
+                {active.preferred_encoding && (
+                  <Badge appearance="outline" color="informative">
+                    编码已切换·保存时转码
+                  </Badge>
+                )}
                 {active.dirty && <Badge appearance="filled" color="warning">未保存</Badge>}
                 {active.big_file && <Badge appearance="outline">大文件·已关高亮</Badge>}
                 {active.readonly && <Badge appearance="filled" color="danger">只读</Badge>}

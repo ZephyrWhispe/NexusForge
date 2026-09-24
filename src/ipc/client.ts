@@ -1530,6 +1530,17 @@ export function desktopNotesDue(): Promise<DesktopNoteDto[]> {
 
 export type EditorEncodingKind = "utf8" | "utf8bom" | "utf16le" | "gbk" | "latin1";
 export type EditorEol = "crlf" | "lf";
+/** T-B7-18：EOL 切换档（preserve=维持当前行尾不动） */
+export type EditorEolChoice = "preserve" | "lf" | "crlf";
+
+/** T-B7-18 转码预览（后端**转码前**算好；replacement_char_count>0 前端必须复述丢失数） */
+export interface EditorEncodingPreviewDto {
+  from: EditorEncodingKind;
+  to: EditorEncodingKind;
+  chars_before: number;
+  chars_after: number;
+  replacement_char_count: number;
+}
 
 export interface EditorSessionInfoDto {
   id: string;
@@ -1537,6 +1548,10 @@ export interface EditorSessionInfoDto {
   name: string;
   encoding: EditorEncodingKind;
   encoding_label: string;
+  /** 待生效切换编码（null=保持检测编码；上方 encoding 已是生效视图） */
+  preferred_encoding: EditorEncodingKind | null;
+  /** 存在比盘上文件更新的 autosave 草稿（open 判定，UI 提示恢复） */
+  autosave_draft: boolean;
   eol: EditorEol;
   /** 混合行尾（保存将整文件统一——UI 需明示） */
   eol_mixed: boolean;
@@ -1582,6 +1597,18 @@ export function editorClose(id: string): Promise<boolean> {
 }
 export function editorSessions(): Promise<EditorSessionInfoDto[]> {
   return invoke("editor_sessions");
+}
+/** 切换回写编码/统一行尾（T-B7-18）：只改内存档位，下一次保存才落盘转码 */
+export function editorSetEncoding(
+  sessionId: string,
+  encoding: EditorEncodingKind,
+  eol: EditorEolChoice,
+): Promise<EditorEncodingPreviewDto> {
+  return invoke("editor_set_encoding", { sessionId, encoding, eol });
+}
+/** 恢复较新的 autosave 草稿（T-B7-18 回读口；恢复后会话置脏待保存） */
+export function editorRecoverDraft(id: string): Promise<EditorSessionInfoDto> {
+  return invoke("editor_recover_draft", { id });
 }
 export function pdfInfo(path: string): Promise<PdfInfoDto> {
   return invoke("pdf_info", { path });

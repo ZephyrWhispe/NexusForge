@@ -39,3 +39,13 @@ commands.allow = ["editor_close"]
 identifier = "allow-editor-sessions"
 description = "允许前端调用 editor_sessions 命令（D-28 按窗最小授权）"
 commands.allow = ["editor_sessions"]
+
+[[permission]]
+identifier = "allow-editor-set-encoding"
+description = "允许前端调用 editor_set_encoding 命令（T-B7-18 编码/EOL 切换；D-28 按窗最小授权）"
+commands.allow = ["editor_set_encoding"]
+
+[[permission]]
+identifier = "allow-editor-recover-draft"
+description = "允许前端调用 editor_recover_draft 命令（T-B7-18 草稿恢复；D-28 按窗最小授权）"
+commands.allow = ["editor_recover_draft"]

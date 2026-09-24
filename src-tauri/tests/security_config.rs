@@ -348,6 +348,9 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-automation-runs-get",
         // T-B7-15 一钮全清死信=抹证据（干跑 dry_run 可给，此枚不给辅助窗）
         "allow-automation-dead-clear",
+        // T-B7-18 编码/EOL 切换与草稿恢复同属内容触盘面（编辑器只存在于 main）
+        "allow-editor-set-encoding",
+        "allow-editor-recover-draft",
     ];
     for (name, cap) in &caps {
         if name == "main" {
@@ -402,6 +405,9 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-sys-pkg-search",
         "allow-automation-runs-get",
         "allow-automation-dead-clear",
+        // T-B7-18 两枚新命令的正对照（aux 禁持 + main 真持=负例不空洞）
+        "allow-editor-set-encoding",
+        "allow-editor-recover-draft",
     ] {
         assert!(
             main_perms.contains(&expect),

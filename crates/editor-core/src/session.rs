@@ -62,6 +62,50 @@ pub enum Eol {
     Lf,
 }
 
+/// IPC 输入侧编码选择（T-B7-18：回写面五档）。与检测侧 `EncodingKind` 分立：
+/// 检测枚举随 chardetng 事实演化，输入面只暴露承诺支持的档位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EncodingKindDto {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Gbk,
+    Latin1,
+}
+
+impl EncodingKindDto {
+    fn to_kind(self) -> EncodingKind {
+        match self {
+            Self::Utf8 => EncodingKind::Utf8,
+            Self::Utf8Bom => EncodingKind::Utf8Bom,
+            Self::Utf16Le => EncodingKind::Utf16Le,
+            Self::Gbk => EncodingKind::Gbk,
+            Self::Latin1 => EncodingKind::Latin1,
+        }
+    }
+}
+
+/// EOL 切换选项（Preserve=维持当前行尾不动）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EolChoice {
+    Preserve,
+    Lf,
+    Crlf,
+}
+
+/// 转码预览（set_encoding 返回；**转码前**算好不可映射字符数——
+/// >0 时前端必须复述「将丢失 N 个字符」，静默丢字与谎称成功同罪）
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EncodingPreview {
+    pub from: EncodingKind,
+    pub to: EncodingKind,
+    pub chars_before: usize,
+    pub chars_after: usize,
+    pub replacement_char_count: usize,
+}
+
 /// 会话元信息（IPC 返回；content 不回传——前端按需拉取）
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SessionInfo {
@@ -71,6 +115,11 @@ pub struct SessionInfo {
     pub encoding: EncodingKind,
     /// 编码显示标签（"UTF-8"/"GBK"…）
     pub encoding_label: &'static str,
+    /// 待生效的切换编码（T-B7-18：Some=保存时转码为该档，None=保持检测编码恒等）；
+    /// 上方 encoding 字段恒为**生效视图**（preferred.unwrap_or(detected)），UI 徽标即时反映切换
+    pub preferred_encoding: Option<EncodingKind>,
+    /// 存在比盘上文件更新的 .nforge-autosave 草稿（open 时判定，恢复口消费）
+    pub autosave_draft: bool,
     pub eol: Eol,
     /// 检测到的 EOL 混合（打开时存在混合行尾，保存将整文件统一——UI 需明示）
     pub eol_mixed: bool,
@@ -85,6 +134,10 @@ pub struct SessionInfo {
 struct Session {
     path: PathBuf,
     encoding: EncodingKind,
+    /// 待生效切换编码（None=保持 encoding 恒等，即旧"保持原编码"行为正对照）
+    preferred_encoding: Option<EncodingKind>,
+    /// open 时检测到的较新 autosave 草稿（内容已随会话载入，恢复与否由 UI 决定）
+    autosave_draft: bool,
     eol: Eol,
     eol_mixed: bool,
     dirty: bool,
@@ -111,11 +164,14 @@ impl EditorSessions {
     }
 
     /// 打开文件：读原始字节 → 编码检测 → 解码 → EOL 检测（不统一，仅标记）
+    /// 若存在比盘上文件更新的 autosave 草稿，置 `autosave_draft`（承重⑨"写了没人读"
+    /// 死面收口：open 只探测不改内容，恢复经 `recover_draft` 显式口，UI 提示二选一）
     pub fn open(&self, path: &Path) -> Result<SessionInfo> {
         let raw = std::fs::read(path)?;
         let size = raw.len() as u64;
         let (encoding, content) = decode(&raw)?;
         let (eol, eol_mixed) = detect_eol(&content);
+        let autosave_draft = draft_newer_than(path);
 
         let id = uuid::Uuid::now_v7().to_string();
         let info = SessionInfo {
@@ -127,6 +183,8 @@ impl EditorSessions {
                 .unwrap_or_else(|| path.display().to_string()),
             encoding,
             encoding_label: encoding.label(),
+            preferred_encoding: None,
+            autosave_draft,
             eol,
             eol_mixed,
             dirty: false,
@@ -139,6 +197,8 @@ impl EditorSessions {
             Session {
                 path: path.to_path_buf(),
                 encoding,
+                preferred_encoding: None,
+                autosave_draft,
                 eol,
                 eol_mixed,
                 dirty: false,
@@ -171,17 +231,17 @@ impl EditorSessions {
         Ok(true)
     }
 
-    /// 保存：保持原编码；EOL 按会话统一（混合时整文件统一——UI 已明示）
-    /// 成功后清脏标记 + 删除 autosave 文件。
+    /// 保存：按**生效编码**回写（preferred 未设=保持原编码恒等）；EOL 按会话统一
+    /// （混合时整文件统一——UI 已明示）。成功后清脏标记 + 删除 autosave 文件。
     pub fn save(&self, id: &str) -> Result<SessionInfo> {
         let (raw, info) = {
             let mut map = self.lock();
             let s = map
                 .get_mut(id)
                 .ok_or_else(|| EditorError::NotFound(id.to_string()))?;
-            // 整文件统一 EOL
+            // 整文件统一 EOL；转码时序=保存时算不落中间盘（T-B7-18）
             let unified = normalize_eol(&s.content, s.eol);
-            let bytes = encode(&unified, s.encoding);
+            let bytes = encode(&unified, s.effective_encoding());
             (bytes, session_info(id, s))
         };
         // 写锁已释放再写文件（避免 IO 慢操作持锁）
@@ -195,11 +255,16 @@ impl EditorSessions {
             s.dirty = false;
             s.eol_mixed = false;
             s.size = raw.len() as u64;
+            // 转码收口：盘上已是目标编码，preferred 消费落定（None 臂=旧行为零变）
+            if let Some(p) = s.preferred_encoding.take() {
+                s.encoding = p;
+            }
+            s.autosave_draft = false;
         }
         Ok(info)
     }
 
-    /// 另存为（编码保持；不改动原会话绑定的路径语义之外的脏状态）
+    /// 另存为（生效编码回写；不改动原会话绑定的路径语义之外的脏状态）
     pub fn save_as(&self, id: &str, target: &Path) -> Result<SessionInfo> {
         let raw = {
             let map = self.lock();
@@ -207,7 +272,7 @@ impl EditorSessions {
                 .get(id)
                 .ok_or_else(|| EditorError::NotFound(id.to_string()))?;
             let unified = normalize_eol(&s.content, s.eol);
-            encode(&unified, s.encoding)
+            encode(&unified, s.effective_encoding())
         };
         std::fs::write(target, &raw)?;
         let mut map = self.lock();
@@ -219,6 +284,90 @@ impl EditorSessions {
         s.eol_mixed = false;
         // size 恒为写盘字节数（与 save 同锚）：GBK 等宽字节下 String::len（UTF-8）会虚高
         s.size = raw.len() as u64;
+        if let Some(p) = s.preferred_encoding.take() {
+            s.encoding = p;
+        }
+        Ok(session_info(id, s))
+    }
+
+    /// 切换回写编码 / 统一行尾（T-B7-18）。**转码前**计算不可映射字符数并如实返回；
+    /// 切换只改内存档位，落盘发生在下一次 save（不落中间盘）。
+    /// 不可映射判据（探针实证后定形）：逐字符 `Encoding::encode` 的第三返回位
+    /// `had_unencodable`——不猜 `?` 字节形，因为 WHATWG 单字节族对不可映射字符发
+    /// **数字字符引用**（中→`&#20013;` 而非 `?`），GBK 才走 `?`，猜字节形会漏计。
+    /// 预览是低频 UI 动作，逐字符探测的开销可接受。
+    pub fn set_encoding(
+        &self,
+        id: &str,
+        encoding: EncodingKindDto,
+        eol: EolChoice,
+    ) -> Result<EncodingPreview> {
+        let to = encoding.to_kind();
+        let mut map = self.lock();
+        let s = map
+            .get_mut(id)
+            .ok_or_else(|| EditorError::NotFound(id.to_string()))?;
+        let from = s.effective_encoding();
+        let enc = to.encoding();
+        let introduced = s
+            .content
+            .chars()
+            .filter(|c| {
+                let mut buf = [0u8; 4];
+                enc.encode(c.encode_utf8(&mut buf)).2
+            })
+            .count();
+        let bytes = encode(&s.content, to);
+        let (roundtrip, _, _) = enc.decode(&bytes);
+        let preview = EncodingPreview {
+            from,
+            to,
+            chars_before: s.content.chars().count(),
+            chars_after: roundtrip.chars().count(),
+            replacement_char_count: introduced,
+        };
+        match eol {
+            EolChoice::Preserve => {}
+            EolChoice::Lf => s.eol = Eol::Lf,
+            EolChoice::Crlf => s.eol = Eol::Crlf,
+        }
+        // 切回检测编码=撤销档位（effective 视图不变，preferred 归 None 恒等）
+        s.preferred_encoding = if to == s.encoding { None } else { Some(to) };
+        Ok(preview)
+    }
+
+    /// 恢复 autosave 草稿（T-B7-18 回读口）：草稿比盘上文件新才恢复——
+    /// 拒陈旧草稿是"无事实源就无文案"的写侧形态；恢复后置脏（未保存事实），
+    /// 草稿文件本身留到下一次 save/close 统一清理（恢复未保存前崩溃仍可再恢复）。
+    pub fn recover_draft(&self, id: &str) -> Result<SessionInfo> {
+        let path = {
+            let map = self.lock();
+            map.get(id)
+                .ok_or_else(|| EditorError::NotFound(id.to_string()))?
+                .path
+                .clone()
+        };
+        if !draft_newer_than(&path) {
+            return Err(EditorError::BadParam(
+                "没有比盘上文件更新的自动保存草稿".into(),
+            ));
+        }
+        let raw = std::fs::read(autosave_path(&path))?;
+        // 草稿恒 UTF-8（autosave 唯一写口）；坏草稿报编码错，不 lossy 吞
+        let text = String::from_utf8(raw)
+            .map_err(|_| EditorError::Encoding("自动保存草稿不是有效 UTF-8，无法恢复".into()))?;
+        let mut map = self.lock();
+        let s = map
+            .get_mut(id)
+            .ok_or_else(|| EditorError::NotFound(id.to_string()))?;
+        if s.readonly() {
+            return Err(EditorError::BadParam(
+                "文件超过 50MB 只读，不恢复草稿".into(),
+            ));
+        }
+        s.content = text;
+        s.dirty = true;
+        s.autosave_draft = false;
         Ok(session_info(id, s))
     }
 
@@ -238,6 +387,9 @@ impl EditorSessions {
         };
         // 草稿恒 UTF-8（恢复时重新检测，无需保持原编码）
         std::fs::write(&p, content.as_bytes())?;
+        if let Some(s) = self.lock().get_mut(id) {
+            s.autosave_draft = true;
+        }
         Ok(true)
     }
 
@@ -293,6 +445,11 @@ impl Session {
     fn readonly(&self) -> bool {
         self.size > HUGE_FILE_READONLY
     }
+
+    /// 生效编码：待切换档优先，None=保持检测编码（旧行为恒等正对照）
+    fn effective_encoding(&self) -> EncodingKind {
+        self.preferred_encoding.unwrap_or(self.encoding)
+    }
 }
 
 impl std::ops::DerefMut for SessionMutGuard<'_> {
@@ -302,6 +459,7 @@ impl std::ops::DerefMut for SessionMutGuard<'_> {
 }
 
 fn session_info(id: &str, s: &Session) -> SessionInfo {
+    let effective = s.effective_encoding();
     SessionInfo {
         id: id.to_string(),
         path: s.path.display().to_string(),
@@ -310,8 +468,10 @@ fn session_info(id: &str, s: &Session) -> SessionInfo {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| s.path.display().to_string()),
-        encoding: s.encoding,
-        encoding_label: s.encoding.label(),
+        encoding: effective,
+        encoding_label: effective.label(),
+        preferred_encoding: s.preferred_encoding,
+        autosave_draft: s.autosave_draft,
         eol: s.eol,
         eol_mixed: s.eol_mixed,
         dirty: s.dirty,
@@ -323,6 +483,19 @@ fn session_info(id: &str, s: &Session) -> SessionInfo {
 
 fn autosave_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}{AUTOSAVE_SUFFIX}", path.display()))
+}
+
+/// 草稿是否比盘上文件更新（mtime 比较；任一侧取不到 mtime 按 false——
+/// 无事实源就不提示，宁可不恢复也不拿陈旧草稿覆盖编辑缓冲）
+fn draft_newer_than(path: &Path) -> bool {
+    let draft = autosave_path(path);
+    match (
+        std::fs::metadata(&draft).and_then(|m| m.modified()),
+        std::fs::metadata(path).and_then(|m| m.modified()),
+    ) {
+        (Ok(d), Ok(f)) => d > f,
+        _ => false,
+    }
 }
 
 /// 编码检测（docs/impl/06 E1）：BOM → UTF-8 严格校验 → chardetng 猜测 → Latin-1 兜底
@@ -372,7 +545,17 @@ pub fn decode(raw: &[u8]) -> Result<(EncodingKind, String)> {
 }
 
 /// 编码回写（BOM 编码补前缀）
+///
+/// 探针实证（T-B7-18）：encoding_rs 按 WHATWG 规格把 UTF-16LE 定为**只解码**编码
+/// （`encode` 直出 UTF-8 字节，注释原文 "The output encoding of this encoding is
+/// UTF-8"），所以 Utf16Le 的编码必须自研：FF FE BOM + `encode_utf16` 小端码元。
+/// Utf8Bom 也需手补（WHATWG 的 UTF-8 编码器不发 BOM）。
 pub fn encode(text: &str, kind: EncodingKind) -> Vec<u8> {
+    if kind == EncodingKind::Utf16Le {
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        return bytes;
+    }
     let mut bytes = kind.encoding().encode(text).0.into_owned();
     if kind == EncodingKind::Utf8Bom {
         let mut with_bom = vec![0xEF, 0xBB, 0xBF];
@@ -579,5 +762,165 @@ mod tests {
             assert!(!had_errors);
             assert_eq!(decoded, text);
         }
+        // T-B7-18：UTF-16LE 落盘带 BOM（探针实证=encoding_rs 按 WHATWG 把 UTF-16LE
+        // 定为只解码编码，encode 直出 UTF-8 字节，故编码在 encode() 内自研补 FF FE），
+        // 判据在**检测口 decode()** 认档而非编码库自洽——否则重开走 chardetng 误判
+        let bytes = encode("中文 Text", EncodingKind::Utf16Le);
+        assert!(bytes.starts_with(&[0xFF, 0xFE]));
+        let (k, t) = decode(&bytes).unwrap();
+        assert_eq!(k, EncodingKind::Utf16Le);
+        assert_eq!(t, "中文 Text");
+    }
+
+    // ======================== T-B7-18 编码/EOL 真实切换 ========================
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-18）字面测试名优先于 rustc 命名惯例
+    fn setEncoding_utf8ToGbk_roundTripsBytes() {
+        let dir = tmpdir("enc-gbk");
+        let path = dir.join("out.txt");
+        std::fs::write(&path, "你好\n世界".as_bytes()).unwrap(); // UTF-8 源文
+
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&path).unwrap();
+        assert_eq!(info.encoding, EncodingKind::Utf8);
+
+        let p = sessions
+            .set_encoding(&info.id, EncodingKindDto::Gbk, EolChoice::Preserve)
+            .unwrap();
+        assert_eq!(p.from, EncodingKind::Utf8);
+        assert_eq!(p.to, EncodingKind::Gbk);
+        assert_eq!(p.replacement_char_count, 0, "GBK 全覆盖中文，应零丢失");
+        // 生效视图即刻反映切换（徽标即时性），但档位未落盘——preferred 待 save 消费
+        assert_eq!(sessions.list()[0].encoding, EncodingKind::Gbk);
+        assert_eq!(
+            sessions.list()[0].preferred_encoding,
+            Some(EncodingKind::Gbk)
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            "你好\n世界".as_bytes(),
+            "切换不落中间盘"
+        );
+
+        sessions.save(&info.id).unwrap();
+        let gbk_fixture = encoding_rs::GBK.encode("你好\n世界").0.into_owned();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            gbk_fixture,
+            "真盘字节=GBK 夹具"
+        );
+
+        // 盘上真实性：重开检测回 GBK，且收口后的 encoding 字段与盘一致
+        sessions.close(&info.id).unwrap();
+        let info2 = sessions.open(&path).unwrap();
+        assert_eq!(info2.encoding, EncodingKind::Gbk);
+        assert_eq!(info2.preferred_encoding, None, "save 已消费档位");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn setEncoding_lossyChars_reportedNotSilent() {
+        let dir = tmpdir("enc-lossy");
+        let path = dir.join("mix.txt");
+        // 夹具含真 '?'（可映射混计臂）与 é（cp1252 可映射臂）——都不许进丢失数
+        std::fs::write(&path, "中文? café").unwrap();
+
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&path).unwrap();
+        let p = sessions
+            .set_encoding(&info.id, EncodingKindDto::Latin1, EolChoice::Preserve)
+            .unwrap();
+        assert_eq!(
+            p.replacement_char_count, 2,
+            "两枚中文在 WINDOWS_1252 不可映射；真 '?' 与 é 不得混计数"
+        );
+        assert!(
+            p.chars_after > p.chars_before,
+            "WHATWG 单字节族不可映射=数字字符引用展开（中→&#20013;），预览如实报膨胀"
+        );
+        // 预览如实报 >0 即为达标——静默是罪
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn preferredNone_keepsLegacySaveVerbatim() {
+        let dir = tmpdir("enc-legacy");
+        let path = dir.join("legacy_gbk.txt");
+        let fixture = encoding_rs::GBK.encode("你好\r\n世界").0.into_owned();
+        std::fs::write(&path, &fixture).unwrap();
+
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&path).unwrap();
+        assert_eq!(info.encoding, EncodingKind::Gbk);
+        assert_eq!(info.preferred_encoding, None);
+        // 不设档直接保存=旧"保持原编码"恒等（正对照，字节零变）
+        sessions.save(&info.id).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), fixture);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn eolNormalize_onlyLineEnders_touched() {
+        let dir = tmpdir("eol-only");
+        let path = dir.join("trail.txt");
+        // LF 主导 + 空行 + 尾换行三特征同夹具：任何"补行/吞行/双 \r"都会现形
+        std::fs::write(&path, b"a\n\nb\n").unwrap();
+
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&path).unwrap();
+        assert_eq!(info.eol, Eol::Lf);
+        // EOL setter 与编码同命令：encoding 传当前档（utf8）恒等，只改行尾
+        sessions
+            .set_encoding(&info.id, EncodingKindDto::Utf8, EolChoice::Crlf)
+            .unwrap();
+        assert_eq!(sessions.list()[0].eol, Eol::Crlf);
+        sessions.save(&info.id).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"a\r\n\r\nb\r\n",
+            "仅行尾展开：空行/尾换行原样保留，不新增也不丢失行结束符"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn autosaveDraft_resumesOnOpen() {
+        use std::time::{Duration, SystemTime};
+        let dir = tmpdir("draft");
+        let path = dir.join("doc.txt");
+        std::fs::write(&path, "磁盘版本".as_bytes()).unwrap();
+        let draft = autosave_path(&path);
+        let file_m = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let set_mtime = |p: &Path, t: SystemTime| {
+            let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+            f.set_modified(t).unwrap();
+        };
+
+        // 无草稿：open 不提示（mtime 事实源缺失臂）
+        let s0 = EditorSessions::new();
+        assert!(!s0.open(&path).unwrap().autosave_draft);
+
+        // 旧草稿（比盘上文件旧）：不提示且恢复拒——陈旧草稿覆盖编辑缓冲是撒谎
+        std::fs::write(&draft, "陈旧草稿".as_bytes()).unwrap();
+        set_mtime(&draft, file_m - Duration::from_secs(3600));
+        let s1 = EditorSessions::new();
+        let info1 = s1.open(&path).unwrap();
+        assert!(!info1.autosave_draft);
+        assert!(s1.recover_draft(&info1.id).is_err());
+
+        // 新草稿：open 提示 → 恢复回读内容并置脏 → save 后草稿清理
+        std::fs::write(&draft, "草稿内容".as_bytes()).unwrap();
+        set_mtime(&draft, file_m + Duration::from_secs(60));
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&path).unwrap();
+        assert!(info.autosave_draft, "草稿较新必须提示恢复");
+        let after = sessions.recover_draft(&info.id).unwrap();
+        assert!(after.dirty, "恢复=未保存事实");
+        assert!(!after.autosave_draft, "已消费不再重复提示");
+        assert_eq!(sessions.content(&info.id).unwrap(), "草稿内容");
+        sessions.save(&info.id).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), "草稿内容".as_bytes());
+        assert!(!draft.exists(), "正常保存清草稿（既有纪律同源）");
     }
 }

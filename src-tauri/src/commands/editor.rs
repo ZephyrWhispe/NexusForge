@@ -106,6 +106,37 @@ pub async fn editor_sessions(
     Ok(m.sessions().list())
 }
 
+/// 切换回写编码/统一行尾（T-B7-18）：转码前算不可映射字符数如实返回；
+/// 只改内存档位不落中间盘，落盘发生在下一次 editor_save（参数名 session_id 逐任务书签名）
+#[tauri::command]
+pub async fn editor_set_encoding(
+    session_id: String,
+    encoding: editor_core::EncodingKindDto,
+    eol: editor_core::EolChoice,
+    state: State<'_, HostState>,
+) -> Result<editor_core::EncodingPreview, AppError> {
+    let m = state.editor.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        m.sessions().set_encoding(&session_id, encoding, eol)
+    })
+    .await
+    .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
+    .map_err(editor_err)
+}
+
+/// 恢复 autosave 草稿（T-B7-18 回读口）：仅当草稿比盘上文件新；恢复后置脏待用户保存
+#[tauri::command]
+pub async fn editor_recover_draft(
+    id: String,
+    state: State<'_, HostState>,
+) -> Result<editor_core::SessionInfo, AppError> {
+    let m = state.editor.clone();
+    tauri::async_runtime::spawn_blocking(move || m.sessions().recover_draft(&id))
+        .await
+        .map_err(|e| AppError::module("EDITOR_IPC_001", e.to_string(), None))?
+        .map_err(editor_err)
+}
+
 /// PDF 基本信息
 #[tauri::command]
 pub async fn pdf_info(

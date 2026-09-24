@@ -86,6 +86,8 @@ const SESS_A: EditorSessionInfoDto = {
   name: "a.txt",
   encoding: "utf8",
   encoding_label: "UTF-8",
+  preferred_encoding: null,
+  autosave_draft: false,
   eol: "lf",
   eol_mixed: false,
   dirty: false,
