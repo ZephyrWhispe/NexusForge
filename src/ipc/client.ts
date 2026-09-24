@@ -1861,6 +1861,50 @@ export function termDockerLogs(id: string, tail: number): Promise<string> {
   return invoke("term_docker_logs", { id, tail });
 }
 
+// ---- T-B7-5 端口转发 -L/-R/-D（键名逐字镜像 term-core serde snake_case：
+//      Tauri 只转顶层参数名，不转 payload 内部字段，故 spec/state 用 snake_case） ----
+
+/// 绑定地址白名单：回环臂序列化为字面 "127.0.0.1"；非回环必须带 acknowledged 确认位
+export type ForwardBindAddrDto =
+  | "127.0.0.1"
+  | { other: { addr: string; acknowledged: boolean } };
+export type ForwardKindDto =
+  | { local: { listen_port: number; dest_host: string; dest_port: number } }
+  | {
+      remote: {
+        bind: ForwardBindAddrDto;
+        listen_port: number;
+        dest_host: string;
+        dest_port: number;
+      };
+    }
+  | { dynamic: { listen_port: number } };
+export type ForwardStateDto =
+  | { listening: { bound_port: number } }
+  | { refused: { reason: string } }
+  | "closed";
+export interface ForwardSpecDto {
+  id: string;
+  kind: ForwardKindDto;
+  state: ForwardStateDto;
+}
+
+/// 开一条转发（返回即终态：Listening 点名实端口 / Refused 点名原因）
+export function termForwardOpen(
+  sessionId: string,
+  spec: ForwardKindDto,
+): Promise<ForwardSpecDto> {
+  return invoke("term_forward_open", { sessionId, spec });
+}
+/// 关一条转发（forward_id 全局唯一）
+export function termForwardClose(forwardId: string): Promise<boolean> {
+  return invoke("term_forward_close", { forwardId });
+}
+/// 列转发（逐行真 state，含被拒原因——面板据此渲染徽标，绝不空表冒充无冲突）
+export function termForwardList(sessionId: string): Promise<ForwardSpecDto[]> {
+  return invoke("term_forward_list", { sessionId });
+}
+
 // ======================== 系统管理（M12 SY，docs/impl/06） ========================
 
 export interface PkgSourceDto {

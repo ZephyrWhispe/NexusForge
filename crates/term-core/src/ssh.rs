@@ -12,6 +12,7 @@
 //!   逐跳经 direct-tcpip 建隧道；任一跳 TOFU 拒 → 整链拒且点名"第 N 跳"
 //! - 私钥走路径引用（不复制内容进 vault）；密码由 UI 现场输入不入库
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,12 +20,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use russh::client::{self, Handle};
 use russh::keys::key::PublicKey;
-use russh::ChannelMsg;
+use russh::{Channel, ChannelMsg};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::error::{Result, TermError};
+use crate::forward::{DynStream, ForwardKind, ForwardSpec, FwdInbox, SessionForwards, Tunnel};
 use crate::session::{SessionInfo, TermKind, TermSessions};
 pub use host_core::ssh_trust::HostKeyDecision;
 
@@ -214,6 +216,9 @@ struct TofuHandler {
     known: Arc<KnownHosts>,
     host: String,
     port: u16,
+    /// 目标腿的入站转投递面（T-B7-5 Remote -R）：服务端拨进来的
+    /// forwarded-tcpip 按 (bind:port) 路由给对应 SessionForwards 腿
+    fwd_inbox: FwdInbox,
 }
 
 #[async_trait]
@@ -231,6 +236,28 @@ impl client::Handler for TofuHandler {
             &whole_key_of(server_public_key),
         )?;
         Ok(true)
+    }
+
+    /// 服务端为已批准的 -R 监听拨入的新连接（T-B7-5）：有 Remote 腿在等
+    /// 就把通道交出去，没人在等则关通道——不静默吞掉一条外部连接
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        if self.fwd_inbox.has(connected_address, connected_port).await {
+            let stream = Box::new(channel.into_stream()) as DynStream;
+            self.fwd_inbox
+                .route(connected_address, connected_port, stream)
+                .await;
+        } else {
+            let _ = channel.close().await;
+        }
+        Ok(())
     }
 }
 
@@ -347,14 +374,24 @@ fn connect_map(n: Option<usize>, target: &SshTarget, e: TermError) -> TermError 
     }
 }
 
-/// 建立连接（TOFU + 认证）
+/// 建立连接（TOFU + 认证）——SFTP/测试臂的默认入口（转发态用空 inbox）
 async fn connect_ssh(target: &SshTarget, known: Arc<KnownHosts>) -> Result<Handle<TofuHandler>> {
+    connect_ssh_with(target, known, FwdInbox::default()).await
+}
+
+/// 直连腿实装：目标 handler 带上调用方的入站投递面（Remote -R 用）
+async fn connect_ssh_with(
+    target: &SshTarget,
+    known: Arc<KnownHosts>,
+    fwd_inbox: FwdInbox,
+) -> Result<Handle<TofuHandler>> {
     let config = client_config();
     let addr = (target.host.as_str(), target.port);
     let handler = TofuHandler {
         known,
         host: target.host.clone(),
         port: target.port,
+        fwd_inbox,
     };
     let mut handle = tokio::time::timeout(
         CONNECT_TIMEOUT,
@@ -376,6 +413,7 @@ async fn connect_hop(
     target: &SshTarget,
     known: Arc<KnownHosts>,
     n: Option<usize>,
+    fwd_inbox: FwdInbox,
 ) -> Result<Handle<TofuHandler>> {
     let channel = prev
         .channel_open_direct_tcpip(target.host.clone(), target.port as u32, "nexusforge", 0)
@@ -390,6 +428,7 @@ async fn connect_hop(
         known,
         host: target.host.clone(),
         port: target.port,
+        fwd_inbox,
     };
     let mut handle = tokio::time::timeout(
         CONNECT_TIMEOUT,
@@ -411,10 +450,20 @@ async fn connect_via_jumps(
     target: &SshTarget,
     known: Arc<KnownHosts>,
 ) -> Result<Handle<TofuHandler>> {
+    connect_via_jumps_with(target, known, FwdInbox::default()).await
+}
+
+/// 连接口实装：`inbox` 只喂**目标腿** handler（Remote -R 的入站通道最终
+/// 落在目标服务器上，中间跳不承载本会话的转发）
+async fn connect_via_jumps_with(
+    target: &SshTarget,
+    known: Arc<KnownHosts>,
+    inbox: FwdInbox,
+) -> Result<Handle<TofuHandler>> {
     jump_guard(&target.jump)?;
     let hops = jump_chain(&target.jump);
     if hops.is_empty() {
-        return connect_ssh(target, known).await;
+        return connect_ssh_with(target, known, inbox).await;
     }
     let to_target = |h: &JumpHop| SshTarget {
         host: h.host.clone(),
@@ -423,18 +472,28 @@ async fn connect_via_jumps(
         auth: h.auth.clone(),
         jump: None,
     };
-    let mut cur = connect_ssh(&to_target(hops[0]), known.clone())
+    let mut cur = connect_ssh_with(&to_target(hops[0]), known.clone(), FwdInbox::default())
         .await
         .map_err(|e| hop_ctx(1, e))?;
     for (i, hop) in hops[1..].iter().enumerate() {
-        cur = connect_hop(&cur, &to_target(hop), known.clone(), Some(i + 2)).await?;
+        cur = connect_hop(
+            &cur,
+            &to_target(hop),
+            known.clone(),
+            Some(i + 2),
+            FwdInbox::default(),
+        )
+        .await?;
     }
-    connect_hop(&cur, target, known, None).await
+    connect_hop(&cur, target, known, None, inbox).await
 }
 
 /// TermSessions 的 SSH 扩展（避免循环依赖，SSH 会话注册复用统一 register 路径）
 pub struct SshService {
     known: Arc<KnownHosts>,
+    /// 会话级转发组注册表（T-B7-5）：session_id → 该 SSH 会话的 SessionForwards。
+    /// 纯进程内，随会话终结拆除；非 SSH 会话不在此表
+    forwards: AsyncMutex<HashMap<String, Arc<SessionForwards>>>,
 }
 
 impl SshService {
@@ -442,6 +501,7 @@ impl SshService {
     pub fn new(app_data_dir: &Path) -> Result<Self> {
         Ok(Self {
             known: Arc::new(KnownHosts::open(app_data_dir)?),
+            forwards: AsyncMutex::new(HashMap::new()),
         })
     }
 
@@ -457,11 +517,16 @@ impl SshService {
         rows: u16,
         sessions: &TermSessions,
     ) -> Result<SessionInfo> {
-        let handle = connect_via_jumps(&target, self.known.clone()).await?;
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| TermError::Ssh(format!("打开会话通道失败: {e}")))?;
+        let inbox = FwdInbox::default();
+        let handle = connect_via_jumps_with(&target, self.known.clone(), inbox.clone()).await?;
+        // Handle 共享：转发显式请求（tcpip_forward 要 &mut）与 kill 断开都经此锁
+        let handle = Arc::new(AsyncMutex::new(handle));
+        let channel = {
+            let h = handle.lock().await;
+            h.channel_open_session()
+                .await
+                .map_err(|e| TermError::Ssh(format!("打开会话通道失败: {e}")))?
+        };
         channel
             .request_pty(
                 false,
@@ -478,6 +543,15 @@ impl SshService {
             .request_shell(false)
             .await
             .map_err(|e| TermError::Ssh(format!("请求 shell 失败: {e}")))?;
+
+        // 转发组装配（T-B7-5）：tunnel 与 handle/inbox 同源——Local/Dynamic 拨
+        // direct-tcpip、Remote 请 tcpip_forward，服务端回拨的入站通道由 handler
+        // 钩子经同一 inbox 路由回对应 SessionForwards 腿
+        let tunnel = Arc::new(RusshTunnel {
+            handle: handle.clone(),
+            inbox,
+        }) as Arc<dyn Tunnel>;
+        let forwards = Arc::new(SessionForwards::new(tunnel));
 
         // Channel 无法 clone：wait 需要 &mut、data/window_change 需要 &self——
         // 用 AsyncMutex 共享（读任务持锁等待 msg，写任务短暂持锁发数据）
@@ -513,26 +587,32 @@ impl SshService {
         });
         // 输出泵：wait() 独占读（持锁直到 msg 到达）
         let ch_out = channel.clone();
+        let fwd_out = forwards.clone();
         tokio::spawn(async move {
-            let mut ch = ch_out.lock().await;
-            while let Some(msg) = ch.wait().await {
-                match msg {
-                    ChannelMsg::Data { data } => {
-                        if out_tx.send(data.to_vec()).await.is_err() {
+            {
+                let mut ch = ch_out.lock().await;
+                while let Some(msg) = ch.wait().await {
+                    match msg {
+                        ChannelMsg::Data { data } => {
+                            if out_tx.send(data.to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
+                        ChannelMsg::ExtendedData { data, .. } => {
+                            if out_tx.send(data.to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
+                        ChannelMsg::ExitStatus { .. } | ChannelMsg::Eof | ChannelMsg::Close => {
                             break;
                         }
+                        _ => {}
                     }
-                    ChannelMsg::ExtendedData { data, .. } => {
-                        if out_tx.send(data.to_vec()).await.is_err() {
-                            break;
-                        }
-                    }
-                    ChannelMsg::ExitStatus { .. } | ChannelMsg::Eof | ChannelMsg::Close => {
-                        break;
-                    }
-                    _ => {}
                 }
             }
+            // 远端 EOF/关闭 ⇒ 本会话所有转发监听器拆除（监听器泄漏红线生产臂；
+            // 单元判据=fwd_sessionClose_tearsDownAllListeners）
+            fwd_out.teardown().await;
             // drop out_tx：reader 收到 EOF（会话结束信号）
         });
 
@@ -543,25 +623,97 @@ impl SshService {
         };
         let title = format!("{}@{}", target.user, target.host);
         // 统一注册入口：SSH 输出/输入/resize 全部经由 PtyHandle 四件套
+        let fwd_kill = forwards.clone();
         let ssh_handle = host_core::ports::PtyHandle::new(
             input_tx,
             out_rx,
             resize_tx,
             Box::new(move || {
-                // kill：关 channel + 断开连接（FnOnce 同步上下文内 spawn 异步清理）
+                // kill：关 channel + 拆本会话转发 + 断开连接（FnOnce 同步上下文内 spawn 异步清理）
                 let ch = channel.clone();
                 tokio::spawn(async move {
                     let c = ch.lock().await;
                     let _ = c.close().await;
                 });
+                let fwd = fwd_kill.clone();
                 tokio::spawn(async move {
-                    let _ = handle
+                    fwd.teardown().await;
+                });
+                let h = handle.clone();
+                tokio::spawn(async move {
+                    let h = h.lock().await;
+                    let _ = h
                         .disconnect(russh::Disconnect::ByApplication, "user quit", "en")
                         .await;
                 });
             }),
         );
-        sessions.register(kind, title, cols, rows, ssh_handle).await
+        let info = sessions
+            .register(kind, title, cols, rows, ssh_handle)
+            .await?;
+        // 注册成功即挂上转发组（命令面按 session_id 取用；会话终结两路 teardown 已闭）
+        self.forwards.lock().await.insert(info.id.clone(), forwards);
+        Ok(info)
+    }
+
+    /// 存活会话的转发组（T-B7-5）：会话已终 ⇒ NoSuchSession 并顺手回收孤儿表项
+    async fn live_forwards(
+        &self,
+        session_id: &str,
+        sessions: &TermSessions,
+    ) -> Result<Arc<SessionForwards>> {
+        if sessions.get(session_id).is_err() {
+            self.forwards.lock().await.remove(session_id);
+            return Err(TermError::NoSuchSession(session_id.to_string()));
+        }
+        self.forwards
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                TermError::NoSuchSession(format!("{session_id} 非 SSH 会话（无端口转发组可挂）"))
+            })
+    }
+
+    /// 开一条转发（命令 `term_forward_open`）：返回即终态 spec（Listening/Refused）
+    pub async fn forward_open(
+        &self,
+        session_id: &str,
+        kind: ForwardKind,
+        sessions: &TermSessions,
+    ) -> Result<ForwardSpec> {
+        self.live_forwards(session_id, sessions)
+            .await?
+            .open(kind)
+            .await
+    }
+
+    /// 关一条转发（命令 `term_forward_close(id)`）：forward_id 全局唯一，扫注册表
+    /// 命中即停监听 + 撤 -R + 行摘除；不在册 ⇒ BadParam（不静默返回 false）
+    pub async fn forward_close(&self, forward_id: &str) -> Result<bool> {
+        let all: Vec<Arc<SessionForwards>> = self.forwards.lock().await.values().cloned().collect();
+        for f in all {
+            if f.table().rows().iter().any(|r| r.id == forward_id) {
+                return f.close(forward_id).await;
+            }
+        }
+        Err(TermError::BadParam(format!(
+            "转发不存在或已关闭: {forward_id}"
+        )))
+    }
+
+    /// 列转发（命令 `term_forward_list`）：真 state 逐行回显（含被拒原因）
+    pub async fn forward_list(
+        &self,
+        session_id: &str,
+        sessions: &TermSessions,
+    ) -> Result<Vec<ForwardSpec>> {
+        Ok(self
+            .live_forwards(session_id, sessions)
+            .await?
+            .table()
+            .rows())
     }
 
     /// SFTP 目录列表（SFTP 各口维持直连腿——T-B7-4 行范围=终端连接命令，
@@ -667,6 +819,60 @@ impl SshService {
             .disconnect(russh::Disconnect::ByApplication, "exec done", "en")
             .await;
         Ok(acc.finish(timed_out))
+    }
+}
+
+/// 生产隧道臂（T-B7-5）：把 `Tunnel` 显式请求打到真实 russh `Handle`（Arc 共享）。
+/// Local/Dynamic 拨 direct-tcpip；Remote 请 tcpip_forward（要 &mut）+ 经共享
+/// `FwdInbox` 订阅服务端回拨的入站通道（handler 钩子投递）
+struct RusshTunnel {
+    handle: Arc<AsyncMutex<Handle<TofuHandler>>>,
+    inbox: FwdInbox,
+}
+
+#[async_trait]
+impl Tunnel for RusshTunnel {
+    async fn open_direct_tcpip(
+        &self,
+        host: &str,
+        port: u32,
+        orig_host: &str,
+        orig_port: u32,
+    ) -> Result<DynStream> {
+        let h = self.handle.lock().await;
+        let ch = h
+            .channel_open_direct_tcpip(host.to_string(), port, orig_host.to_string(), orig_port)
+            .await
+            .map_err(|e| TermError::Forward(format!("direct-tcpip 拨 {host}:{port} 失败: {e}")))?;
+        Ok(Box::new(ch.into_stream()) as DynStream)
+    }
+
+    async fn tcpip_forward(&self, addr: &str, port: u32) -> Result<u32> {
+        let mut h = self.handle.lock().await;
+        h.tcpip_forward(addr.to_string(), port)
+            .await
+            .map_err(|e| TermError::Forward(format!("tcpip_forward 请求 {addr}:{port} 失败: {e}")))
+    }
+
+    async fn cancel_tcpip_forward(&self, addr: &str, port: u32) -> Result<()> {
+        let h = self.handle.lock().await;
+        h.cancel_tcpip_forward(addr.to_string(), port)
+            .await
+            .map_err(|e| {
+                TermError::Forward(format!("cancel_tcpip_forward {addr}:{port} 失败: {e}"))
+            })
+    }
+
+    async fn subscribe_inbound(
+        &self,
+        addr: &str,
+        port: u32,
+    ) -> Result<mpsc::UnboundedReceiver<DynStream>> {
+        Ok(self.inbox.subscribe(addr, port).await)
+    }
+
+    async fn unsubscribe_inbound(&self, addr: &str, port: u32) {
+        self.inbox.unsubscribe(addr, port).await;
     }
 }
 

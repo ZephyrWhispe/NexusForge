@@ -86,6 +86,21 @@ description = "允许前端调用 term_sftp_upload 命令（D-28 按窗最小授
 commands.allow = ["term_sftp_upload"]
 
 [[permission]]
+identifier = "allow-term-forward-open"
+description = "允许前端调用 term_forward_open 命令（端口暴露红线批，main-only）"
+commands.allow = ["term_forward_open"]
+
+[[permission]]
+identifier = "allow-term-forward-close"
+description = "允许前端调用 term_forward_close 命令（端口暴露红线批，main-only）"
+commands.allow = ["term_forward_close"]
+
+[[permission]]
+identifier = "allow-term-forward-list"
+description = "允许前端调用 term_forward_list 命令（端口暴露红线批，main-only）"
+commands.allow = ["term_forward_list"]
+
+[[permission]]
 identifier = "allow-term-docker-containers"
 description = "允许前端调用 term_docker_containers 命令（D-28 按窗最小授权）"
 commands.allow = ["term_docker_containers"]

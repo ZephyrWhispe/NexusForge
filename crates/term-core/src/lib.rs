@@ -9,6 +9,7 @@
 
 pub mod docker;
 pub mod error;
+pub mod forward;
 pub mod module;
 pub mod session;
 pub mod ssh;
@@ -16,6 +17,7 @@ pub mod sshconfig;
 pub mod wsl;
 
 pub use error::{Result, TermError};
+pub use forward::{BindAddr, ForwardKind, ForwardSpec, ForwardState};
 pub use module::TermModule;
 pub use session::{SessionInfo, SessionState, TermKind, TermSessions};
 pub use ssh::{JumpHop, SftpEntry, SshAuth, SshService, SshTarget};

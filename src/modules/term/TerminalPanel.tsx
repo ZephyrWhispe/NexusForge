@@ -63,6 +63,7 @@ import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import ForwardSection from "./ForwardSection";
 
 /**
  * 终端与运维面板（docs/impl/06 T1–T6，M11 v1）：
@@ -173,6 +174,8 @@ export default function TerminalPanel() {
   const [execCmd, setExecCmd] = useState("");
   const [execBusy, setExecBusy] = useState(false);
   const [execResult, setExecResult] = useState<SshExecResultDto | null>(null);
+  // 端口转发管理表（T-B7-5，红线批）：转发挂活 SSH 会话，独立对话框
+  const [fwdOpen, setFwdOpen] = useState(false);
   // SFTP
   const [sftpPath, setSftpPath] = useState("/root");
   const [sftpEntries, setSftpEntries] = useState<SftpEntryDto[]>([]);
@@ -679,6 +682,14 @@ export default function TerminalPanel() {
             >
               一次性远端命令
             </Button>
+            <Button
+              size="small"
+              appearance="outline"
+              title="端口转发 -L/-R/-D 管理表（转发挂 SSH 会话、会话关即全拆；端口占用显示被拒行而非静默）"
+              onClick={() => setFwdOpen(true)}
+            >
+              端口转发
+            </Button>
           </div>
 
           <div className={styles.row}>
@@ -926,6 +937,28 @@ export default function TerminalPanel() {
             </DialogContent>
             <DialogActions>
               <Button appearance="subtle" onClick={() => setKhOpen(false)}>
+                关闭
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+      {/* 端口转发管理表 Dialog（T-B7-5，红线批）：每行真 state 徽标，
+          端口占用显示被拒行而非空表；非回环绑定须地址+确认位齐备（bind_gate UI 镜像） */}
+      <Dialog
+        open={fwdOpen}
+        onOpenChange={(_, d) => {
+          if (!d.open) setFwdOpen(false);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>端口转发（-L 本地 / -R 远端 / -D SOCKS5）</DialogTitle>
+            <DialogContent>
+              <ForwardSection sessions={sessions} activeId={active} />
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="subtle" onClick={() => setFwdOpen(false)}>
                 关闭
               </Button>
             </DialogActions>

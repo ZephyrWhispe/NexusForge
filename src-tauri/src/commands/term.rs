@@ -382,6 +382,55 @@ pub async fn term_sftp_upload(
         .map_err(term_err)
 }
 
+// ---- T-B7-5 端口转发 -L/-R/-D（**红线批：端口暴露**，转发挂 SSH 会话、会话关即全拆） ----
+
+/// 开一条转发（`term_forward_open`）：返回即终态 ForwardSpec——Listening 点名
+/// 实 bind 端口 / Refused 点名原因（含 TERM_FWD_002 非回环未显式指定），
+/// 不存在"先回成功再悄悄失败"的窗口；禁自动换端口
+#[tauri::command]
+pub async fn term_forward_open(
+    session_id: String,
+    spec: term_core::ForwardKind,
+    state: State<'_, HostState>,
+) -> Result<term_core::ForwardSpec, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    ssh.forward_open(&session_id, spec, state.term.sessions())
+        .await
+        .map_err(term_err)
+}
+
+/// 关一条转发（`term_forward_close`）：forward_id 全局唯一，停监听 + 撤 -R + 行摘除
+#[tauri::command]
+pub async fn term_forward_close(
+    forward_id: String,
+    state: State<'_, HostState>,
+) -> Result<bool, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    ssh.forward_close(&forward_id).await.map_err(term_err)
+}
+
+/// 列转发（`term_forward_list`）：逐行真 state 回显（含被拒原因），
+/// 端口占用显示失败行而非静默——前端据此渲染徽标，永不空表冒充无冲突
+#[tauri::command]
+pub async fn term_forward_list(
+    session_id: String,
+    state: State<'_, HostState>,
+) -> Result<Vec<term_core::ForwardSpec>, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    ssh.forward_list(&session_id, state.term.sessions())
+        .await
+        .map_err(term_err)
+}
+
 // ---- T6 Docker ----
 
 /// 容器列表

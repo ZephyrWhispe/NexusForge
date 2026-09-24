@@ -32,6 +32,10 @@ pub enum TermError {
     },
     #[error("认证失败: {0}")]
     Auth(String),
+    #[error("转发错误: {0}")]
+    Forward(String),
+    #[error("端口暴露需显式指定: {0}")]
+    ForwardBind(String),
     #[error("WSL 错误: {0}")]
     Wsl(String),
     #[error("Docker 错误: {0}")]
@@ -67,6 +71,8 @@ impl TermError {
             TermError::HostKey(_) => "TERM_SSH_002",
             TermError::Auth(_) => "TERM_SSH_003",
             TermError::HostKeyUnknown { .. } => "TERM_SSH_004",
+            TermError::Forward(_) => "TERM_FWD_001",
+            TermError::ForwardBind(_) => "TERM_FWD_002",
             TermError::Wsl(_) => "TERM_WSL_001",
             TermError::Docker(_) => "TERM_DOCKER_001",
         }

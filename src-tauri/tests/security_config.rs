@@ -1429,6 +1429,42 @@ fn auxWindows_neverGrantSshFingerprintAck() {
     );
 }
 
+#[test]
+#[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-5）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantForwardCommands() {
+    // B7 T-B7-5 红线批（端口暴露）：转发把本机端口挂进远端网络——open 起监听/
+    // 发 -R 请求、close 拆腿、list 揭示内网端口占用形状。转发只挂在 SSH 终端会话
+    // 上，唯一入口是主窗口终端面板；辅助窗（热键任意上下文呼出）永不持有三命令。
+    let caps = load_capabilities();
+    for ident in [
+        "allow-term-forward-open",
+        "allow-term-forward-close",
+        "allow-term-forward-list",
+    ] {
+        let mut main_granted = false;
+        for (name, cap) in &caps {
+            let perms: Vec<&str> = cap["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            if name == "main" {
+                main_granted = perms.contains(&ident);
+                continue;
+            }
+            assert!(
+                !perms.contains(&ident),
+                "辅助窗 capability {name} 不得持有 {ident}（端口暴露面是 main-only）"
+            );
+        }
+        assert!(
+            main_granted,
+            "正对照：main 必须持有 {ident}，否则本负例是空洞"
+        );
+    }
+}
+
 // ---------------- B6 T-B6-8（09 §6.2）凭据只进不出：三枚持久化/装配面负例 ----------------
 
 #[test]
