@@ -44,11 +44,13 @@ import {
   xferStatus,
   parseAppError,
   endpointText,
+  dispatchNameFix,
   type ConflictItemDto,
   type ConflictPolicyDto,
   type FileEndpointDto,
   type FileEntryDto,
   type FileOpKind,
+  type NameFixItemDto,
   type OpProgressDto,
   type PendingOpDto,
   type PreviewDto,
@@ -58,6 +60,7 @@ import {
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
+import NameFixDialog from "./NameFixDialog";
 import { isFileSubPanel, useSession } from "../../stores/session";
 import { parse_magic_target } from "./magicTarget";
 import InlineError from "../../components/InlineError";
@@ -255,6 +258,10 @@ export default function FilePanel() {
     dst: FileEndpointDto;
     srcs: string[];
   } | null>(null);
+  // T-B7-26 名闸 Ask 臂：预览行 + 挂起重投的 spec（确认后带 name_fix 覆盖重投）
+  const [nameFix, setNameFix] = useState<{ items: NameFixItemDto[]; srcs: string[] } | null>(
+    null
+  );
   const [ops, setOps] = useState<OpProgressDto[]>([]);
   const [mkdirName, setMkdirName] = useState("");
   const [dstInput, setDstInput] = useState("");
@@ -554,15 +561,60 @@ export default function FilePanel() {
         policy,
         recycle: kind === "delete",
       });
-      if (res.conflicts.length > 0 && res.op_id === null) {
-        setConflicts(res.conflicts);
-        setPendingSpec({ kind, dst: target, srcs });
-        return;
-      }
-      setError(null);
-      void refreshOps();
+      await dispatchEnqueue(res, { kind, dst: target, srcs });
     } catch (e) {
       applyError(e, "操作入队失败");
+    }
+  };
+
+  // T-B7-26 入队回执三臂分派（判据纯函数 = client.ts dispatchNameFix）：
+  // AutoRename 臂 toast 逐行复述 原名→新名——静默改名与传败同罪，
+  // 改了什么必须看得见
+  const dispatchEnqueue = (
+    res: Awaited<ReturnType<typeof fileEnqueue>>,
+    spec: { kind: FileOpKind; dst: FileEndpointDto; srcs: string[] }
+  ) => {
+    setError(null);
+    const d = dispatchNameFix(res);
+    switch (d.kind) {
+      case "nameFixPreview":
+        setPendingSpec(spec);
+        setNameFix({ items: d.items, srcs: spec.srcs });
+        break;
+      case "nameFixRenamed":
+        notify(
+          "info",
+          "远端名按冲突字符映射改名后入队",
+          d.items.map((i) => `${i.name} → ${i.suggested ?? "？"}`).join("\n")
+        );
+        void refreshOps();
+        break;
+      case "conflicts":
+        setConflicts(d.items);
+        setPendingSpec(spec);
+        break;
+      case "done":
+        void refreshOps();
+        break;
+    }
+  };
+
+  const confirmNameFix = async () => {
+    if (!nameFix || !pendingSpec) return;
+    const spec = pendingSpec;
+    setNameFix(null);
+    try {
+      const res = await fileEnqueue({
+        kind: spec.kind,
+        srcs: spec.srcs,
+        dst: spec.dst,
+        policy: "ask",
+        name_fix: "auto_rename",
+      });
+      // 逐请求覆盖恒 auto_rename ⇒ 不会再回预览；行复述走 toast 臂
+      await dispatchEnqueue(res, spec);
+    } catch (e) {
+      applyError(e, "改名重投失败");
     }
   };
 
@@ -1081,6 +1133,17 @@ export default function FilePanel() {
             </Button>
           </div>
         </div>
+      )}
+
+      {/* 名闸 Ask 预览（T-B7-26）：按次挂载——items 随裁决整批换新，常驻挂载
+          会把旧预览行定格在对话框里（ConnectDialog 补记③同谱） */}
+      {nameFix && (
+        <NameFixDialog
+          open
+          items={nameFix.items}
+          onConfirm={confirmNameFix}
+          onCancel={() => setNameFix(null)}
+        />
       )}
 
       {/* 目录列表 */}

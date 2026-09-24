@@ -131,7 +131,7 @@ beforeEach(() => {
   vi.mocked(filePreview).mockResolvedValue({ kind: "unsupported", reason: "未配置" });
   vi.mocked(fileOpsActive).mockResolvedValue([]);
   vi.mocked(fileOpsPending).mockResolvedValue([]);
-  vi.mocked(fileEnqueue).mockResolvedValue({ op_id: "op-new", conflicts: [] });
+  vi.mocked(fileEnqueue).mockResolvedValue({ op_id: "op-new", conflicts: [], name_fix: [] });
   vi.mocked(fileOpResume).mockResolvedValue({ op_id: "op-resumed", previous_op_id: "op-old" });
   vi.mocked(xferStatus).mockResolvedValue(opRow("op-resumed"));
   // T-B6-10 三档分派：本文件全部观察传输队列臂，默认停在 transfers 档
@@ -190,8 +190,9 @@ describe("FilePanel 传输状态类型化+断点真值+冲突消费（T-B6-7）"
       .mockResolvedValueOnce({
         op_id: null,
         conflicts: [{ name: "a.txt", dst: "C:\\out\\a.txt" }],
+        name_fix: [],
       })
-      .mockResolvedValue({ op_id: "op-2", conflicts: [] });
+      .mockResolvedValue({ op_id: "op-2", conflicts: [], name_fix: [] });
     // 入队交互活在浏览档（列表选中 + 目标目录输入框都在左列工具区）
     useSession.setState({ fileSubPanel: "browse" });
     await mount();

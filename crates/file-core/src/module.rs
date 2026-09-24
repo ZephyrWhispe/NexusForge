@@ -15,13 +15,14 @@ use host_core::module::{
 
 use crate::conflict::ConflictPolicy;
 use crate::error::FileError;
+use crate::namefix::FixPolicy;
 use crate::service::FileService;
 
 /// 内置 worker 数上限（`max_concurrent` 的天花板）：线程在建队时定死，
 /// 配置只收紧不超发——设置项与运行事实同源，禁"配 8 实际 2"的谎
 pub const MAX_CONCURRENT_CEILING: usize = 2;
 
-/// file 域配置真源（09 §6.2 T-B6-6：`config_schema()` 六键的唯一读者群，
+/// file 域配置真源（09 §6.2 T-B6-6：`config_schema()` 七键的唯一读者群，
 /// [`FileModule::apply_config`] 的唯一产物）。`upload_kbps` 随 T-B6-11 上传
 /// 字节路径接通一并入表——死键复活的判据形态是 merged/schema/读者三面同批
 /// 到位（T-B6-6"先声明就是自造死键"的逆命题同样成立）。
@@ -42,6 +43,10 @@ pub struct FileConfig {
     pub upload_kbps: u32,
     /// 并发传输数（队列准入门 + 限速摊分母），合法域 `1..=MAX_CONCURRENT_CEILING`
     pub max_concurrent: usize,
+    /// T-B7-26：远端文件名冲突字符的入队前裁决三档（读者唯一在
+    /// [`crate::service::FileService::enqueue`] 的前置闸；逐请求覆盖走
+    /// `OpSpec::name_fix`，Ask 预览后用户确认即带 AutoRename 重投）
+    pub remote_name_fix: FixPolicy,
 }
 
 impl Default for FileConfig {
@@ -53,6 +58,7 @@ impl Default for FileConfig {
             download_kbps: 0,
             upload_kbps: 0,
             max_concurrent: MAX_CONCURRENT_CEILING,
+            remote_name_fix: FixPolicy::default(),
         }
     }
 }
@@ -123,6 +129,15 @@ impl FileConfig {
                 ));
             }
             next.max_concurrent = n;
+        }
+        if let Some(v) = values.get("remote_name_fix") {
+            next.remote_name_fix =
+                serde_json::from_value::<FixPolicy>(v.clone()).map_err(|_| {
+                    FileConfig::bad(
+                        "remote_name_fix",
+                        format!("须为 ask/auto_rename/reject 之一，收到 {v}"),
+                    )
+                })?;
         }
         Ok(next)
     }
@@ -238,6 +253,12 @@ impl Module for FileModule {
                     "type": "integer", "title": "并发传输数",
                     "description": "上限 = 内置 worker 数 2：配置只收紧不超发（线程在建队时定死）",
                     "minimum": 1, "maximum": 2, "default": 2
+                },
+                "remote_name_fix": {
+                    "type": "string", "title": "远端文件名冲突字符裁决",
+                    "description": "上传入队前逐协议探测非法字符：ask=返回预览待确认（确认后带 auto_rename 重投）、auto_rename=按全角映射表改名入队并复述原名→新名、reject=点名冲突字符拒入。静默改名与传败同罪，无第四档",
+                    "enum": ["ask", "auto_rename", "reject"],
+                    "default": "ask"
                 }
             }
         })
@@ -316,6 +337,7 @@ mod tests {
             download_kbps: 500,
             upload_kbps: 0,
             max_concurrent: 1,
+            remote_name_fix: FixPolicy::AutoRename,
         };
         // 全缺省补丁 ⇒ 逐值原样
         assert_eq!(runtime.merged(&serde_json::json!({})).unwrap(), runtime);
@@ -330,9 +352,17 @@ mod tests {
                 patched.delete_to_recycle,
                 patched.insecure_plaintext,
                 patched.upload_kbps,
-                patched.max_concurrent
+                patched.max_concurrent,
+                patched.remote_name_fix
             ),
-            (ConflictPolicy::Skip, false, true, 0, 1)
+            (
+                ConflictPolicy::Skip,
+                false,
+                true,
+                0,
+                1,
+                FixPolicy::AutoRename
+            )
         );
         // 正对照：显式写回默认值 = 真改值（0 从 500 归位、true 总闸不动仍 true）
         let explicit_default = runtime
@@ -375,6 +405,13 @@ mod tests {
             .expect_err("策略枚举外的值必须拒");
         assert!(
             e.to_string().contains("ask/skip/overwrite/rename"),
+            "拒语要点名合法集: {e}"
+        );
+        let e = d
+            .merged(&serde_json::json!({ "remote_name_fix": "silently_rename" }))
+            .expect_err("三档外的值必须拒（静默改名与传败同罪，第四档不存在）");
+        assert!(
+            e.to_string().contains("ask/auto_rename/reject"),
             "拒语要点名合法集: {e}"
         );
         // 全有或全无：坏键混在好键批里 ⇒ 整批不落地
@@ -445,6 +482,8 @@ mod tests {
 
         // 态①默认：删除请求原样通过（回收站开）
         let delete_spec = || crate::ops::OpSpec {
+            name_fix: None,
+            name_overrides: Default::default(),
             kind: crate::ops::OpKind::Delete,
             srcs: vec![crate::ops::OpEndpoint::local(PathBuf::from("a.txt"))],
             dst: crate::ops::OpEndpoint::local(PathBuf::from(".")),

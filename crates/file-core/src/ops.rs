@@ -9,7 +9,7 @@
 //! - 删除：recycle=true 走 [`RecycleBinPort`]（SHFileOperationW 回收站），无端口降级直删
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -27,6 +27,7 @@ use zip::{CompressionMethod, ZipWriter};
 use crate::browse::to_long_path;
 use crate::conflict::{resolve_target, unique_target, ConflictPolicy};
 use crate::error::FileError;
+use crate::namefix::FixPolicy;
 
 /// 分块大小（docs/impl/05 K6/F2 统一 4MB）
 pub const CHUNK: usize = 4 * 1024 * 1024;
@@ -151,6 +152,14 @@ pub struct OpSpec {
     /// 远端源 + recycle=true 在入队即拒（远端无回收站，承重⑥）
     #[serde(default)]
     pub recycle: bool,
+    /// T-B7-26：远端名三档的逐请求覆盖（Ask 预览后的"确认改名重投"即带
+    /// Some(AutoRename) 二次提交）；None=取配置 `remote_name_fix` 缺省
+    #[serde(default)]
+    pub name_fix: Option<FixPolicy>,
+    /// T-B7-26：原名→新名（AutoRename 裁决在入队时点物化于此，执行器直取；
+    /// 随 PendingOp 落盘，resume/崩溃恢复不丢改名事实）
+    #[serde(default)]
+    pub name_overrides: BTreeMap<String, String>,
 }
 
 /// 断点：续传从扁平计划的 file_index 个文件开始，该文件前 bytes_done 字节已完成
@@ -178,6 +187,12 @@ pub struct PendingOp {
     /// 旧 op resume 而来（断点链落盘，重开服务不丢）
     #[serde(default)]
     pub resumed_from: Option<String>,
+    /// T-B7-26 加键（serde default ⇒ 旧 pending 文件零迁移）：远端名裁决两件套
+    /// 随 op 落盘——resume 重建的 OpSpec 必须带同一名事实
+    #[serde(default)]
+    pub name_fix: Option<FixPolicy>,
+    #[serde(default)]
+    pub name_overrides: BTreeMap<String, String>,
 }
 
 /// 进度快照（事件 payload 与 active() 返回共用）
@@ -501,6 +516,8 @@ impl OpQueue {
         persist_pending(
             &self.store_dir,
             &PendingOp {
+                name_fix: spec.name_fix,
+                name_overrides: spec.name_overrides.clone(),
                 op_id: op_id.clone(),
                 kind: spec.kind,
                 srcs: spec.srcs.clone(),
@@ -570,6 +587,8 @@ impl OpQueue {
             return Err(FileError::BadState("pending 文件与 op_id 不符".into()));
         }
         let spec = OpSpec {
+            name_fix: pending.name_fix,
+            name_overrides: pending.name_overrides,
             kind: pending.kind,
             srcs: pending.srcs,
             dst: pending.dst,
@@ -1131,6 +1150,8 @@ fn copy_one(
         let _ = persist_pending(
             store_dir,
             &PendingOp {
+                name_fix: spec.name_fix,
+                name_overrides: spec.name_overrides.clone(),
                 op_id: op_id_snap.clone(),
                 kind: spec.kind,
                 srcs: spec.srcs.clone(),
@@ -1346,6 +1367,20 @@ fn join_remote(base: &str, rel: &str) -> String {
         b.to_owned()
     } else {
         format!("{b}/{rel}")
+    }
+}
+
+/// T-B7-26：AutoRename 物化过的首段名改写（表里没有 ⇒ 原名直传）。
+/// 嵌套段不改——入队闸的预览点从未登记它，在这里顺手改就是静默改名（与传败
+/// 同罪）；嵌套段带非法字符的诚实归宿是对端报错、操作 Failed 露出。
+fn apply_name_override(rel: &str, overrides: &BTreeMap<String, String>) -> String {
+    let (head, rest) = match rel.find('/') {
+        Some(i) => (&rel[..i], &rel[i..]),
+        None => (rel, ""),
+    };
+    match overrides.get(head) {
+        Some(new) => format!("{new}{rest}"),
+        None => rel.to_owned(),
     }
 }
 
@@ -1599,6 +1634,7 @@ fn build_remote_items(
                             .strip_prefix(&base)
                             .map_err(|e| Flow::msg(e.to_string()))?;
                         let rel_posix = rel.to_string_lossy().replace('\\', "/");
+                        let rel_posix = apply_name_override(&rel_posix, &spec.name_overrides);
                         items.push(XferItem {
                             src: Leg::Local(entry.path().to_path_buf()),
                             dst: Leg::Remote(drv.clone(), join_remote(&dpath, &rel_posix)),
@@ -1607,7 +1643,7 @@ fn build_remote_items(
                     }
                 } else if long.is_file() {
                     let target = if dst_is_dir {
-                        join_remote(&dpath, &name)
+                        join_remote(&dpath, &apply_name_override(&name, &spec.name_overrides))
                     } else {
                         dpath.clone()
                     };
@@ -1707,6 +1743,8 @@ fn pump_download(
         let _ = persist_pending(
             store_dir,
             &PendingOp {
+                name_fix: spec.name_fix,
+                name_overrides: spec.name_overrides.clone(),
                 op_id: op_id_snap.clone(),
                 kind: spec.kind,
                 srcs: spec.srcs.clone(),
@@ -1789,6 +1827,8 @@ fn pump_upload(
         let _ = persist_pending(
             store_dir,
             &PendingOp {
+                name_fix: spec.name_fix,
+                name_overrides: spec.name_overrides.clone(),
                 op_id: op_id_snap.clone(),
                 kind: spec.kind,
                 srcs: spec.srcs.clone(),
@@ -2290,6 +2330,8 @@ mod tests {
         let q = OpQueue::new(store.clone(), 2, cb).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.clone())],
                 dst: L(dst.clone()),
@@ -2340,6 +2382,8 @@ mod tests {
         let store = tmpdir("mv_store");
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
+            name_fix: None,
+            name_overrides: Default::default(),
             kind: OpKind::Move,
             srcs: vec![L(src.join("sub/b.txt"))],
             dst: L(dst.join("b.txt")),
@@ -2367,6 +2411,8 @@ mod tests {
         let q = OpQueue::new(store, 1, cb).unwrap();
         // 目标为已存在目录 → rename 到 dst/src_name；模拟跨卷失败路径用逐项校验
         q.enqueue(OpSpec {
+            name_fix: None,
+            name_overrides: Default::default(),
             kind: OpKind::Move,
             srcs: vec![L(src.clone())],
             dst: L(dst.clone()),
@@ -2393,6 +2439,8 @@ mod tests {
         let store = tmpdir("conf_store");
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
+            name_fix: None,
+            name_overrides: Default::default(),
             kind: OpKind::Copy,
             srcs: vec![L(src.join("f.txt"))],
             dst: L(dst.clone()),
@@ -2418,6 +2466,8 @@ mod tests {
         let store = tmpdir("del_store");
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
+            name_fix: None,
+            name_overrides: Default::default(),
             kind: OpKind::Delete,
             srcs: vec![L(src.clone())],
             dst: L(PathBuf::new()),
@@ -2440,6 +2490,8 @@ mod tests {
         let store = tmpdir("zip_store");
         let q = OpQueue::new(store, 1, cb).unwrap();
         q.enqueue(OpSpec {
+            name_fix: None,
+            name_overrides: Default::default(),
             kind: OpKind::Compress,
             srcs: vec![L(src)],
             dst: L(zipfile.clone()),
@@ -2462,6 +2514,8 @@ mod tests {
         let ext_dir = dst.join("unpacked");
         let op2 = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Extract,
                 srcs: vec![L(zipfile)],
                 dst: L(ext_dir.clone()),
@@ -2498,6 +2552,8 @@ mod tests {
         let q = OpQueue::new(store.clone(), 1, cb).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("big.bin"))],
                 dst: L(dst.join("big.bin")),
@@ -2545,6 +2601,8 @@ mod tests {
         let q = OpQueue::new(store.clone(), 1, cb).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("big.bin"))],
                 dst: L(dst.join("big.bin")),
@@ -2590,6 +2648,8 @@ mod tests {
         );
         // 新格式远端臂序列化为对象、反序列化回同值（untagged 第二候选）
         let rp = PendingOp {
+            name_fix: None,
+            name_overrides: Default::default(),
             op_id: "op-remote-1".into(),
             kind: OpKind::Copy,
             srcs: vec![R("remote:webdav-1", "/docs/报告.docx")],
@@ -2654,6 +2714,8 @@ mod tests {
         let q = OpQueue::new(store.clone(), 1, cb).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![a.clone()],
                 dst: L(r"C:\dst\copy_one.txt"),
@@ -2738,6 +2800,8 @@ mod tests {
         let mut q = OpQueue::new(store.clone(), 1, cb).unwrap();
         let e = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Delete,
                 srcs: vec![R("remote:webdav-1", "/docs/报告.docx")],
                 dst: L(PathBuf::new()),
@@ -2753,6 +2817,8 @@ mod tests {
         q.set_recycle_port(Arc::new(FakeRecycleNever));
         assert!(q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Delete,
                 srcs: vec![L(loc.join("f.txt"))],
                 dst: L(PathBuf::new()),
@@ -2787,6 +2853,8 @@ mod tests {
         persist_pending(
             &store,
             &PendingOp {
+                name_fix: None,
+                name_overrides: Default::default(),
                 op_id: op_id.to_owned(),
                 kind: OpKind::Copy,
                 srcs: vec![R("remote:webdav-1", "/docs/a.bin")],
@@ -2900,6 +2968,8 @@ mod tests {
         persist_pending(
             &store,
             &PendingOp {
+                name_fix: None,
+                name_overrides: Default::default(),
                 op_id: "A".into(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("f.bin"))],
@@ -2930,6 +3000,8 @@ mod tests {
         std::fs::write(src.join("g.bin"), vec![4u8; 1024]).unwrap();
         let c = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("g.bin"))],
                 dst: L(dst.clone()),
@@ -2961,6 +3033,8 @@ mod tests {
         let q = OpQueue::new(store.clone(), 1, cb).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("s.bin"))],
                 dst: L(dst.clone()),
@@ -3009,6 +3083,8 @@ mod tests {
         let q = OpQueue::new(store.clone(), 1, cb).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("a.txt"))],
                 dst: L(dst.clone()),
@@ -3033,6 +3109,8 @@ mod tests {
         // 正对照：Skip 档仍静默跳＝语义不变（防误伤既有测）
         let op2 = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("a.txt"))],
                 dst: L(dst.clone()),
@@ -3074,6 +3152,8 @@ mod tests {
         // ① Compress：Ask + 已存在压缩包 ⇒ Failed 点名（修前 File::create 静默截断重写）
         let cmp_op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Compress,
                 srcs: vec![L(root.join("in"))],
                 dst: L(zip_path.clone()),
@@ -3113,6 +3193,8 @@ mod tests {
         std::fs::write(ext_dir.join("a.txt"), b"on-disk").unwrap();
         let ext_op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Extract,
                 srcs: vec![L(root.join("real.zip"))],
                 dst: L(ext_dir.clone()),
@@ -3137,6 +3219,8 @@ mod tests {
         std::fs::write(root.join("gone.txt"), b"x").unwrap();
         let del_op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Delete,
                 srcs: vec![L(root.join("gone.txt"))],
                 dst: L(root.clone()),
@@ -3179,6 +3263,8 @@ mod tests {
         persist_pending(
             &store,
             &PendingOp {
+                name_fix: None,
+                name_overrides: Default::default(),
                 op_id: "B".into(),
                 kind: OpKind::Copy,
                 srcs: vec![],
@@ -3307,6 +3393,8 @@ mod tests {
         let q = OpQueue::new(store.clone(), 1, cb).unwrap();
         let mut op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("big.bin"))],
                 dst: L(dst.join("big.bin")),
@@ -3368,6 +3456,8 @@ mod tests {
         let kd = tmpdir("keys_dst");
         let local = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("a.bin"))],
                 dst: L(kd.clone()),
@@ -3383,6 +3473,8 @@ mod tests {
         );
         let remote = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(src.join("a.bin"))],
                 dst: R("remote:webdav-1", "/up/a.bin"),
@@ -3725,6 +3817,8 @@ mod remote_exec_tests {
         std::fs::create_dir_all(&dst).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![R("remote:m", "/docs/f.bin")],
                 dst: L(dst.join("f.bin")),
@@ -3756,6 +3850,8 @@ mod remote_exec_tests {
         q.set_max_concurrent(1);
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(store0.join("up.bin"))],
                 dst: R("remote:m", "/inbox/up.bin"),
@@ -3776,6 +3872,8 @@ mod remote_exec_tests {
         q2.set_max_concurrent(1);
         let op2 = q2
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(store0.join("up.bin"))],
                 dst: R("remote:m", "/inbox/up.bin"),
@@ -3788,6 +3886,89 @@ mod remote_exec_tests {
         assert!(row2.error.unwrap().contains("收尾"));
         assert!(uploaded2.lock().is_empty(), "finish 被拒不落账");
         q.close();
+        q2.close();
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&store2);
+        let _ = std::fs::remove_dir_all(&store0);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B7-26）执行腿字面测名
+    fn autoRenameExecutor_firstSegmentRenamed_nestedUntouched() {
+        // T-B7-26 执行侧两半判据：①单文件上传——入队闸物化的 name_overrides
+        // 必须真落到远端键（"回执改了、字节照旧"=静默传败同罪）；②目录上传
+        // ——只有首段名命中改写，嵌套段即使其名在覆盖表里也照原样外发
+        // （预览点从未登记嵌套段，执行器越权改=静默改名）。
+        // 夹具名取 Windows 可落盘的 "up.bin"（'?' 无法建盘，执行腿要真字节）。
+        let store0 = tmpdir("nfx_src");
+        let payload: Vec<u8> = (0..600u32).map(|i| (i % 97) as u8).collect();
+        std::fs::write(store0.join("up.bin"), &payload).unwrap();
+        let mut ov = BTreeMap::new();
+        ov.insert("up.bin".to_string(), "up？.bin".to_string());
+        // "/inbox" 预置一枚可列成员 ⇒ dst 形态探针判为目录（源名在其下重建）
+        let drv = MemRemote::new("/inbox/seed.txt", b"seed".to_vec());
+        let uploaded = drv.uploaded.clone();
+        let (q, _reg, store) = fixture("nfx_file", drv, FileConfig::default());
+        q.set_max_concurrent(1);
+        let op = q
+            .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: ov.clone(),
+                kind: OpKind::Copy,
+                srcs: vec![L(store0.join("up.bin"))],
+                dst: R("remote:m", "/inbox"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let row = wait_done(&q, &op);
+        assert_eq!(row.state, OpState::Done, "错误面: {:?}", row.error);
+        let keys: Vec<String> = uploaded.lock().keys().cloned().collect();
+        assert!(
+            keys.contains(&"/inbox/up？.bin".to_string()),
+            "改写名须作为远端键落账，实有 {keys:?}"
+        );
+        assert_eq!(uploaded.lock().get("/inbox/up？.bin").unwrap(), &payload);
+        assert!(
+            !keys.contains(&"/inbox/up.bin".to_string()),
+            "原名键不得在场（覆盖臂等于没改=谎报）"
+        );
+        q.close();
+        // 目录腿：顶层段 d 命中改写为 D；嵌套段 sub 虽在覆盖表里也逐字外发
+        let dir = store0.join("d");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("top.txt"), b"t").unwrap();
+        std::fs::write(dir.join("sub").join("c.txt"), b"n").unwrap();
+        ov.insert("d".to_string(), "D".to_string());
+        ov.insert("sub".to_string(), "SUB".to_string()); // 嵌套段——执行器不许越权
+        let drv2 = MemRemote::new("/inbox/seed.txt", b"seed".to_vec());
+        let uploaded2 = drv2.uploaded.clone();
+        let (q2, _r2, store2) = fixture("nfx_dir", drv2, FileConfig::default());
+        q2.set_max_concurrent(1);
+        let op2 = q2
+            .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: ov,
+                kind: OpKind::Copy,
+                srcs: vec![L(dir.clone())],
+                dst: R("remote:m", "/inbox"),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        let row2 = wait_done(&q2, &op2);
+        assert_eq!(row2.state, OpState::Done, "错误面: {:?}", row2.error);
+        let got2 = uploaded2.lock();
+        let keys2: Vec<&String> = got2.keys().collect();
+        assert!(
+            got2.contains_key("/inbox/D/top.txt"),
+            "首段改写须落账，实有 {keys2:?}"
+        );
+        assert!(
+            got2.contains_key("/inbox/D/sub/c.txt"),
+            "嵌套段保持原样（越权改=静默改名），实有 {keys2:?}"
+        );
+        drop(got2);
         q2.close();
         let _ = std::fs::remove_dir_all(&store);
         let _ = std::fs::remove_dir_all(&store2);
@@ -3813,6 +3994,8 @@ mod remote_exec_tests {
         let t0 = std::time::Instant::now();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![L(store0.join("t.bin"))],
                 dst: R("remote:m", "/up/t.bin"),
@@ -3852,6 +4035,8 @@ mod remote_exec_tests {
     fn enqueue_with_have(q: &OpQueue, dst: &Path) -> String {
         q.enqueue_with_checkpoint(
             OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![R("remote:m", "/docs")],
                 dst: L(dst.to_path_buf()),
@@ -3926,6 +4111,8 @@ mod remote_exec_tests {
         std::fs::create_dir_all(&dst).unwrap();
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Move,
                 srcs: vec![R("remote:m", "/docs/f.bin")],
                 dst: L(dst.join("f.bin")),
@@ -3960,6 +4147,8 @@ mod remote_exec_tests {
         q.set_max_concurrent(1);
         let op = q
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Delete,
                 srcs: vec![R("remote:gone", "/docs/old.txt")],
                 dst: L(store.clone()),

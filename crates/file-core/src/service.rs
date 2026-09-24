@@ -12,7 +12,10 @@ use crate::conflict::{scan_conflicts, ConflictItem, ConflictPolicy};
 use crate::driver::{DriverInfo, DriverRegistry};
 use crate::error::{FileError, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING};
 use crate::module::FileConfig;
-use crate::ops::{OpProgress, OpQueue, OpSpec, PendingOp, ResumeDto, XferStatusDto};
+use crate::namefix::{FixPolicy, NameFixItem, NameFixTables};
+use crate::ops::{
+    OpEndpoint, OpKind, OpProgress, OpQueue, OpSpec, PendingOp, ResumeDto, XferStatusDto,
+};
 use crate::preset::PresetStore;
 use crate::preview::{preview_file, Preview};
 use crate::profile::{ProfileStore, RemoteProtocol};
@@ -25,6 +28,17 @@ use crate::remote::webdav::WebDavDriver;
 use crate::remote::{AuthSecret, HttpsDriver, RemoteDriverInfo, RemoteEntry};
 use crate::rename::{apply_plan, build_plan, RenamePlan, RenameRule};
 use crate::search::{self, SearchOpts, SearchResult};
+
+/// 冲突字符的可读形（Err/toast 消息里 \0/\r/\n 不许以裸控制字符过 IPC——
+/// 终端与日志会把它们打没，"点名冲突字符"就成了空话）
+fn display_char(c: &str) -> String {
+    match c {
+        "\0" => "\\0(NUL)".into(),
+        "\r" => "\\r(CR)".into(),
+        "\n" => "\\n(LF)".into(),
+        other => other.to_owned(),
+    }
+}
 
 /// 已连接远端：连接态是**进程内**事实（不落盘——重启即"未连接"的真实反映，
 /// 禁把连接态持久化成假连接，09 §6.2 T-B6-3 数据变更栏）
@@ -153,6 +167,26 @@ pub fn chmod_mode_within_limit(mode: u32) -> Result<(), FileError> {
     Ok(())
 }
 
+/// 入队回执（T-B7-26 破坏性 IPC 变更：二元组 → 三字段结构）。
+/// `name_fix` 非空 ⇔ 远端名前置闸开过口：Ask 臂=预览待确认（op_id None，
+/// 未入队）；AutoRename 臂=已入队且逐行复述原名→新名（toast 消费）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EnqueueOutcome {
+    pub op_id: Option<String>,
+    pub conflicts: Vec<ConflictItem>,
+    pub name_fix: Vec<NameFixItem>,
+}
+
+/// [`FileService::gate_remote_names`] 的裁决形：Preview 即 Ask 短路
+/// （不入队），Pass 携可能被 AutoRename 物化过的 spec
+enum GateOutcome {
+    Pass {
+        spec: OpSpec,
+        items: Vec<NameFixItem>,
+    },
+    Preview(Vec<NameFixItem>),
+}
+
 pub struct FileService {
     queue: OpQueue,
     drivers: Arc<DriverRegistry>,
@@ -175,6 +209,10 @@ pub struct FileService {
     /// 连接预设（内置 + 用户目录，open 时 fail-closed 全量校验；
     /// 预设不是档案，零注册零连接，命令面只读列表）
     presets: PresetStore,
+    /// T-B7-26 名表挂账（fail-closed 的**状态化**）：open 时装载
+    /// `{app_data}/file/namefix/` 覆盖表；Err = 毒态，此后一切远端目标入队
+    /// 恒 Err 点名坏文件（坏映射表改名可能毁文件，静默用残余表=同罪）
+    namefix: parking_lot::RwLock<Result<NameFixTables, String>>,
 }
 
 impl FileService {
@@ -252,6 +290,9 @@ impl FileService {
             ssh_backend_override: parking_lot::RwLock::new(None),
             config,
             presets: PresetStore::load(&app_data_dir.join("presets"))?,
+            namefix: parking_lot::RwLock::new(NameFixTables::load_from(
+                &app_data_dir.join("namefix"),
+            )),
         })
     }
 
@@ -341,10 +382,145 @@ impl FileService {
         spec
     }
 
+    /// 名表读口（毒态如实回 Err，禁残余表冒充）：入队前置闸与执行器共读
+    pub(crate) fn namefix_tables(&self) -> Result<NameFixTables, String> {
+        self.namefix.read().clone()
+    }
+
+    /// 远端档案协议（driver_id = `remote:{profile_id}`，承重①前缀）：
+    /// 档案缺席 ⇒ None——名闸不猜协议，该腿的诚实失败点在驱动解析口
+    /// （未连接即 Err 点名），不在这里编第二套失联归因。
+    /// 两形并查：生产档案 id 自带 `remote:` 前缀（`profile_id_of`），裸 id 是
+    /// 测试夹具形（ops.rs 的 "remote:webdav-1"）——只查一形会让另一形的闸静默
+    /// 放行，正是要防的"看起来对"。
+    fn protocol_for_driver(&self, driver_id: &str) -> Option<RemoteProtocol> {
+        self.profiles
+            .get(driver_id)
+            .or_else(|| {
+                let bare = driver_id.strip_prefix("remote:")?;
+                self.profiles.get(bare)
+            })
+            .map(|p| p.protocol)
+    }
+
+    /// T-B7-26 入队前置闸（上传臂唯一名闸；改名侧登记=本域 rename 只有本地
+    /// 臂，远端改名命令不在场，无第二处可挂）：Copy/Move 且远端目标时逐协议
+    /// 探测本地源名。
+    /// 三臂无第四态：毒态⇒Err；Reject⇒Err 点名字符；Ask⇒预览不入队；
+    /// AutoRename⇒建议名物化进 spec.name_overrides 后放行（不可改者 Err——
+    /// 静默改名与传败同罪，这里没有"先收了再说"）
+    fn gate_remote_names(&self, mut spec: OpSpec) -> Result<GateOutcome, FileError> {
+        if spec.kind != OpKind::Copy && spec.kind != OpKind::Move {
+            return Ok(GateOutcome::Pass {
+                spec,
+                items: vec![],
+            });
+        }
+        let driver_id = match &spec.dst {
+            OpEndpoint::Remote { driver_id, .. } => driver_id.clone(),
+            OpEndpoint::Local(_) => {
+                return Ok(GateOutcome::Pass {
+                    spec,
+                    items: vec![],
+                })
+            }
+        };
+        let Some(protocol) = self.protocol_for_driver(&driver_id) else {
+            return Ok(GateOutcome::Pass {
+                spec,
+                items: vec![],
+            });
+        };
+        let tables = self.namefix_tables().map_err(|why| FileError::Remote {
+            code: FILE_REMOTE_FIELD,
+            msg: format!("远端名表带毒：{why}——远端入队拒（fail-closed，坏映射表改名可能毁文件）"),
+        })?;
+        let policy = spec.name_fix.unwrap_or(self.config().remote_name_fix);
+        // 待裁决名集：本地源名（文件/目录顶层名）。dst 名是用户在已连目录树
+        // 里选的事实且目标为既有目录时不产生新名；dst 不可列时其命名裁决在
+        // 档案/浏览面先行，这里不编第二套
+        let mut items: Vec<NameFixItem> = vec![];
+        for src in &spec.srcs {
+            let OpEndpoint::Local(p) = src else { continue };
+            let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let bad = crate::namefix::probe_remote_name(&name, protocol, &tables);
+            if !bad.is_empty() {
+                items.push(NameFixItem {
+                    name,
+                    bad,
+                    suggested: None,
+                });
+            }
+        }
+        if items.is_empty() {
+            return Ok(GateOutcome::Pass {
+                spec,
+                items: vec![],
+            });
+        }
+        let errs = |items: &[NameFixItem]| FileError::Remote {
+            code: FILE_REMOTE_FIELD,
+            msg: format!(
+                "远端名字符越表（{} 臂）：{}",
+                protocol.as_str(),
+                items
+                    .iter()
+                    .map(|i| format!(
+                        "'{}' 含 {}",
+                        i.name,
+                        i.bad
+                            .iter()
+                            .map(|b| format!("'{}'（{}）", display_char(&b.char), b.reason))
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ),
+        };
+        match policy {
+            FixPolicy::Reject => Err(errs(&items)),
+            FixPolicy::Ask => {
+                // 预览必须原名/新名两字面都在场（确认对话框的裁决依据）；
+                // 映射不动就明说 suggested=None——禁拿半截建议冒充可确认项
+                for item in &mut items {
+                    item.suggested = crate::namefix::suggest_rename(&item.name, protocol, &tables);
+                }
+                Ok(GateOutcome::Preview(items))
+            }
+            FixPolicy::AutoRename => {
+                for item in &mut items {
+                    match crate::namefix::suggest_rename(&item.name, protocol, &tables) {
+                        Some(new) => {
+                            spec.name_overrides.insert(item.name.clone(), new.clone());
+                            item.suggested = Some(new);
+                        }
+                        // 无干净建议=改不动，AutoRename 不许半截承诺
+                        None => return Err(errs(std::slice::from_ref(item))),
+                    }
+                }
+                Ok(GateOutcome::Pass { spec, items })
+            }
+        }
+    }
+
     /// 入队（Ask 策略先预扫描：有冲突则不入队，返回冲突清单给 UI 决议）。
-    /// 配置两消费点经 [`Self::apply_config_to_spec`]（T-B6-6）。
-    pub fn enqueue(&self, spec: OpSpec) -> Result<(Option<String>, Vec<ConflictItem>), FileError> {
+    /// 配置两消费点经 [`Self::apply_config_to_spec`]（T-B6-6）；远端名三档
+    /// 前置闸 [`Self::gate_remote_names`]（T-B7-26）。
+    pub fn enqueue(&self, spec: OpSpec) -> Result<EnqueueOutcome, FileError> {
         let spec = Self::apply_config_to_spec(&self.config(), spec);
+        let (spec, name_fix) = match self.gate_remote_names(spec)? {
+            GateOutcome::Preview(items) => {
+                return Ok(EnqueueOutcome {
+                    op_id: None,
+                    conflicts: vec![],
+                    name_fix: items,
+                })
+            }
+            GateOutcome::Pass { spec, items } => (spec, items),
+        };
         if spec.kind == crate::ops::OpKind::Copy || spec.kind == crate::ops::OpKind::Move {
             // T-B6-2：Ask 预扫描只覆盖本地端点（fs 事实源）；远端端点跳过预扫描，
             // 冲突引擎本身已在 conflict_pairs 收口为唯一一份，远端事实源接线随协议行落地
@@ -364,12 +540,20 @@ impl FileService {
                 };
                 let conflicts = scan_conflicts(&srcs, &dst_dir);
                 if !conflicts.is_empty() && spec.policy == ConflictPolicy::Ask {
-                    return Ok((None, conflicts));
+                    return Ok(EnqueueOutcome {
+                        op_id: None,
+                        conflicts,
+                        name_fix,
+                    });
                 }
             }
         }
         let op_id = self.queue.enqueue(spec)?;
-        Ok((Some(op_id), vec![]))
+        Ok(EnqueueOutcome {
+            op_id: Some(op_id),
+            conflicts: vec![],
+            name_fix,
+        })
     }
 
     pub fn ops_active(&self) -> Vec<OpProgress> {
@@ -664,8 +848,10 @@ mod tests {
             FileService::open(&root.join("store"), bus.clone(), Arc::new(Ports::new())).unwrap();
         let mut prog = bus.subscribe("operation.progress").unwrap();
         let mut done = bus.subscribe("operation.done").unwrap();
-        let (op_id, conflicts) = svc
+        let out = svc
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![OpEndpoint::local(src.join("big.bin"))],
                 dst: OpEndpoint::local(dst.clone()),
@@ -673,8 +859,8 @@ mod tests {
                 recycle: false,
             })
             .unwrap();
-        assert!(conflicts.is_empty());
-        let op_id = op_id.unwrap();
+        assert!(out.conflicts.is_empty());
+        let op_id = out.op_id.unwrap();
 
         let start = std::time::Instant::now();
         let mut progress = Vec::new();
@@ -735,16 +921,19 @@ mod tests {
             FileService::open(&root.join("store"), bus.clone(), Arc::new(Ports::new())).unwrap();
         let mut prog = bus.subscribe("operation.progress").unwrap();
         let mut done = bus.subscribe("operation.done").unwrap();
-        let (op_id, _) = svc
+        let op_id = svc
             .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
                 kind: OpKind::Copy,
                 srcs: vec![OpEndpoint::local(src.join("s.bin"))],
                 dst: OpEndpoint::local(dst.clone()),
                 policy: ConflictPolicy::Overwrite,
                 recycle: false,
             })
+            .unwrap()
+            .op_id
             .unwrap();
-        let op_id = op_id.unwrap();
         let start = std::time::Instant::now();
         let mut progress = Vec::new();
         loop {
@@ -1177,6 +1366,8 @@ mod tests {
         std::fs::write(src.join("a.txt"), b"x").unwrap();
         std::fs::write(dst.join("a.txt"), b"y").unwrap();
         let spec = || crate::ops::OpSpec {
+            name_fix: None,
+            name_overrides: Default::default(),
             kind: crate::ops::OpKind::Copy,
             srcs: vec![crate::ops::OpEndpoint::local(src.join("a.txt"))],
             dst: crate::ops::OpEndpoint::local(dst.clone()),
@@ -1184,20 +1375,207 @@ mod tests {
             recycle: false,
         };
         // 默认（Ask）：冲突预扫描原样返回
-        let (op, conflicts) = svc.enqueue(spec()).unwrap();
-        assert!(op.is_none() && conflicts.len() == 1, "Ask 缺省须回冲突清单");
+        let out = svc.enqueue(spec()).unwrap();
+        assert!(
+            out.op_id.is_none() && out.conflicts.len() == 1,
+            "Ask 缺省须回冲突清单"
+        );
         // 改闸为 Rename：同一次 Ask 调用被配置接管，直接入队
         svc.set_config(crate::module::FileConfig {
             default_conflict_policy: ConflictPolicy::Rename,
             ..Default::default()
         });
-        let (op, conflicts) = svc.enqueue(spec()).unwrap();
+        let out = svc.enqueue(spec()).unwrap();
         assert!(
-            op.is_some() && conflicts.is_empty(),
+            out.op_id.is_some() && out.conflicts.is_empty(),
             "非 Ask 缺省必须接管 Ask 调用位"
         );
-        let op_id = op.unwrap();
+        let op_id = out.op_id.unwrap();
         let _ = svc.op_cancel(&op_id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- T-B7-26 远端名三档闸（09 §6.2 字面测名；执行腿判据在 ops.rs
+    // `autoRenameExecutor_...`，toast 复述判据归 vitest）----
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B7-26）字面测试名优先于 rustc 命名惯例
+    fn askPolicy_previewsBeforeEnqueue() {
+        // Ask 臂：预览行必须原名/建议名/冲突字符三字段齐（确认对话框的裁决
+        // 依据），且**未入队**——该 op_id 行不存在；确认后带 name_fix 覆盖重投
+        // 才真正入队。
+        let (svc, root) = svc_fixture("namefix-ask");
+        svc.profiles()
+            .save(remote_sample(
+                "remote:w-dav",
+                crate::profile::RemoteProtocol::WebDav,
+            ))
+            .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // 平台事实：Windows 不容 '?' 落盘——名闸只读 file_name() 不触磁盘 stat，
+        // 夹具以"名字带争议字符的路径"构造，无需（也不能）真建该文件
+        let bad_path = src.join("a?b.txt");
+        let ok_path = src.join("cn 报告.docx");
+        let spec = |fix: Option<FixPolicy>| OpSpec {
+            name_fix: fix,
+            name_overrides: Default::default(),
+            kind: OpKind::Copy,
+            srcs: vec![
+                OpEndpoint::local(bad_path.clone()),
+                OpEndpoint::local(ok_path.clone()),
+            ],
+            dst: OpEndpoint::Remote {
+                driver_id: "remote:w-dav".into(),
+                path: "/dav".into(),
+            },
+            policy: ConflictPolicy::default(),
+            recycle: false,
+        };
+        let out = svc.enqueue(spec(None)).unwrap();
+        assert!(out.op_id.is_none(), "Ask 预览不得入队");
+        assert!(svc.ops_active().is_empty(), "预览臂零队列侧效应");
+        assert_eq!(out.name_fix.len(), 1, "只有 '?' 名开闸，实得 {out:?}");
+        let item = &out.name_fix[0];
+        assert_eq!(item.name, "a?b.txt", "预览须携原名字面");
+        assert_eq!(
+            item.suggested.as_deref(),
+            Some("a？b.txt"),
+            "原名→新名两字面"
+        );
+        assert!(
+            item.bad
+                .iter()
+                .any(|b| b.char == "?" && !b.reason.is_empty()),
+            "冲突字符逐枚带归因，实得 {item:?}"
+        );
+        // 用户点"确认改名"＝同 spec 带逐请求覆盖重投（AutoRename 语义）；
+        // 源文件在 Windows 上本就无法落盘，入队成功即可（字节腿的诚实
+        // 失败点在 worker 读盘，非本行判据）
+        let ok = svc.enqueue(spec(Some(FixPolicy::AutoRename))).unwrap();
+        assert!(ok.op_id.is_some(), "确认后重投必须入队");
+        assert_eq!(ok.name_fix[0].suggested.as_deref(), Some("a？b.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B7-26）字面测试名优先于 rustc 命名惯例
+    fn autoRenameConfig_takesOverWithoutCallerOverride() {
+        // 配置真源消费：remote_name_fix=auto_rename 时调用方留缺省即改名入队
+        // （不逐单问）；本地目标正对照——名闸零开口，name_fix 回执恒空。
+        let (svc, root) = svc_fixture("namefix-cfg");
+        svc.profiles()
+            .save(remote_sample(
+                "remote:w-cfg",
+                crate::profile::RemoteProtocol::WebDav,
+            ))
+            .unwrap();
+        svc.set_config(crate::module::FileConfig {
+            remote_name_fix: FixPolicy::AutoRename,
+            ..Default::default()
+        });
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        // 平台事实：'?' 在 Windows 无法落盘——名闸只探测 file_name()，夹具取
+        // "名字带争议字符的路径"即为其名（字节腿诚实失败点在 worker，非本判据）
+        let out = svc
+            .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
+                kind: OpKind::Copy,
+                srcs: vec![OpEndpoint::local(src.join("a?b.txt"))],
+                dst: OpEndpoint::Remote {
+                    driver_id: "remote:w-cfg".into(),
+                    path: "/dav".into(),
+                },
+                policy: ConflictPolicy::default(),
+                recycle: false,
+            })
+            .unwrap();
+        assert!(out.op_id.is_some(), "AutoRename 档直接入队，实得 {out:?}");
+        assert_eq!(out.name_fix[0].suggested.as_deref(), Some("a？b.txt"));
+        // 本地臂正对照：名闸是远端专属，本地入队回执零名裁行（真文件）
+        std::fs::write(src.join("real.dat"), b"x").unwrap();
+        let local = svc
+            .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
+                kind: OpKind::Copy,
+                srcs: vec![OpEndpoint::local(src.join("real.dat"))],
+                dst: OpEndpoint::local(dst.clone()),
+                policy: ConflictPolicy::default(),
+                recycle: false,
+            })
+            .unwrap();
+        assert!(local.op_id.is_some() && local.name_fix.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §6.2 T-B7-26）字面测试名优先于 rustc 命名惯例
+    fn nameFixPoison_blocksRemoteEnqueue() {
+        // fail-closed 的状态化：坏 char_map.json 在 open 即挂毒态——此后一切
+        // 远端目标入队恒 Err 点名坏文件；本地臂无映射消费点、照常放行。
+        // （镜像 process_guard 裁决族：坏映射表改名可能毁文件，静默回落内置
+        // =拿旧表冒充用户的表。）
+        let root = std::env::temp_dir().join("nf_file_svc_namefix-poison");
+        let _ = std::fs::remove_dir_all(&root);
+        let store = root.join("store");
+        std::fs::create_dir_all(store.join("namefix")).unwrap();
+        std::fs::write(store.join("namefix").join("char_map.json"), b"[ oops").unwrap();
+        let svc =
+            FileService::open(&store, Arc::new(EventBus::new()), Arc::new(Ports::new())).unwrap();
+        // 建档：毒闸在协议解析**之后**、策略分派之前开口（不猜协议是闸的纪律）
+        svc.profiles()
+            .save(remote_sample(
+                "remote:psn",
+                crate::profile::RemoteProtocol::WebDav,
+            ))
+            .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // 远端臂夹具＝"名字带 '?' 的路径"（Windows 无法落盘，毒闸在探测点
+        // 即 Err，字节腿根本走不到）
+        let remote = svc
+            .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
+                kind: OpKind::Copy,
+                srcs: vec![OpEndpoint::local(src.join("f?.txt"))],
+                dst: OpEndpoint::Remote {
+                    driver_id: "remote:psn".into(),
+                    path: "/x".into(),
+                },
+                policy: ConflictPolicy::default(),
+                recycle: false,
+            })
+            .unwrap_err();
+        match &remote {
+            FileError::Remote { code, msg } => {
+                assert_eq!(*code, FILE_REMOTE_FIELD, "毒表归因字段码，实得 {remote}");
+                assert!(msg.contains("char_map.json"), "须点名坏文件，实得 {remote}");
+                assert!(msg.contains("带毒"), "毒态措辞钉死，实得 {remote}");
+            }
+            other => panic!("毒态拒入须走 Remote 臂点名，实得 {other:?}"),
+        }
+        // 本地臂正对照：毒表不殃及无消费点的腿（红线圈范围，不扩面）——
+        // 连名字带 '?' 的源都照常入队，闸是远端专属
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let out = svc
+            .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
+                kind: OpKind::Copy,
+                srcs: vec![OpEndpoint::local(src.join("f?.txt"))],
+                dst: OpEndpoint::local(dst.clone()),
+                policy: ConflictPolicy::default(),
+                recycle: false,
+            })
+            .unwrap();
+        assert!(out.op_id.is_some() && out.name_fix.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

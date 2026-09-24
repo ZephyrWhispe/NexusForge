@@ -964,12 +964,17 @@ export function endpointText(e: FileEndpointDto): string {
   return typeof e === "string" ? e : `${e.driver_id}:${e.path}`;
 }
 
+/** 远端名三档（Rust FixPolicy 的线上形，T-B7-26；snake_case 逐字与 serde 同名） */
+export type NameFixPolicyDto = "ask" | "auto_rename" | "reject";
+
 export interface OpSpecDto {
   kind: FileOpKind;
   srcs: FileEndpointDto[];
   dst: FileEndpointDto;
   policy: ConflictPolicyDto;
   recycle?: boolean;
+  /** Ask 预览确认后的逐请求重投（缺省=取配置 remote_name_fix） */
+  name_fix?: NameFixPolicyDto | null;
 }
 
 export interface ConflictItemDto {
@@ -977,9 +982,41 @@ export interface ConflictItemDto {
   dst: string;
 }
 
+/** 名闸单行回执（Rust NameFixItem 镜像）：bad=冲突字符逐枚带归因，
+ * suggested=全角映射后的新名（映射不动即 null，禁半截建议） */
+export interface NameIssueDto {
+  char: string;
+  reason: string;
+}
+export interface NameFixItemDto {
+  name: string;
+  bad: NameIssueDto[];
+  suggested: string | null;
+}
+
 export interface FileEnqueueDto {
   op_id: string | null;
   conflicts: ConflictItemDto[];
+  /** T-B7-26：op_id 空+此列非空=Ask 预览待确认；op_id 有值+此列非空=已按改名入队的复述 */
+  name_fix: NameFixItemDto[];
+}
+
+/** T-B7-26 入队回执的四态分派（纯函数，四臂无重叠）：名闸优先于冲突框——
+ *  远端 dst 本就跳过冲突预扫描，服务端口两闸不同开，这里不造第二裁决 */
+export type EnqueueDispatch =
+  | { kind: "nameFixPreview"; items: NameFixItemDto[] }
+  | { kind: "nameFixRenamed"; items: NameFixItemDto[] }
+  | { kind: "conflicts"; items: ConflictItemDto[] }
+  | { kind: "done" };
+
+export function dispatchNameFix(res: FileEnqueueDto): EnqueueDispatch {
+  if (res.name_fix.length > 0) {
+    return res.op_id === null
+      ? { kind: "nameFixPreview", items: res.name_fix }
+      : { kind: "nameFixRenamed", items: res.name_fix };
+  }
+  if (res.conflicts.length > 0 && res.op_id === null) return { kind: "conflicts", items: res.conflicts };
+  return { kind: "done" };
 }
 
 /** 线上真相 = Rust OpState 的 snake_case 序列化（T-B6-7 假绿位收口：旧 PascalCase

@@ -175,7 +175,7 @@ beforeEach(() => {
   vi.mocked(fileDrives).mockResolvedValue([]);
   vi.mocked(fileOpsActive).mockResolvedValue([]);
   vi.mocked(fileOpsPending).mockResolvedValue([]);
-  vi.mocked(fileEnqueue).mockResolvedValue({ op_id: "op-x", conflicts: [] });
+  vi.mocked(fileEnqueue).mockResolvedValue({ op_id: "op-x", conflicts: [], name_fix: [] });
   vi.mocked(fileRemotePresets).mockResolvedValue([]);
   vi.mocked(fileRemoteProfiles).mockResolvedValue([profileDto()]);
   vi.mocked(fileRemoteDrivers).mockResolvedValue([driverDto()]);
@@ -314,6 +314,7 @@ describe("RemoteBrowser 传输投递钮（不摆假钮的翻正）", () => {
     vi.mocked(fileEnqueue).mockResolvedValue({
       op_id: null,
       conflicts: [{ name: "a.bin", dst: "/docs/a.bin" }],
+      name_fix: [],
     });
     await mount(<RemoteBrowser />);
     await click(buttonByText("浏览")!);

@@ -9,9 +9,12 @@ use crate::state::HostState;
 
 #[derive(Serialize)]
 pub struct FileEnqueueDto {
-    /// None = Ask 策略发现冲突未入队
+    /// None = Ask 策略发现冲突未入队，或 T-B7-26 名闸 Ask 预览待确认
     pub op_id: Option<String>,
     pub conflicts: Vec<file_core::ConflictItem>,
+    /// T-B7-26：远端名三档闸回执。Ask 臂=预览行（未入队，确认后带
+    /// name_fix:"auto_rename" 重投）；AutoRename 臂=已入队的原名→新名复述
+    pub name_fix: Vec<file_core::NameFixItem>,
 }
 
 fn file_service(state: &HostState) -> Result<std::sync::Arc<file_core::FileService>, AppError> {
@@ -98,8 +101,11 @@ pub async fn file_enqueue(
 ) -> Result<FileEnqueueDto, AppError> {
     let svc = file_service(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        svc.enqueue(spec)
-            .map(|(op_id, conflicts)| FileEnqueueDto { op_id, conflicts })
+        svc.enqueue(spec).map(|out| FileEnqueueDto {
+            op_id: out.op_id,
+            conflicts: out.conflicts,
+            name_fix: out.name_fix,
+        })
     })
     .await
     .map_err(|e| AppError::module("FILE_IPC_002", e.to_string(), None))?

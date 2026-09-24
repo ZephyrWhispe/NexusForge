@@ -9,6 +9,7 @@ pub mod conflict;
 pub mod driver;
 pub mod error;
 pub mod module;
+pub mod namefix;
 pub mod ops;
 pub mod preset;
 pub mod preview;
@@ -27,6 +28,9 @@ pub use error::{
     FileError, FILE_REMOTE_CODES, FILE_REMOTE_FIELD, FILE_REMOTE_MISSING, FILE_REMOTE_PLAIN_CONFIRM,
 };
 pub use module::{FileConfig, FileModule, MAX_CONCURRENT_CEILING};
+pub use namefix::{
+    probe_remote_name, suggest_rename, FixPolicy, NameFixItem, NameFixTables, NameIssue,
+};
 pub use ops::{
     direction_of, parent_key, Checkpoint, OpEndpoint, OpKind, OpProgress, OpQueue, OpSpec, OpState,
     PendingOp, ResumeDto, TransferDirection, XferStatusDto, CHUNK,
@@ -56,4 +60,4 @@ pub use remote::{
 };
 pub use rename::{apply_plan, build_plan, CaseMode, RenamePlan, RenameRule};
 pub use search::{SearchOpts, SearchResult};
-pub use service::FileService;
+pub use service::{EnqueueOutcome, FileService};

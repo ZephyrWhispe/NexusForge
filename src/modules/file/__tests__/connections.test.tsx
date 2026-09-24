@@ -253,7 +253,7 @@ beforeEach(() => {
   vi.mocked(filePreview).mockResolvedValue({ kind: "unsupported", reason: "未配置" });
   vi.mocked(fileOpsActive).mockResolvedValue([]);
   vi.mocked(fileOpsPending).mockResolvedValue([]);
-  vi.mocked(fileEnqueue).mockResolvedValue({ op_id: "op-new", conflicts: [] });
+  vi.mocked(fileEnqueue).mockResolvedValue({ op_id: "op-new", conflicts: [], name_fix: [] });
   vi.mocked(fileOpResume).mockResolvedValue({ op_id: "op-resumed", previous_op_id: "op-old" });
   vi.mocked(xferStatus).mockResolvedValue(opRow("op-resumed"));
 });
