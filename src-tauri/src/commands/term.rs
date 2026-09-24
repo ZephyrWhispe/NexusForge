@@ -382,6 +382,107 @@ pub async fn term_sftp_upload(
         .map_err(term_err)
 }
 
+/// SFTP 删除（T-B7-6）：目录只删空目录（russh-sftp 实测臂登记，非空点名拒、
+/// 不递归）；不存在点名拒
+#[tauri::command]
+pub async fn term_sftp_remove(
+    host: String,
+    port: u16,
+    user: String,
+    auth: term_core::SshAuth,
+    path: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget {
+        host,
+        port,
+        user,
+        auth,
+        // SFTP 各口维持直连腿（同 list/download/upload 臂，jump 接线挂批次尾台账）
+        jump: None,
+    };
+    ssh.sftp_remove(&target, &path).await.map_err(term_err)
+}
+
+/// SFTP 建目录（T-B7-6）：mkdir -p 语义（多级父目录自动补建，抉择写进消息）
+#[tauri::command]
+pub async fn term_sftp_mkdir(
+    host: String,
+    port: u16,
+    user: String,
+    auth: term_core::SshAuth,
+    path: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget {
+        host,
+        port,
+        user,
+        auth,
+        jump: None,
+    };
+    ssh.sftp_mkdir(&target, &path).await.map_err(term_err)
+}
+
+/// SFTP 重命名（T-B7-6）：目标已存在 → 拒（禁静默覆盖，file-core 同纪律）
+#[tauri::command]
+pub async fn term_sftp_rename(
+    host: String,
+    port: u16,
+    user: String,
+    auth: term_core::SshAuth,
+    from_path: String,
+    to_path: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget {
+        host,
+        port,
+        user,
+        auth,
+        jump: None,
+    };
+    ssh.sftp_rename(&target, &from_path, &to_path)
+        .await
+        .map_err(term_err)
+}
+
+/// SFTP 元数据（T-B7-6）：null = 路径不存在（NoSuchFile 与其余失败分臂）
+#[tauri::command]
+pub async fn term_sftp_stat(
+    host: String,
+    port: u16,
+    user: String,
+    auth: term_core::SshAuth,
+    path: String,
+    state: State<'_, HostState>,
+) -> Result<Option<term_core::SftpMeta>, AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    let target = term_core::SshTarget {
+        host,
+        port,
+        user,
+        auth,
+        jump: None,
+    };
+    ssh.sftp_stat(&target, &path).await.map_err(term_err)
+}
+
 // ---- T-B7-5 端口转发 -L/-R/-D（**红线批：端口暴露**，转发挂 SSH 会话、会话关即全拆） ----
 
 /// 开一条转发（`term_forward_open`）：返回即终态 ForwardSpec——Listening 点名

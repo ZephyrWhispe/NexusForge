@@ -336,6 +336,11 @@ fn aux_windows_never_reach_main_only_commands() {
         "allow-kvm-pair-with",
         "allow-sys-clean-execute",
         "allow-term-ssh-connect",
+        // T-B7-6 SFTP 变更族（remove/mkdir/rename/stat）按族循环进既有模式
+        "allow-term-sftp-remove",
+        "allow-term-sftp-mkdir",
+        "allow-term-sftp-rename",
+        "allow-term-sftp-stat",
         "allow-file-enqueue",
     ];
     for (name, cap) in &caps {
@@ -375,6 +380,25 @@ fn aux_windows_never_reach_main_only_commands() {
         8,
         "quickpanel 权限面只增不减，扩张须显式改此断言"
     );
+    // 负例不空洞正对照：main 必须真持有 T-B7-6 SFTP 变更族四枚（禁改后 aux
+    // 全空但 main 也没接 = 假绿）
+    let main_perms: Vec<&str> = caps.iter().find(|(n, _)| n == "main").unwrap().1["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for expect in [
+        "allow-term-sftp-remove",
+        "allow-term-sftp-mkdir",
+        "allow-term-sftp-rename",
+        "allow-term-sftp-stat",
+    ] {
+        assert!(
+            main_perms.contains(&expect),
+            "正对照：main 必须持有 {expect}，否则上方 aux 负例是空洞"
+        );
+    }
 }
 
 #[test]

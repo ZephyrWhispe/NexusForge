@@ -780,6 +780,38 @@ impl SshService {
         Ok(n)
     }
 
+    /// SFTP 取元数据（T-B7-6）：`None` = 路径不存在（NoSuchFile 与其余失败
+    /// 分臂，不并成"读取失败"）；维持直连腿（jump 接线挂批次尾台账）
+    pub async fn sftp_stat(&self, target: &SshTarget, path: &str) -> Result<Option<SftpMeta>> {
+        self.sftp_leg(target).await?.stat(path).await
+    }
+
+    /// SFTP 建目录（T-B7-6）：**mkdir -p 语义**（多级父目录自动补建；拒多级
+    /// 的对照臂按任务书二选一登记，此处选 -p 并写进消息——UI 一次输入即达）
+    pub async fn sftp_mkdir(&self, target: &SshTarget, path: &str) -> Result<()> {
+        leg_mkdir(&self.sftp_leg(target).await?, path).await
+    }
+
+    /// SFTP 删除（T-B7-6）：先 stat 分类再分派——目录只删**空目录**（ russh-sftp
+    /// 实测 remove_dir 对非空目录回服务端 "Directory is not empty"，点名上抛、
+    /// 不递归）；不存在点名拒，不静默成功
+    pub async fn sftp_remove(&self, target: &SshTarget, path: &str) -> Result<()> {
+        leg_remove(&self.sftp_leg(target).await?, path).await
+    }
+
+    /// SFTP 重命名（T-B7-6）：目标已存在 → **拒，禁静默覆盖**（file-core 同
+    /// 纪律）——预检点名目标；TOCTOU 缝隙留给服务端 rename 自身回执
+    pub async fn sftp_rename(&self, target: &SshTarget, from: &str, to: &str) -> Result<()> {
+        leg_rename(&self.sftp_leg(target).await?, from, to).await
+    }
+
+    /// 变更操作口的建腿（每调用独立连接——SFTP 三口既有纪律的延伸）
+    async fn sftp_leg(&self, target: &SshTarget) -> Result<RusshSftpLeg> {
+        let mut handle = connect_ssh(target, self.known.clone()).await?;
+        let sftp = open_sftp(&mut handle).await?;
+        Ok(RusshSftpLeg { sftp })
+    }
+
     /// 一次性非交互远端命令（T-B7-2）：无 PTY 的 exec 通道，输出按
     /// stdout/stderr/exit 三分收口——**不冒充终端回显**。TOFU 门复用
     /// T-B7-1 的 connect 臂：首见主机在 KEX 即拒，通道打开与 exec 请求
@@ -897,6 +929,163 @@ pub struct SftpEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+}
+
+/// SFTP 元数据（`term_sftp_stat` 的 IPC DTO，T-B7-6）：mtime 无事实源回 0，
+/// 绝不回当前时刻（file-core 同纪律）
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SftpMeta {
+    pub size: u64,
+    pub modified_ms: i64,
+    pub is_dir: bool,
+}
+
+/// 变更操作最小面（T-B7-6 测试缝，file-core `SshBackend` 同纪律）：语义裁决
+/// （stat 分臂 / -p 补建 / 空目录约束 / 禁覆盖）与真协议腿解耦——内存 fake
+/// 腿不依赖真服务器即可判四口语义
+#[async_trait]
+trait SftpLeg: Send + Sync {
+    /// `Ok(None)` = NoSuchFile（不存在与其他失败分臂）；其余错误原样上抛
+    async fn stat(&self, path: &str) -> Result<Option<SftpMeta>>;
+    async fn create_dir(&self, path: &str) -> Result<()>;
+    async fn remove_file(&self, path: &str) -> Result<()>;
+    async fn remove_dir(&self, path: &str) -> Result<()>;
+    async fn rename(&self, from: &str, to: &str) -> Result<()>;
+}
+
+/// russh-sftp 2.4 真腿薄适配（错误统一裹 `TermError::Sftp` 并点名路径）
+struct RusshSftpLeg {
+    sftp: russh_sftp::client::SftpSession,
+}
+
+#[async_trait]
+impl SftpLeg for RusshSftpLeg {
+    async fn stat(&self, path: &str) -> Result<Option<SftpMeta>> {
+        if !self
+            .sftp
+            .try_exists(path)
+            .await
+            .map_err(|e| TermError::Sftp(format!("SFTP 探测 {path} 失败: {e}")))?
+        {
+            return Ok(None);
+        }
+        let md = self
+            .sftp
+            .metadata(path)
+            .await
+            .map_err(|e| TermError::Sftp(format!("SFTP 取元数据 {path} 失败: {e}")))?;
+        Ok(Some(SftpMeta {
+            size: md.size.unwrap_or(0),
+            modified_ms: md.mtime.map_or(0, |s| s as i64 * 1000),
+            is_dir: md.is_dir(),
+        }))
+    }
+
+    async fn create_dir(&self, path: &str) -> Result<()> {
+        self.sftp
+            .create_dir(path)
+            .await
+            .map_err(|e| TermError::Sftp(format!("SFTP 建目录 {path} 失败: {e}")))
+    }
+
+    async fn remove_file(&self, path: &str) -> Result<()> {
+        self.sftp
+            .remove_file(path)
+            .await
+            .map_err(|e| TermError::Sftp(format!("SFTP 删文件 {path} 失败: {e}")))
+    }
+
+    async fn remove_dir(&self, path: &str) -> Result<()> {
+        self.sftp
+            .remove_dir(path)
+            .await
+            .map_err(|e| TermError::Sftp(format!("SFTP 删目录 {path} 失败: {e}")))
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        self.sftp
+            .rename(from, to)
+            .await
+            .map_err(|e| TermError::Sftp(format!("SFTP 重命名 {from} → {to} 失败: {e}")))
+    }
+}
+
+/// `mkdir -p` 语义的祖先清单（含自身、根→叶序）："/a/b/c" →
+/// ["/a", "/a/b", "/a/b/c"]；相对路径保原点（"a/b" → ["a", "a/b"]）。
+/// `..` 臂拒解析（不替客户端猜目录遍历）；空段/`.` 段滤除
+fn mkdir_plan(path: &str) -> Result<Vec<String>> {
+    if path.contains("..") {
+        return Err(TermError::BadParam(format!(
+            "mkdir 路径含 .. 拒解析（-p 补建不做目录回退）: {path}"
+        )));
+    }
+    let absolute = path.starts_with('/');
+    let mut out: Vec<String> = Vec::new();
+    for seg in path.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        let prefix = out.last();
+        let next = match prefix {
+            Some(p) => format!("{p}/{seg}"),
+            None if absolute => format!("/{seg}"),
+            None => seg.to_string(),
+        };
+        out.push(next);
+    }
+    if out.is_empty() {
+        return Err(TermError::BadParam(format!(
+            "mkdir 路径为空或根目录，无层级可建: {path}"
+        )));
+    }
+    Ok(out)
+}
+
+/// mkdir（**-p 语义**，二选一抉择已写进消息）：逐级已存在目录静默放行；
+/// 中途撞同名文件 → 点名拒
+async fn leg_mkdir(leg: &dyn SftpLeg, path: &str) -> Result<()> {
+    for ancestor in mkdir_plan(path)? {
+        match leg.stat(&ancestor).await? {
+            Some(m) if m.is_dir => continue,
+            Some(m) => {
+                return Err(TermError::Sftp(format!(
+                    "mkdir 中止：中间层 {ancestor} 已存在但不是目录（-p 语义不覆盖同名文件，大小 {} 字节）",
+                    m.size
+                )))
+            }
+            None => leg.create_dir(&ancestor).await?,
+        }
+    }
+    Ok(())
+}
+
+/// remove（russh-sftp 实测臂登记）：先 stat 分类再分派——目录走 remove_dir
+/// （**只空目录**：非空时服务端回执 "Directory is not empty" 原样点名上抛，
+/// 不做递归删除），文件走 remove_file；不存在点名拒
+async fn leg_remove(leg: &dyn SftpLeg, path: &str) -> Result<()> {
+    match leg.stat(path).await? {
+        None => Err(TermError::Sftp(format!(
+            "删除目标不存在: {path}（不静默成功）"
+        ))),
+        Some(m) if m.is_dir => leg.remove_dir(path).await,
+        Some(_) => leg.remove_file(path).await,
+    }
+}
+
+/// rename：**目标已存在 → 拒**（禁静默覆盖——file-core 同纪律）：预检点名
+/// 目标及其类型；源不存在同样点名拒。假想"服务端 rename 会覆盖"的腿在
+/// `sftpRename_targetExists_refusesNotOverwrite` 里被构造性封死（fake 腿故意
+/// 用覆盖语义，仍到不了 rename 调用）
+async fn leg_rename(leg: &dyn SftpLeg, from: &str, to: &str) -> Result<()> {
+    if leg.stat(from).await?.is_none() {
+        return Err(TermError::Sftp(format!(
+            "重命名源不存在: {from}（禁静默新建）"
+        )));
+    }
+    if let Some(target) = leg.stat(to).await? {
+        return Err(TermError::Sftp(format!(
+            "重命名目标已存在: {to}（类型: {}）——禁静默覆盖，请先删除或换名",
+            if target.is_dir { "目录" } else { "文件" }
+        )));
+    }
+    leg.rename(from, to).await
 }
 
 #[cfg(test)]
@@ -1383,5 +1572,285 @@ mod tests {
         // 任务书形状：最内层 via 显式 null（不是省键）
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["jump"]["via"]["via"], serde_json::Value::Null);
+    }
+
+    // ---- T-B7-6 SFTP 变更操作语义（内存 fake 腿，判据不靠真服务器） ----
+
+    /// 内存假腿：目录集 + 文件集 + 调用痕。rename 故意实现 **POSIX 覆盖语义**
+    /// （服务端真会静默覆盖也不许漏——门必须挡在调用之前）
+    #[derive(Default)]
+    struct FakeFs {
+        dirs: std::collections::HashSet<String>,
+        files: HashMap<String, u64>,
+        log: Vec<String>,
+    }
+
+    struct FakeSftp(AsyncMutex<FakeFs>);
+
+    impl FakeSftp {
+        fn with(files: &[(&str, u64)], dirs: &[&str]) -> Self {
+            let mut fs = FakeFs::default();
+            for (p, s) in files {
+                fs.files.insert((*p).to_string(), *s);
+            }
+            for d in dirs {
+                fs.dirs.insert((*d).to_string());
+            }
+            Self(AsyncMutex::new(fs))
+        }
+        async fn snapshot(&self) -> FakeFs {
+            let g = self.0.lock().await;
+            FakeFs {
+                dirs: g.dirs.clone(),
+                files: g.files.clone(),
+                log: g.log.clone(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SftpLeg for FakeSftp {
+        async fn stat(&self, path: &str) -> Result<Option<SftpMeta>> {
+            let g = self.0.lock().await;
+            if let Some(size) = g.files.get(path) {
+                return Ok(Some(SftpMeta {
+                    size: *size,
+                    modified_ms: 0,
+                    is_dir: false,
+                }));
+            }
+            if g.dirs.contains(path) {
+                return Ok(Some(SftpMeta {
+                    size: 0,
+                    modified_ms: 0,
+                    is_dir: true,
+                }));
+            }
+            Ok(None)
+        }
+
+        async fn create_dir(&self, path: &str) -> Result<()> {
+            let mut g = self.0.lock().await;
+            g.log.push(format!("create_dir {path}"));
+            if g.dirs.contains(path) || g.files.contains_key(path) {
+                return Err(TermError::Sftp(format!("SFTP 建目录 {path} 失败: 已存在")));
+            }
+            g.dirs.insert(path.to_string());
+            Ok(())
+        }
+
+        async fn remove_file(&self, path: &str) -> Result<()> {
+            let mut g = self.0.lock().await;
+            g.log.push(format!("remove_file {path}"));
+            if g.files.remove(path).is_none() {
+                return Err(TermError::Sftp(format!(
+                    "SFTP 删文件 {path} 失败: Status: NoSuchFile"
+                )));
+            }
+            Ok(())
+        }
+
+        /// 实测臂登记：非空目录 → 服务端风格回执点名 "is not empty"
+        async fn remove_dir(&self, path: &str) -> Result<()> {
+            let mut g = self.0.lock().await;
+            g.log.push(format!("remove_dir {path}"));
+            if !g.dirs.remove(path) {
+                return Err(TermError::Sftp(format!(
+                    "SFTP 删目录 {path} 失败: Status: NoSuchFile"
+                )));
+            }
+            let prefix = format!("{path}/");
+            let non_empty = g
+                .dirs
+                .iter()
+                .chain(g.files.keys())
+                .any(|p| p.starts_with(&prefix));
+            if non_empty {
+                g.dirs.insert(path.to_string());
+                return Err(TermError::Sftp(format!(
+                    "SFTP 删目录 {path} 失败: Status: Directory is not empty（目录非空）"
+                )));
+            }
+            Ok(())
+        }
+
+        /// 故意覆盖语义（正对照压力测试：假腿会静默覆盖，门仍必须挡住）
+        async fn rename(&self, from: &str, to: &str) -> Result<()> {
+            let mut g = self.0.lock().await;
+            g.log.push(format!("rename {from} {to}"));
+            if let Some(size) = g.files.remove(from) {
+                g.files.insert(to.to_string(), size);
+                return Ok(());
+            }
+            if g.dirs.remove(from) {
+                g.dirs.insert(to.to_string());
+                return Ok(());
+            }
+            Err(TermError::Sftp(format!(
+                "SFTP 重命名 {from} → {to} 失败: Status: NoSuchFile"
+            )))
+        }
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-6）字面测试名优先于 rustc 命名惯例
+    async fn sftpRename_targetExists_refusesNotOverwrite() {
+        let leg = FakeSftp::with(&[("/a.txt", 10), ("/b.txt", 99)], &[]);
+        let e = leg_rename(&leg, "/a.txt", "/b.txt").await.unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("/b.txt"), "必须点名目标，实得 {msg}");
+        assert!(msg.contains("禁静默覆盖"), "禁覆盖语义必须显形，实得 {msg}");
+        // 构造性封死：假腿本身是覆盖语义——若门漏了，rename 调用痕会出卖它
+        let snap = leg.snapshot().await;
+        assert!(
+            !snap.log.iter().any(|l| l.starts_with("rename")),
+            "预检拒后不得触达 rename 调用: {:?}",
+            snap.log
+        );
+        assert_eq!(snap.files.get("/b.txt"), Some(&99), "目标内容不得被覆盖");
+        assert_eq!(snap.files.get("/a.txt"), Some(&10), "源不得消失");
+        // 正对照：目标无占用 → 重命名真发生（拒臂不是无条件默认值）
+        leg_rename(&leg, "/a.txt", "/c.txt").await.unwrap();
+        let snap = leg.snapshot().await;
+        assert_eq!(snap.files.get("/c.txt"), Some(&10));
+        assert!(!snap.files.contains_key("/a.txt"));
+        // 源不存在臂：点名源，禁静默新建
+        let e = leg_rename(&leg, "/gone.txt", "/d.txt").await.unwrap_err();
+        assert!(e.to_string().contains("重命名源不存在: /gone.txt"));
+        assert!(!leg.snapshot().await.dirs.contains("/d.txt"));
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    async fn sftpRemove_dirNotEmpty_errsNaming() {
+        // russh-sftp 实测登记：remove 对目录只走空目录臂（假腿 remove_dir 非空
+        // 回服务端风格 "is not empty"），语义=先 stat 分类再分派，不盲试双腿
+        let leg = FakeSftp::with(&[("/d/x", 1)], &["/d", "/e"]);
+        let e = leg_remove(&leg, "/d").await.unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("/d"), "必须点名目录，实得 {msg}");
+        assert!(msg.contains("not empty"), "非空事实必须上抛，实得 {msg}");
+        let snap = leg.snapshot().await;
+        assert!(
+            snap.log.iter().any(|l| l == "remove_dir /d"),
+            "目录必须走 remove_dir 臂: {:?}",
+            snap.log
+        );
+        assert!(
+            !snap.log.iter().any(|l| l.starts_with("remove_file")),
+            "已分类为目录后不得盲试文件腿: {:?}",
+            snap.log
+        );
+        assert!(snap.dirs.contains("/d"), "被拒的删除不得生效");
+        // 正对照：空目录删成；文件走 remove_file 臂
+        leg_remove(&leg, "/e").await.unwrap();
+        leg_remove(&leg, "/d/x").await.unwrap();
+        let snap = leg.snapshot().await;
+        assert!(!snap.dirs.contains("/e"), "空目录必须删成");
+        assert!(
+            snap.log.iter().any(|l| l == "remove_file /d/x"),
+            "文件必须走 remove_file 臂: {:?}",
+            snap.log
+        );
+        // 不存在臂：点名拒，不静默成功
+        let e = leg_remove(&leg, "/nope").await.unwrap_err();
+        assert!(
+            e.to_string().contains("删除目标不存在: /nope"),
+            "不存在必须点名拒（不静默成功），实得 {e}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    async fn sftpMkdir_nested_parents() {
+        // 二选一抉择=**-p 语义**（多级自动补建），已写进 leg_mkdir 消息与文档
+        assert_eq!(
+            mkdir_plan("/a/b/c/").unwrap(),
+            vec!["/a".to_string(), "/a/b".to_string(), "/a/b/c".to_string()]
+        );
+        assert_eq!(
+            mkdir_plan("a/b").unwrap(),
+            vec!["a".to_string(), "a/b".to_string()]
+        );
+        assert!(mkdir_plan("/").is_err() && mkdir_plan("").is_err());
+        assert!(mkdir_plan("/a/../b").is_err(), ".. 臂必须拒解析");
+
+        let leg = FakeSftp::with(&[], &[]);
+        leg_mkdir(&leg, "/a/b/c").await.unwrap();
+        let snap = leg.snapshot().await;
+        for p in ["/a", "/a/b", "/a/b/c"] {
+            assert!(snap.dirs.contains(p), "-p 必须补建每一级缺环: {p}");
+        }
+        assert_eq!(
+            snap.log
+                .iter()
+                .filter(|l| l.starts_with("create_dir"))
+                .count(),
+            3,
+            "缺环逐級各建一次: {:?}",
+            snap.log
+        );
+        // 幂等臂（-p）：全链已存在 → 零次 create_dir 且成功
+        leg_mkdir(&leg, "/a/b/c").await.unwrap();
+        assert_eq!(
+            leg.snapshot()
+                .await
+                .log
+                .iter()
+                .filter(|l| l.starts_with("create_dir"))
+                .count(),
+            3,
+            "已存在层必须静默放行"
+        );
+        // 中途撞同名文件 → 点名拒，不覆盖
+        let leg = FakeSftp::with(&[("/f", 7)], &[]);
+        let e = leg_mkdir(&leg, "/f/g").await.unwrap_err();
+        assert!(
+            e.to_string().contains("/f 已存在但不是目录"),
+            "同名文件挡路必须点名，实得 {e}"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    fn termSftp_and_fileSftp_sameOperationNames() {
+        // 形状对齐登记（grep 对照表）：七动词族两侧同字面——
+        // | 动词 | term-core SshService | file-core SftpDriver |
+        // | list | fn sftp_list | fn list_entries |
+        // | download | fn sftp_download | fn download_to |
+        // | upload | fn sftp_upload | fn upload_from |
+        // | remove | fn sftp_remove | fn remove_remote |
+        // | mkdir | fn sftp_mkdir | fn mkdir_remote |
+        // | rename | fn sftp_rename | fn rename_remote |
+        // | stat | fn sftp_stat | fn stat_size |
+        let term_src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ssh.rs")).unwrap();
+        let file_src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../file-core/src/remote/ssh.rs"
+        ))
+        .unwrap();
+        for verb in [
+            "list", "download", "upload", "remove", "mkdir", "rename", "stat",
+        ] {
+            let term_pat = format!("fn sftp_{verb}");
+            assert!(
+                term_src.contains(&term_pat),
+                "term 侧缺 {term_pat}（对照表破形）"
+            );
+            let file_pat = format!("fn {verb}");
+            assert!(
+                file_src.contains(&file_pat),
+                "file 侧缺 {file_pat}（对照表破形）"
+            );
+        }
+        // 行范围钉：无 chmod——权限位单归 T-B7-25，两域不得先立一面
+        // （禁串拼接构造：本断言自身在场，字面量写死会自指导弹）
+        let chmod = ["ch", "mod"].concat();
+        assert!(
+            !term_src.contains(&format!("fn sftp_{chmod}"))
+                && !file_src.contains(&format!("fn {chmod}")),
+            "chmod 提前落地属越权（T-B7-25 专属）"
+        );
     }
 }

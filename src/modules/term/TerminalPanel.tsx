@@ -35,6 +35,9 @@ import {
   termSessions,
   termSftpDownload,
   termSftpList,
+  termSftpMkdir,
+  termSftpRemove,
+  termSftpRename,
   termSftpUpload,
   termSpawnLocal,
   termSpawnWsl,
@@ -182,6 +185,11 @@ export default function TerminalPanel() {
   const [sftpRemote, setSftpRemote] = useState("");
   const [sftpLocal, setSftpLocal] = useState("");
   const [sftpBusy, setSftpBusy] = useState(false);
+  // T-B7-6 SFTP 变更操作（删除确认钮 / 新建目录 / 重命名）——stat 不上 UI，
+  // 命令面供 file 域与后续消费；删除走二次确认（arm→再点执行）防误删
+  const [sftpMkDir, setSftpMkDir] = useState("");
+  const [sftpRenaming, setSftpRenaming] = useState<{ from: string; to: string } | null>(null);
+  const [sftpDeleteArm, setSftpDeleteArm] = useState<string | null>(null);
 
   // ---- Docker ----
   const [containers, setContainers] = useState<DockerContainerDto[] | null>(null);
@@ -455,6 +463,61 @@ export default function TerminalPanel() {
       setSftpBusy(false);
     }
   }, [sftpTarget, sftpPath, fail]);
+
+  const joinRemote = useCallback(
+    (name: string) => `${sftpPath.replace(/\/$/, "")}/${name}`,
+    [sftpPath],
+  );
+
+  // T-B7-6 变更操作统一收束：成功即重取列表（结果永不"以为成了"——被拒的
+  // 目录非空/禁覆盖都从后端回执点名，不静默）
+  const sftpMutate = useCallback(
+    async (run: () => Promise<unknown>, okMsg: string) => {
+      setSftpBusy(true);
+      setErr(null);
+      try {
+        await run();
+        setMsg(okMsg);
+        await loadSftp();
+      } catch (e) {
+        fail(e);
+      } finally {
+        setSftpBusy(false);
+      }
+    },
+    [fail, loadSftp],
+  );
+
+  const sftpMkdir = useCallback(() => {
+    const name = sftpMkDir.trim();
+    if (!name) return;
+    const t = sftpTarget();
+    void sftpMutate(
+      () => termSftpMkdir(t.host, t.port, t.user, t.auth, joinRemote(name)),
+      `已创建目录 ${name}`,
+    ).then(() => setSftpMkDir(""));
+  }, [sftpMkDir, sftpTarget, sftpMutate, joinRemote]);
+
+  const sftpRename = useCallback(() => {
+    if (!sftpRenaming) return;
+    const { from, to } = sftpRenaming;
+    const t = sftpTarget();
+    void sftpMutate(
+      () => termSftpRename(t.host, t.port, t.user, t.auth, joinRemote(from), joinRemote(to)),
+      `已重命名 ${from} → ${to}`,
+    ).then(() => setSftpRenaming(null));
+  }, [sftpRenaming, sftpTarget, sftpMutate, joinRemote]);
+
+  const sftpRemove = useCallback(
+    (name: string) => {
+      const t = sftpTarget();
+      void sftpMutate(
+        () => termSftpRemove(t.host, t.port, t.user, t.auth, joinRemote(name)),
+        `已删除 ${name}`,
+      ).then(() => setSftpDeleteArm(null));
+    },
+    [sftpTarget, sftpMutate, joinRemote],
+  );
 
   const showLogs = useCallback(
     async (id: string) => {
@@ -771,6 +834,19 @@ export default function TerminalPanel() {
               {sftpBusy && <Spinner size="tiny" />}
             </div>
           )}
+          {active && (
+            <div className={styles.row}>
+              <Input
+                className={styles.grow}
+                placeholder="新目录名（当前路径下）"
+                value={sftpMkDir}
+                onChange={(_, d) => setSftpMkDir(d.value)}
+              />
+              <Button size="small" disabled={!sftpMkDir.trim() || sftpBusy} onClick={sftpMkdir}>
+                新建目录
+              </Button>
+            </div>
+          )}
           {sftpEntries.length > 0 && (
             <div className={styles.list}>
               {sftpEntries.map((e) => (
@@ -790,11 +866,97 @@ export default function TerminalPanel() {
                     if (e.is_dir) void loadSftp();
                   })}
                 >
-                  <Text size={200}>{e.is_dir ? "📁" : "📄"} {e.name}</Text>
-                  {!e.is_dir && (
-                    <Text size={100} className={styles.muted}>
-                      {(e.size / 1024).toFixed(1)} KB
-                    </Text>
+                  {sftpRenaming?.from === e.name ? (
+                    <span
+                      style={{ display: "flex", gap: 4, alignItems: "center", width: "100%" }}
+                    >
+                      <Input
+                        className={styles.grow}
+                        placeholder="新名（目标存在则拒，不覆盖）"
+                        value={sftpRenaming.to}
+                        onClick={(ev) => ev.stopPropagation()}
+                        onChange={(_, d) => setSftpRenaming({ from: e.name, to: d.value })}
+                      />
+                      <Button
+                        size="small"
+                        disabled={!sftpRenaming.to.trim() || sftpBusy}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          sftpRename();
+                        }}
+                      >
+                        确认
+                      </Button>
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          setSftpRenaming(null);
+                        }}
+                      >
+                        取消
+                      </Button>
+                    </span>
+                  ) : (
+                    <>
+                      <Text size={200}>{e.is_dir ? "📁" : "📄"} {e.name}</Text>
+                      {!e.is_dir && (
+                        <Text size={100} className={styles.muted}>
+                          {(e.size / 1024).toFixed(1)} KB
+                        </Text>
+                      )}
+                      <span style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          disabled={sftpBusy}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            setSftpRenaming({ from: e.name, to: e.name });
+                          }}
+                        >
+                          重命名
+                        </Button>
+                        {sftpDeleteArm === e.name ? (
+                          <>
+                            <Button
+                              size="small"
+                              appearance="outline"
+                              disabled={sftpBusy}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                sftpRemove(e.name);
+                              }}
+                            >
+                              确认删除
+                            </Button>
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                setSftpDeleteArm(null);
+                              }}
+                            >
+                              取消
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            size="small"
+                            appearance="subtle"
+                            disabled={sftpBusy}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setSftpDeleteArm(e.name);
+                            }}
+                          >
+                            删除
+                          </Button>
+                        )}
+                      </span>
+                    </>
                   )}
                 </div>
               ))}

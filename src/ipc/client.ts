@@ -1746,6 +1746,11 @@ export interface SftpEntryDto {
   is_dir: boolean;
   size: number;
 }
+export interface SftpMetaDto {
+  size: number;
+  modified_ms: number;
+  is_dir: boolean;
+}
 export interface DockerContainerDto {
   id: string;
   name: string;
@@ -1850,6 +1855,28 @@ export function termSftpUpload(
   host: string, port: number, user: string, auth: SshAuthDto, localPath: string, remotePath: string,
 ): Promise<number> {
   return invoke("term_sftp_upload", { host, port, user, auth, localPath, remotePath });
+}
+// T-B7-6 SFTP 变更族：remove 目录只删空目录 / mkdir 走 -p 语义 / rename 禁静默
+// 覆盖 / stat null=不存在（语义判据都在 term-core，这里只保线形）
+export function termSftpRemove(
+  host: string, port: number, user: string, auth: SshAuthDto, path: string,
+): Promise<void> {
+  return invoke("term_sftp_remove", { host, port, user, auth, path });
+}
+export function termSftpMkdir(
+  host: string, port: number, user: string, auth: SshAuthDto, path: string,
+): Promise<void> {
+  return invoke("term_sftp_mkdir", { host, port, user, auth, path });
+}
+export function termSftpRename(
+  host: string, port: number, user: string, auth: SshAuthDto, fromPath: string, toPath: string,
+): Promise<void> {
+  return invoke("term_sftp_rename", { host, port, user, auth, fromPath, toPath });
+}
+export function termSftpStat(
+  host: string, port: number, user: string, auth: SshAuthDto, path: string,
+): Promise<SftpMetaDto | null> {
+  return invoke("term_sftp_stat", { host, port, user, auth, path });
 }
 export function termDockerContainers(): Promise<DockerContainerDto[]> {
   return invoke("term_docker_containers");
