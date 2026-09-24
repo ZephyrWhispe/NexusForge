@@ -8,7 +8,13 @@ use crate::state::HostState;
 use host_core::ports::DockerPipePort;
 
 fn term_err(e: term_core::TermError) -> AppError {
-    AppError::module(e.code(), e.to_string(), None)
+    // T-B7-1：TOFU 首见拒连时整键描述符逐字进 hint——前端确认对话框展示的
+    // 就是盘上要比对的那串（永不归一化，展示面与信任面同源）
+    let hint = match &e {
+        term_core::TermError::HostKeyUnknown { descriptor, .. } => Some(descriptor.clone()),
+        _ => None,
+    };
+    AppError::module(e.code(), e.to_string(), hint.as_deref())
 }
 
 /// 本地会话（T1）
@@ -190,6 +196,38 @@ pub async fn term_ssh_forget_host(
         .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
     let (h, port) = parse_host_port(&host);
     ssh.known_hosts().remove(&h, port).map_err(term_err)
+}
+
+/// TOFU 首见指纹确认（T-B7-1）：信任决定的唯一写入口。
+/// `fingerprint` 必须是连接被拒时 hint 里的**整键描述符逐字**
+/// （`"algo SHA256:base64"`）——接受的是这一枚指纹，不是这台主机。
+#[tauri::command]
+pub async fn term_ssh_fingerprint_ack(
+    host: String,
+    port: u16,
+    fingerprint: String,
+    state: State<'_, HostState>,
+) -> Result<(), AppError> {
+    let ssh = state
+        .term
+        .ssh()
+        .ok_or_else(|| AppError::module("TERM_IPC_001", "SSH 服务未就绪", None))?;
+    if host.trim().is_empty() {
+        return Err(term_err(term_core::TermError::BadParam(
+            "主机名不得为空".into(),
+        )));
+    }
+    if fingerprint.trim().is_empty()
+        || fingerprint.lines().count() > 1
+        || fingerprint.contains(['\r', '\n'])
+    {
+        return Err(term_err(term_core::TermError::BadParam(
+            "指纹确认参数必须是单行非空的整键描述符（拒绝多行注入）".into(),
+        )));
+    }
+    ssh.known_hosts()
+        .accept(&host, port, &fingerprint)
+        .map_err(term_err)
 }
 
 fn parse_host_port(host: &str) -> (String, u16) {

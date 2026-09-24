@@ -39,6 +39,7 @@ import {
   termSpawnLocal,
   termSpawnWsl,
   termSshConnect,
+  termSshFingerprintAck,
   termSshForgetHost,
   termSshKnownHosts,
   termWslList,
@@ -319,19 +320,42 @@ export default function TerminalPanel() {
   const spawnSsh = useCallback(async () => {
     if (!sshHost.trim()) return;
     setErr(null);
-    try {
-      const s = await termSshConnect({
-        host: sshHost.trim(),
-        port: Number(sshPort) || 22,
-        user: sshUser,
-        auth: sshAuth(),
-        cols: 100,
-        rows: 26,
-      });
+    const host = sshHost.trim();
+    const port = Number(sshPort) || 22;
+    const attempt = async () =>
+      termSshConnect({ host, port, user: sshUser, auth: sshAuth(), cols: 100, rows: 26 });
+    const openSession = (s: TermSessionDto) => {
       setSessions((prev) => [...prev, s]);
       setActive(s.id);
       setMsg(`SSH 已连接 ${s.title}`);
+    };
+    try {
+      openSession(await attempt());
     } catch (e) {
+      // T-B7-1 TOFU 首见臂：TERM_SSH_004 的 hint 携带整键描述符逐字——
+      // 确认对话框展示的就是盘上要比对的那串；明示核对后才记信任并仅重连一次
+      const err = parseAppError(e);
+      if (err?.data.code === "TERM_SSH_004" && err.data.hint) {
+        const descriptor = err.data.hint;
+        const ok = await confirmAction({
+          title: "SSH 首见主机指纹确认",
+          impact: [
+            `主机 ${host}:${port} 尚无密钥记录`,
+            `整键描述符（逐字）：${descriptor}`,
+          ],
+          detail:
+            "请先经带外渠道与服务器侧核对这枚指纹完全一致，确认后才记入共享信任表并重连。心存疑虑就取消——本客户端没有隐式自纳这回事。",
+          confirmLabel: "已核对，记录这枚指纹",
+        });
+        if (!ok) return;
+        try {
+          await termSshFingerprintAck(host, port, descriptor);
+          openSession(await attempt());
+        } catch (e2) {
+          fail(e2);
+        }
+        return;
+      }
       fail(e);
     }
   }, [sshHost, sshPort, sshUser, sshAuth, fail]);

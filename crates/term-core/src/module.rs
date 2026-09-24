@@ -64,8 +64,11 @@ impl Module for TermModule {
             .ok_or_else(|| ModuleError::Init("ConptyPort 未注册".into()))?;
         self.sessions.attach(conpty, ctx.event_bus.clone());
 
-        let ssh = SshService::new(self.app_data_dir.join("term").join("known_hosts.json"))
-            .map_err(|e| ModuleError::Init(e.to_string()))?;
+        // T-B7-1：信任面走两域共享单一事实源（appData 根下的 ssh/ 文件；
+        // 首载触发两旧表合并）。坏文件 fail-closed——init 即 Err 点名路径，
+        // 带病启动等于信任任意主机。
+        let ssh =
+            SshService::new(&self.app_data_dir).map_err(|e| ModuleError::Init(e.to_string()))?;
         *self.ssh.write() = Some(Arc::new(ssh));
 
         self.state.set(ModuleState::Stopped);

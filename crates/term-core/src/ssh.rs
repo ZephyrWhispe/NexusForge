@@ -1,13 +1,13 @@
 //! T3 SSH/SFTP（docs/impl/06 T3）：russh 客户端 + TOFU known_hosts。
 //!
-//! - 首次连接记录指纹（TOFU）；指纹变更拒绝连接并报 TERM_SSH_002（不允许静默接受）
-//! - known_hosts 存 `{appData}/term/known_hosts.json`（host:port → SHA256 指纹）
+//! - T-B7-1 治本：首见**拒连**（`TERM_SSH_004` + 指纹进 hint），只有用户经
+//!   `term_ssh_fingerprint_ack` 明示核对才落信任；指纹变更拒连点名两枚（TERM_SSH_002）
+//! - known_hosts 单一事实源 `{app_data}/ssh/known_hosts.json`（term 与 file
+//!   两域共读一表，构造与旧表迁移在 host-core `ssh_trust`）；坏文件 fail-closed
 //! - 终端会话：request_pty + request_shell → 输出泵入统一 SessionState
 //! - SFTP：每次操作独立 channel + sftp subsystem（v1 简化，不复用连接池）
 //! - 私钥走路径引用（不复制内容进 vault）；密码由 UI 现场输入不入库
 
-use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +22,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::error::{Result, TermError};
 use crate::session::{SessionInfo, TermKind, TermSessions};
+pub use host_core::ssh_trust::HostKeyDecision;
 
 /// 连接超时
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -48,91 +49,88 @@ pub struct SshTarget {
     pub auth: SshAuth,
 }
 
-/// known_hosts 存储（JSON：host:port → SHA256:xxxx）
+/// known_hosts 单源视图（host-core `ssh_trust` 共享存储；路径构造与旧表
+/// 迁移全在 host-core——本型只是 term 侧的薄门面）
 pub struct KnownHosts {
-    path: PathBuf,
-    map: RwLock<HashMap<String, String>>,
+    store: host_core::ssh_trust::KnownHostsStore,
+}
+
+impl std::fmt::Debug for KnownHosts {
+    /// 与 host-core 存储同谱：只报规模，不整版抄表
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.store, f)
+    }
 }
 
 impl KnownHosts {
-    pub fn open(path: PathBuf) -> Result<Self> {
-        let map = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => HashMap::new(),
-        };
+    /// 以 appData 根打开共享信任文件。**坏文件 Err 不自愈**——
+    /// 拒绝以空表启动（错误消息点名路径，见 `TrustError::Corrupt`）。
+    pub fn open(app_data_dir: &Path) -> Result<Self> {
         Ok(Self {
-            path,
-            map: RwLock::new(map),
+            store: host_core::ssh_trust::KnownHostsStore::shared(app_data_dir)
+                .map_err(TermError::from)?,
         })
     }
 
-    fn key(host: &str, port: u16) -> String {
-        if port == 22 {
-            host.to_string()
-        } else {
-            format!("[{host}]:{port}")
-        }
+    /// 单一事实源路径（与 file 域同一构造函数——`fileAndTerm_shareSingleStore`
+    /// 恒一断言的 term 半边）
+    pub fn shared_path(app_data_dir: &Path) -> PathBuf {
+        host_core::ssh_trust::shared_path(app_data_dir)
     }
 
-    /// 查询已记录指纹
+    /// 查询已记录整键描述符
     pub fn get(&self, host: &str, port: u16) -> Option<String> {
-        self.map.read().get(&Self::key(host, port)).cloned()
+        self.store.get(host, port)
     }
 
-    /// 记录/更新指纹（UI 明确接受后调用）
-    pub fn accept(&self, host: &str, port: u16, fingerprint: &str) -> Result<()> {
-        self.map
-            .write()
-            .insert(Self::key(host, port), fingerprint.to_string());
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(TermError::Io)?;
-        }
-        let data = serde_json::to_vec_pretty(&*self.map.read())
-            .map_err(|e| TermError::BadState(format!("known_hosts 序列化失败: {e}")))?;
-        std::fs::write(&self.path, data).map_err(TermError::Io)?;
-        Ok(())
+    /// 记录/更新**整键逐字**（`"algo SHA256:base64"`）——只在用户经
+    /// `term_ssh_fingerprint_ack` 明示核对后调用；首见绝不自动流经此口（T-B7-1 治本）
+    pub fn accept(&self, host: &str, port: u16, whole_key: &str) -> Result<()> {
+        self.store
+            .accept(host, port, whole_key)
+            .map_err(TermError::from)
     }
 
     /// 删除记录（用户确认主机重建后允许重连）
     pub fn remove(&self, host: &str, port: u16) -> Result<bool> {
-        let removed = self.map.write().remove(&Self::key(host, port)).is_some();
-        if removed {
-            let data = serde_json::to_vec_pretty(&*self.map.read())
-                .map_err(|e| TermError::BadState(format!("known_hosts 序列化失败: {e}")))?;
-            std::fs::write(&self.path, data).map_err(TermError::Io)?;
-        }
-        Ok(removed)
+        self.store.remove(host, port).map_err(TermError::from)
     }
 
-    /// 全部记录（UI 管理：host:port → 指纹）
+    /// 全部记录（UI 管理：规范键 → 整键描述符）
     pub fn entries(&self) -> Vec<(String, String)> {
-        let mut v: Vec<(String, String)> = self
-            .map
-            .read()
-            .iter()
-            .map(|(k, fp)| (k.clone(), fp.clone()))
-            .collect();
-        v.sort();
-        v
+        self.store.entries()
     }
 
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.map.read().len()
-    }
-
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// 三态裁决（首见 = Unknown 零写；裸旧记录命中即 Trusted 并升级落盘）
+    pub fn decide(&self, host: &str, port: u16, actual: &str) -> HostKeyDecision {
+        self.store.decide(host, port, actual)
     }
 }
 
-/// SHA256 指纹（russh-keys 自带格式 "SHA256:base64"）
-fn fingerprint(key: &PublicKey) -> String {
-    key.fingerprint()
+/// 整键描述符组形口：russh 公钥 → `"{algo} {SHA256:base64}"`（盘上比对与
+/// UI 展示的是同一串，永不只取 base64 段）
+fn whole_key_of(key: &PublicKey) -> String {
+    format!("{} {}", key.name(), key.fingerprint())
 }
 
-/// russh Handler：TOFU 校验（指纹变更强拒绝，不允许静默接受——docs/impl/06 风险标注）
+/// TOFU 三态 → TermError 的统一裁决出口（Handler 臂与测试臂共用一枚——
+/// 点名牌只有这一份措辞，错误消息构造不存在第二套）
+fn tofu_verdict(known: &KnownHosts, host: &str, port: u16, whole_key: &str) -> Result<()> {
+    match known.decide(host, port, whole_key) {
+        HostKeyDecision::Trusted { .. } => Ok(()),
+        HostKeyDecision::Unknown { fingerprint } => Err(TermError::HostKeyUnknown {
+            host: host.to_owned(),
+            port,
+            descriptor: fingerprint,
+        }),
+        HostKeyDecision::Changed { recorded, actual } => Err(TermError::HostKey(format!(
+            "主机 {host}:{port} 密钥已变更！记录（逐字）{recorded}，实收（逐字）{actual}。\
+             若确认主机重建，请删除已知主机记录后重连；不存在带着旧记录继续连的出路。",
+        ))),
+    }
+}
+
+/// russh Handler：TOFU 校验（首见拒 + 变更拒，都不允许静默接受——docs/impl/06 风险标注）
 struct TofuHandler {
     known: Arc<KnownHosts>,
     host: String,
@@ -147,21 +145,13 @@ impl client::Handler for TofuHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        let fp = fingerprint(server_public_key);
-        match self.known.get(&self.host, self.port) {
-            Some(recorded) if recorded == fp => Ok(true),
-            Some(recorded) => Err(TermError::HostKey(format!(
-                "主机 {host}:{port} 密钥已变更！记录 {recorded}，实际 {fp}。\
-                 若确认主机重建，请删除已知主机记录后重连。",
-                host = self.host,
-                port = self.port
-            ))),
-            None => {
-                // 首次连接：TOFU 自动记录指纹（首次确认 UI 在后续迭代）
-                self.known.accept(&self.host, self.port, &fp)?;
-                Ok(true)
-            }
-        }
+        tofu_verdict(
+            &self.known,
+            &self.host,
+            self.port,
+            &whole_key_of(server_public_key),
+        )?;
+        Ok(true)
     }
 }
 
@@ -222,9 +212,10 @@ async fn connect_ssh(target: &SshTarget, known: Arc<KnownHosts>) -> Result<Handl
     )
     .await
     .map_err(|_| TermError::Ssh(format!("连接超时（{}s）", CONNECT_TIMEOUT.as_secs())))?
-    // connect 返回 H::Error = TermError（check_server_key 拒绝即 HostKey 详情）
+    // connect 返回 H::Error = TermError（check_server_key 拒绝即 HostKey/HostKeyUnknown 详情，
+    // 两枚信任臂都原样过网——不许被兜底臂裹成 TERM_SSH_001）
     .map_err(|e| match &e {
-        TermError::HostKey(_) => e,
+        TermError::HostKey(_) | TermError::HostKeyUnknown { .. } => e,
         other => TermError::Ssh(format!(
             "连接 {host}:{port} 失败: {other}",
             host = target.host,
@@ -241,9 +232,10 @@ pub struct SshService {
 }
 
 impl SshService {
-    pub fn new(known_hosts_path: PathBuf) -> Result<Self> {
+    /// 以 appData 根构造（信任面走 T-B7-1 单一事实源；坏文件即 Err）
+    pub fn new(app_data_dir: &Path) -> Result<Self> {
         Ok(Self {
-            known: Arc::new(KnownHosts::open(known_hosts_path)?),
+            known: Arc::new(KnownHosts::open(app_data_dir)?),
         })
     }
 
@@ -464,28 +456,142 @@ mod tests {
         d
     }
 
+    fn seed_shared(app: &Path, obj: &serde_json::Value) -> PathBuf {
+        let p = KnownHosts::shared_path(app);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, serde_json::to_vec(obj).unwrap()).unwrap();
+        p
+    }
+
     #[test]
-    fn known_hosts_tofu_lifecycle() {
-        let d = tmpdir("tofu");
-        let kh = KnownHosts::open(d.join("known_hosts.json")).unwrap();
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-1）字面测试名优先于 rustc 命名惯例
+    fn knownHosts_corruptFile_isErrNotSilentlyEmpty() {
+        // 修前判红即达标（旧臂解析失败静默回落空表）——镜像 file 域同名测
+        let d = tmpdir("corrupt");
+        let p = seed_shared(&d, &serde_json::json!({"ok": "x"}));
+        std::fs::write(&p, b"{ torn json").unwrap();
+        let e = KnownHosts::open(&d).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("known_hosts"), "必须点名文件，实得 {msg}");
+        assert!(
+            msg.contains("以空表启动即被拒绝"),
+            "fail-closed 语义必须显形"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    fn tofu_firstSight_returnsUnknownAndZeroWrites() {
+        let d = tmpdir("firstsight");
+        let kh = KnownHosts::open(&d).unwrap();
+        let e = tofu_verdict(&kh, "srv.example", 22, "ssh-ed25519 SHA256:aaa").unwrap_err();
+        match &e {
+            TermError::HostKeyUnknown { descriptor, .. } => {
+                assert_eq!(
+                    descriptor, "ssh-ed25519 SHA256:aaa",
+                    "指纹必须逐字进错误体（hint 通道）"
+                );
+            }
+            other => panic!("首见必须是 HostKeyUnknown（TERM_SSH_004），实得 {other:?}"),
+        }
+        assert_eq!(e.code(), "TERM_SSH_004");
+        assert!(
+            !KnownHosts::shared_path(&d).exists(),
+            "首见零写——不存在隐式自纳这回事"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    fn tofu_changed_errsNamingBothFingerprints() {
+        let d = tmpdir("changed");
+        seed_shared(
+            &d,
+            &serde_json::json!({"srv.example": "ssh-ed25519 SHA256:old"}),
+        );
+        let kh = KnownHosts::open(&d).unwrap();
+        let e = tofu_verdict(&kh, "srv.example", 22, "ssh-ed25519 SHA256:new").unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            matches!(e, TermError::HostKey(_)),
+            "变更臂维持 TERM_SSH_002"
+        );
+        assert!(
+            msg.contains("ssh-ed25519 SHA256:old") && msg.contains("ssh-ed25519 SHA256:new"),
+            "两枚指纹都必须逐字点名，实得 {msg}"
+        );
+        // 盘态未被裁决改动
+        let on_disk = std::fs::read_to_string(KnownHosts::shared_path(&d)).unwrap();
+        assert!(on_disk.contains("old") && !on_disk.contains("\"ssh-ed25519 SHA256:new\""));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    fn tofu_trusted_matchesWholeKeyVerbatim() {
+        let d = tmpdir("verbatim");
+        seed_shared(
+            &d,
+            &serde_json::json!({
+                "srv.example": "ssh-ed25519 SHA256:abc",
+                "legacy.bare": "SHA256:def"
+            }),
+        );
+        let kh = KnownHosts::open(&d).unwrap();
+        // 整键逐字相等 → 放行
+        tofu_verdict(&kh, "srv.example", 22, "ssh-ed25519 SHA256:abc").unwrap();
+        // base64 巧合相等而算法名不同 → 拒（整键口径的负例臂）
+        let e = tofu_verdict(&kh, "srv.example", 22, "ssh-rsa SHA256:abc").unwrap_err();
+        assert!(matches!(e, TermError::HostKey(_)));
+        // 裸旧记录（term 遗留值形制）正对照：指纹段命中 → Trusted 且升级落盘
+        tofu_verdict(&kh, "legacy.bare", 22, "ssh-rsa SHA256:def").unwrap();
+        assert_eq!(
+            kh.get("legacy.bare", 22).as_deref(),
+            Some("ssh-rsa SHA256:def")
+        );
+        // 非 22 端口键形状
+        kh.accept("srv.example", 2222, "ssh-ed25519 SHA256:port2222")
+            .unwrap();
+        assert_eq!(
+            kh.get("srv.example", 2222).as_deref(),
+            Some("ssh-ed25519 SHA256:port2222")
+        );
+        assert!(
+            KnownHosts::shared_path(&d).exists(),
+            "明示 accept 后才允许落盘"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn known_hosts_roundtrip_and_forget() {
+        let d = tmpdir("lifecycle");
+        let kh = KnownHosts::open(&d).unwrap();
         assert_eq!(kh.get("srv.example", 22), None);
-        kh.accept("srv.example", 22, "SHA256:abc").unwrap();
-        assert_eq!(kh.get("srv.example", 22).as_deref(), Some("SHA256:abc"));
-        // 非 22 端口的 host:port 键
-        kh.accept("srv.example", 2222, "SHA256:def").unwrap();
-        assert_eq!(kh.get("srv.example", 2222).as_deref(), Some("SHA256:def"));
-        assert_eq!(kh.len(), 2);
-        // 重开持久化
-        let kh2 = KnownHosts::open(d.join("known_hosts.json")).unwrap();
-        assert_eq!(kh2.get("srv.example", 22).as_deref(), Some("SHA256:abc"));
+        kh.accept("srv.example", 22, "ssh-ed25519 SHA256:abc")
+            .unwrap();
+        kh.accept("srv.example", 2222, "ssh-ed25519 SHA256:def")
+            .unwrap();
+        assert_eq!(kh.entries().len(), 2);
+        // 重开持久化（同一共享文件）
+        let kh2 = KnownHosts::open(&d).unwrap();
+        assert_eq!(
+            kh2.get("srv.example", 22).as_deref(),
+            Some("ssh-ed25519 SHA256:abc")
+        );
         assert!(kh2.remove("srv.example", 22).unwrap());
         assert!(kh2.get("srv.example", 22).is_none());
+        assert!(!kh2.remove("srv.example", 22).unwrap());
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn host_key_names() {
-        assert_eq!(KnownHosts::key("h", 22), "h");
-        assert_eq!(KnownHosts::key("h", 2200), "[h]:2200");
+        // 规范键规则维持现行两域同谱形制（22 端口省略为裸 host）——
+        // 任务书"废除 22 省略"经 §7.1 核账修正为维持，落地补记在册
+        assert_eq!(host_core::ssh_trust::canonical_key("h", 22), "h");
+        assert_eq!(host_core::ssh_trust::canonical_key("h", 2200), "[h]:2200");
     }
 }

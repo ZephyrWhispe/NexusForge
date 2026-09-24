@@ -1783,6 +1783,12 @@ export function termSshConnect(
 ): Promise<TermSessionDto> {
   return invoke("term_ssh_connect", { conn });
 }
+/** TOFU 首见指纹确认（B7 T-B7-1）：fingerprint 必须是拒连错误 hint 里的整键描述符逐字 */
+export function termSshFingerprintAck(
+  host: string, port: number, fingerprint: string,
+): Promise<void> {
+  return invoke("term_ssh_fingerprint_ack", { host, port, fingerprint });
+}
 export function termSshKnownHosts(): Promise<SshKnownHostDto[]> {
   return invoke("term_ssh_known_hosts");
 }

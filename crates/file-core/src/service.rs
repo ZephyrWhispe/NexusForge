@@ -18,7 +18,7 @@ use crate::preview::{preview_file, Preview};
 use crate::profile::{ProfileStore, RemoteProtocol};
 use crate::remote::ftp::{ftp_confirm_gate, ftp_plaintext_guard, FtpDriver};
 use crate::remote::ssh::{
-    load_known_hosts, sftp_auth_for, tofu_guard, KnownHostsFile, RusshBackend, SftpDriver,
+    load_shared_known_hosts, sftp_auth_for, tofu_guard, KnownHostsFile, RusshBackend, SftpDriver,
     SshBackend,
 };
 use crate::remote::webdav::WebDavDriver;
@@ -127,8 +127,9 @@ pub struct FileService {
     /// 不可达）；值同时注册进 [`DriverRegistry`]（`register_as` 动态键），两路
     /// 同一 Arc。断线/重启即消失——连接态永不落盘。
     connections: parking_lot::RwLock<HashMap<String, ConnectedDriver>>,
-    /// file 域自己的 known_hosts（T-B6-5）：与 term 的表**互不共享**（缺口登记
-    /// 09 §6.3）；open 时 fail-closed 加载——坏文件 ⇒ 服务根本开不起来。
+    /// 共享 known_hosts（T-B7-1 单源）：与 term 同一份 `{app_data}/ssh/` 信任
+    /// 文件（存储体 host-core `ssh_trust`）；open 时 fail-closed 加载——
+    /// 坏文件 ⇒ 服务根本开不起来。
     known_hosts: Arc<KnownHostsFile>,
     /// 测试注入位：SSH 协议腿替身（FakeSsh）。生产路径恒 None ⇒ 每档案
     /// 现场 `RusshBackend::bound`；这不是回退兜底，是分派口的依赖注入槽。
@@ -210,7 +211,9 @@ impl FileService {
             ports,
             profiles: ProfileStore::open(&app_data_dir.join("profiles"))?,
             connections: parking_lot::RwLock::new(HashMap::new()),
-            known_hosts: load_known_hosts(&app_data_dir.join("known_hosts.json"))?,
+            // T-B7-1 单源：appData 根下共享信任文件（本函数收的 app_data_dir
+            // 是 {app_data}/file 域目录，上跳一级取根；路径构造在 host-core）
+            known_hosts: load_shared_known_hosts(app_data_dir.parent().unwrap_or(app_data_dir))?,
             ssh_backend_override: parking_lot::RwLock::new(None),
             config,
             presets: PresetStore::load(&app_data_dir.join("presets"))?,

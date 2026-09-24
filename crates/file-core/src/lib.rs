@@ -37,7 +37,10 @@ pub use profile::{
     auth_source_of, profile_id_of, validate_profile, AuthKind, AuthSource, ProfileStore,
     RemoteProfile, RemoteProtocol,
 };
-pub use remote::ssh::{vault_secret_via_ports, VaultSecretPort};
+pub use remote::ssh::{
+    check_shared_host_key, shared_known_hosts_path, vault_secret_via_ports, HostKeyDecision,
+    VaultSecretPort,
+};
 pub use remote::{
     classify_resume, range_plan, remote_error_message, throttle_allow, throttle_share_kbps,
     ThrottleGate,

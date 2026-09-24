@@ -20,6 +20,12 @@ pub enum TermError {
     Sftp(String),
     #[error("主机密钥校验失败（TOFU）: {0}")]
     HostKey(String),
+    #[error("主机密钥不在记录（TOFU 首见拒连）: {host}:{port}。指纹（逐字）：{descriptor}。请经带外渠道核对后走指纹确认命令")]
+    HostKeyUnknown {
+        host: String,
+        port: u16,
+        descriptor: String,
+    },
     #[error("认证失败: {0}")]
     Auth(String),
     #[error("WSL 错误: {0}")]
@@ -30,6 +36,14 @@ pub enum TermError {
 
 impl From<russh::Error> for TermError {
     fn from(e: russh::Error) -> Self {
+        TermError::Ssh(e.to_string())
+    }
+}
+
+impl From<host_core::ssh_trust::TrustError> for TermError {
+    fn from(e: host_core::ssh_trust::TrustError) -> Self {
+        // 信任文件 IO/损坏消息已自带点名（路径 + fail-closed 语义），
+        // 裹进 TERM_SSH_001 臂——不为存储面另立错误码家族
         TermError::Ssh(e.to_string())
     }
 }
@@ -48,6 +62,7 @@ impl TermError {
             TermError::Sftp(_) => "TERM_SFTP_001",
             TermError::HostKey(_) => "TERM_SSH_002",
             TermError::Auth(_) => "TERM_SSH_003",
+            TermError::HostKeyUnknown { .. } => "TERM_SSH_004",
             TermError::Wsl(_) => "TERM_WSL_001",
             TermError::Docker(_) => "TERM_DOCKER_001",
         }

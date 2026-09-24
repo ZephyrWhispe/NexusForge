@@ -208,6 +208,7 @@
     "allow-term-spawn-local",
     "allow-term-spawn-wsl",
     "allow-term-ssh-connect",
+    "allow-term-ssh-fingerprint-ack",
     "allow-term-ssh-forget-host",
     "allow-term-ssh-known-hosts",
     "allow-term-write",

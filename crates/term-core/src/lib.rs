@@ -2,7 +2,8 @@
 //!
 //! - T1 ConPTY：win-integration 封装（CreatePseudoConsole + 双管道，写/resize 串行化）
 //! - T2 数据管道：8ms 批处理（单批 ≤ 64KB）+ 前端 ack 背压（落后 > 4MB 暂停拉取）
-//! - T3 SSH/SFTP：russh + TOFU known_hosts（指纹变更强拒绝）
+//! - T3 SSH/SFTP：russh + TOFU known_hosts（首见拒 + 变更拒；信任表与 file 域
+//!   共享单一事实源，T-B7-1）
 //! - T5 WSL：wsl.exe 分发探测（UTF-16LE 解析）+ ConPTY spawn
 //! - T6 Docker：Engine API over named pipe（容器列表/启停/日志 tail）
 

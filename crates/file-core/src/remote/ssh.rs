@@ -13,14 +13,15 @@
 //! - 口令只进不出：本文件的凭据类型不 derive `Serialize`，`Debug` 只报在场；
 //!   探测会话（`Connect` 臂）在 KEX 拿到主机键后即中止，凭据字节永不出网——
 //!   未受信对端连"认证尝试"这一事实都不该拥有。
-//! - 操作会话（List/Mkdir/…）连接时以 known_hosts 录制值为**整串**预期，
-//!   与守卫臂同一比较口径；守卫在分派口（`FileService::connect`）先行，
-//!   驱动实例只有已受信档案才可达。
+//! - 操作会话（List/Mkdir/…）连接时以 known_hosts 录制值过 host-core 唯一
+//!   整键口径 `whole_key_agrees`，与守卫臂同一比较口径；守卫在分派口
+//!   （`FileService::connect`）先行，驱动实例只有已受信档案才可达。
 //!
 //! 码表分工（T-B6-1 固定的 001..005，本行不扩码，理由登记于批次提交说明）：
 //! 首见无记录 → `FILE_REMOTE_001`（记录缺失的字面语义）；键变更/凭据形状不合 →
 //! `FILE_REMOTE_005`（字段级不符）；坏 known_hosts → 005（文件内容字段不可解析）。
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Seek as StdSeek;
@@ -230,14 +231,18 @@ pub(crate) fn server_key_descriptor(algo: &str, fingerprint: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// known_hosts（与 term 的 known_hosts.json **分开一张表**，09 §6.3 会话统一
-// 缺口在此显式登记不静默）
+// known_hosts（T-B7-1 单源：term 与 file 共用一份信任文件，存储体与三态
+// 裁决上移 host-core `ssh_trust`——B6 登记的"两张表互不共享"缺口在此清偿；
+// 两旧表的首见合并也在 host-core，本文件只剩 file 侧门面与错误映射）
 // ---------------------------------------------------------------------------
 
-/// `{app_data}/file/known_hosts.json` 的进程内视图：host[:port] → 整键描述符。
+use host_core::ssh_trust::{
+    shared_path as shared_trust_path, whole_key_agrees, KnownHostsStore, TrustError,
+};
+
+/// file 域对共享信任文件的进程内视图（存储体在 host-core）。
 pub(crate) struct KnownHostsFile {
-    path: PathBuf,
-    map: parking_lot::RwLock<HashMap<String, String>>,
+    store: KnownHostsStore,
 }
 
 impl std::fmt::Debug for KnownHostsFile {
@@ -245,122 +250,99 @@ impl std::fmt::Debug for KnownHostsFile {
     /// 少一张可被日志整版抄走的表
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KnownHostsFile")
-            .field("path", &self.path)
-            .field("records", &self.map.read().len())
+            .field("path", &self.store.path())
+            .field("records", &self.store.entries().len())
             .finish()
     }
 }
 
-impl KnownHostsFile {
-    /// 键格式与 term 同谱（`[{host}]:{port}`，22 端口省略）——同一台服务器在
-    /// 两张表里形状一致，但两张表**互不共享**（缺口登记见模块头）
-    fn key(host: &str, port: u16) -> String {
-        if port == 22 {
-            host.to_owned()
-        } else {
-            format!("[{host}]:{port}")
-        }
-    }
-
-    pub(crate) fn get(&self, host: &str, port: u16) -> Option<String> {
-        self.map.read().get(&Self::key(host, port)).cloned()
-    }
-
-    /// 用户明示接受后才调本口（`file_remote_fingerprint_ack` 的唯一落点）。
-    /// 写盘非原子的取舍：崩溃撕裂下一份坏文件会撞上 fail-closed 的加载臂
-    /// （启动即报）——宁可拒绝一切连接，也不静默清空重来。
-    pub(crate) fn accept(&self, host: &str, port: u16, descriptor: &str) -> Result<(), FileError> {
-        self.map
-            .write()
-            .insert(Self::key(host, port), descriptor.to_owned());
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let data = serde_json::to_vec_pretty(&*self.map.read()).map_err(|e| {
-            FileError::BadState(format!(
-                "known_hosts 序列化失败（内存态未回滚，盘态未写坏）: {e}"
-            ))
-        })?;
-        std::fs::write(&self.path, data)?;
-        Ok(())
-    }
-
-    /// 全部记录（host 键 → 描述符；管理页属 B7 §7，本行只保证自救口存在）
-    #[allow(dead_code)] // B7 管理页消费；本行由 ssh.rs 测试臂走通（禁裁）
-    pub(crate) fn entries(&self) -> Vec<(String, String)> {
-        let mut v: Vec<(String, String)> = self
-            .map
-            .read()
-            .iter()
-            .map(|(k, d)| (k.clone(), d.clone()))
-            .collect();
-        v.sort();
-        v
+/// 共享存储面错误 → FileError：损坏=005 字段级不符（B6 既有口径），
+/// IO=001 传输失败；消息体逐字取自 host-core（点名路径 + fail-closed 语义）
+fn trust_err(e: TrustError) -> FileError {
+    match e {
+        TrustError::Corrupt { .. } => FileError::Remote {
+            code: FILE_REMOTE_FIELD,
+            msg: e.to_string(),
+        },
+        TrustError::Io(_) => FileError::Remote {
+            code: FILE_REMOTE_MISSING,
+            msg: e.to_string(),
+        },
     }
 }
 
-/// 加载（**fail-closed**）：文件不存在 = 尚无记录（Ok 空表）；存在而解析失败 =
-/// `Err` 且消息点名文件——"坏文件 ⇒ 接受任意主机"正是 term 侧缺陷的反面，
-/// 解析兜底口在本函数结构性缺席。
+impl KnownHostsFile {
+    pub(crate) fn get(&self, host: &str, port: u16) -> Option<String> {
+        self.store.get(host, port)
+    }
+
+    /// 用户明示接受后才调本口（`file_remote_fingerprint_ack` 的唯一落点），
+    /// 整键逐字写入共享文件（读盘-改-原子 tmp+rename 在 host-core mutate）
+    pub(crate) fn accept(&self, host: &str, port: u16, descriptor: &str) -> Result<(), FileError> {
+        self.store.accept(host, port, descriptor).map_err(trust_err)
+    }
+
+    /// 全部记录（规范键 → 描述符；管理页属 B7 §7，本行只保证自救口存在）
+    #[allow(dead_code)] // B7 管理页消费；本行由 ssh.rs 测试臂走通（禁裁）
+    pub(crate) fn entries(&self) -> Vec<(String, String)> {
+        self.store.entries()
+    }
+}
+
+/// 按确切路径加载视图（**fail-closed**，测试夹具位）：文件不存在 = 尚无记录
+/// （Ok 空表）；存在而解析失败 = `Err` 且消息点名文件——"坏文件 ⇒ 接受任意
+/// 主机"是 fail-closed 立论的反面，解析兜底口在本函数结构性缺席。
+/// 生产路径走 [`load_shared_known_hosts`]（单源）。
+#[cfg(test)]
 pub(crate) fn load_known_hosts(path: &Path) -> Result<Arc<KnownHostsFile>, FileError> {
-    let map = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<HashMap<String, String>>(&bytes).map_err(|e| {
-            FileError::Remote {
-                code: FILE_REMOTE_FIELD,
-                msg: format!(
-                    "known_hosts 不可解析（路径 {}）：{e}。损坏文件启动即报、**不静默清空**——\
-                     清空等于接受任意主机。请人工核对后从信得过的副本恢复该文件",
-                    path.display()
-                ),
-            }
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-        Err(e) => return Err(FileError::Io(e)),
-    };
     Ok(Arc::new(KnownHostsFile {
-        path: path.to_path_buf(),
-        map: parking_lot::RwLock::new(map),
+        store: KnownHostsStore::open_at(path).map_err(trust_err)?,
     }))
 }
 
-/// TOFU 三态裁决（纯函数，零 IO）
-#[derive(Debug)]
-pub(crate) enum HostKeyDecision {
-    Trusted {
-        #[allow(dead_code)] // 裁决留档面：Trusted 臂无需读指纹（放行即走），
-        // Unknown/Changed 的点名字段真读——本枚禁裁（对话框展示属 T-B6-10）
-        fingerprint: String,
-    },
-    Unknown {
-        fingerprint: String,
-    },
-    Changed {
-        recorded: String,
-        actual: String,
-    },
+/// T-B7-1 共享信任文件装载（**单一事实源**）：appData 根下 `ssh/` 目录的
+/// known_hosts.json——路径构造与两旧表合并全在 host-core `ssh_trust`，
+/// 本行是 file 域源码里该文件名的唯一字面出现（单源字面判据的落点）。
+pub(crate) fn load_shared_known_hosts(
+    app_data_root: &Path,
+) -> Result<Arc<KnownHostsFile>, FileError> {
+    Ok(Arc::new(KnownHostsFile {
+        store: KnownHostsStore::shared(app_data_root).map_err(trust_err)?,
+    }))
 }
 
-/// 三臂裁决：整串相等才 `Trusted`；无记录 `Unknown`；有记录不等 `Changed`
-/// （两枚指纹都进决策体，点名义务由 [`tofu_guard`] 执行）。返回 `Result`
-/// 是为任务书签名形状保真——本函数自身无失败路径，坏文件的失败在加载臂。
+/// 单源路径（与 term 域恒一等值断言面，`fileAndTerm_shareSingleStore` 消费）
+pub fn shared_known_hosts_path(app_data_root: &Path) -> PathBuf {
+    shared_trust_path(app_data_root)
+}
+
+/// file 域对共享信任文件的三态裁决（单源端到端正证面；每次独立读盘态，
+/// 不依赖运行中的 service 实例）
+pub fn check_shared_host_key(
+    app_data_root: &Path,
+    host: &str,
+    port: u16,
+    actual: &str,
+) -> Result<HostKeyDecision, FileError> {
+    let store = load_shared_known_hosts(app_data_root)?;
+    Ok(store.store.decide(host, port, actual))
+}
+
+/// TOFU 三态裁决（上移 host-core，两域共读一型——B6 `Resumable` 上移同谱）
+pub use host_core::ssh_trust::HostKeyDecision;
+
+/// 三臂裁决（host-core `decide` 的 file 侧保形包装）：无记录 `Unknown`；
+/// 整键口径放行者是 host-core 唯一比较口 `whole_key_agrees`——两枚整键描述符
+/// 逐字相等才 `Trusted`（裸旧记录命中即 Trusted 并升级落盘），不等即
+/// `Changed`（两枚指纹都进决策体，点名义务由 [`tofu_guard`] 执行）。返回
+/// `Result` 是为任务书签名形状保真——本函数自身无失败路径，坏文件的失败在加载臂。
 pub(crate) fn check_server_key(
     store: &KnownHostsFile,
     host: &str,
     port: u16,
     got: &str,
 ) -> Result<HostKeyDecision, FileError> {
-    Ok(match store.get(host, port) {
-        Some(recorded) if recorded == got => HostKeyDecision::Trusted {
-            fingerprint: got.to_owned(),
-        },
-        Some(recorded) => HostKeyDecision::Changed {
-            recorded,
-            actual: got.to_owned(),
-        },
-        None => HostKeyDecision::Unknown {
-            fingerprint: got.to_owned(),
-        },
-    })
+    Ok(store.store.decide(host, port, got))
 }
 
 /// 守卫（分派口与操作会话共用的裁决出口）：`Unknown`/`Changed` 都拒连，
@@ -692,7 +674,8 @@ impl Drop for SftpDriver {
 // ---------------------------------------------------------------------------
 
 /// russh Handler：探测臂 `expect=None` 只捕获密钥并中止 KEX（凭据不出网）；
-/// 操作臂以录制描述符为唯一预期，整串相等才放行。
+/// 操作臂以录制值为预期，过 host-core 唯一整键口径 `whole_key_agrees`
+/// （两道门同一比较口径，裸旧记录臂与守卫侧裁决一致）。
 struct FileSshHandler {
     expect: Option<String>,
     captured: Arc<parking_lot::Mutex<Option<(String, String)>>>,
@@ -710,7 +693,10 @@ impl client::Handler for FileSshHandler {
         let fp = server_public_key.fingerprint();
         *self.captured.lock() = Some((algo.clone(), fp.clone()));
         let desc = server_key_descriptor(&algo, &fp);
-        Ok(self.expect.as_deref().is_some_and(|want| want == desc))
+        Ok(self
+            .expect
+            .as_deref()
+            .is_some_and(|want| whole_key_agrees(want, &desc)))
     }
 }
 
@@ -1283,7 +1269,7 @@ mod tests {
         // 承重⑬(a)：坏文件必须炸，静默清空 = 接受任意主机。
         // 修前（term 式兜底）该臂等价于"表空→首见→自动自纳"三连，判红即达标。
         let d = tmpdir("corrupt");
-        let p = d.join("known_hosts.json");
+        let p = d.join("kh-view.json");
         std::fs::write(&p, b"{ not json at all").unwrap();
         let e = load_known_hosts(&p).unwrap_err();
         let msg = e.to_string();
@@ -1318,7 +1304,7 @@ mod tests {
         // 承重⑬(b)：首见 → Unknown，且**真的拒了**——FakeSsh 断 calls 无后续
         // RPC（探测之后再发一条操作 RPC 就是"拒完继续连"）。
         let d = tmpdir("first");
-        let store = load_known_hosts(&d.join("known_hosts.json")).unwrap();
+        let store = load_known_hosts(&d.join("kh-view.json")).unwrap();
         let fp = "ssh-ed25519 SHA256:FIRSTSIGHTabc";
         let fake = Arc::new(FakeSsh::new(fp));
         let calls = fake.calls.clone();
@@ -1380,8 +1366,9 @@ mod tests {
             .unwrap();
         assert_eq!(info.protocol, "sftp");
         assert_eq!(svc.remote_drivers().len(), 1);
-        // 确认写盘：盘上记录逐字等于核对过的描述符
-        let on_disk = std::fs::read_to_string(d.join("store").join("known_hosts.json")).unwrap();
+        // 确认写盘：单源共享文件（FileService 的域目录上跳一级即 appData 根），
+        // 盘上记录逐字等于核对过的描述符
+        let on_disk = std::fs::read_to_string(shared_known_hosts_path(&d)).unwrap();
         assert!(on_disk.contains(fp), "落盘须逐字，实得 {on_disk}");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1391,7 +1378,7 @@ mod tests {
     fn tofu_changedKey_errsNamingBothFingerprints() {
         // term 变更臂零测的债在此还：recorded 与 actual 双双点名。
         let d = tmpdir("changed");
-        let store = load_known_hosts(&d.join("known_hosts.json")).unwrap();
+        let store = load_known_hosts(&d.join("kh-view.json")).unwrap();
         let recorded = "ssh-ed25519 SHA256:RECORDEDoldkey0ld";
         let actual = "ssh-ed25519 SHA256:ACTUALnewkeyac7";
         store
@@ -1431,7 +1418,7 @@ mod tests {
     fn tofu_trusted_matchesWholeKeyNotJustBase64() {
         // 整键相等才 Trusted：算法名不同而 base64 巧合相等 = 两把钥匙。
         let d = tmpdir("whole");
-        let store = load_known_hosts(&d.join("known_hosts.json")).unwrap();
+        let store = load_known_hosts(&d.join("kh-view.json")).unwrap();
         let base64 = "SAMEB64value==";
         let rsa = server_key_descriptor("ssh-rsa", base64);
         let ed = server_key_descriptor("ssh-ed25519", base64);
@@ -1513,11 +1500,11 @@ mod tests {
             }
         }
         // known_hosts 落盘同样只有描述符
-        let store = load_known_hosts(&store_dir.join("known_hosts.json")).unwrap();
+        let store = load_known_hosts(&store_dir.join("kh-view.json")).unwrap();
         store
             .accept(&p.host, p.port, "ssh-ed25519 SHA256:visible-only")
             .unwrap();
-        let kh = std::fs::read_to_string(store_dir.join("known_hosts.json")).unwrap();
+        let kh = std::fs::read_to_string(store_dir.join("kh-view.json")).unwrap();
         assert!(!kh.contains("sesame") && !kh.contains("passphrase"), "{kh}");
         // ③ 未送入凭据臂：VaultEntry 指针无值 → Err 点名三态归因结构，
         //    且**不回落**成"提示输口令"（口令永远不向协议腿自己伸手要）
@@ -1550,7 +1537,7 @@ mod tests {
         fn assert_driver<T: StorageDriver + Send + Sync>() {}
         assert_driver::<SftpDriver>();
         let d = tmpdir("driver");
-        let store = load_known_hosts(&d.join("known_hosts.json")).unwrap();
+        let store = load_known_hosts(&d.join("kh-view.json")).unwrap();
         let fake = Arc::new(FakeSsh::new("ssh-ed25519 SHA256:d").with_listing(vec![
             RemoteEntry {
                 name: "报告.txt".into(),
@@ -1621,7 +1608,7 @@ mod tests {
         // Download{offset} 由 checkpoint 算出（Stat→range_plan→offset 三步
         // 全走 T-B6-4 立的唯一算式），续传后 bytes_done 单调 + 总大小正确
         let d = tmpdir("resume");
-        let store = load_known_hosts(&d.join("known_hosts.json")).unwrap();
+        let store = load_known_hosts(&d.join("kh-view.json")).unwrap();
         let src = vec![7u8; 10];
         let fake = Arc::new(FakeSsh::new("ssh-ed25519 SHA256:r").with_file("/srv/big.bin", &src));
         let calls = fake.calls.clone();

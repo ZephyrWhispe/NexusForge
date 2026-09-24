@@ -18,6 +18,7 @@ pub mod logging;
 pub mod module;
 pub mod ports;
 pub mod registry;
+pub mod ssh_trust;
 pub mod storage;
 pub mod util;
 pub mod wire;
