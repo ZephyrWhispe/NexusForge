@@ -69,6 +69,7 @@ import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import DeferredBadge from "../../components/DeferredBadge";
 import ForwardSection from "./ForwardSection";
 
 /**
@@ -804,6 +805,9 @@ export default function TerminalPanel() {
             >
               端口转发
             </Button>
+            {/* T-B7-28（§7.3-a 明示不做）：term 是 per-tab 长会话、file 是 per-op 短连接，
+                两域共用一条 SSH 会话需生命周期仲裁者，属 B8 待裁决——以徽标诚实登记。 */}
+            <DeferredBadge label="SSH 连接池统一" decisionRef="09 §7.3-(a)" />
           </div>
 
           <div className={styles.row}>

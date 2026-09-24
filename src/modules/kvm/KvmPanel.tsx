@@ -46,6 +46,7 @@ import { confirmAction } from "../../stores/confirm";
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import DeferredBadge from "../../components/DeferredBadge";
 
 /**
  * 键鼠共享面板（docs/impl/05 K8，M4 v1）：
@@ -610,6 +611,9 @@ export default function KvmPanel() {
           B（本机输入被转发，B 端注入执行）；B 的鼠标移到它的左缘（回移）即切回本机，或随时按
           Ctrl+Alt+Shift+Q 切回。边缘映射会话建立后即时生效。
         </Text>
+        {/* T-B7-28（§7.3-(b) 明示不做）：跨机文件推送已有按钮/右键口；
+            从桌面把文件丢过边缘传送需宿主 shell 级落点，风险面大，归 B8 待裁决。 */}
+        <DeferredBadge label="拖拽传文件" decisionRef="09 §7.3-(b)" />
       </Section>
 
       {/* 推送文本回落对话框：readText 被拒时手动输入/粘贴（无需剪贴板权限） */}
