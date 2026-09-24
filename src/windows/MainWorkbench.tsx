@@ -24,6 +24,7 @@ import { IN_TAURI } from "../ipc/env";
 import { toggleLauncher } from "./launcherController";
 import { toggleNoteBar } from "./notebarController";
 import SchemaForm from "../settings/SchemaForm";
+import HostSettings from "../settings/HostSettings";
 import { toggleQuickPanel } from "./quickPanelController";
 import { reportError } from "../stores/notifications";
 import { useSession } from "../stores/session";
@@ -228,6 +229,8 @@ export default function MainWorkbench() {
                 </div>
                 {/* key=模块 id：切换跟随目标时整体重建，杜绝上一模块表单值闪现 */}
                 <SchemaForm key={settingsModule} moduleId={settingsModule} />
+                {/* 宿主段（托盘等，T-B7-11）：不随模块切换，常驻设置中心底部 */}
+                <HostSettings />
               </>
             ) : (
               <>
