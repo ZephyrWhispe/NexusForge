@@ -1978,6 +1978,14 @@ export interface MetricsPointDto {
   net_bps: number;
   disks: DiskPointDto[];
 }
+/** 进程行（T-B7-10；disk_bps=null 即无事实源——首轮无差值/跨权限读不到，不编 0） */
+export interface ProcessRowDto {
+  pid: number;
+  name: string;
+  cpu_pct: number;
+  mem_bytes: number;
+  disk_bps: number | null;
+}
 
 export function sysPkgSources(): Promise<PkgSourceDto[]> {
   return invoke("sys_pkg_sources");
@@ -2002,6 +2010,14 @@ export function sysCleanExecute(selectedIds: string[], recycle: boolean): Promis
 }
 export function sysMetricsHistory(): Promise<MetricsPointDto[]> {
   return invoke("sys_metrics_history");
+}
+/** 进程页 Top-N（两拍差值；sort=name|cpu|mem|disk） */
+export function sysProcesses(sort: string, query?: string): Promise<ProcessRowDto[]> {
+  return invoke("sys_processes", { sort, query: query ?? null });
+}
+/** 结束进程（红线：confirmName 须逐字复述实际进程名，不符即拒；回执=实际进程名） */
+export function sysKill(pid: number, confirmName: string): Promise<string> {
+  return invoke("sys_kill", { pid, confirmName });
 }
 
 // ======================== WinOps Tweak 引擎（M16 W1，docs/impl/08） ========================

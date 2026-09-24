@@ -181,3 +181,36 @@ pub async fn sys_metrics_history(
 ) -> Result<Vec<sys_core::MetricsPoint>, AppError> {
     Ok(state.sys.metrics().history())
 }
+
+/// 进程页 Top-N（T-B7-10：两拍差值；sort=name|cpu|mem|disk，query 大小写不敏感）
+#[tauri::command]
+pub async fn sys_processes(
+    sort: String,
+    query: Option<String>,
+    state: State<'_, HostState>,
+) -> Result<Vec<sys_core::ProcessRow>, AppError> {
+    let m = state.sys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(m.processes(&sort, PROCESS_TOP_N, &query.unwrap_or_default()))
+    })
+    .await
+    .map_err(|e| AppError::module("SYS_IPC_001", e.to_string(), None))?
+}
+
+/// 结束进程（T-B7-10 红线：复述名逐字确认 + 保护名单 + 坏盘总拒，闸在 sys-core；
+/// 成功/被拒均落 `{appData}/sys/process_audit.jsonl`，返回实际进程名回执）
+#[tauri::command]
+pub async fn sys_kill(
+    pid: u32,
+    confirm_name: String,
+    state: State<'_, HostState>,
+) -> Result<String, AppError> {
+    let m = state.sys.clone();
+    tauri::async_runtime::spawn_blocking(move || m.kill_process(pid, &confirm_name))
+        .await
+        .map_err(|e| AppError::module("SYS_IPC_001", e.to_string(), None))?
+        .map_err(sys_err)
+}
+
+/// 进程页行数上限（UI 滚动面；差值计算在 sys-core 两拍内完成）
+const PROCESS_TOP_N: usize = 60;

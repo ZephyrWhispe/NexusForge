@@ -408,6 +408,35 @@ fn aux_windows_never_reach_main_only_commands() {
 }
 
 #[test]
+#[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-10）字面测试名优先于 rustc 命名惯例
+fn auxWindows_neverGrantSysKill() {
+    // T-B7-10 红线负例：结束进程=破坏力命令（可杀任意可见进程），只允许主窗进程页
+    // 触达；查询面 sys_processes 不给此负例——读列表无破坏力，杀才有。
+    let caps = load_capabilities();
+    let mut main_granted = false;
+    for (name, cap) in &caps {
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        if name == "main" {
+            main_granted = perms.contains(&"allow-sys-kill");
+            continue;
+        }
+        assert!(
+            !perms.contains(&"allow-sys-kill"),
+            "辅助窗 capability {name} 不得持有 allow-sys-kill（结束进程是 main-only 红线面）"
+        );
+    }
+    assert!(
+        main_granted,
+        "正对照：main 必须持有 allow-sys-kill，否则本负例是空洞"
+    );
+}
+
+#[test]
 #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
 fn auxWindows_neverGrantProxyKernelSelect() {
     // T-B2-2 红线负例：换核命令可停/起内核进程，只允许主窗代理页触达

@@ -39,3 +39,13 @@ commands.allow = ["sys_clean_execute"]
 identifier = "allow-sys-metrics-history"
 description = "允许前端调用 sys_metrics_history 命令（D-28 按窗最小授权）"
 commands.allow = ["sys_metrics_history"]
+
+[[permission]]
+identifier = "allow-sys-processes"
+description = "允许前端调用 sys_processes 命令（D-28 按窗最小授权）"
+commands.allow = ["sys_processes"]
+
+[[permission]]
+identifier = "allow-sys-kill"
+description = "允许前端调用 sys_kill 命令（结束进程红线：main-only，见 security_config 负例）"
+commands.allow = ["sys_kill"]

@@ -351,6 +351,8 @@ pub fn run() {
             commands::sys_clean_scan,
             commands::sys_clean_execute,
             commands::sys_metrics_history,
+            commands::sys_processes,
+            commands::sys_kill,
             // 自动化与拓展（M14 A1–A3）
             commands::automation_rules_list,
             commands::automation_save_rule,

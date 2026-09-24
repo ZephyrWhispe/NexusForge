@@ -25,11 +25,13 @@ import {
   sysCleanExecute,
   sysCleanScan,
   sysCleanTargets,
+  sysKill,
   sysMetricsHistory,
   sysPkgAction,
   sysPkgCmdPreview,
   sysPkgList,
   sysPkgSources,
+  sysProcesses,
   winopsApply,
   winopsCatalog,
   winopsRollback,
@@ -40,6 +42,7 @@ import {
   type MetricsPointDto,
   type PkgEntryDto,
   type PkgSourceDto,
+  type ProcessRowDto,
   type WinopsActionDto,
   type WinopsScanItemDto,
   type WinopsTweakDto,
@@ -54,6 +57,9 @@ import { reportError } from "../../stores/notifications";
  * - T-B1-9：清理页扫描前即呈现 sys_clean_targets 静态清单（dir/exts/optional 可见、
  *   safe_default 只做「推荐」角标不自动勾选），勾选态持久化在 session store；
  *   调整页「浏览目录」Dialog 按 category 分组展示全目录（含 maintenance 与生效方式）。
+ * - T-B7-10 进程页红线：监控 Tab 内进程 Section（两拍差值 Top-N/排序头/搜索框），
+ *   结束钮走「逐字复述进程名输入确认词 → confirmAction → sys_kill」双闸；
+ *   保护名单与坏盘 fail-closed 在后端 sys-core ProcessTable，UI 闸不代替后端闸。
  */
 
 /** 动作 type → 生效方式中文说明（前端纯函数；type 对照 winops.rs:52-105 serde tag） */
@@ -152,6 +158,15 @@ export default function SysPanel() {
   // ---- 监控 ----
   const [history, setHistory] = useState<MetricsPointDto[]>([]);
   const historyRef = useRef<MetricsPointDto[]>([]);
+
+  // ---- 进程页（T-B7-10 红线：两拍差值 + 复述名输入确认词）----
+  const [procs, setProcs] = useState<ProcessRowDto[]>([]);
+  const [procSort, setProcSort] = useState<"cpu" | "mem" | "disk" | "name">("cpu");
+  const [procQuery, setProcQuery] = useState("");
+  const [procBusy, setProcBusy] = useState(false);
+  /** 复述闸：非 null 时该行下方展开输入框，逐字复述进程名才可用确认钮 */
+  const [killTarget, setKillTarget] = useState<ProcessRowDto | null>(null);
+  const [killTyped, setKillTyped] = useState("");
 
   // ---- 清理 ----
   const [targets, setTargets] = useState<CleanTargetDto[]>([]);
@@ -409,6 +424,60 @@ export default function SysPanel() {
       .catch(fail);
   }, [fail]);
 
+  // ---- 进程页（T-B7-10）----
+  /** 两拍载入：第一拍立差值基线（全 0 轮），越过 PROCESS_SAMPLE_GAP_MS 后第二拍取真差值行 */
+  const loadProcs = useCallback(
+    async (sort: string, query: string) => {
+      setProcBusy(true);
+      try {
+        await sysProcesses(sort, query);
+        await new Promise((r) => setTimeout(r, 600));
+        setProcs(await sysProcesses(sort, query));
+      } catch (e) {
+        fail(e);
+      } finally {
+        setProcBusy(false);
+      }
+    },
+    [fail],
+  );
+
+  useEffect(() => {
+    void loadProcs("cpu", "");
+  }, [loadProcs]);
+
+  /** 复述名逐字相符（与后端 eq_ignore_ascii_case 同谱的大小写宽容）才放行确认钮 */
+  const killTypedOk =
+    killTarget !== null && killTyped.trim().toLowerCase() === killTarget.name.toLowerCase();
+
+  const confirmKill = useCallback(async () => {
+    if (!killTarget || !killTypedOk) return;
+    const typed = killTyped.trim();
+    if (
+      !(await confirmAction({
+        title: "结束进程",
+        impact: [
+          `将结束进程「${killTarget.name}」（pid ${killTarget.pid}）`,
+          `当前占用：CPU ${killTarget.cpu_pct.toFixed(1)}% · 内存 ${Math.round(killTarget.mem_bytes / 1024 / 1024)} MB`,
+        ],
+        detail:
+          "TerminateProcess 立即强杀，进程未保存数据将丢失；系统关键进程受保护名单拦截。操作（成功与被拒均）落 sys/process_audit.jsonl 审计。",
+        danger: true,
+        confirmLabel: "结束进程",
+      }))
+    )
+      return;
+    setKillTarget(null);
+    setKillTyped("");
+    try {
+      const name = await sysKill(killTarget.pid, typed);
+      setMsg(`已结束进程「${name}」（已记 kill 审计）`);
+      await loadProcs(procSort, procQuery);
+    } catch (e) {
+      fail(e);
+    }
+  }, [killTarget, killTypedOk, procSort, procQuery, loadProcs, fail]);
+
   const cpuSeries = history.map((p) => p.cpu);
   const memSeries = history.map((p) => (p.mem_total ? (p.mem_used / p.mem_total) * 100 : 0));
   const netSeries = history.map((p) => p.net_bps / 1024);
@@ -448,27 +517,140 @@ export default function SysPanel() {
       <InlineError text={err} />
 
       {tab === "monitor" && (
-        <Section>
-          {!latest && <Spinner size="tiny" />}
-          {latest && (
+        <>
+          <Section>
+            {!latest && <Spinner size="tiny" />}
+            {latest && (
+              <Text className={styles.muted}>
+                内存 {fmtBytes(latest.mem_used)} / {fmtBytes(latest.mem_total)} ·{" "}
+                {latest.disks.map((d) => `${d.mount} ${fmtBytes(d.total - d.used)} 可用`).join(" · ")}
+              </Text>
+            )}
+            <div className={styles.row}>
+              <div style={{ flex: 1, minWidth: 240 }}>
+                <Spark values={cpuSeries} color={tokens.colorBrandForeground1} label="CPU" fmt={(v) => `${v.toFixed(1)}%`} />
+              </div>
+              <div style={{ flex: 1, minWidth: 240 }}>
+                <Spark values={memSeries} color={tokens.colorPaletteGreenForeground1} label="内存占用" fmt={(v) => `${v.toFixed(1)}%`} />
+              </div>
+              <div style={{ flex: 1, minWidth: 240 }}>
+                <Spark values={netSeries} color={tokens.colorPaletteMarigoldForeground1} label="网络吞吐" fmt={(v) => `${v.toFixed(1)} KB/s`} />
+              </div>
+            </div>
+            <Text className={styles.muted}>1s PDH 采样 · 保留最近 300 点 · 无数据时确认模块已启动</Text>
+          </Section>
+
+          {/* 进程页（T-B7-10 红线）：两拍差值 Top-N + 排序头/搜索 + 结束钮复述名输入确认词 */}
+          <Section
+            title={`进程（${procs.length}）`}
+            actions={
+              <>
+                <Input
+                  style={{ maxWidth: 180 }}
+                  placeholder="搜索进程名"
+                  value={procQuery}
+                  onChange={(_, d) => setProcQuery(d.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void loadProcs(procSort, procQuery);
+                  }}
+                />
+                <Button size="small" onClick={() => void loadProcs(procSort, procQuery)}>
+                  刷新
+                </Button>
+                {procBusy && <Spinner size="tiny" />}
+              </>
+            }
+          >
+            <div className={styles.row}>
+              <Text className={styles.muted}>排序：</Text>
+              {(
+                [
+                  ["name", "名称"],
+                  ["cpu", "CPU%"],
+                  ["mem", "内存"],
+                  ["disk", "磁盘"],
+                ] as const
+              ).map(([key, label]) => (
+                <Button
+                  key={key}
+                  size="small"
+                  appearance={procSort === key ? "primary" : "subtle"}
+                  onClick={() => {
+                    setProcSort(key);
+                    void loadProcs(key, procQuery);
+                  }}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+            <div className={styles.list}>
+              {procs.map((r) => (
+                <div key={r.pid} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div className={styles.item}>
+                    <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                      <Text size={200} weight="semibold">
+                        {r.name}
+                      </Text>
+                      <Text size={100} className={styles.muted}>
+                        pid {r.pid} · CPU {r.cpu_pct.toFixed(1)}% · 内存 {fmtBytes(r.mem_bytes)} · 磁盘{" "}
+                        {r.disk_bps === null ? "—" : `${fmtBytes(r.disk_bps)}/s`}
+                      </Text>
+                    </div>
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      disabled={killTarget !== null}
+                      onClick={() => {
+                        setKillTarget(r);
+                        setKillTyped("");
+                      }}
+                    >
+                      结束
+                    </Button>
+                  </div>
+                  {killTarget?.pid === r.pid && (
+                    <div className={styles.row} style={{ padding: "0 8px 6px" }}>
+                      <Input
+                        className="kill-confirm-input"
+                        style={{ flex: 1, minWidth: 200 }}
+                        placeholder={`逐字输入「${r.name}」以确认`}
+                        value={killTyped}
+                        onChange={(_, d) => setKillTyped(d.value)}
+                      />
+                      <Button
+                        appearance="primary"
+                        size="small"
+                        disabled={!killTypedOk}
+                        onClick={() => void confirmKill()}
+                      >
+                        确认结束
+                      </Button>
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        onClick={() => {
+                          setKillTarget(null);
+                          setKillTyped("");
+                        }}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {!procBusy && procs.length === 0 && (
+                <Text className={styles.muted}>
+                  进程列表为空（首轮为差值基线拍，稍候点「刷新」取两拍结果；非 Windows 端口缺省亦空表）
+                </Text>
+              )}
+            </div>
             <Text className={styles.muted}>
-              内存 {fmtBytes(latest.mem_used)} / {fmtBytes(latest.mem_total)} ·{" "}
-              {latest.disks.map((d) => `${d.mount} ${fmtBytes(d.total - d.used)} 可用`).join(" · ")}
+              CPU/磁盘为两拍差值（首拍无基线记 0/—）· 结束进程须逐字复述进程名并经确认对话框 · 系统关键进程（pid 0/4 与保护名单）拒绝结束 · 成功与被拒均落审计
             </Text>
-          )}
-          <div className={styles.row}>
-            <div style={{ flex: 1, minWidth: 240 }}>
-              <Spark values={cpuSeries} color={tokens.colorBrandForeground1} label="CPU" fmt={(v) => `${v.toFixed(1)}%`} />
-            </div>
-            <div style={{ flex: 1, minWidth: 240 }}>
-              <Spark values={memSeries} color={tokens.colorPaletteGreenForeground1} label="内存占用" fmt={(v) => `${v.toFixed(1)}%`} />
-            </div>
-            <div style={{ flex: 1, minWidth: 240 }}>
-              <Spark values={netSeries} color={tokens.colorPaletteMarigoldForeground1} label="网络吞吐" fmt={(v) => `${v.toFixed(1)} KB/s`} />
-            </div>
-          </div>
-          <Text className={styles.muted}>1s PDH 采样 · 保留最近 300 点 · 无数据时确认模块已启动</Text>
-        </Section>
+          </Section>
+        </>
       )}
 
       {tab === "clean" && (

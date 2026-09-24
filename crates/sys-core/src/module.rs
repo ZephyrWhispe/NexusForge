@@ -15,13 +15,15 @@ use host_core::module::{
     priority_of, Module, ModuleContext, ModuleInfo, ModuleState, ModuleStateCell,
 };
 use host_core::ports::{
-    AppxPort, MaintenancePort, PerfPort, RecycleBinPort, RegistryOps, ServiceCtlPort,
+    AppxPort, MaintenancePort, PerfPort, ProcPort, RecycleBinPort, RegistryOps, ServiceCtlPort,
     TaskTogglePort,
 };
 
 use crate::clean;
+use crate::error::SysError;
 use crate::metrics::{MetricsBuffer, MetricsPoint};
 use crate::pkg::PkgManager;
+use crate::process::{ProcessRow, ProcessTable};
 
 /// 采样间隔
 const SAMPLE_INTERVAL_MS: u64 = 1000;
@@ -48,6 +50,8 @@ pub struct SysModule {
     sample_thread: RwLock<Option<std::thread::JoinHandle<()>>>,
     /// WinOps 数据面（init 注入；start 时回归检测用）
     winops: RwLock<Option<WinopsFace>>,
+    /// 进程表（T-B7-10：init 时经 ProcPort 构建；端口缺失容忍——查询空表、kill 总拒）
+    process: RwLock<Option<Arc<ProcessTable>>>,
     /// appData 根（回归检测定位 backup.json 与外置目录）
     app_data_dir: PathBuf,
 }
@@ -65,6 +69,7 @@ impl SysModule {
             sample_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sample_thread: RwLock::new(None),
             winops: RwLock::new(None),
+            process: RwLock::new(None),
             app_data_dir: app_data_dir.to_path_buf(),
         }
     }
@@ -95,6 +100,28 @@ impl SysModule {
 
     pub fn recycle(&self) -> Option<Arc<dyn RecycleBinPort>> {
         self.recycle.read().clone()
+    }
+
+    /// IPC 入口：进程 Top-N（T-B7-10；进程表未建时诚实空表）
+    pub fn processes(&self, sort: &str, n: usize, query: &str) -> Vec<ProcessRow> {
+        match self.process.read().as_ref() {
+            Some(t) => t.top_n(sort, n, query, host_core::util::now_ms()),
+            None => Vec::new(),
+        }
+    }
+
+    /// IPC 入口：结束进程（红线闸序在 ProcessTable::kill；未建表同样拒）
+    pub fn kill_process(
+        &self,
+        pid: u32,
+        confirm_name: &str,
+    ) -> std::result::Result<String, SysError> {
+        let Some(t) = self.process.read().clone() else {
+            return Err(SysError::ProcKill(
+                "进程表未初始化（ProcPort 未注册）".into(),
+            ));
+        };
+        t.kill(pid, confirm_name)
     }
 
     /// 采样线程（start 在后台调用；1s 采样 → 缓冲 + D-03 统一合并发布：
@@ -215,6 +242,11 @@ impl Module for SysModule {
         *self.perf.write() = Some(perf);
         *self.recycle.write() = ctx.ports.get::<dyn RecycleBinPort>();
         *self.bus.write() = Some(ctx.event_bus.clone());
+        // 进程表（T-B7-10）：ProcPort 缺失容忍——查询空表、kill 走总拒
+        *self.process.write() = Some(Arc::new(ProcessTable::open(
+            &self.app_data_dir,
+            ctx.ports.get::<dyn ProcPort>(),
+        )));
         // WinOps 数据面快照（注册缺失容忍——回归检测按 None 跳过对应比对）
         *self.winops.write() = Some(WinopsFace {
             registry: ctx

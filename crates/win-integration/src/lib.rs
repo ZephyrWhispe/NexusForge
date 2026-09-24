@@ -26,6 +26,7 @@ pub mod maintenance;
 pub mod memlock;
 pub mod ocr;
 pub mod perf;
+pub mod process;
 pub mod registry;
 pub mod service;
 pub mod shell;

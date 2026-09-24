@@ -18,6 +18,8 @@ pub enum SysError {
     Registry(String),
     #[error("WinOps 应用失败: {0}")]
     Apply(String),
+    #[error("结束进程被拒/失败: {0}")]
+    ProcKill(String),
 }
 
 impl SysError {
@@ -32,6 +34,7 @@ impl SysError {
             SysError::Catalog(_) => "SYS_WINOPS_001",
             SysError::Registry(_) => "SYS_WINOPS_002",
             SysError::Apply(_) => "SYS_WINOPS_003",
+            SysError::ProcKill(_) => "SYS_PROC_001",
         }
     }
 }

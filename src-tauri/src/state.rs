@@ -11,7 +11,7 @@ use host_core::hotkey::HotkeyManager;
 use host_core::module::{Module, ModuleContext, ModuleState};
 use host_core::ports::{
     CapturePort, ClipboardPort, ConptyPort, CryptoPort, DockerPipePort, HelloPort, HelperSpawnPort,
-    HotkeyWinPort, InputHookPort, InputInjectPort, MemLockPort, OcrPort, PerfPort, Ports,
+    HotkeyWinPort, InputHookPort, InputInjectPort, MemLockPort, OcrPort, PerfPort, Ports, ProcPort,
     RecycleBinPort, RegistryOps, ScreenInfoPort, ServiceCtlPort, ShellPort, SysProxyPort,
     TaskSchdPort, TaskTogglePort, ThumbPort, UsnIndexPort,
 };
@@ -140,6 +140,8 @@ impl HostState {
         ports.register::<dyn ConptyPort>(Arc::new(win_integration::conpty::ConptyWin::new()));
         // SY4 性能采样（sys-core，docs/impl/06 SY）
         ports.register::<dyn PerfPort>(Arc::new(win_integration::perf::PdhWin::new()?));
+        // T-B7-10 进程枚举/终结（sys-core 进程页红线；OS 面在 win-integration）
+        ports.register::<dyn ProcPort>(Arc::new(win_integration::process::WinProc));
         // T6 Docker Engine named pipe（docs/impl/06 T6）
         ports.register::<dyn DockerPipePort>(Arc::new(
             win_integration::docker::DockerPipeWin::new(),

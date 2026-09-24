@@ -450,6 +450,29 @@ pub trait PerfPort: Port {
     fn net_bps(&self) -> Result<f64, AppError>;
 }
 
+/// 进程快照行（T-B7-10 进程页；win-integration/process.rs Toolhelp32+PSAPI 实现）
+#[derive(Clone, Debug, Serialize)]
+pub struct ProcSnap {
+    pub pid: u32,
+    /// 进程名（小写归一由消费方做；此处为 OS 原样）
+    pub name: String,
+    /// 累计 CPU 时间（kernel+user，毫秒）——两拍差值才是占用率
+    pub cpu_ms: u64,
+    pub mem_bytes: u64,
+    /// 累计读+写字节（None = 跨权限读不到——无事实源即 None，不编 0）
+    pub io_bytes: Option<u64>,
+}
+
+/// 进程枚举/结束端口（T-B7-10 红线批：guard 名单与确认词闸在 sys-core，OS 面在此）
+pub trait ProcPort: Port {
+    /// 当前可见进程快照（个别读不到的静默跳过）
+    fn snapshot(&self) -> Result<Vec<ProcSnap>, AppError>;
+    /// pid 对应进程名（不存在 = Err）
+    fn name_of(&self, pid: u32) -> Result<String, AppError>;
+    /// 结束进程（调用方必须已过保护名单 + 复述名闸——本端口不重复判）
+    fn kill(&self, pid: u32) -> Result<(), AppError>;
+}
+
 /// RegisterHotKey 底层封装（宿主 HotkeyManager 专用，S6.2 使用）
 pub trait HotkeyWinPort: Port {
     fn register(&self, hotkey_id: i32, modifiers: u32, vk: u32) -> Result<(), AppError>;
