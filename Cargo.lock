@@ -7515,6 +7515,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "rand 0.8.8",
+ "serde_json",
  "tokio",
  "tracing",
  "windows 0.58.0",

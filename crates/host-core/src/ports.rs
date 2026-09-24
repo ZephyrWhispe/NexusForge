@@ -516,7 +516,7 @@ pub enum RawInput {
         x: i32,
         y: i32,
     },
-    /// button: 0 左 1 右 2 中
+    /// button: 0 左 1 右 2 中 3 XButton1（后退） 4 XButton2（前进）（T-B7-7 扩值域）
     MouseDown {
         button: u8,
         x: i32,
@@ -527,11 +527,16 @@ pub enum RawInput {
         x: i32,
         y: i32,
     },
-    /// delta: 正=上/右滚
+    /// delta: 正=上/右滚；horizontal: false=垂直滚轮（缺省） true=水平滚轮（T-B7-7 加键不改臂）。
+    /// 版本偏差登记（§7.3 冒烟清单）：`#[serde(default)]` 使旧帧新码可读；button 3/4 帧注到
+    /// **旧对端**落其 match 兜底臂得 WIN_INPUT_006（如实错不静默）；horizontal=true 到旧对端
+    /// 被当垂直轮注入（有损不炸）——两侧键/水平滚投影须双端升级到位后再用。
     Wheel {
         delta: i32,
         x: i32,
         y: i32,
+        #[serde(default)]
+        horizontal: bool,
     },
 }
 

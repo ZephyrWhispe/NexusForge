@@ -24,17 +24,19 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+    VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, GetSystemMetrics, PostThreadMessageW, SetWindowsHookExW,
     UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, LLKHF_INJECTED,
     LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    XBUTTON1, XBUTTON2,
 };
 
 use host_core::error::AppError;
@@ -42,6 +44,11 @@ use host_core::ports::{InputHookPort, InputInjectPort, RawInput, ScreenInfoPort,
 
 /// 鼠标 move 转发最小间隔（125Hz 采样上限）
 const MOVE_MIN_INTERVAL_MS: u64 = 8;
+
+/// MOUSEEVENTF_XBUTTONDOWN/UP（winuser.h 0x0080/0x0100）——windows 0.58 元数据缺位
+/// 这两枚（XBUTTON1/2 旗标常量在册），按头文件字面值以同款 newtype 本地成形（T-B7-7）
+const MOUSEEVENTF_XBUTTONDOWN: MOUSE_EVENT_FLAGS = MOUSE_EVENT_FLAGS(0x0080);
+const MOUSEEVENTF_XBUTTONUP: MOUSE_EVENT_FLAGS = MOUSE_EVENT_FLAGS(0x0100);
 
 type Cb = Arc<dyn Fn(&RawInput) -> bool + Send + Sync>;
 
@@ -82,6 +89,18 @@ thread_local! {
 /// HIWORD(mouseData) → 有符号滚轮增量（正=上滚）
 fn wheel_delta(mouse_data: u32) -> i32 {
     ((mouse_data >> 16) & 0xFFFF) as u16 as i16 as i32
+}
+
+/// LOWORD(mouseData) → 侧键投影键（T-B7-7 代码事实：WH_MOUSE_LL 的 wparam 是消息号，
+/// WM_XBUTTON* 的 XBUTTON1/XBUTTON2 旗标落在 MSLLHOOKSTRUCT.mouseData 低字——任务书
+/// 字面 GET_XBUTTON_WPARAM 是普通窗口过程视角，钩子内无事件 wparam 可取，
+/// 按旗标映射等价收口，提交信息登记）。1=后退→3，2=前进→4，其余不成臂透传。
+fn xbutton_index(mouse_data: u32) -> Option<u8> {
+    match (mouse_data & 0xFFFF) as u16 {
+        XBUTTON1 => Some(3),
+        XBUTTON2 => Some(4),
+        _ => None,
+    }
 }
 
 /// 绝对坐标 → 0..65535 归一化（虚拟桌面，副屏可为负坐标）。
@@ -186,12 +205,37 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     x: ms.pt.x,
                     y: ms.pt.y,
                 },
+                WM_XBUTTONDOWN => match xbutton_index(ms.mouseData) {
+                    Some(button) => RawInput::MouseDown {
+                        button,
+                        x: ms.pt.x,
+                        y: ms.pt.y,
+                    },
+                    // 未知 xbutton 旗标透传（不误投影）
+                    None => return,
+                },
+                WM_XBUTTONUP => match xbutton_index(ms.mouseData) {
+                    Some(button) => RawInput::MouseUp {
+                        button,
+                        x: ms.pt.x,
+                        y: ms.pt.y,
+                    },
+                    None => return,
+                },
                 WM_MOUSEWHEEL => RawInput::Wheel {
                     delta: wheel_delta(ms.mouseData),
                     x: ms.pt.x,
                     y: ms.pt.y,
+                    horizontal: false,
                 },
-                // 水平滚轮等 v1 不捕获（透传）
+                WM_MOUSEHWHEEL => RawInput::Wheel {
+                    // 水平滚轮：mouseData 高字带符号 delta，同谱拆出（T-B7-7）
+                    delta: wheel_delta(ms.mouseData),
+                    x: ms.pt.x,
+                    y: ms.pt.y,
+                    horizontal: true,
+                },
+                // 其余鼠标消息透传
                 _ => return,
             };
             let cb_guard = shared.cb.load();
@@ -408,7 +452,9 @@ fn to_input(ev: &RawInput) -> Result<INPUT, AppError> {
         RawInput::MouseMove { x, y } => Ok(mouse_move(*x, *y)),
         RawInput::MouseDown { button, .. } => mouse_button(*button, true),
         RawInput::MouseUp { button, .. } => mouse_button(*button, false),
-        RawInput::Wheel { delta, .. } => Ok(mouse_wheel(*delta)),
+        RawInput::Wheel {
+            delta, horizontal, ..
+        } => Ok(mouse_wheel(*delta, *horizontal)),
     }
 }
 
@@ -455,14 +501,21 @@ fn mouse_move(x: i32, y: i32) -> INPUT {
     }
 }
 
-fn mouse_button(button: u8, down: bool) -> Result<INPUT, AppError> {
-    let flags: MOUSE_EVENT_FLAGS = match (button, down) {
-        (0, true) => MOUSEEVENTF_LEFTDOWN,
-        (0, false) => MOUSEEVENTF_LEFTUP,
-        (1, true) => MOUSEEVENTF_RIGHTDOWN,
-        (1, false) => MOUSEEVENTF_RIGHTUP,
-        (2, true) => MOUSEEVENTF_MIDDLEDOWN,
-        (2, false) => MOUSEEVENTF_MIDDLEUP,
+/// 键→(dwFlags, mouseData) 纯映射臂（T-B7-7 拆"算"与"做"）：3/4=侧键投影，
+/// mouseData 按 MSDN 携 XBUTTON1(1)/XBUTTON2(2)；旧对端只有 0..=2 臂——
+/// button≥3 帧注旧端落其 `_` 臂得 WIN_INPUT_006（如实错不静默，ports.rs 注释在册）
+fn mouse_button_plan(button: u8, down: bool) -> Result<(MOUSE_EVENT_FLAGS, u32), AppError> {
+    let plan = match (button, down) {
+        (0, true) => (MOUSEEVENTF_LEFTDOWN, 0),
+        (0, false) => (MOUSEEVENTF_LEFTUP, 0),
+        (1, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
+        (1, false) => (MOUSEEVENTF_RIGHTUP, 0),
+        (2, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
+        (2, false) => (MOUSEEVENTF_MIDDLEUP, 0),
+        (3, true) => (MOUSEEVENTF_XBUTTONDOWN, XBUTTON1 as u32),
+        (3, false) => (MOUSEEVENTF_XBUTTONUP, XBUTTON1 as u32),
+        (4, true) => (MOUSEEVENTF_XBUTTONDOWN, XBUTTON2 as u32),
+        (4, false) => (MOUSEEVENTF_XBUTTONUP, XBUTTON2 as u32),
         _ => {
             return Err(AppError::module(
                 "WIN_INPUT_006",
@@ -471,13 +524,18 @@ fn mouse_button(button: u8, down: bool) -> Result<INPUT, AppError> {
             ))
         }
     };
+    Ok(plan)
+}
+
+fn mouse_button(button: u8, down: bool) -> Result<INPUT, AppError> {
+    let (flags, data) = mouse_button_plan(button, down)?;
     Ok(INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
                 dx: 0,
                 dy: 0,
-                mouseData: 0,
+                mouseData: data,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -486,7 +544,7 @@ fn mouse_button(button: u8, down: bool) -> Result<INPUT, AppError> {
     })
 }
 
-fn mouse_wheel(delta: i32) -> INPUT {
+fn mouse_wheel(delta: i32, horizontal: bool) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -494,7 +552,11 @@ fn mouse_wheel(delta: i32) -> INPUT {
                 dx: 0,
                 dy: 0,
                 mouseData: delta as u32,
-                dwFlags: MOUSEEVENTF_WHEEL,
+                dwFlags: if horizontal {
+                    MOUSEEVENTF_HWHEEL
+                } else {
+                    MOUSEEVENTF_WHEEL
+                },
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -551,6 +613,132 @@ mod tests {
         assert_eq!(wheel_delta(120u32 << 16), 120);
         assert_eq!(wheel_delta(((-120i16) as u16 as u32) << 16), -120);
         assert_eq!(wheel_delta(1u32 << 16), 1);
+    }
+
+    // ======================== T-B7-7 任务书字面测试名 ========================
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-7）字面测试名优先于 rustc 命名惯例
+    fn rawInput_xbuttonCaptureMaps3And4() {
+        // 纯映射拆臂：mouseData 低字旗标→投影键（钩子内无事件 wparam，见 xbutton_index 注）
+        assert_eq!(xbutton_index(XBUTTON1 as u32), Some(3));
+        assert_eq!(xbutton_index(XBUTTON2 as u32), Some(4));
+        // 非旗标值不成臂（透传不误投影）；高字滚轮 delta 不串台到低字判
+        assert_eq!(xbutton_index(0), None);
+        assert_eq!(xbutton_index(3), None);
+        assert_eq!(xbutton_index(120u32 << 16), None);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-7）字面测试名优先于 rustc 命名惯例
+    fn rawInput_buttonRoundTripInjectsMouseeventf() {
+        // 映射表五键双臂全覆盖：down/up 各得各的 MOUSEEVENTF_*，侧键携 XBUTTON 旗标
+        let table: [(u8, MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS, u32); 5] = [
+            (0, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
+            (1, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
+            (2, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+            (
+                3,
+                MOUSEEVENTF_XBUTTONDOWN,
+                MOUSEEVENTF_XBUTTONUP,
+                XBUTTON1 as u32,
+            ),
+            (
+                4,
+                MOUSEEVENTF_XBUTTONDOWN,
+                MOUSEEVENTF_XBUTTONUP,
+                XBUTTON2 as u32,
+            ),
+        ];
+        for (b, dn, up, data) in table {
+            assert_eq!(mouse_button_plan(b, true).unwrap(), (dn, data));
+            assert_eq!(mouse_button_plan(b, false).unwrap(), (up, data));
+            // "做"臂：plan 结果原样落 INPUT 载荷（mouseData 不再恒 0；INPUT 为 union，
+            // 字段读取按契约 unsafe，unwrap 不可用——无 Debug）
+            let Ok(input) = mouse_button(b, true) else {
+                panic!("button{b} down 应成臂");
+            };
+            let mi = unsafe { input.Anonymous.mi };
+            assert_eq!(mi.dwFlags, dn);
+            assert_eq!(mi.mouseData, data);
+        }
+        assert!(mouse_button_plan(5, true).is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-7）字面测试名优先于 rustc 命名惯例
+    fn wheel_horizontalFlag_legacyPeerPayloadStillParses() {
+        // 手写旧格式字节夹具（B6 纪律）：T-B7-7 前 Wheel 帧无 horizontal 键
+        let legacy = r#"{"Wheel":{"delta":120,"x":10,"y":-3}}"#;
+        let ev: RawInput = serde_json::from_str(legacy).expect("旧帧新码必须可读");
+        match ev {
+            RawInput::Wheel {
+                delta,
+                x,
+                y,
+                horizontal,
+            } => {
+                assert_eq!((delta, x, y), (120, 10, -3));
+                assert!(!horizontal, "缺省键=垂直轮（serde default）");
+            }
+            other => panic!("变体漂移: {other:?}"),
+        }
+        // 新帧带键往返（旧对端 serde 忽略未知键=不炸，但按垂直轮注入——见 ports.rs 注释）
+        let json = serde_json::to_string(&RawInput::Wheel {
+            delta: -120,
+            x: 1,
+            y: 2,
+            horizontal: true,
+        })
+        .unwrap();
+        assert!(json.contains("\"horizontal\":true"));
+        let back: RawInput = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            RawInput::Wheel {
+                horizontal: true,
+                ..
+            }
+        ));
+        // inject 分道：horizontal ⇒ HWHEEL，否则 WHEEL 恒等（旧行为正对照；union 字段 unsafe 契约读）
+        let hw = unsafe { mouse_wheel(-120, true).Anonymous.mi.dwFlags };
+        assert_eq!(hw, MOUSEEVENTF_HWHEEL);
+        let wh = unsafe { mouse_wheel(-120, false).Anonymous.mi.dwFlags };
+        assert_eq!(wh, MOUSEEVENTF_WHEEL);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-7）字面测试名优先于 rustc 命名惯例
+    fn inject_xbuttonOnLegacyTarget_errs006NotSilent() {
+        // 旧对端夹具：逐字复刻 T-B7-7 前 mouse_button match（仅 0..=2 臂有值）。
+        // 侧键帧到旧端 ⇒ 落 `_` 臂 ⇒ WIN_INPUT_006 如实错，不静默丢。
+        fn legacy_button(button: u8) -> Option<&'static str> {
+            match button {
+                0 => Some("LEFT"),
+                1 => Some("RIGHT"),
+                2 => Some("MIDDLE"),
+                _ => None,
+            }
+        }
+        for b in [3u8, 4] {
+            assert!(
+                legacy_button(b).is_none(),
+                "button{b} 在旧对端不得有静默映射臂"
+            );
+        }
+        // 错误码路径实测：现行码面对集外键仍走同一 WIN_INPUT_006 出口（旧端收到侧键即此码）
+        let e = match mouse_button(9, true) {
+            Err(e) => e,
+            // INPUT 是 union 无 Debug，不用 unwrap_err
+            Ok(_) => panic!("集外键 9 必须拒注"),
+        };
+        match e {
+            AppError::Module { code, message, .. } => {
+                assert_eq!(code, "WIN_INPUT_006");
+                assert!(message.contains('9'), "错误须点名坏键: {message}");
+            }
+            other => panic!("错误形制漂移: {other:?}"),
+        }
     }
 
     #[test]

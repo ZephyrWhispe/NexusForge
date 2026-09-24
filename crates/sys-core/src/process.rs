@@ -377,7 +377,15 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("nf-proc-{tag}-{}", std::process::id()))
+        // pid 会被 Windows 复用：仅 pid 后缀会跨运行撞同名夹具目录，
+        // 让审计 jsonl  Append-读 计数翻倍（门禁实测翻红根因）。补纳秒盐并先清场。
+        let salt = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("nf-proc-{tag}-{}-{salt}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
     }
 
     fn table(port: Arc<FakePort>, dir: &Path) -> ProcessTable {

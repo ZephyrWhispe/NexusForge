@@ -84,3 +84,5 @@ features = [
 
 [dev-dependencies]
 portable-pty = "0.9.0"
+# T-B7-7 线格式夹具测（旧格式 RawInput 字节夹具手写字面 JSON，B6 纪律）
+serde_json = { workspace = true }
