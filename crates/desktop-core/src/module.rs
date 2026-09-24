@@ -17,8 +17,10 @@ use host_core::module::{
 };
 use host_core::ports::ShellPort;
 
+use crate::config::DesktopConfig;
 use crate::index::{ItemKind, LauncherIndex};
 use crate::note::NoteStore;
+use crate::tidy::TidyMapping;
 
 /// 提醒轮询间隔
 const REMIND_POLL_MS: u64 = 30_000;
@@ -35,6 +37,10 @@ pub struct DesktopModule {
     /// 提醒线程取消标志（true = 停止）
     remind_cancel: Arc<std::sync::atomic::AtomicBool>,
     remind_thread: RwLock<Option<std::thread::JoinHandle<()>>>,
+    /// T-B7-16 整理映射运行态真源（Arc 下发 TidyPlanner；apply_config 覆写=不重启）
+    tidy_map: Arc<RwLock<Option<TidyMapping>>>,
+    /// 最近一次生效的 desktop 段配置（merged 派发基底，盘上镜像；映射真源在 tidy_map）
+    cfg: RwLock<DesktopConfig>,
 }
 
 impl DesktopModule {
@@ -52,6 +58,8 @@ impl DesktopModule {
             app_data_dir: app_data_dir.to_path_buf(),
             remind_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             remind_thread: RwLock::new(None),
+            tidy_map: Arc::new(RwLock::new(None)),
+            cfg: RwLock::new(DesktopConfig::default()),
         }
     }
 
@@ -69,7 +77,10 @@ impl DesktopModule {
     }
 
     pub fn tidy_planner(&self) -> crate::tidy::TidyPlanner {
-        crate::tidy::TidyPlanner::new(self.app_data_dir.join("desktop").join("tidy_manifest.json"))
+        crate::tidy::TidyPlanner::new(
+            self.app_data_dir.join("desktop").join("tidy_manifest.json"),
+            self.tidy_map.clone(),
+        )
     }
 
     /// launch：App → ShellExecuteW；Action → 发事件。均记频次。
@@ -251,19 +262,51 @@ impl Module for DesktopModule {
     }
 
     fn config_schema(&self) -> serde_json::Value {
+        // 键集 ≡ DesktopConfig 字段集（死键守卫测钉死）。T-B7-16：
+        // launcher_hotkey_note 死键除名（纯说明文案无读者，描述已并入本 title/description）；
+        // tidy_map readOnly=SchemaForm 不渲染，写口唯一在 DesktopPanel 映射编辑表
+        // （Rust 侧 schema + validate 双层拒存点名）。
         serde_json::json!({
             "type": "object",
             "properties": {
-                "launcher_hotkey_note": {
-                    "type": "string", "title": "快捷键说明",
-                    "description": "启动器 Alt+Q；速记条 Ctrl+Alt+N（v1 固定，后续可配置）",
-                    "default": ""
+                "tidy_map": {
+                    "type": ["object", "null"],
+                    "title": "桌面整理自定义分类映射",
+                    "description": "null=内置六类；每行 [类名, 目标夹(带盘符绝对路径，拒相对/UNC/引号), 扩展名数组]，声明序即优先序（编辑口在桌面效率面板整理区）",
+                    "default": null,
+                    "readOnly": true,
+                    "required": ["categories"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "categories": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "minItems": 3,
+                                "maxItems": 3,
+                                "prefixItems": [
+                                    { "type": "string", "minLength": 1 },
+                                    { "type": "string", "pattern": "^[A-Za-z]:[\\\\/][^\"'<>|?]*$" },
+                                    { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" } }
+                                ]
+                            }
+                        }
+                    }
                 }
             }
         })
     }
 
-    fn apply_config(&self, _values: serde_json::Value) -> Result<(), ModuleError> {
+    fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError> {
+        // merged 三件套派发（同 kvm T-B7-8 形制）：缺键不动；坏值整批点名拒收；
+        // 映射变更经共享 Arc 直达 TidyPlanner——不重启生效
+        let base = self.cfg.read().clone();
+        let next = base.merged(&values).map_err(ModuleError::Config)?;
+        if next.tidy_map != base.tidy_map {
+            *self.tidy_map.write() = next.tidy_map.clone();
+            tracing::info!("桌面整理分类映射已热更新（不重启生效）");
+        }
+        *self.cfg.write() = next;
         Ok(())
     }
 
@@ -332,13 +375,157 @@ impl HotkeyProvider for DesktopModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use host_core::config::ConfigStore;
+
+    /// 自闭合夹具目录（pid 会被复用，补纳秒盐并先清场）
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let salt = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("nf-desktop-{tag}-{}-{salt}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-16）字面测试名优先于 rustc 命名惯例
+    fn tidyMap_runtimeApply_noRestart() {
+        let dir = tmp_dir("tidyapply");
+        let bus = Arc::new(EventBus::new());
+        let m = DesktopModule::new(&dir);
+        let store = Arc::new(ConfigStore::new(dir.join("config"), bus.clone()));
+        store.register_schema("desktop", m.config_schema());
+        // planner 在配置生效之前创建：热更新必须走同一 Arc，而非换 planner（重建=重启语义）
+        let p0 = m.tidy_planner();
+
+        let mapping = serde_json::json!({
+            "categories": [["设计稿", "D:\\Design", ["psd", "sketch"]]]
+        });
+        // ① 真写侧：store.set_module schema 门放行 → 盘上 → apply_config 派发
+        store
+            .set_module(
+                "desktop",
+                serde_json::json!({ "tidy_map": mapping.clone() }),
+            )
+            .unwrap();
+        let disk = store.get_module("desktop").unwrap();
+        m.apply_config(disk).unwrap();
+        let want = TidyMapping {
+            categories: vec![(
+                "设计稿".into(),
+                "D:\\Design".into(),
+                vec!["psd".into(), "sketch".into()],
+            )],
+        };
+        assert_eq!(*m.tidy_map.read(), Some(want.clone()));
+        // ② 派发证明：旧 planner 持同一 Arc 且立即可见（不重启生效）
+        assert!(
+            Arc::ptr_eq(&m.tidy_map, p0.map_ref()),
+            "配置生效不得以换代 TidyPlanner 为代价——B6 T-B6-6 Arc::ptr_eq 判据形制"
+        );
+        assert_eq!(*p0.map_ref().read(), Some(want.clone()));
+
+        // ③ 运行态坏值整批弹回点名（绕过 store 直灌派发口的防御臂）
+        let e = m
+            .apply_config(
+                serde_json::json!({ "tidy_map": { "categories": [["x", "Docs", ["pdf"]]] } }),
+            )
+            .unwrap_err();
+        assert!(e.to_string().contains("绝对路径"), "拒因点名: {e}");
+        assert_eq!(*m.tidy_map.read(), Some(want), "弹回批不得连坐运行态");
+
+        // ④ schema 门独立臂：相对路径与 UNC 都进不了盘（store 层拒存，不必到模块）
+        for bad in ["Docs", "\\\\nas\\share"] {
+            let e = store
+                .set_module(
+                    "desktop",
+                    serde_json::json!({ "tidy_map": { "categories": [["x", bad, ["pdf"]]] } }),
+                )
+                .unwrap_err();
+            assert!(
+                e.to_string().contains("配置校验失败"),
+                "schema 门必须拦下非法目标夹: {e}"
+            );
+        }
+        assert_eq!(
+            store.get_module("desktop").unwrap()["tidy_map"],
+            mapping,
+            "拒存批不得污染盘上旧值"
+        );
+
+        // ⑤ 显式 null 回内置（经真写侧全链路）
+        store
+            .set_module("desktop", serde_json::json!({ "tidy_map": null }))
+            .unwrap();
+        m.apply_config(store.get_module("desktop").unwrap())
+            .unwrap();
+        assert_eq!(*m.tidy_map.read(), None, "null=收回内置六类");
+        assert_eq!(*p0.map_ref().read(), None, "同一 Arc：planner 同步看见");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-16）随批：死键守卫 desktop 段
+    fn dead_config_keys_are_revived_or_removed() {
+        // kvm/file-core 同形制：module.rs 是声明现场，读者必须在别处（注释行不算）
+        let src_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut reader_lines: Vec<Vec<String>> = Vec::new();
+        for entry in walkdir::WalkDir::new(&src_root).into_iter() {
+            let entry = entry.expect("walkdir 不应失败");
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.file_name() == Some(std::ffi::OsStr::new("module.rs")) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            reader_lines.push(
+                text.lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .map(|l| l.to_owned())
+                    .collect(),
+            );
+        }
+        let key_has_reader = |key: &str| {
+            reader_lines
+                .iter()
+                .any(|lines| lines.iter().any(|l| l.contains(key)))
+        };
+
+        let schema = DesktopModule::new(&PathBuf::from(".")).config_schema();
+        let props = schema["properties"].as_object().expect("schema 应为对象");
+        let default_ser = serde_json::to_value(DesktopConfig::default()).unwrap();
+        let default_obj = default_ser.as_object().expect("DesktopConfig 可序列化");
+
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
+        let mut fields: Vec<&String> = default_obj.keys().collect();
+        fields.sort();
+        assert_eq!(keys, fields, "schema 键集必须恰等 DesktopConfig 字段集");
+        assert_eq!(keys, vec!["tidy_map"], "launcher_hotkey_note 死键已除名");
+        for key in &keys {
+            assert!(
+                key_has_reader(key),
+                "死键：{key} 在 config_schema 声明却在 module.rs 之外零读者"
+            );
+            assert_eq!(
+                props[*key].get("default").cloned(),
+                default_obj.get(*key).cloned(),
+                "schema default 与 Default 必须逐值同源: {key}"
+            );
+        }
+    }
 
     /// 红线回归（09 §4.2 T-B1-6）：build() 整体替换条目，重放是内置动作的唯一保留路径
     #[test]
     fn launcher_reindex_preserves_registered_actions() {
-        let dir = std::env::temp_dir().join(format!("nf_desktop_reindex_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("reindex");
         let sm = dir.join("sm");
         std::fs::create_dir_all(&sm).unwrap();
         std::fs::write(sm.join("记事本.lnk"), b"fake-lnk").unwrap();
