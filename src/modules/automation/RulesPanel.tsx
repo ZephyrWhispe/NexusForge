@@ -34,8 +34,10 @@ import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 
 /**
- * 自动化面板（docs/impl/07 A1–A3，M14 v1）：
- * - 规则：事件/启动/每日定时触发 + 可选 when 条件 + 单动作（通知/打开 URL/发布事件）+ 冷却
+ * 自动化面板（docs/impl/07 A1–A3 + T-B7-13 多动作编辑器）：
+ * - 规则：事件/启动/每日定时触发 + 可选 when（一层 And/Or 组 UI；深层树逐字
+ *   携带不回造，触碰降级须显式确认）+ **then 数组**（增删/上下移/五类动作全
+ *   含 ipc_command）+ 冷却
  * - 死信：动作重试耗尽的死信队列（可重放；重放仍失败以新 id 重新入队）
  * - 风暴防护：automation 自产事件不再触发规则（防自环）；默认冷却 5s/规则
  */
@@ -86,27 +88,63 @@ const useStyles = makeStyles({
 
 type TabId = "rules" | "dead" | "plugins";
 
-/** 表单状态（简化编辑：单动作 + 可选单条件） */
+type ActionKind = "notify" | "open_url" | "publish" | "ipc_command" | "run_script";
+
+/** 动作行（T-B7-13 then 数组编辑器）：五类参数字段并存一行形状，按 kind 显形 */
+interface ActionRow {
+  kind: ActionKind;
+  notifyTitle: string;
+  notifyBody: string;
+  url: string;
+  pubTopic: string;
+  pubPayload: string;
+  ipcModule: string;
+  ipcCmd: string;
+  ipcArgs: string;
+  wasmPath: string;
+  wasmFunc: string;
+}
+
+/** when 叶行（UI 只造一层；深层树走 rawWhen 逐字携带） */
+interface WhenLeafRow {
+  path: string;
+  cmp: "eq" | "ne" | "gt" | "lt" | "contains";
+  value: string;
+}
+
 interface FormState {
   id: string;
   name: string;
   trigger: "event" | "startup" | "schedule";
   topic: string;
   time: string;
-  useWhen: boolean;
-  whenPath: string;
-  whenCmp: "eq" | "ne" | "gt" | "lt" | "contains";
-  whenValue: string;
-  action: "notify" | "open_url" | "publish" | "run_script";
-  notifyTitle: string;
-  notifyBody: string;
-  url: string;
-  pubTopic: string;
-  pubPayload: string;
-  wasmPath: string;
-  wasmFunc: string;
+  /** none = 无条件 | leaf = 单条件 | group = 一层 And/Or 组 */
+  whenMode: "none" | "leaf" | "group";
+  whenGroupOp: "and" | "or";
+  whenLeaves: WhenLeafRow[];
+  /** 载入即存的深层树：未触碰原样序列化回去；触碰才降级 + 保存前显式确认 */
+  rawWhen: ExprDto | null;
+  whenTouched: boolean;
+  /** then 整数组（编辑回填不回造——每动作一行，序即执行序） */
+  actions: ActionRow[];
+  /** 启停随表单往返（编辑停用规则保存后不得被悄悄启用） */
+  enabled: boolean;
   cooldown: string;
 }
+
+const EMPTY_ROW: ActionRow = {
+  kind: "notify",
+  notifyTitle: "",
+  notifyBody: "",
+  url: "",
+  pubTopic: "",
+  pubPayload: "{}",
+  ipcModule: "",
+  ipcCmd: "",
+  ipcArgs: "",
+  wasmPath: "",
+  wasmFunc: "",
+};
 
 const EMPTY_FORM: FormState = {
   id: "",
@@ -114,18 +152,13 @@ const EMPTY_FORM: FormState = {
   trigger: "event",
   topic: "clipboard.captured",
   time: "08:30",
-  useWhen: false,
-  whenPath: "",
-  whenCmp: "eq",
-  whenValue: "",
-  action: "notify",
-  notifyTitle: "",
-  notifyBody: "",
-  url: "",
-  pubTopic: "",
-  pubPayload: "{}",
-  wasmPath: "",
-  wasmFunc: "",
+  whenMode: "none",
+  whenGroupOp: "and",
+  whenLeaves: [],
+  rawWhen: null,
+  whenTouched: false,
+  actions: [{ ...EMPTY_ROW }],
+  enabled: true,
   cooldown: "0",
 };
 
@@ -157,7 +190,103 @@ function actionLabel(a: ActionDto): string {
   }
 }
 
-/** 表单 → DTO（value 尝试 JSON 解析，失败按字符串） */
+const parseValue = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+};
+
+/** 动作行 → DTO；ipc_command 参数 JSON 解析失败回 err（就地红、禁提交） */
+function rowToAction(r: ActionRow): { action?: ActionDto; err?: string } {
+  switch (r.kind) {
+    case "notify":
+      return { action: { kind: "notify", title: r.notifyTitle, body: r.notifyBody } };
+    case "open_url":
+      return { action: { kind: "open_url", url: r.url.trim() } };
+    case "publish":
+      return {
+        action: {
+          kind: "publish",
+          topic: r.pubTopic.trim(),
+          payload: parseValue(r.pubPayload || "{}"),
+        },
+      };
+    case "run_script":
+      return { action: { kind: "run_script", path: r.wasmPath.trim(), func: r.wasmFunc.trim() } };
+    case "ipc_command": {
+      const raw = r.ipcArgs.trim();
+      let args: unknown = {};
+      if (raw !== "") {
+        try {
+          args = JSON.parse(raw);
+        } catch {
+          return { err: "IPC 参数不是合法 JSON，修正后才能保存" };
+        }
+      }
+      return { action: { kind: "ipc_command", module: r.ipcModule.trim(), cmd: r.ipcCmd.trim(), args } };
+    }
+  }
+}
+
+/** 动作 DTO → 编辑行（回填不回造：字段逐字带回） */
+function rowFromAction(a: ActionDto): ActionRow {
+  const base = { ...EMPTY_ROW };
+  switch (a.kind) {
+    case "notify":
+      return { ...base, kind: "notify", notifyTitle: a.title, notifyBody: a.body };
+    case "open_url":
+      return { ...base, kind: "open_url", url: a.url };
+    case "publish":
+      return { ...base, kind: "publish", pubTopic: a.topic, pubPayload: JSON.stringify(a.payload) };
+    case "ipc_command":
+      return {
+        ...base,
+        kind: "ipc_command",
+        ipcModule: a.module,
+        ipcCmd: a.cmd,
+        ipcArgs: JSON.stringify(a.args),
+      };
+    case "run_script":
+      return { ...base, kind: "run_script", wasmPath: a.path, wasmFunc: a.func };
+  }
+}
+
+const leafValueText = (v: unknown): string =>
+  typeof v === "string" ? v : JSON.stringify(v);
+
+function whenLeavesOf(rows: ExprDto[]): WhenLeafRow[] {
+  return rows.flatMap((e) =>
+    e.op === "leaf"
+      ? [{ path: e.args.path, cmp: e.args.cmp, value: leafValueText(e.args.value) }]
+      : [],
+  );
+}
+
+const EMPTY_LEAF: WhenLeafRow = { path: "", cmp: "eq", value: "" };
+
+const withLeaf = (
+  rows: WhenLeafRow[],
+  i: number,
+  patch: Partial<WhenLeafRow>,
+): WhenLeafRow[] => rows.map((row, idx) => (idx === i ? { ...row, ...patch } : row));
+
+/** 表单 → when DTO（编辑形状；rawWhen 的取舍在 formToRule 收口） */
+function whenFromForm(f: FormState): ExprDto | null {
+  if (f.whenMode === "none") return null;
+  const leaves = f.whenLeaves
+    .filter((row) => row.path.trim() !== "")
+    .map<ExprDto>((row) => ({
+      op: "leaf",
+      args: { path: row.path.trim(), cmp: row.cmp, value: parseValue(row.value) },
+    }));
+  if (leaves.length === 0) return null;
+  if (f.whenMode === "leaf") return leaves.find(() => true) ?? null;
+  return { op: f.whenGroupOp, args: leaves };
+}
+
+/** 表单 → DTO：深层 when 未触碰 → 逐字原样携带（正对照防"编辑器必然展平"） */
 function formToRule(f: FormState): RuleDto {
   const on: TriggerDto =
     f.trigger === "event"
@@ -165,42 +294,31 @@ function formToRule(f: FormState): RuleDto {
       : f.trigger === "schedule"
         ? { kind: "schedule", time: f.time.trim() }
         : { kind: "startup" };
-  const parseValue = (raw: string): unknown => {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return raw;
-    }
-  };
-  let when: ExprDto | null = null;
-  if (f.useWhen && f.whenPath.trim()) {
-    when = {
-      op: "leaf",
-      args: { path: f.whenPath.trim(), cmp: f.whenCmp, value: parseValue(f.whenValue) },
-    };
-  }
-  const action: ActionDto =
-    f.action === "notify"
-      ? { kind: "notify", title: f.notifyTitle, body: f.notifyBody }
-      : f.action === "open_url"
-        ? { kind: "open_url", url: f.url.trim() }
-        : f.action === "run_script"
-          ? { kind: "run_script", path: f.wasmPath.trim(), func: f.wasmFunc.trim() }
-          : { kind: "publish", topic: f.pubTopic.trim(), payload: parseValue(f.pubPayload || "{}") };
+  const when = f.rawWhen !== null && !f.whenTouched ? f.rawWhen : whenFromForm(f);
   return {
     id: f.id || crypto.randomUUID(),
     name: f.name.trim(),
     on,
     when,
-    then: [action],
+    then: f.actions.flatMap((row) => {
+      const built = rowToAction(row);
+      return built.action ? [built.action] : [];
+    }),
     cooldown_secs: Number(f.cooldown) > 0 ? Number(f.cooldown) : 0,
-    enabled: true,
+    enabled: f.enabled,
   };
 }
 
-/** DTO → 表单（编辑回填：取第一个动作/条件） */
+/** DTO → 表单（编辑回填：then 整数组 + when 一层/深层树分臂载入） */
 function ruleToForm(r: RuleDto): FormState {
-  const f: FormState = { ...EMPTY_FORM, id: r.id, name: r.name, cooldown: String(r.cooldown_secs) };
+  const f: FormState = {
+    ...EMPTY_FORM,
+    id: r.id,
+    name: r.name,
+    cooldown: String(r.cooldown_secs),
+    enabled: r.enabled,
+    actions: r.then.map(rowFromAction),
+  };
   if (r.on.kind === "event") {
     f.trigger = "event";
     f.topic = r.on.topic;
@@ -210,29 +328,21 @@ function ruleToForm(r: RuleDto): FormState {
   } else {
     f.trigger = "startup";
   }
-  if (r.when && r.when.op === "leaf") {
-    f.useWhen = true;
-    f.whenPath = r.when.args.path;
-    f.whenCmp = r.when.args.cmp;
-    f.whenValue = typeof r.when.args.value === "string" ? r.when.args.value : JSON.stringify(r.when.args.value);
-  }
-  const a = r.then[0];
-  if (a) {
-    if (a.kind === "notify") {
-      f.action = "notify";
-      f.notifyTitle = a.title;
-      f.notifyBody = a.body;
-    } else if (a.kind === "open_url") {
-      f.action = "open_url";
-      f.url = a.url;
-    } else if (a.kind === "publish") {
-      f.action = "publish";
-      f.pubTopic = a.topic;
-      f.pubPayload = JSON.stringify(a.payload);
-    } else if (a.kind === "run_script") {
-      f.action = "run_script";
-      f.wasmPath = a.path;
-      f.wasmFunc = a.func;
+  if (r.when) {
+    if (r.when.op === "leaf") {
+      f.whenMode = "leaf";
+      f.whenLeaves = whenLeavesOf([r.when]);
+    } else if (
+      (r.when.op === "and" || r.when.op === "or") &&
+      r.when.args.every((e) => e.op === "leaf")
+    ) {
+      // 恰好一层（成员全 leaf）：可安全往返，进组编辑器
+      f.whenMode = "group";
+      f.whenGroupOp = r.when.op;
+      f.whenLeaves = whenLeavesOf(r.when.args);
+    } else {
+      // 深层树（嵌套组/not）：逐字存 rawWhen，编辑器不碰它
+      f.rawWhen = r.when;
     }
   }
   return f;
@@ -277,8 +387,44 @@ export default function RulesPanel() {
 
   const set = (patch: Partial<FormState>) => setForm((f) => (f ? { ...f, ...patch } : f));
 
+  /** when 区的任何编辑都算「触碰」：rawWhen 逐字携带让位给编辑器形状（保存前有确认闸） */
+  const markWhen = (patch: Partial<FormState>) =>
+    setForm((f) => (f ? { ...f, ...patch, whenTouched: true } : f));
+
+  const setRow = (i: number, patch: Partial<ActionRow>) =>
+    setForm((f) =>
+      f ? { ...f, actions: f.actions.map((row, idx) => (idx === i ? { ...row, ...patch } : row)) } : f
+    );
+
+  const moveRow = (i: number, dir: -1 | 1) =>
+    setForm((f) => {
+      if (!f) return f;
+      const j = i + dir;
+      if (j < 0 || j >= f.actions.length) return f;
+      const rows = [...f.actions];
+      const tmp = rows[i];
+      rows[i] = rows[j];
+      rows[j] = tmp;
+      return { ...f, actions: rows };
+    });
+
   const save = async () => {
     if (!form) return;
+    // IPC 参数非法 JSON：就地红已在各行的错误文本上，禁提交
+    if (form.actions.some((row) => rowToAction(row).err)) return;
+    if (form.rawWhen !== null && form.whenTouched) {
+      // 深层树展平是破坏性语义变更（D-18 纪律）：静默裁切改显式确认
+      const ok = await confirmAction({
+        title: "嵌套条件展平为单层",
+        impact: [
+          "原规则 when 为深层嵌套树（多层组 / not 条件），编辑器已将其展平",
+          "保存后条件将变为当前单层 And/Or 形状，原嵌套结构丢失",
+        ],
+        detail: "取消则回到表单，深层树仍逐字保留不丢。",
+        confirmLabel: "展平并保存",
+      });
+      if (!ok) return;
+    }
     try {
       await automationSaveRule(formToRule(form));
       setForm(null);
@@ -438,14 +584,73 @@ export default function RulesPanel() {
                 </div>
               </div>
               <div className={styles.row}>
-                <Switch checked={form.useWhen} onChange={(_, d) => set({ useWhen: d.checked })} label="启用条件过滤（when）" />
-                {form.useWhen && (
-                  <>
-                    <Input size="small" value={form.whenPath} onChange={(_, d) => set({ whenPath: d.value })} placeholder="payload 点路径，如 entry.kind" className={styles.grow} />
+                <Switch
+                  checked={form.whenMode !== "none" || form.rawWhen !== null}
+                  onChange={(_, d) =>
+                    d.checked
+                      ? markWhen({ whenMode: "leaf", whenLeaves: [{ ...EMPTY_LEAF }] })
+                      : markWhen({ whenMode: "none", whenLeaves: [], rawWhen: null })
+                  }
+                  label="启用条件过滤（when）"
+                />
+              </div>
+              {form.rawWhen !== null && form.whenMode === "none" && (
+                <div className={styles.row}>
+                  <Text className={styles.muted}>
+                    本规则的 when 是深层嵌套条件树：逐字保留，未触碰将原样保存。
+                  </Text>
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      markWhen({
+                        whenMode: "group",
+                        whenGroupOp: "and",
+                        whenLeaves: [{ ...EMPTY_LEAF }],
+                      })
+                    }
+                  >
+                    编辑条件（将降级为单层）
+                  </Button>
+                </div>
+              )}
+              {form.whenMode === "group" && (
+                <div className={styles.row}>
+                  <Button
+                    size="small"
+                    appearance={form.whenGroupOp === "and" ? "primary" : "subtle"}
+                    onClick={() => markWhen({ whenGroupOp: "and" })}
+                  >
+                    满足全部（and）
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance={form.whenGroupOp === "or" ? "primary" : "subtle"}
+                    onClick={() => markWhen({ whenGroupOp: "or" })}
+                  >
+                    满足其一（or）
+                  </Button>
+                </div>
+              )}
+              {form.whenMode !== "none" &&
+                form.whenLeaves.map((leaf, i) => (
+                  <div key={i} className={styles.row}>
+                    <Input
+                      size="small"
+                      value={leaf.path}
+                      onChange={(_, d) => markWhen({ whenLeaves: withLeaf(form.whenLeaves, i, { path: d.value }) })}
+                      placeholder="payload 点路径，如 entry.kind"
+                      className={styles.grow}
+                    />
                     <select
                       className={styles.select}
-                      value={form.whenCmp}
-                      onChange={(e) => set({ whenCmp: e.target.value as FormState["whenCmp"] })}
+                      value={leaf.cmp}
+                      onChange={(e) =>
+                        markWhen({
+                          whenLeaves: withLeaf(form.whenLeaves, i, {
+                            cmp: e.target.value as WhenLeafRow["cmp"],
+                          }),
+                        })
+                      }
                     >
                       <option value="eq">等于</option>
                       <option value="ne">不等于</option>
@@ -453,66 +658,149 @@ export default function RulesPanel() {
                       <option value="lt">小于</option>
                       <option value="contains">包含</option>
                     </select>
-                    <Input size="small" value={form.whenValue} onChange={(_, d) => set({ whenValue: d.value })} placeholder="比较值（数字/字符串/JSON）" className={styles.grow} />
-                  </>
-                )}
-              </div>
-              <div className={styles.row}>
-                <div className={styles.field}>
-                  <Text className={styles.label}>动作</Text>
-                  <select
-                    className={styles.select}
-                    value={form.action}
-                    onChange={(e) => set({ action: e.target.value as FormState["action"] })}
-                  >
-                    <option value="notify">前端通知</option>
-                    <option value="open_url">打开 URL/路径</option>
-                    <option value="publish">发布事件</option>
-                    <option value="run_script">执行 WASM 插件</option>
-                  </select>
-                </div>
-                {form.action === "notify" && (
-                  <>
-                    <div className={styles.field}>
-                      <Text className={styles.label}>标题</Text>
-                      <Input size="small" value={form.notifyTitle} onChange={(_, d) => set({ notifyTitle: d.value })} />
-                    </div>
-                    <div className={styles.field}>
-                      <Text className={styles.label}>正文</Text>
-                      <Input size="small" value={form.notifyBody} onChange={(_, d) => set({ notifyBody: d.value })} />
-                    </div>
-                  </>
-                )}
-                {form.action === "open_url" && (
-                  <div className={styles.field}>
-                    <Text className={styles.label}>URL / 路径</Text>
-                    <Input size="small" value={form.url} onChange={(_, d) => set({ url: d.value })} placeholder="https:// 或 C:\path" />
+                    <Input
+                      size="small"
+                      value={leaf.value}
+                      onChange={(_, d) => markWhen({ whenLeaves: withLeaf(form.whenLeaves, i, { value: d.value }) })}
+                      placeholder="比较值（数字/字符串/JSON）"
+                      className={styles.grow}
+                    />
+                    {form.whenMode === "group" && form.whenLeaves.length > 1 && (
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        onClick={() =>
+                          markWhen({ whenLeaves: form.whenLeaves.filter((_, idx) => idx !== i) })
+                        }
+                      >
+                        删除
+                      </Button>
+                    )}
                   </div>
-                )}
-                {form.action === "publish" && (
-                  <>
+                ))}
+              {form.whenMode === "leaf" && (
+                <div className={styles.row}>
+                  <Button
+                    size="small"
+                    onClick={() => markWhen({ whenMode: "group", whenGroupOp: "and" })}
+                  >
+                    组成条件组
+                  </Button>
+                </div>
+              )}
+              {form.whenMode === "group" && (
+                <div className={styles.row}>
+                  <Button
+                    size="small"
+                    onClick={() => markWhen({ whenLeaves: [...form.whenLeaves, { ...EMPTY_LEAF }] })}
+                  >
+                    添加条件
+                  </Button>
+                </div>
+              )}
+              <Text className={styles.label}>动作序列（按序串行执行 · 可上移/下移/增删）</Text>
+              {form.actions.map((row, i) => (
+                <div key={i} className={styles.row}>
+                  <Badge appearance="outline">{i + 1}</Badge>
+                  <div className={styles.field}>
+                    <select
+                      className={styles.select}
+                      value={row.kind}
+                      onChange={(e) => setRow(i, { kind: e.target.value as ActionKind })}
+                    >
+                      <option value="notify">前端通知</option>
+                      <option value="open_url">打开 URL/路径</option>
+                      <option value="publish">发布事件</option>
+                      <option value="ipc_command">执行 IPC 命令</option>
+                      <option value="run_script">执行 WASM 插件</option>
+                    </select>
+                  </div>
+                  {row.kind === "notify" && (
+                    <>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>标题</Text>
+                        <Input size="small" value={row.notifyTitle} onChange={(_, d) => setRow(i, { notifyTitle: d.value })} />
+                      </div>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>正文</Text>
+                        <Input size="small" value={row.notifyBody} onChange={(_, d) => setRow(i, { notifyBody: d.value })} />
+                      </div>
+                    </>
+                  )}
+                  {row.kind === "open_url" && (
                     <div className={styles.field}>
-                      <Text className={styles.label}>目标主题（需在 TOPIC_REGISTRY 登记）</Text>
-                      <Input size="small" value={form.pubTopic} onChange={(_, d) => set({ pubTopic: d.value })} />
+                      <Text className={styles.label}>URL / 路径</Text>
+                      <Input size="small" value={row.url} onChange={(_, d) => setRow(i, { url: d.value })} placeholder="https:// 或 C:\path" />
                     </div>
-                    <div className={styles.field}>
-                      <Text className={styles.label}>payload（JSON）</Text>
-                      <Input size="small" value={form.pubPayload} onChange={(_, d) => set({ pubPayload: d.value })} />
-                    </div>
-                  </>
-                )}
-                {form.action === "run_script" && (
-                  <>
-                    <div className={styles.field}>
-                      <Text className={styles.label}>插件（plugin:id 或 wasm 路径）</Text>
-                      <Input size="small" value={form.wasmPath} onChange={(_, d) => set({ wasmPath: d.value })} placeholder="plugin:demo" />
-                    </div>
-                    <div className={styles.field}>
-                      <Text className={styles.label}>入口函数（空=manifest.func）</Text>
-                      <Input size="small" value={form.wasmFunc} onChange={(_, d) => set({ wasmFunc: d.value })} placeholder="run" />
-                    </div>
-                  </>
-                )}
+                  )}
+                  {row.kind === "publish" && (
+                    <>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>目标主题（需在 TOPIC_REGISTRY 登记）</Text>
+                        <Input size="small" value={row.pubTopic} onChange={(_, d) => setRow(i, { pubTopic: d.value })} />
+                      </div>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>payload（JSON）</Text>
+                        <Input size="small" value={row.pubPayload} onChange={(_, d) => setRow(i, { pubPayload: d.value })} />
+                      </div>
+                    </>
+                  )}
+                  {row.kind === "ipc_command" && (
+                    <>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>模块</Text>
+                        <Input size="small" value={row.ipcModule} onChange={(_, d) => setRow(i, { ipcModule: d.value })} placeholder="模块名，如 clipboard" />
+                      </div>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>命令</Text>
+                        <Input size="small" value={row.ipcCmd} onChange={(_, d) => setRow(i, { ipcCmd: d.value })} placeholder="命令名，如 clipboard_get_entry" />
+                      </div>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>参数（JSON，空=无参）</Text>
+                        <Input size="small" value={row.ipcArgs} onChange={(_, d) => setRow(i, { ipcArgs: d.value })} placeholder='{"id": "..."}' />
+                        {rowToAction(row).err && (
+                          <Text style={{ color: tokens.colorStatusDangerForeground1, fontSize: tokens.fontSizeBase200 }}>
+                            {rowToAction(row).err}
+                          </Text>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  {row.kind === "run_script" && (
+                    <>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>插件（plugin:id 或 wasm 路径）</Text>
+                        <Input size="small" value={row.wasmPath} onChange={(_, d) => setRow(i, { wasmPath: d.value })} placeholder="plugin:demo" />
+                      </div>
+                      <div className={styles.field}>
+                        <Text className={styles.label}>入口函数（空=manifest.func）</Text>
+                        <Input size="small" value={row.wasmFunc} onChange={(_, d) => setRow(i, { wasmFunc: d.value })} placeholder="run" />
+                      </div>
+                    </>
+                  )}
+                  <Button size="small" disabled={i === 0} onClick={() => moveRow(i, -1)}>
+                    ↑
+                  </Button>
+                  <Button size="small" disabled={i === form.actions.length - 1} onClick={() => moveRow(i, 1)}>
+                    ↓
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    disabled={form.actions.length <= 1}
+                    onClick={() => set({ actions: form.actions.filter((_, idx) => idx !== i) })}
+                  >
+                    删除
+                  </Button>
+                </div>
+              ))}
+              <div className={styles.row}>
+                <Button
+                  size="small"
+                  onClick={() => set({ actions: [...form.actions, { ...EMPTY_ROW }] })}
+                >
+                  添加动作
+                </Button>
               </div>
               <div className={styles.row}>
                 <Button appearance="primary" size="small" onClick={() => void save()}>
@@ -536,31 +824,37 @@ export default function RulesPanel() {
               <EmptyState text="暂无规则——点击「新建规则」创建第一条自动化。" />
             ) : (
               <div className={styles.list}>
-                {rules.map((r) => (
-                  <div key={r.id} className={styles.item}>
-                    <div className={styles.itemBody}>
-                      <div className={styles.row}>
-                        <Text weight="semibold" size={300}>
-                          {r.name}
-                        </Text>
-                        <Badge appearance="outline">{triggerLabel(r.on)}</Badge>
-                        <Badge appearance="outline">{actionLabel(r.then[0])}</Badge>
-                        {r.when && <Badge appearance="filled">有条件</Badge>}
+                {rules.map((r) => {
+                  const [first, ...rest] = r.then;
+                  return (
+                    <div key={r.id} className={styles.item}>
+                      <div className={styles.itemBody}>
+                        <div className={styles.row}>
+                          <Text weight="semibold" size={300}>
+                            {r.name}
+                          </Text>
+                          <Badge appearance="outline">{triggerLabel(r.on)}</Badge>
+                          <Badge appearance="outline">
+                            {actionLabel(first)}
+                            {rest.length > 0 ? ` +${rest.length}` : ""}
+                          </Badge>
+                          {r.when && <Badge appearance="filled">有条件</Badge>}
+                        </div>
+                        <Text className={styles.muted}>冷却 {r.cooldown_secs || 5}s · {r.enabled ? "已启用" : "已停用"}</Text>
                       </div>
-                      <Text className={styles.muted}>冷却 {r.cooldown_secs || 5}s · {r.enabled ? "已启用" : "已停用"}</Text>
+                      <Switch
+                        checked={r.enabled}
+                        onChange={(_, d) => void toggle(r.id, d.checked)}
+                      />
+                      <Button size="small" onClick={() => setForm(ruleToForm(r))}>
+                        编辑
+                      </Button>
+                      <Button size="small" appearance="subtle" onClick={() => void remove(r)}>
+                        删除
+                      </Button>
                     </div>
-                    <Switch
-                      checked={r.enabled}
-                      onChange={(_, d) => void toggle(r.id, d.checked)}
-                    />
-                    <Button size="small" onClick={() => setForm(ruleToForm(r))}>
-                      编辑
-                    </Button>
-                    <Button size="small" appearance="subtle" onClick={() => void remove(r)}>
-                      删除
-                    </Button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </Section>
