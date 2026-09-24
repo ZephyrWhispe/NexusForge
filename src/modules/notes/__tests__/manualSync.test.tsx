@@ -36,6 +36,16 @@ vi.mock("../../../stores/confirm", () => ({
   confirmAction: vi.fn(async () => true),
 }));
 
+// T-B7-23：NotesPanel 已换 Monaco 编辑核——本文件不进编辑态，轻量桩即可
+// （约定同 editor 模块：绝不直接 mock monaco-editor，只 mock monaco/setup）
+vi.mock("../../../monaco/setup", () => ({
+  languageForPath: () => "markdown",
+  monaco: {
+    editor: { create: vi.fn(), createModel: vi.fn() },
+    languages: { registerCompletionItemProvider: vi.fn(), CompletionItemKind: { Reference: 17 } },
+  },
+}));
+
 const SYNC0: NoteSyncResultDto = { added: 0, updated: 0, removed: 0, total: 0 };
 
 let container: HTMLDivElement;

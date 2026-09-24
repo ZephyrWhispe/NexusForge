@@ -44,6 +44,8 @@ import {
 import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
+import { languageForPath, monaco } from "../../monaco/setup";
+import { registerWikiCompletion, setWikiTitles } from "./wikiCompletion";
 import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
@@ -106,17 +108,11 @@ const useStyles = makeStyles({
     textOverflow: "ellipsis",
     overflow: "hidden",
   },
-  editorArea: {
-    width: "100%",
-    minHeight: "380px",
-    resize: "vertical",
-    padding: "10px 12px",
-    fontFamily: "Consolas, monospace",
-    fontSize: tokens.fontSizeBase300,
+  editorHost: {
+    height: "420px",
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorNeutralBackground1,
-    color: tokens.colorNeutralForeground1,
+    overflow: "hidden",
   },
   preview: {
     minHeight: "380px",
@@ -249,7 +245,14 @@ export default function NotesPanel() {
   const [doc, setDoc] = useState<CanvasDocDto>({ version: 1, nodes: [], edges: [] });
   const [selNode, setSelNode] = useState<string | null>(null);
   const linkMode = useRef<string | null>(null); // 连线模式：第一个端点
-  const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  // T-B7-23：textarea → Monaco markdown。B1 三 ref 桥同一形制——编辑器只建一次
+  // （deps=存在性布尔），markdown model 共享一个，切篇经带闸 setValue 换内容不 dispose；
+  // loadingLoadRef 抑制程序化载入误置脏（editorPanel_depsMustBeExistenceBoolean 族镜像）。
+  const editorMounted = tab === "notes" && active !== null;
+  const editorHostRef = useRef<HTMLDivElement | null>(null);
+  const noteEdRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const noteModelRef = useRef<monaco.editor.ITextModel | null>(null);
+  const loadingLoadRef = useRef(false);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -261,6 +264,7 @@ export default function NotesPanel() {
     try {
       const list = await notesList();
       setAll(list);
+      setWikiTitles(list); // T-B7-23：[[双链]] 补全候选缓存随列表刷新
     } catch (e) {
       reportError(e, { context: "笔记列表加载失败", dedupeKey: "notes-list", toast: false });
     } finally {
@@ -428,6 +432,51 @@ export default function NotesPanel() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [saveNote, tab]);
+
+  // 编辑器创建：deps 为「编辑器是否应在场」布尔（tab + active 收敛），false→true
+  // 建一次，切篇/置脏/预览切换布尔不变即不重建；noteEdRef 守卫兜底 StrictMode 双跑。
+  useEffect(() => {
+    if (!editorMounted || !editorHostRef.current || noteEdRef.current) return;
+    registerWikiCompletion(); // 模块级 once 幂等
+    const ed = monaco.editor.create(editorHostRef.current, {
+      theme: "vs",
+      automaticLayout: true,
+      minimap: { enabled: false },
+      fontSize: 13,
+    });
+    const model = monaco.editor.createModel("", languageForPath("x.md"));
+    noteEdRef.current = ed;
+    noteModelRef.current = model;
+    ed.setModel(model);
+    ed.onDidChangeModelContent(() => {
+      // 程序化载入（openNote 换篇）不是用户编辑：monaco 变更事件同步派发，抑制置脏
+      if (loadingLoadRef.current) return;
+      const m = ed.getModel();
+      if (!m || m.isDisposed()) return;
+      setContent(m.getValue());
+      setDirty(true);
+    });
+    return () => {
+      ed.dispose();
+      model.dispose();
+      noteEdRef.current = null;
+      noteModelRef.current = null;
+    };
+    // deps 语义见上方纪律注释：布尔表达式即全部依赖，内容/脏标记经 setState 与 ref 桥
+  }, [editorMounted]);
+
+  // content → model 回绑（openNote/删除等程序态）：已一致则跳过，防 setValue 回声循环
+  useEffect(() => {
+    const model = noteModelRef.current;
+    if (!editorMounted || !model || model.isDisposed()) return;
+    if (model.getValue() === content) return;
+    loadingLoadRef.current = true;
+    try {
+      model.setValue(content);
+    } finally {
+      loadingLoadRef.current = false;
+    }
+  }, [content, editorMounted]);
 
   const createNote = useCallback(async () => {
     const name = newName.trim();
@@ -705,12 +754,11 @@ export default function NotesPanel() {
       setPreview(false); // 预览态先回编辑态；再次点击即定位
       return;
     }
-    const ta = editorRef.current;
-    if (!ta) return;
-    const pos = content.split("\n").slice(0, line - 1).join("\n").length + (line > 1 ? 1 : 0);
-    ta.focus();
-    ta.setSelectionRange(pos, pos);
-    ta.scrollTop = Math.max(0, (line - 3) * 20);
+    const ed = noteEdRef.current;
+    if (!ed) return;
+    ed.revealLineInCenterIfOutsideViewport(line);
+    ed.setPosition({ lineNumber: line, column: 1 });
+    ed.focus();
   };
 
   return (
@@ -904,22 +952,18 @@ export default function NotesPanel() {
                       保存（Ctrl+S）
                     </Button>
                   </div>
-                  {preview ? (
+                  {preview && (
                     <div
                       className={styles.preview}
                       dangerouslySetInnerHTML={{ __html: marked.parse(content) as string }}
                     />
-                  ) : (
-                    <textarea
-                      className={styles.editorArea}
-                      ref={editorRef}
-                      value={content}
-                      onChange={(e) => {
-                        setContent(e.target.value);
-                        setDirty(true);
-                      }}
-                    />
                   )}
+                  {/* 编辑器常驻不卸载（预览仅隐藏）——重建会丢撤销栈且违 B1 建一次纪律 */}
+                  <div
+                    ref={editorHostRef}
+                    className={styles.editorHost}
+                    style={preview ? { display: "none" } : undefined}
+                  />
                   <div className={styles.row}>
                     <Text size={200} weight="semibold">
                       出链：{links.length}

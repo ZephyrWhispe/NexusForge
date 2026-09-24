@@ -44,6 +44,92 @@ vi.mock("../../../stores/confirm", () => ({
   confirmAction: vi.fn(async () => true),
 }));
 
+// T-B7-23：编辑核换 Monaco——形制桩镜像 autosaveDiscipline（FakeModel 同步派发
+// setValue 变更、isDisposed 后 getValue 抛错），定位断言从 textarea selectionStart
+// 改为Fake editor 记录的 setPosition。
+const stub = vi.hoisted(() => ({
+  createCount: 0,
+  editors: [] as Array<{
+    handlers: Array<() => void>;
+    current: { getValue: () => string; setValue: (v: string) => void; isDisposed: () => boolean } | null;
+    positionCalls: Array<{ lineNumber: number; column: number }>;
+    revealed: number[];
+  }>,
+}));
+
+vi.mock("../../../monaco/setup", () => {
+  class FakeModel {
+    private value = "";
+    private disposed = false;
+    constructor(private fire: () => void) {}
+    isDisposed() {
+      return this.disposed;
+    }
+    setValue(v: string) {
+      this.value = v;
+      this.fire(); // monaco 语义：变更监听器同步派发
+    }
+    getValue() {
+      if (this.disposed) throw new Error("Model is disposed!");
+      return this.value;
+    }
+    getLanguageId() {
+      return "markdown";
+    }
+    onDidChangeContent() {
+      return { dispose() {} };
+    }
+    dispose() {
+      this.disposed = true;
+    }
+  }
+  return {
+    languageForPath: () => "markdown",
+    monaco: {
+      editor: {
+        create: () => {
+          stub.createCount += 1;
+          const editor = {
+            handlers: [] as Array<() => void>,
+            current: null as FakeModel | null,
+            positionCalls: [] as Array<{ lineNumber: number; column: number }>,
+            revealed: [] as number[],
+          };
+          stub.editors.push(editor as unknown as (typeof stub.editors)[number]);
+          return {
+            onDidChangeModelContent: (h: () => void) => {
+              editor.handlers.push(h);
+              return { dispose() {} };
+            },
+            getModel: () => editor.current,
+            setModel: (m: FakeModel) => {
+              editor.current = m;
+            },
+            updateOptions: () => {},
+            revealLineInCenterIfOutsideViewport: (line: number) => {
+              editor.revealed.push(line);
+            },
+            setPosition: (p: { lineNumber: number; column: number }) => {
+              editor.positionCalls.push(p);
+            },
+            focus: () => {},
+            dispose: () => {},
+          };
+        },
+        createModel: () => {
+          const editor = stub.editors[stub.editors.length - 1];
+          return new FakeModel(() => editor.handlers.forEach((h) => h()));
+        },
+        setModelLanguage: () => {},
+      },
+      languages: {
+        registerCompletionItemProvider: () => ({ dispose() {} }),
+        CompletionItemKind: { Reference: 17 },
+      },
+    },
+  };
+});
+
 const A: NoteMetaDto = {
   path: "a.md",
   title: "甲笔记",
@@ -92,6 +178,8 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
+  stub.createCount = 0;
+  stub.editors.length = 0;
   vi.mocked(notesList).mockResolvedValue([A, B]);
   vi.mocked(notesReviewQueue).mockResolvedValue([]);
   vi.mocked(notesCards).mockResolvedValue([]);
@@ -167,7 +255,7 @@ describe("NotesPanel 标签芯片 + 大纲（T-B7-22）", () => {
     expect(container.textContent).toContain("乙笔记");
   });
 
-  it("notesPanel_outlineJump_selectsLine：点大纲项 → textarea 光标落到该标题行", async () => {
+  it("notesPanel_outlineJump_selectsLine：点大纲项 → Monaco 编辑核光标落到该标题行", async () => {
     await mount();
     await click(container.querySelectorAll(`[role="button"]`)[0]); // 打开 a.md
     await flush();
@@ -175,10 +263,10 @@ describe("NotesPanel 标签芯片 + 大纲（T-B7-22）", () => {
       el.textContent?.trim() === "二级",
     );
     expect(outline.length).toBe(1);
-    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
-    expect(ta.selectionStart).toBe(0);
+    const ed = stub.editors[stub.editors.length - 1];
     await click(outline[0]);
-    expect(ta.selectionStart).toBe(DOC.indexOf("## 二级"));
-    expect(ta.selectionEnd).toBe(DOC.indexOf("## 二级"));
+    // DOC="# 一级\n\n段落\n\n## 二级\n正文" —— "## 二级" 在第 5 行
+    expect(ed.positionCalls).toEqual([{ lineNumber: 5, column: 1 }]);
+    expect(ed.revealed).toEqual([5]);
   });
 });
