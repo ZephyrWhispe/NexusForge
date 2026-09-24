@@ -1778,9 +1778,26 @@ export function termKill(sessionId: string): Promise<void> {
 export function termSessions(): Promise<TermSessionDto[]> {
   return invoke("term_sessions");
 }
-export function termSshConnect(
-  conn: { host: string; port: number; user: string; auth: SshAuthDto; cols: number; rows: number },
-): Promise<TermSessionDto> {
+/** ProxyJump 一跳（B7 T-B7-4）：链式递归——`via` 是更靠近客户端的前链，
+ * 最外层 jump 是离目标最近的一跳；逐跳独立凭据，深度上限 3（后端闸） */
+export interface SshJumpHopDto {
+  host: string;
+  port: number;
+  user: string;
+  auth: SshAuthDto;
+  via?: SshJumpHopDto | null;
+}
+/** SSH 连接入参（T-B7-4 起含可空 jump——旧调用方不传即可） */
+export interface SshConnectArgsDto {
+  host: string;
+  port: number;
+  user: string;
+  auth: SshAuthDto;
+  cols: number;
+  rows: number;
+  jump?: SshJumpHopDto | null;
+}
+export function termSshConnect(conn: SshConnectArgsDto): Promise<TermSessionDto> {
   return invoke("term_ssh_connect", { conn });
 }
 /** TOFU 首见指纹确认（B7 T-B7-1）：fingerprint 必须是拒连错误 hint 里的整键描述符逐字 */
@@ -1797,7 +1814,7 @@ export interface SshExecResultDto {
   timed_out: boolean;
 }
 export function termSshExec(
-  target: { host: string; port: number; user: string; auth: SshAuthDto; cols: number; rows: number },
+  target: SshConnectArgsDto,
   command: string, timeoutMs?: number,
 ): Promise<SshExecResultDto> {
   return invoke("term_ssh_exec", { target, command, timeoutMs: timeoutMs ?? null });

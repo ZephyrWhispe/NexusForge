@@ -52,6 +52,7 @@ import {
   type SshAuthDto,
   type SshExecResultDto,
   type SshHostEntryDto,
+  type SshJumpHopDto,
   type SshKnownHostDto,
   type TermSessionDto,
 } from "../../ipc/client";
@@ -155,6 +156,12 @@ export default function TerminalPanel() {
   const [useKey, setUseKey] = useState(false);
   // ~/.ssh/config 只读导入（T-B7-3）：懒载——下拉未开前零后端读（null=未加载）
   const [cfgHosts, setCfgHosts] = useState<SshHostEntryDto[] | null>(null);
+  // ProxyJump 跳板（T-B7-4）：默认收起，展开前不采任何跳字段（collapsedByDefault 机检面）
+  const [jumpOpen, setJumpOpen] = useState(false);
+  const [jumpHost, setJumpHost] = useState("");
+  const [jumpPort, setJumpPort] = useState("22");
+  const [jumpUser, setJumpUser] = useState("");
+  const [jumpPass, setJumpPass] = useState("");
   // 已知主机管理（T-B1-8）：host 串含 [h]:port 复合形态一律原样回传，
   // parse_host_port（commands/term.rs:195-203）依赖该形状，前端禁止拆解重组。
   const [khOpen, setKhOpen] = useState(false);
@@ -329,13 +336,26 @@ export default function TerminalPanel() {
     return { kind: "password", password: sshPass };
   }, [useKey, sshKeyPath, sshPass]);
 
+  // 单跳 ProxyJump（T-B7-4）：未展开/主机空 = null（后端 jump=None 直连腿逐字不变）。
+  // 凭据形状复用 SshAuthDto——与目标腿同一登记面
+  const jumpHop = useCallback((): SshJumpHopDto | null => {
+    if (!jumpOpen || !jumpHost.trim()) return null;
+    return {
+      host: jumpHost.trim(),
+      port: Number(jumpPort) || 22,
+      user: jumpUser,
+      auth: { kind: "password", password: jumpPass },
+      via: null,
+    };
+  }, [jumpOpen, jumpHost, jumpPort, jumpUser, jumpPass]);
+
   const spawnSsh = useCallback(async () => {
     if (!sshHost.trim()) return;
     setErr(null);
     const host = sshHost.trim();
     const port = Number(sshPort) || 22;
     const attempt = async () =>
-      termSshConnect({ host, port, user: sshUser, auth: sshAuth(), cols: 100, rows: 26 });
+      termSshConnect({ host, port, user: sshUser, auth: sshAuth(), jump: jumpHop(), cols: 100, rows: 26 });
     const openSession = (s: TermSessionDto) => {
       setSessions((prev) => [...prev, s]);
       setActive(s.id);
@@ -348,6 +368,13 @@ export default function TerminalPanel() {
       // 确认对话框展示的就是盘上要比对的那串；明示核对后才记信任并仅重连一次
       const err = parseAppError(e);
       if (err?.data.code === "TERM_SSH_004" && err.data.hint) {
+        // 跳臂拒连（消息含"第 N 跳"）：指纹属于跳板主机，而确认对话框的
+        // host/port 取自目标表单——拿目标的键去 ack 跳的指纹=错绑，此臂
+        // 只如实报错（多跳逐跳确认通道人工核对，批次尾台账登记）
+        if (/第 \d+ 跳/.test(err.data.message)) {
+          fail(e);
+          return;
+        }
         const descriptor = err.data.hint;
         const ok = await confirmAction({
           title: "SSH 首见主机指纹确认",
@@ -370,7 +397,7 @@ export default function TerminalPanel() {
       }
       fail(e);
     }
-  }, [sshHost, sshPort, sshUser, sshAuth, fail]);
+  }, [sshHost, sshPort, sshUser, sshAuth, jumpHop, fail]);
 
   const killSession = useCallback(
     async (s: TermSessionDto) => {
@@ -403,8 +430,16 @@ export default function TerminalPanel() {
   );
 
   const sftpTarget = useCallback(() => {
-    return { host: sshHost.trim(), port: Number(sshPort) || 22, user: sshUser, auth: sshAuth() };
-  }, [sshHost, sshPort, sshUser, sshAuth]);
+    // jump 一并带上：exec 臂消费（SshConnectDto 同形状）；SFTP 命令面维持直连腿，
+    // sftpTargetArgs 只取四元——多出的键不外溢
+    return {
+      host: sshHost.trim(),
+      port: Number(sshPort) || 22,
+      user: sshUser,
+      auth: sshAuth(),
+      jump: jumpHop(),
+    };
+  }, [sshHost, sshPort, sshUser, sshAuth, jumpHop]);
 
   const loadSftp = useCallback(async () => {
     setSftpBusy(true);
@@ -644,6 +679,48 @@ export default function TerminalPanel() {
             >
               一次性远端命令
             </Button>
+          </div>
+
+          <div className={styles.row}>
+            {/* ProxyJump 跳板（T-B7-4）：默认收起——收起态不渲染任何跳字段 */}
+            <Button
+              size="small"
+              appearance="outline"
+              title="经一台跳板机中转连接目标（逐跳独立 TOFU 核验；深度上限 3 跳）"
+              aria-expanded={jumpOpen}
+              onClick={() => setJumpOpen((o) => !o)}
+            >
+              {jumpOpen ? "收起 ProxyJump 跳板" : "ProxyJump 跳板"}
+            </Button>
+            {jumpOpen ? (
+              <>
+                <Input
+                  className={styles.grow}
+                  placeholder="跳板主机（单跳，密码凭据）"
+                  value={jumpHost}
+                  onChange={(_, d) => setJumpHost(d.value)}
+                />
+                <Input
+                  style={{ maxWidth: 80 }}
+                  placeholder="跳板端口"
+                  value={jumpPort}
+                  onChange={(_, d) => setJumpPort(d.value)}
+                />
+                <Input
+                  style={{ maxWidth: 120 }}
+                  placeholder="跳板用户"
+                  value={jumpUser}
+                  onChange={(_, d) => setJumpUser(d.value)}
+                />
+                <Input
+                  className={styles.grow}
+                  placeholder="跳板密码"
+                  type="password"
+                  value={jumpPass}
+                  onChange={(_, d) => setJumpPass(d.value)}
+                />
+              </>
+            ) : null}
           </div>
 
           <div className={styles.row}>

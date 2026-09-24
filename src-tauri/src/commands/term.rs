@@ -138,6 +138,9 @@ pub struct SshConnectDto {
     pub auth: term_core::SshAuth,
     pub cols: u16,
     pub rows: u16,
+    /// ProxyJump 跳链（T-B7-4）：既有连接命令扩参，零新命令；旧前端无此键可读
+    #[serde(default)]
+    pub jump: Option<Box<term_core::JumpHop>>,
 }
 
 /// SSH 终端会话（T3）
@@ -155,6 +158,7 @@ pub async fn term_ssh_connect(
         port: conn.port,
         user: conn.user,
         auth: conn.auth,
+        jump: conn.jump,
     };
     ssh.open_shell(target, conn.cols, conn.rows, state.term.sessions())
         .await
@@ -273,6 +277,7 @@ pub async fn term_ssh_exec(
         port: target.port,
         user: target.user,
         auth: target.auth,
+        jump: target.jump,
     };
     let r = ssh
         .exec(&t, &command, std::time::Duration::from_millis(ms))
@@ -315,6 +320,8 @@ pub async fn term_sftp_list(
         port,
         user,
         auth,
+        // SFTP 各口维持直连腿（T-B7-4 行范围=终端连接命令，jump 接线挂批次尾台账）
+        jump: None,
     };
     ssh.sftp_list(&target, &path).await.map_err(term_err)
 }
@@ -339,6 +346,8 @@ pub async fn term_sftp_download(
         port,
         user,
         auth,
+        // SFTP 各口维持直连腿（T-B7-4 行范围=终端连接命令，jump 接线挂批次尾台账）
+        jump: None,
     };
     ssh.sftp_download(&target, &remote_path, &local_path)
         .await
@@ -365,6 +374,8 @@ pub async fn term_sftp_upload(
         port,
         user,
         auth,
+        // SFTP 各口维持直连腿（T-B7-4 行范围=终端连接命令，jump 接线挂批次尾台账）
+        jump: None,
     };
     ssh.sftp_upload(&target, &local_path, &remote_path)
         .await

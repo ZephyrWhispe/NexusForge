@@ -20,8 +20,12 @@ pub enum TermError {
     Sftp(String),
     #[error("主机密钥校验失败（TOFU）: {0}")]
     HostKey(String),
-    #[error("主机密钥不在记录（TOFU 首见拒连）: {host}:{port}。指纹（逐字）：{descriptor}。请经带外渠道核对后走指纹确认命令")]
+    #[error("主机密钥不在记录（TOFU 首见拒连）: {note}{host}:{port}。指纹（逐字）：{descriptor}。请经带外渠道核对后走指纹确认命令")]
     HostKeyUnknown {
+        /// ProxyJump 臂的展示侧前缀（"第 N 跳 "，T-B7-4 落位）；直连为空串。
+        /// host/port/descriptor 三字段恒原样——跳数信息永不混进逐字回传面
+        /// （指纹确认命令吃的还是那三枚原字段）
+        note: String,
         host: String,
         port: u16,
         descriptor: String,

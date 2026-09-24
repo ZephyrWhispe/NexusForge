@@ -8,6 +8,8 @@
 //! - 一次性 exec（T-B7-2）：无 PTY 通道，stdout/stderr/exit 三分收口，
 //!   超时只立 `timed_out` 不编造退出码
 //! - SFTP：每次操作独立 channel + sftp subsystem（v1 简化，不复用连接池）
+//! - ProxyJump（T-B7-4）：`SshTarget::jump` 链式递归（≤3 跳，逐跳独立凭据），
+//!   逐跳经 direct-tcpip 建隧道；任一跳 TOFU 拒 → 整链拒且点名"第 N 跳"
 //! - 私钥走路径引用（不复制内容进 vault）；密码由 UI 现场输入不入库
 
 use std::path::{Path, PathBuf};
@@ -42,6 +44,18 @@ pub enum SshAuth {
     },
 }
 
+/// ProxyJump 一跳（T-B7-4）：链式递归——`via` 是更靠近客户端的前链，
+/// 最外层 `jump` 是离目标最近的一跳。每跳独立凭据（`auth` 字段），
+/// 跨跳不复用不回落。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JumpHop {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub auth: SshAuth,
+    pub via: Option<Box<JumpHop>>,
+}
+
 /// 连接目标
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SshTarget {
@@ -49,6 +63,9 @@ pub struct SshTarget {
     pub port: u16,
     pub user: String,
     pub auth: SshAuth,
+    /// ProxyJump 前链（T-B7-4）。serde default = 旧 JSON 会话参数无 jump 键可读
+    #[serde(default)]
+    pub jump: Option<Box<JumpHop>>,
 }
 
 /// 一次性非交互 exec 结果（T-B7-2）：`exit_code = None` 是"未收到退出码
@@ -180,6 +197,7 @@ fn tofu_verdict(known: &KnownHosts, host: &str, port: u16, whole_key: &str) -> R
     match known.decide(host, port, whole_key) {
         HostKeyDecision::Trusted { .. } => Ok(()),
         HostKeyDecision::Unknown { fingerprint } => Err(TermError::HostKeyUnknown {
+            note: String::new(),
             host: host.to_owned(),
             port,
             descriptor: fingerprint,
@@ -254,13 +272,84 @@ async fn authenticate(handle: &mut Handle<TofuHandler>, user: &str, auth: &SshAu
     }
 }
 
-/// 建立连接（TOFU + 认证）
-async fn connect_ssh(target: &SshTarget, known: Arc<KnownHosts>) -> Result<Handle<TofuHandler>> {
-    let config = Arc::new(client::Config {
+/// russh 客户端配置（直连与隧道跳共用同一构造口——两臂参数永不漂移）
+fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(600)),
         keepalive_interval: Some(Duration::from_secs(30)),
         ..Default::default()
-    });
+    })
+}
+
+/// ProxyJump 跳数上限（T-B7-4）：超限拒在任何建连之前
+pub const JUMP_MAX_HOPS: usize = 3;
+
+/// 展开 jump 链：`via` 最深者 = 第 1 跳 …… 最外层 `jump` = 紧邻目标的一跳
+fn jump_chain(jump: &Option<Box<JumpHop>>) -> Vec<&JumpHop> {
+    let mut out = Vec::new();
+    let mut cur = jump.as_deref();
+    while let Some(h) = cur {
+        out.push(h);
+        cur = h.via.as_deref();
+    }
+    out.reverse();
+    out
+}
+
+/// 深度闸（在任何一跳建连之前判定；"跳数超限"唯一措辞，负例臂在测）
+fn jump_guard(jump: &Option<Box<JumpHop>>) -> Result<()> {
+    let n = jump_chain(jump).len();
+    if n > JUMP_MAX_HOPS {
+        return Err(TermError::BadParam(format!(
+            "跳数超限（收到 {n} 跳 > 上限 {JUMP_MAX_HOPS} 跳）——未连接任何一跳"
+        )));
+    }
+    Ok(())
+}
+
+/// 信任臂错误的跳数展示前缀：只给 Unknown 加 note，host/port/descriptor
+/// 逐字原样（指纹确认的三枚输入不被跳数信息污染）；已有 note 不覆写（幂等）
+fn hop_ctx(n: usize, e: TermError) -> TermError {
+    match e {
+        TermError::HostKeyUnknown {
+            note,
+            host,
+            port,
+            descriptor,
+        } => TermError::HostKeyUnknown {
+            note: if note.is_empty() {
+                format!("第 {n} 跳 ")
+            } else {
+                note
+            },
+            host,
+            port,
+            descriptor,
+        },
+        other => other,
+    }
+}
+
+/// 连接错误统一措辞（直连臂与隧道臂同源——`jump_none_keepsLegacyPath`
+/// 的逐字相等由此构造性保证）：信任两臂原样过网，其余裹成点名臂；
+/// `n=Some(k)` 再叠跳数前缀
+fn connect_map(n: Option<usize>, target: &SshTarget, e: TermError) -> TermError {
+    let is_trust = matches!(e, TermError::HostKey(_) | TermError::HostKeyUnknown { .. });
+    let mapped = if is_trust {
+        e
+    } else {
+        let disp = e.to_string();
+        TermError::Ssh(format!("连接 {}:{} 失败: {disp}", target.host, target.port))
+    };
+    match n {
+        Some(k) => hop_ctx(k, mapped),
+        None => mapped,
+    }
+}
+
+/// 建立连接（TOFU + 认证）
+async fn connect_ssh(target: &SshTarget, known: Arc<KnownHosts>) -> Result<Handle<TofuHandler>> {
+    let config = client_config();
     let addr = (target.host.as_str(), target.port);
     let handler = TofuHandler {
         known,
@@ -275,16 +364,72 @@ async fn connect_ssh(target: &SshTarget, known: Arc<KnownHosts>) -> Result<Handl
     .map_err(|_| TermError::Ssh(format!("连接超时（{}s）", CONNECT_TIMEOUT.as_secs())))?
     // connect 返回 H::Error = TermError（check_server_key 拒绝即 HostKey/HostKeyUnknown 详情，
     // 两枚信任臂都原样过网——不许被兜底臂裹成 TERM_SSH_001）
-    .map_err(|e| match &e {
-        TermError::HostKey(_) | TermError::HostKeyUnknown { .. } => e,
-        other => TermError::Ssh(format!(
-            "连接 {host}:{port} 失败: {other}",
-            host = target.host,
-            port = target.port
-        )),
-    })?;
+    .map_err(|e| connect_map(None, target, e))?;
     authenticate(&mut handle, &target.user, &target.auth).await?;
     Ok(handle)
+}
+
+/// 经既有隧道连接一跳（direct-tcpip → connect_stream）。`n=Some(k)` 给
+/// 该跳的信任拒叠"第 k 跳"前缀；目标腿传 `None`（消息本体已点名目标）
+async fn connect_hop(
+    prev: &Handle<TofuHandler>,
+    target: &SshTarget,
+    known: Arc<KnownHosts>,
+    n: Option<usize>,
+) -> Result<Handle<TofuHandler>> {
+    let channel = prev
+        .channel_open_direct_tcpip(target.host.clone(), target.port as u32, "nexusforge", 0)
+        .await
+        .map_err(|e| {
+            TermError::Ssh(format!(
+                "打开下一跳 {}:{} 的隧道通道失败: {e}",
+                target.host, target.port
+            ))
+        })?;
+    let handler = TofuHandler {
+        known,
+        host: target.host.clone(),
+        port: target.port,
+    };
+    let mut handle = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        russh::client::connect_stream(client_config(), channel.into_stream(), handler),
+    )
+    .await
+    .map_err(|_| TermError::Ssh(format!("连接超时（{}s）", CONNECT_TIMEOUT.as_secs())))?
+    .map_err(|e| connect_map(n, target, e))?;
+    authenticate(&mut handle, &target.user, &target.auth).await?;
+    Ok(handle)
+}
+
+/// 连接口（T-B7-4）：`jump=None` 逐字委派直连（既有腿零漂移）；有链则
+/// 逐跳建连——第 1 跳走 TCP 直连（TOFU 如常），后续跳与目标经
+/// direct-tcpip 隧道。**任一跳指纹 Unknown/变更 → 整链拒**，信任错误
+/// 点名"第 N 跳"。跳会话的显式收编口属 T-B7-5 ForwardTable（随批登记）：
+/// 本行复用既有会话清扫面（通道关 + inactivity/keepalive 失效即终）。
+async fn connect_via_jumps(
+    target: &SshTarget,
+    known: Arc<KnownHosts>,
+) -> Result<Handle<TofuHandler>> {
+    jump_guard(&target.jump)?;
+    let hops = jump_chain(&target.jump);
+    if hops.is_empty() {
+        return connect_ssh(target, known).await;
+    }
+    let to_target = |h: &JumpHop| SshTarget {
+        host: h.host.clone(),
+        port: h.port,
+        user: h.user.clone(),
+        auth: h.auth.clone(),
+        jump: None,
+    };
+    let mut cur = connect_ssh(&to_target(hops[0]), known.clone())
+        .await
+        .map_err(|e| hop_ctx(1, e))?;
+    for (i, hop) in hops[1..].iter().enumerate() {
+        cur = connect_hop(&cur, &to_target(hop), known.clone(), Some(i + 2)).await?;
+    }
+    connect_hop(&cur, target, known, None).await
 }
 
 /// TermSessions 的 SSH 扩展（避免循环依赖，SSH 会话注册复用统一 register 路径）
@@ -312,7 +457,7 @@ impl SshService {
         rows: u16,
         sessions: &TermSessions,
     ) -> Result<SessionInfo> {
-        let handle = connect_ssh(&target, self.known.clone()).await?;
+        let handle = connect_via_jumps(&target, self.known.clone()).await?;
         let channel = handle
             .channel_open_session()
             .await
@@ -419,7 +564,8 @@ impl SshService {
         sessions.register(kind, title, cols, rows, ssh_handle).await
     }
 
-    /// SFTP 目录列表
+    /// SFTP 目录列表（SFTP 各口维持直连腿——T-B7-4 行范围=终端连接命令，
+    /// jump 接线挂批次尾台账）
     pub async fn sftp_list(&self, target: &SshTarget, path: &str) -> Result<Vec<SftpEntry>> {
         let mut handle = connect_ssh(target, self.known.clone()).await?;
         let sftp = open_sftp(&mut handle).await?;
@@ -494,7 +640,7 @@ impl SshService {
         timeout: Duration,
     ) -> Result<ExecResult> {
         exec_guard(command)?;
-        let handle = connect_ssh(target, self.known.clone()).await?;
+        let handle = connect_via_jumps(target, self.known.clone()).await?;
         let mut channel = handle
             .channel_open_session()
             .await
@@ -780,5 +926,256 @@ mod tests {
         assert_eq!(e.code(), "TERM_SSH_004");
         assert!(!KnownHosts::shared_path(&d).exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- T-B7-4 ProxyJump ----
+
+    fn hop(
+        host: &str,
+        port: u16,
+        user: &str,
+        auth: SshAuth,
+        via: Option<Box<JumpHop>>,
+    ) -> Box<JumpHop> {
+        Box::new(JumpHop {
+            host: host.into(),
+            port,
+            user: user.into(),
+            auth,
+            via,
+        })
+    }
+
+    /// 闭端口（127.0.0.1:1）目标——连接必败且零凭据风险，专供错误臂断言
+    fn closed_target(jump: Option<Box<JumpHop>>) -> SshTarget {
+        SshTarget {
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "t".into(),
+            auth: SshAuth::Password {
+                password: "x".into(),
+            },
+            jump,
+        }
+    }
+
+    /// Handle 无 Debug ⇒ unwrap_err 不可用；连接臂必败取错
+    fn conn_err(r: Result<Handle<TofuHandler>>) -> TermError {
+        match r {
+            Err(e) => e,
+            Ok(_) => panic!("127.0.0.1:1 闭端口连接本应必败"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-4）字面测试名优先于 rustc 命名惯例
+    async fn jump_none_keepsLegacyPath() {
+        let d = tmpdir("junnolegacy");
+        let kh = Arc::new(KnownHosts::open(&d).unwrap());
+        // 正对照：jump=None 与直连臂逐字同消息（空链臂字面委派 connect_ssh，
+        // 任何偏差=跳链改造污染了直连腿）
+        let direct = conn_err(connect_ssh(&closed_target(None), kh.clone()).await).to_string();
+        let via = conn_err(connect_via_jumps(&closed_target(None), kh.clone()).await).to_string();
+        assert_eq!(direct, via, "两臂错误措辞必须逐字相等");
+        assert!(direct.contains("连接 127.0.0.1:1 失败"), "实得 {direct}");
+        // 旧 JSON 会话参数无 jump 键可读（serde default——加键兼容）
+        let legacy = serde_json::json!({
+            "host": "h", "port": 22, "user": "u",
+            "auth": {"password": {"password": "p"}}
+        });
+        let t: SshTarget = serde_json::from_value(legacy).unwrap();
+        assert!(t.jump.is_none());
+        // 序列化显式写 null 键（形状可机检，不是省键）
+        let out = serde_json::to_value(&t).unwrap();
+        assert_eq!(out["jump"], serde_json::Value::Null);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    fn jump_firstHopUnknown_refuses() {
+        // 首跳首见拒 → 整链拒。"第 N 跳"点名只有 hop_ctx 一处构造（唯一牌面），
+        // 本臂同时是真实链路的同型断言；指纹确认三枚输入逐字不污染
+        let d = tmpdir("jhop1");
+        let kh = KnownHosts::open(&d).unwrap();
+        let raw = tofu_verdict(&kh, "j1.example", 22, "ssh-ed25519 SHA256:j1key").unwrap_err();
+        let named = hop_ctx(1, raw);
+        let msg = named.to_string();
+        assert!(
+            msg.contains("第 1 跳 j1.example:22"),
+            "跳数与主机必须连排点名，实得 {msg}"
+        );
+        match &named {
+            TermError::HostKeyUnknown {
+                descriptor,
+                note,
+                host,
+                port,
+            } => {
+                assert_eq!(descriptor, "ssh-ed25519 SHA256:j1key", "指纹逐字进错误体");
+                assert_eq!((host.as_str(), *port), ("j1.example", 22));
+                assert_eq!(note, "第 1 跳 ");
+            }
+            other => panic!("必须仍是 TERM_SSH_004 臂，实得 {other:?}"),
+        }
+        assert_eq!(named.code(), "TERM_SSH_004");
+        // 正对照：变更臂（HostKey）过 hop_ctx 逐字不变——前缀只加 Unknown 臂
+        let changed = TermError::HostKey("主机密钥已变更".into());
+        assert!(matches!(hop_ctx(1, changed), TermError::HostKey(m) if m == "主机密钥已变更"));
+        // 整链拒=零写（裁决不落地，跳数信息不是放行通道）
+        assert!(!KnownHosts::shared_path(&d).exists(), "首见零写");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §7.2 T-B7-4）D-28 栏安全负例
+    fn tofu_jumpSecondHop_refusesNamingHopIndex() {
+        // 第二跳 TOFU 拒 = 整链拒且点名跳数——connect_hop 错误统一走
+        // connect_map(Some(n))（唯一入口），指纹确认通道在第二跳同样存活
+        let t = SshTarget {
+            host: "j2.example".into(),
+            port: 2222,
+            user: "u".into(),
+            auth: SshAuth::Password {
+                password: "x".into(),
+            },
+            jump: None,
+        };
+        let raw = TermError::HostKeyUnknown {
+            note: String::new(),
+            host: "j2.example".into(),
+            port: 2222,
+            descriptor: "ssh-ed25519 SHA256:j2key".into(),
+        };
+        let mapped = connect_map(Some(2), &t, raw);
+        let msg = mapped.to_string();
+        assert!(msg.contains("第 2 跳 j2.example:2222"), "实得 {msg}");
+        match &mapped {
+            TermError::HostKeyUnknown { descriptor, .. } => {
+                assert_eq!(descriptor, "ssh-ed25519 SHA256:j2key")
+            }
+            other => panic!("信任臂必须原样过网、不得裹成 TERM_SSH_001，实得 {other:?}"),
+        }
+        // 正对照：非信任错误由连接口裹主机名（第二跳 IO/认证失败同样点名主机端口）
+        let wrapped = connect_map(Some(2), &t, TermError::Auth("公钥认证失败".into()));
+        assert!(wrapped.to_string().contains("连接 j2.example:2222 失败"));
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    async fn jump_depthExceeded_errsBeforeAnyConnect() {
+        let d = tmpdir("jdepth");
+        let kh = Arc::new(KnownHosts::open(&d).unwrap());
+        let pw = || SshAuth::Password {
+            password: "x".into(),
+        };
+        // 4 跳 = 超限一枚（via 最深者=第 1 跳的链式形状）
+        let deep = Some(hop(
+            "127.0.0.1",
+            1,
+            "a",
+            pw(),
+            Some(hop(
+                "127.0.0.1",
+                1,
+                "b",
+                pw(),
+                Some(hop(
+                    "127.0.0.1",
+                    1,
+                    "c",
+                    pw(),
+                    Some(hop("127.0.0.1", 1, "d", pw(), None)),
+                )),
+            )),
+        ));
+        let e = conn_err(connect_via_jumps(&closed_target(deep), kh.clone()).await);
+        let msg = e.to_string();
+        assert!(msg.contains("跳数超限"), "实得 {msg}");
+        assert!(
+            msg.contains("4 跳 > 上限 3 跳"),
+            "收到数与上限都要点名，实得 {msg}"
+        );
+        // 零 IO 证据：任何建连尝试的错误都含主机名或"失败"（connect_map 措辞），
+        // 闸内消息两者皆无
+        assert!(
+            !msg.contains("127.0.0.1") && !msg.contains("失败"),
+            "深度闸必须先于任何连接，实得 {msg}"
+        );
+        assert!(matches!(e, TermError::BadParam(_)));
+        assert_eq!(e.code(), "TERM_SESSION_004");
+        // 正对照：3 跳（=上限）过深度闸
+        let three = Some(hop(
+            "127.0.0.1",
+            1,
+            "a",
+            pw(),
+            Some(hop(
+                "127.0.0.1",
+                1,
+                "b",
+                pw(),
+                Some(hop("127.0.0.1", 1, "c", pw(), None)),
+            )),
+        ));
+        jump_guard(&three).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书字面测试名
+    fn jump_authPerHop_independent() {
+        // 逐跳独立凭据：Password/Key 各自经 JSON 往返保留，跨跳不复用不回落
+        let outer = hop(
+            "jump-b.example",
+            2201,
+            "ub",
+            SshAuth::Key {
+                key_path: "C:/keys/b_id".into(),
+                passphrase: Some("pb".into()),
+            },
+            Some(hop(
+                "jump-a.example",
+                22,
+                "ua",
+                SshAuth::Password {
+                    password: "pa".into(),
+                },
+                None,
+            )),
+        );
+        let t = SshTarget {
+            host: "final.example".into(),
+            port: 22,
+            user: "uf".into(),
+            auth: SshAuth::Key {
+                key_path: "/home/u/.ssh/id_f".into(),
+                passphrase: None,
+            },
+            jump: Some(outer),
+        };
+        let back: SshTarget = serde_json::from_value(serde_json::to_value(&t).unwrap()).unwrap();
+        let b = back.jump.as_ref().unwrap();
+        assert_eq!(b.host, "jump-b.example");
+        assert!(matches!(&b.auth,
+            SshAuth::Key { key_path, passphrase: Some(p) }
+                if key_path == "C:/keys/b_id" && p == "pb"));
+        let a = b.via.as_ref().unwrap();
+        assert_eq!(
+            (a.host.as_str(), a.port, a.user.as_str()),
+            ("jump-a.example", 22, "ua")
+        );
+        assert!(matches!(&a.auth, SshAuth::Password { password } if password == "pa"));
+        assert!(a.via.is_none());
+        assert!(matches!(
+            &back.auth,
+            SshAuth::Key {
+                passphrase: None,
+                ..
+            }
+        ));
+        // 任务书形状：最内层 via 显式 null（不是省键）
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["jump"]["via"]["via"], serde_json::Value::Null);
     }
 }

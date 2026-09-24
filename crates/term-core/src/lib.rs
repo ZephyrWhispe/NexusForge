@@ -18,5 +18,5 @@ pub mod wsl;
 pub use error::{Result, TermError};
 pub use module::TermModule;
 pub use session::{SessionInfo, SessionState, TermKind, TermSessions};
-pub use ssh::{SftpEntry, SshAuth, SshService, SshTarget};
+pub use ssh::{JumpHop, SftpEntry, SshAuth, SshService, SshTarget};
 pub use sshconfig::{load_default_config, SshHostEntry};
