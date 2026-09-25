@@ -2,6 +2,7 @@
 name = "nexusforge"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 authors.workspace = true
 description = "NexusForge 桌面应用（Tauri 2 壳）"
 
@@ -20,22 +21,22 @@ tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-host-core = { path = "../crates/host-core" }
-win-integration = { path = "../crates/win-integration" }
-clipboard-core = { path = "../crates/clipboard-core" }
-screenshot-core = { path = "../crates/screenshot-core" }
-ocr-core = { path = "../crates/ocr-core" }
-kvm-core = { path = "../crates/kvm-core" }
-vault-core = { path = "../crates/vault-core" }
-file-core = { path = "../crates/file-core" }
-proxy-core = { path = "../crates/proxy-core" }
-desktop-core = { path = "../crates/desktop-core" }
-editor-core = { path = "../crates/editor-core" }
-notes-core = { path = "../crates/notes-core" }
-term-core = { path = "../crates/term-core" }
-sys-core = { path = "../crates/sys-core" }
-automation-core = { path = "../crates/automation-core" }
-sync-core = { path = "../crates/sync-core" }
+host-core = { path = "../crates/host-core", version = "0.1.0" }
+win-integration = { path = "../crates/win-integration", version = "0.1.0" }
+clipboard-core = { path = "../crates/clipboard-core", version = "0.1.0" }
+screenshot-core = { path = "../crates/screenshot-core", version = "0.1.0" }
+ocr-core = { path = "../crates/ocr-core", version = "0.1.0" }
+kvm-core = { path = "../crates/kvm-core", version = "0.1.0" }
+vault-core = { path = "../crates/vault-core", version = "0.1.0" }
+file-core = { path = "../crates/file-core", version = "0.1.0" }
+proxy-core = { path = "../crates/proxy-core", version = "0.1.0" }
+desktop-core = { path = "../crates/desktop-core", version = "0.1.0" }
+editor-core = { path = "../crates/editor-core", version = "0.1.0" }
+notes-core = { path = "../crates/notes-core", version = "0.1.0" }
+term-core = { path = "../crates/term-core", version = "0.1.0" }
+sys-core = { path = "../crates/sys-core", version = "0.1.0" }
+automation-core = { path = "../crates/automation-core", version = "0.1.0" }
+sync-core = { path = "../crates/sync-core", version = "0.1.0" }
 # B6 T-B6-5：vault 指针端口测试需要 Zeroizing 名义类型（零新包，workspace 已锁）
 zeroize = { workspace = true }
 base64.workspace = true
