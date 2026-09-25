@@ -3,7 +3,34 @@ import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
-import * as monaco from "monaco-editor";
+// R-I4（D-37·PERF-03 半项）：全量入口 `monaco-editor`（＝editor.main，捆绑 ~90 门
+// basic-languages）改按需装配——能力面按 languageForPath 实际服务的语言集合取，
+// 编辑器特性（查找/折叠/建议等）由 editor.all 全保。
+import "monaco-editor/esm/vs/editor/editor.all";
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+
+// 语言服务四门（ts 服务连带注册 typescript/javascript，css 服务连带 css/scss/less，
+// html/json 服务各自注册本语言）
+import "monaco-editor/esm/vs/language/typescript/monaco.contribution";
+import "monaco-editor/esm/vs/language/json/monaco.contribution";
+import "monaco-editor/esm/vs/language/css/monaco.contribution";
+import "monaco-editor/esm/vs/language/html/monaco.contribution";
+// 其余 languageForPath 服务的语言（cpp 包连带注册 c/cpp；纯词法着色无语言服务）
+import "monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution";
+import "monaco-editor/esm/vs/basic-languages/python/python.contribution";
+import "monaco-editor/esm/vs/basic-languages/rust/rust.contribution";
+import "monaco-editor/esm/vs/basic-languages/go/go.contribution";
+import "monaco-editor/esm/vs/basic-languages/java/java.contribution";
+import "monaco-editor/esm/vs/basic-languages/cpp/cpp.contribution";
+import "monaco-editor/esm/vs/basic-languages/csharp/csharp.contribution";
+import "monaco-editor/esm/vs/basic-languages/xml/xml.contribution";
+import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution";
+import "monaco-editor/esm/vs/basic-languages/ini/ini.contribution";
+import "monaco-editor/esm/vs/basic-languages/sql/sql.contribution";
+import "monaco-editor/esm/vs/basic-languages/shell/shell.contribution";
+import "monaco-editor/esm/vs/basic-languages/bat/bat.contribution";
+import "monaco-editor/esm/vs/basic-languages/powershell/powershell.contribution";
+import "monaco-editor/esm/vs/basic-languages/lua/lua.contribution";
 
 /**
  * Monaco 本地集成（docs/impl/06 E2）：
