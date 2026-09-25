@@ -347,6 +347,21 @@
 
 ---
 
+### D-33 B8 裁决落地：放行 KVM 拖拽传文件（T-B8-1；附 B8 六题与 D-31/D-32 裁决留痕）（新立范围，承 D-29 批次制与 D-22 规则 4）
+
+- **背景**：B8 方案集（`docs/impl/11-b8-proposals.md`，提交 890f7df）逐题出裁决材料后，用户 2026-09-25 裁决：**六题仅放行「KVM 拖拽传文件」**；办公助手待用户重供蓝本 §8 原文后再议（原文已不在 Downloads 路径）；i18n/SSH 连接池/Pre-Socks/S3 维持现状或不做；D-31（系统功能专项）与 D-32（B9 构件自动更新）**暂缓**放行。
+- **决策**：
+  1. **交付形制（零新命令、零新配置键、D-28 零触碰）**：主窗体 KVM 面板挂载期订阅 `getCurrentWindow().onDragDropEvent`（`@tauri-apps/api/window`，与 TitleBar 同源 import 形制；卸载即退订）→ 纯函数 `planDropSend` 裁决（无 client 出站会话＝立即拒并点名，不开对话框）→ 新组件 `DragDropSendDialog`（按次挂载，B6 ConnectDialog 教训形制）：目标设备 Select（只列 client 出站会话设备）+ 文件清单逐条展示 + 发送钮单次 → 循环既有 `kvm_send_file` 腿 → 「成功 X · 失败 Y」聚合通知 + 逐条错误行上屏。
+  2. **偏离登记（不静默）**：① 不复用 `DryRunDialog`——该组件无选择槽，为本行扩它波及 automation 既有消费面，裁决为对话框自持清单+Select（共性③"预览→清单确认→执行"语义同形保留）；② 方案段（11 §4）曾列"目标 guest 路径合法性校验 + 大小上限配置键"，**裁决不做**——后端 `send_file` 已有会话总闸与 `KVM_TRANSFER_007/008` 显式错误面（`crates/kvm-core/src/transfer.rs:164-198`、`module.rs:274`），确认清单即门禁；上限键=新配置面三件套，与"失败整文件重发"传输模型收益不成立。目录/不存在路径由后端错误行如实点名，禁前端猜。
+  3. **§7.3-(b) 徽标退役双向钉**：KvmPanel 摘 `<DeferredBadge label="拖拽传文件">`；`kvm/__tests__/deferred.test.tsx` 断言翻正——登记标签集转空（徽标数恰 0，凭空回挂即红）、实现形状词 `dragDrop|fileDrop` 从禁词**反转**为必在场锚、"拖拽"字样仍只许出现在说明文案；画饼话术负例保留。
+  4. **留痕**：办公助手/i18n/Pre-Socks/SSH 连接池/S3 五题的裁决结果与 D-31/D-32 暂缓记于本条与 09 §11；再次翻案须新决策编号，不得引用本条默认放行。
+- **依据**：11 档 §4 子方案 + 现状锚点亲验（`KvmPanel.tsx:341` 发送腿、`:355` clientSessionIds 门禁集、`TitleBar.tsx:55` window API 形制、后端错误面 transfer.rs/module.rs 如上）；WebView2 Windows `dragDropEnabled` 默认真是平台事实，**列为放行后实启冒烟第一核证点**——不可达则本行按徽标回挂交付判红，不装完成。
+- **代价**：窗口级 drop 对主窗全局——靠"仅面板挂载期订阅"圈定作用域；jsdom 无法模拟原生拖放——接线层以本地 `vi.mock("@tauri-apps/api/window")` 捕获处理器覆盖、裁决层纯函数测覆盖，真 drop 属人工冒烟项；DragDropSendDialog 与 DryRunDialog 两枚清单确认组件并存（形状差异=选择槽），登记为可接受的轻度重复。
+- **验收**：vitest 字面测名全集见 11 档 §8 六栏任务书 T-B8-1 回归列（planner 四枚 + 对话框三枚 + 接线退订一枚 + deferred 翻正两枚）；`cargo test --workspace`/`security_config` 恒绿（本行零 Rust/零 ACL 变更，跑即是负证）；实启冒烟两则：①资源管理器拖文件入 KVM 面板→清单确认→对端收妥；②无会话时 drop→拒且点名"无活跃会话"，不开对话框。
+- **实施记录（T-B8-1 动工前登记，代码随下一提交）**：——
+
+---
+
 ## 5. 明确不做（v1 范围外，已记录不再重开）
 
 | 项 | 原因 | 处置 |

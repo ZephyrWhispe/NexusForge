@@ -134,3 +134,20 @@
 6. S3 驱动：**维持不做 / 自写子集**
 
 放行项逐条按 D-22 规则 4 新登记决策编号五要素后，升六栏任务书动工；未放行项本档即其"已给一页方案"的兑现记录，09 §11/§12 状态随本批翻正。
+
+**裁决结果（2026-09-25 用户裁决）**：1 办公助手＝**待重供蓝本 §8 原文后再议**；2 i18n＝**维持现状**（不收敛安装器语言，割裂继续登记）；3 Pre-Socks＝**不做**（维持二期登记）；4 KVM 拖拽＝**放行**（→ D-33 / T-B8-1，§8）；5 SSH 连接池＝**维持现状徽标**；6 S3＝**维持不做**。另 D-31/D-32 用户裁决**暂缓**。
+
+---
+
+## 8. T-B8-1 六栏任务书：KVM 拖拽传文件（D-33 放行）
+
+| 栏 | 内容 |
+|----|------|
+| ①锚点 | `src/modules/kvm/KvmPanel.tsx`：发送腿 `kvmSendFile`(:341)、`clientSessionIds`(:355-357)、边缘说明段 `<DeferredBadge label="拖拽传文件" decisionRef="09 §7.3-(b)" />`（摘除对象）；`src/layout/TitleBar.tsx:55` window API import 形制范本；后端 `crates/kvm-core/src/transfer.rs:164-198`（KVM_TRANSFER_007/008 显式错误面）、`module.rs:274`（"设备 … 无活跃会话"总闸）——**本行零 Rust 改动，只消费**。新文件：`src/modules/kvm/dragDropFlow.ts`、`src/modules/kvm/DragDropSendDialog.tsx`。 |
+| ②签名 | `export interface KvmClientDevice { deviceId: string; deviceName: string }`；`export type DropPlan = { kind: "refuse"; reason: string } | { kind: "ready"; files: string[]; devices: KvmClientDevice[] }`；`export function planDropSend(paths: readonly string[], devices: readonly KvmClientDevice[]): DropPlan`（空 paths→refuse"未拖入任何文件"；无设备→refuse 点名"需先建立出站会话"；files 逐字保序全携带）；`export interface SendOutcome { path: string; error?: string }`；`export function aggregateSends(outcomes: readonly SendOutcome[]): { ok: number; failed: number; lines: string[] }`（"成功 X · 失败 Y"，逐条错误行含路径）；对话框 props：`{ open: boolean; files: readonly string[]; devices: readonly KvmClientDevice[]; onSend: (deviceId: string, paths: readonly string[]) => Promise<SendOutcome[]>; onClose: () => void }`，**按次挂载**（`open &&` 条件渲染，B6 ConnectDialog 定格教训）。接线：KvmPanel `useEffect` 内 `inTauri && import("@tauri-apps/api/window").then(...)` 订阅 `onDragDropEvent`，事件 `type==="drop"` 时 `planDropSend(paths, clientDevices)`——refuse→`setError(reason)` 不开对话框；ready→置 dropFiles+开对话框；unmount 退订。 |
+| ③数据变更 | 零：无新命令、无新配置键、无持久化、旧数据无关。 |
+| ④门禁联动 | D-28 零触碰（`kvm_send_file` 既有 ACL 不动）；aux 窗不渲染 KVM 面板＝无第二消费面；订阅仅面板挂载期（他视图零打扰是本行负例）。 |
+| ⑤回归字面测名 | `dragDropFlow.test.tsx`：`kvmDragDrop_emptyPaths_refusesBeforeDialog`、`kvmDragDrop_noClientSessions_namedRefuse`、`kvmDragDrop_readyVerbatimFileOrder`、`kvmDragDrop_aggregate_countsPerLetterAndLines`；`dragDropSend.test.tsx`：`kvmDragDropDialog_sendsSelectedDeviceOncePerFile`（onSend 恰一次、设备 id 逐字）、`kvmDragDropDialog_failureLinesSurfaceAndRecitePaths`、`kvmDragDropDialog_cancelSendsNothing`（onSend 调用数恒 0）；`kvmPanelDragWiring.test.tsx`：`kvmDragDrop_subscribesOnMount_unsubscribesOnUnmount`（本地 `vi.mock("@tauri-apps/api/window")` 捕获 handler + unlisten 计数）；deferred 翻正：`kvmDeferredItems_badgeRetiredWithDelivery`（徽标数恰 0＋`dragDrop|fileDrop` 反转为必在场锚＋"拖拽"字样剥说明段后零实现位＋画饼话术负例保留）。 |
+| ⑥完成判据 | 上述 vitest 全绿；`security_config`/workspace 恒绿（零 Rust 变更跑即是负证）；`grep -c "DeferredBadge" KvmPanel 边缘说明段`＝0 且 §7.3-(b) 归属列翻正"已交付（D-33/T-B8-1）"；**实启冒烟两则属人工**（真 drop 达+对端收妥；无会话 drop 点名拒）——WebView2 `dragDropEnabled` 不可达＝本行回挂徽标判红不装完成，登记于 D-33 验收行。 |
+
+实施切法：单提交（纯前端 + deferred 翻正 + 台账/DECISIONS 状态随批）；七门禁全绿不遮罩。
