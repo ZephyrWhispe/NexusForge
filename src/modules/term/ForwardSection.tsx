@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Button, Dropdown, Input, Option, Text } from "@fluentui/react-components";
+import { Badge, Button, Dropdown, Input, Option, Text, tokens } from "@fluentui/react-components";
 import {
   termForwardClose,
   termForwardList,
@@ -217,7 +217,7 @@ export default function ForwardSection({
                   {kindLabel(r.kind)}
                 </Text>
                 {reason ? (
-                  <Text size={100} style={{ color: "#c50f1f" }}>
+                  <Text size={100} style={{ color: tokens.colorPaletteRedForeground1 }}>
                     {reason}
                   </Text>
                 ) : null}

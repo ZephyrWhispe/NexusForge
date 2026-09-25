@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { makeStyles } from "@fluentui/react-components";
 import { hostCapabilities } from "../ipc/client";
 import { IN_TAURI } from "../ipc/env";
+import { MICA_FALLBACK } from "../theme/palette";
 
 /**
  * Mica 材质背景（docs/UI-PLAN.md U1-4 + COR-26）。
@@ -17,15 +18,13 @@ const useStyles = makeStyles({
     position: "fixed",
     inset: "0",
     zIndex: "-1",
-    background:
-      "linear-gradient(135deg, rgba(28,31,38,0.96) 0%, rgba(32,36,46,0.94) 55%, rgba(27,32,40,0.96) 100%)",
+    background: MICA_FALLBACK.dark,
   },
   lightFallback: {
     position: "fixed",
     inset: "0",
     zIndex: "-1",
-    background:
-      "linear-gradient(135deg, rgba(238,242,247,0.96) 0%, rgba(232,237,245,0.94) 60%, rgba(227,235,246,0.96) 100%)",
+    background: MICA_FALLBACK.light,
   },
 });
 

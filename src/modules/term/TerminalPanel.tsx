@@ -66,6 +66,7 @@ import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
 import { sharedTab, sharedTabActive } from "../../components/tabStyles";
+import { TERMINAL_BG } from "../../theme/palette";
 import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
@@ -101,7 +102,7 @@ const useStyles = makeStyles({
     height: "420px",
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: "#1b1b1b",
+    backgroundColor: TERMINAL_BG,
     padding: "6px",
   },
   list: {

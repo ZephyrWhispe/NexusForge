@@ -5,6 +5,7 @@ import { PhysicalSize } from "@tauri-apps/api/dpi";
 import { screenshotPinGet, screenshotPinUpdate, screenshotPinClose, type PinDataDto } from "../ipc/client";
 import { reportError } from "../stores/notifications";
 import InlineError from "../components/InlineError";
+import { OVERLAY_CHROME } from "../theme/palette";
 
 /**
  * 贴图置顶窗口（docs/impl/03 P6）：
@@ -36,8 +37,8 @@ const useStyles = makeStyles({
     right: "10px",
     padding: "2px 8px",
     borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: "rgba(28,28,30,0.85)",
-    color: "#fff",
+    backgroundColor: OVERLAY_CHROME.pinChipBg,
+    color: OVERLAY_CHROME.onDark,
     fontSize: tokens.fontSizeBase100,
     pointerEvents: "none",
     opacity: 0,

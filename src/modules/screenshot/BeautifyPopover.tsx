@@ -13,6 +13,7 @@ import {
   type BeautifySpecDto,
 } from "../../ipc/client";
 import { notify, reportError } from "../../stores/notifications";
+import { BEAUTIFY_BG } from "../../theme/palette";
 
 /**
  * 美化导出弹层（D-29 B4 T-B4-6）：内边距/圆角/投影 + 双色渐变底 + 预览 + 导出。
@@ -54,15 +55,15 @@ export function toBeautifySpec(f: BeautifyFields): BeautifySpecDto {
 export const BEAUTIFY_PRESETS: { label: string; fields: BeautifyFields }[] = [
   {
     label: "无",
-    fields: { radius: "0", padding: "0", shadow: false, bgFrom: "#000000", bgTo: "#000000" },
+    fields: { radius: "0", padding: "0", shadow: false, bgFrom: BEAUTIFY_BG.none.from, bgTo: BEAUTIFY_BG.none.to },
   },
   {
     label: "圆角阴影",
-    fields: { radius: "24", padding: "32", shadow: true, bgFrom: "#1f2937", bgTo: "#0b1220" },
+    fields: { radius: "24", padding: "32", shadow: true, bgFrom: BEAUTIFY_BG.card.from, bgTo: BEAUTIFY_BG.card.to },
   },
   {
     label: "社交卡片",
-    fields: { radius: "40", padding: "96", shadow: true, bgFrom: "#7c3aed", bgTo: "#0ea5e9" },
+    fields: { radius: "40", padding: "96", shadow: true, bgFrom: BEAUTIFY_BG.social.from, bgTo: BEAUTIFY_BG.social.to },
   },
 ];
 

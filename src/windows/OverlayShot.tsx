@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { makeStyles, tokens, Button, Slider, Switch, Text } from "@fluentui/react-components";
+import { ANNOTATION, OVERLAY_CHROME } from "../theme/palette";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
@@ -98,7 +99,7 @@ const useStyles = makeStyles({
     inset: 0,
     overflow: "hidden",
     userSelect: "none",
-    backgroundColor: "#000",
+    backgroundColor: OVERLAY_CHROME.matte,
   },
   backdrop: {
     position: "absolute",
@@ -109,14 +110,14 @@ const useStyles = makeStyles({
   dim: {
     position: "absolute",
     inset: 0,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor: OVERLAY_CHROME.dim,
   },
   selection: {
     position: "absolute",
-    border: "1px solid #ffffffcc",
-    boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
+    border: `1px solid ${OVERLAY_CHROME.selectionBorder}`,
+    boxShadow: `0 0 0 1px ${OVERLAY_CHROME.selectionEdge}`,
     // 用超大 box-shadow 把选区外区域"抠亮"（比四块遮罩少 3 个元素）
-    outline: "9999px solid rgba(0,0,0,0.55)",
+    outline: `9999px solid ${OVERLAY_CHROME.selectionMask}`,
     cursor: "move",
   },
   hint: {
@@ -126,8 +127,8 @@ const useStyles = makeStyles({
     transform: "translateX(-50%)",
     padding: "6px 14px",
     borderRadius: tokens.borderRadiusLarge,
-    backgroundColor: "rgba(28,28,30,0.92)",
-    color: "#fff",
+    backgroundColor: OVERLAY_CHROME.chipBg,
+    color: OVERLAY_CHROME.onDark,
     fontSize: tokens.fontSizeBase200,
     pointerEvents: "none",
   },
@@ -135,8 +136,8 @@ const useStyles = makeStyles({
     position: "absolute",
     padding: "2px 8px",
     borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: "rgba(28,28,30,0.92)",
-    color: "#fff",
+    backgroundColor: OVERLAY_CHROME.chipBg,
+    color: OVERLAY_CHROME.onDark,
     fontSize: tokens.fontSizeBase100,
     pointerEvents: "none",
   },
@@ -148,7 +149,7 @@ const useStyles = makeStyles({
     alignItems: "center",
     justifyContent: "center",
     gap: "10px",
-    backgroundColor: "rgba(20,20,22,0.92)",
+    backgroundColor: OVERLAY_CHROME.editBg,
   },
   canvasBox: {
     position: "relative",
@@ -156,7 +157,7 @@ const useStyles = makeStyles({
     maxHeight: "76vh",
     display: "flex",
     border: `1px solid ${tokens.colorNeutralStroke2}`,
-    boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
+    boxShadow: OVERLAY_CHROME.canvasShadow,
   },
   toolbar: {
     display: "flex",
@@ -328,7 +329,7 @@ const useStyles = makeStyles({
 
 type Stage = "select" | "edit";
 
-const COLORS = ["#ff4d4f", "#ffb020", "#52c41a", "#1677ff", "#ffffff"];
+const COLORS = ANNOTATION.swatches;
 const WIDTHS = [2, 4, 8];
 
 /** 取色悬停读数：坐标给放大镜，色值给读数与当前色 */
@@ -449,7 +450,7 @@ export default function OverlayShot() {
   /** 当前笔画路径（mousedown 起点 + mousemove 采样） */
   const pathRef = useRef<[number, number][]>([]);
   /** 笔画开始时定格的样式（拖拽中改工具栏不影响进行中的笔画） */
-  const strokeStyle = useRef({ color: "#1677ff", width: 4, alpha: 1, fill: false });
+  const strokeStyle = useRef({ color: ANNOTATION.accent, width: 4, alpha: 1, fill: false });
   /** 撤销/重做栈深度（state：驱动按钮 disabled，避免 ref 不触发渲染） */
   const [stackCounts, setStackCounts] = useState({ undo: 0, redo: 0 });
 
@@ -953,7 +954,7 @@ export default function OverlayShot() {
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = ANNOTATION.seqFg;
         ctx.font = `bold ${r + 2}px "Segoe UI", sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -1086,7 +1087,7 @@ export default function OverlayShot() {
     if (!box) return;
     vctx.save();
     vctx.setLineDash([6, 4]);
-    vctx.strokeStyle = "#1677ff";
+    vctx.strokeStyle = ANNOTATION.accent;
     vctx.lineWidth = 2;
     vctx.strokeRect(box.x - 2, box.y - 2, box.w + 4, box.h + 4);
     vctx.restore();
@@ -1435,7 +1436,7 @@ export default function OverlayShot() {
   if (error) {
     return (
       <div className={styles.root} style={{ display: "grid", placeItems: "center" }}>
-        <div style={{ textAlign: "center", color: "#fff" }}>
+        <div style={{ textAlign: "center", color: OVERLAY_CHROME.onDark }}>
           <Text block>{error}</Text>
           <Button appearance="secondary" style={{ marginTop: 12 }} onClick={closeSelf}>
             关闭

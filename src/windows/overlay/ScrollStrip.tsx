@@ -5,6 +5,7 @@ import {
   scrollStripCopy,
   type ScrollState,
 } from "./scrollFlow";
+import { OVERLAY_CHROME } from "../../theme/palette";
 
 const useStyles = makeStyles({
   strip: {
@@ -13,9 +14,9 @@ const useStyles = makeStyles({
     gap: "8px",
     padding: "6px 10px",
     borderTop: `1px solid ${tokens.colorNeutralStroke1}`,
-    backgroundColor: "rgba(0,0,0,.72)",
+    backgroundColor: OVERLAY_CHROME.stripBg,
   },
-  copy: { color: "#fff", flex: 1, minWidth: 0 },
+  copy: { color: OVERLAY_CHROME.onDark, flex: 1, minWidth: 0 },
 });
 
 /**

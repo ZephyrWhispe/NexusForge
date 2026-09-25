@@ -11,6 +11,7 @@
  * 磁盘写侧的格式与质量真源仍是 `util::encode_rgba`。
  */
 import { screenshotHistoryGet } from "../../ipc/client";
+import { JPEG_MATTE } from "../../theme/palette";
 import {
   EXPORT_MIME,
   exportFormatOfMime,
@@ -19,7 +20,7 @@ import {
 } from "../../windows/overlay/exportFormats";
 
 /** 与 Rust `JPEG_BG_RGB` 同语义：JPEG 无 alpha，这里显式压白底而不是让浏览器丢通道 */
-const JPEG_BG = "#ffffff";
+const JPEG_BG = JPEG_MATTE;
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
