@@ -358,7 +358,7 @@
 - **依据**：11 档 §4 子方案 + 现状锚点亲验（`KvmPanel.tsx:341` 发送腿、`:355` clientSessionIds 门禁集、`TitleBar.tsx:55` window API 形制、后端错误面 transfer.rs/module.rs 如上）；WebView2 Windows `dragDropEnabled` 默认真是平台事实，**列为放行后实启冒烟第一核证点**——不可达则本行按徽标回挂交付判红，不装完成。
 - **代价**：窗口级 drop 对主窗全局——靠"仅面板挂载期订阅"圈定作用域；jsdom 无法模拟原生拖放——接线层以本地 `vi.mock("@tauri-apps/api/window")` 捕获处理器覆盖、裁决层纯函数测覆盖，真 drop 属人工冒烟项；DragDropSendDialog 与 DryRunDialog 两枚清单确认组件并存（形状差异=选择槽），登记为可接受的轻度重复。
 - **验收**：vitest 字面测名全集见 11 档 §8 六栏任务书 T-B8-1 回归列（planner 四枚 + 对话框三枚 + 接线退订一枚 + deferred 翻正两枚）；`cargo test --workspace`/`security_config` 恒绿（本行零 Rust/零 ACL 变更，跑即是负证）；实启冒烟两则：①资源管理器拖文件入 KVM 面板→清单确认→对端收妥；②无会话时 drop→拒且点名"无活跃会话"，不开对话框。
-- **实施记录（T-B8-1 动工前登记，代码随下一提交）**：——
+- **实施记录（T-B8-1 已落，2026-09-25）**：三层落码——`dragDropFlow.ts` 纯裁决（`planDropSend`/`aggregateSends`，拒态先于对话框）＋ `DragDropSendDialog.tsx` 按次挂载清单确认（逐文件 `sendOne(deviceId, path)` 顺序腿，登记偏差：任务书单 `onSend` 形制与测名 OncePerFile 矛盾，按测名做）＋ `KvmPanel.tsx` 窗口级 `onDragDropEvent` 仅面板挂载期订阅（`__TAURI_INTERNALS__` 守卫，卸载 unlisten）；发送腿全走既有 `kvmSendFile`，零新命令/零配置键/零 Rust/零 ACL。徽标退役双向翻正（kvm deferred 必在场锚＋ocr 跨模块锚收缩为 kvm/KvmPanel.tsx 恰一枚）。11 档 §8 字面测名全绿＋超集两枚；七门最终树回声行全 0：vitest 复跑 **348/90 files**（基线 339/87，首跑 1 红＝ocr 锚，翻正后复跑绿）、workspace 985/56 零 Rust 负证、tsc/lint 复跑 0。人工冒烟三则待执行（真 drop 收妥／无会话点名拒／`dragDropEnabled` 可达性——不可达按本决策判红回挂徽标）。详证＝09 §12「T-B8-1 已落」段。未推送（standing ruling）。
 
 ---
 

@@ -438,7 +438,13 @@ describe("批量识别与合并导出（T-B4-12）", () => {
       "正对照：全仓扫描须命中含 ocr_recognize 的生产源码",
     ).toBeGreaterThan(0);
     const withDrag = allProd.filter(([, src]) => src.includes("onDragDropEvent"));
-    expect(withDrag.map(([path]) => path), "原生窗口级拖放仍是收窄项，生产源码零命中").toEqual([]);
+    // 锚翻正（D-33/T-B8-1，2026-09-25 B8 裁决放行）：窗口级拖放已在 kvm 面板交付，
+    // "全仓零命中"收窄判据收缩为"kvm/KvmPanel.tsx 唯一命中"；OCR 面板本身仍不接（上方断言未动）
+    expect(withDrag.length, "kvm 拖放交付点恰一枚（防锚点整体失踪）").toBe(1);
+    expect(
+      withDrag.map(([path]) => path).filter((p) => !p.endsWith("kvm/KvmPanel.tsx")),
+      "窗口级拖放限 kvm/KvmPanel.tsx，其余生产源码仍零命中",
+    ).toEqual([]);
   });
 
   it("ocrBatch_cancelMidway_stopsInvoking", async () => {

@@ -46,7 +46,13 @@ import { confirmAction } from "../../stores/confirm";
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
-import DeferredBadge from "../../components/DeferredBadge";
+import DragDropSendDialog from "./DragDropSendDialog";
+import {
+  aggregateSends,
+  planDropSend,
+  type KvmClientDevice,
+  type SendOutcome,
+} from "./dragDropFlow";
 
 /**
  * 键鼠共享面板（docs/impl/05 K8，M4 v1）：
@@ -55,6 +61,7 @@ import DeferredBadge from "../../components/DeferredBadge";
  * T-B1-7：推送剪贴板/推送文件仅对 role=client 的出站会话开放（核账⑤：
  * 后端 session_to 两种角色均可解析，客户端门禁是产品语义——server 会话是
  * 对端在控制本机，不是推送目标）；「活跃会话」卡按角色列出全部会话。
+ * T-B8-1（D-33）：窗口级原生拖放 → 清单确认对话框 → 逐文件走既有 kvm_send_file。
  */
 const useStyles = makeStyles({
   root: {
@@ -105,6 +112,8 @@ export default function KvmPanel() {
   const [fileFor, setFileFor] = useState<PairedPeerDto | null>(null);
   const [filePath, setFilePath] = useState("");
   const [fileBusy, setFileBusy] = useState(false);
+  // T-B8-1：drop 裁决为 ready 后按次挂载确认对话框（null＝未挂/已收）
+  const [dropFiles, setDropFiles] = useState<string[] | null>(null);
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -356,6 +365,60 @@ export default function KvmPanel() {
     sessions.filter((s) => s.role === "client").map((s) => s.device_id),
   );
   const unpaired = discovered.filter((p) => !paired.some((q) => q.device_id === p.device_id));
+
+  // T-B8-1：拖放目标设备集合同一门禁（只列 client 出站会话）；事件回调经 ref 取最新值，
+  // 订阅本身只在挂载期建立一次（卸载退订＝他视图零打扰的负证面）
+  const clientDevices: KvmClientDevice[] = paired
+    .filter((p) => clientSessionIds.has(p.device_id))
+    .map((p) => ({ deviceId: p.device_id, deviceName: p.device_name }));
+  const clientDevicesRef = useRef<KvmClientDevice[]>([]);
+  useEffect(() => {
+    clientDevicesRef.current = clientDevices;
+  });
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onDragDropEvent((event) => {
+          const e = event.payload;
+          if (e.type !== "drop") return;
+          const plan = planDropSend(e.paths, clientDevicesRef.current);
+          if (plan.kind === "refuse") {
+            setError(plan.reason);
+            return;
+          }
+          setDropFiles(plan.files);
+        }),
+      )
+      .then((u) => {
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+  const onDropDone = (outcomes: SendOutcome[]) => {
+    setDropFiles(null);
+    const agg = aggregateSends(outcomes);
+    if (agg.failed === 0) {
+      setError("");
+      notify("success", `拖拽发送：${agg.ok} 个文件已开始`, "进度与回执经会话事件回报");
+    } else {
+      setError(agg.lines.join("；"));
+      notify(
+        agg.ok > 0 ? "warn" : "error",
+        `拖拽发送：成功 ${agg.ok} · 失败 ${agg.failed}`,
+        agg.lines.join("\n"),
+      );
+    }
+  };
 
   return (
     <div className={styles.root}>
@@ -611,9 +674,8 @@ export default function KvmPanel() {
           B（本机输入被转发，B 端注入执行）；B 的鼠标移到它的左缘（回移）即切回本机，或随时按
           Ctrl+Alt+Shift+Q 切回。边缘映射会话建立后即时生效。
         </Text>
-        {/* T-B7-28（§7.3-(b) 明示不做）：跨机文件推送已有按钮/右键口；
-            从桌面把文件丢过边缘传送需宿主 shell 级落点，风险面大，归 B8 待裁决。 */}
-        <DeferredBadge label="拖拽传文件" decisionRef="09 §7.3-(b)" />
+        {/* T-B8-1（D-33）已交付：从资源管理器把文件丢进本面板即逐个发送
+            （只列出站会话设备；目录与非法路径由后端错误面如实点名）。 */}
       </Section>
 
       {/* 推送文本回落对话框：readText 被拒时手动输入/粘贴（无需剪贴板权限） */}
@@ -689,6 +751,17 @@ export default function KvmPanel() {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {/* T-B8-1：拖放确认对话框按次挂载（dropFiles 非空才存在） */}
+      {dropFiles && (
+        <DragDropSendDialog
+          files={dropFiles}
+          devices={clientDevices}
+          sendOne={(deviceId, path) => kvmSendFile(deviceId, path)}
+          onDone={onDropDone}
+          onClose={() => setDropFiles(null)}
+        />
+      )}
     </div>
   );
 }
