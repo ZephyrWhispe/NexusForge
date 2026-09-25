@@ -216,6 +216,7 @@ impl LauncherIndex {
         {
             let map = self.usage.read();
             if let Err(e) = std::fs::write(
+                // P-02豁免:频次统计可丢数据,失败已记日志(上注)
                 &self.usage_file,
                 serde_json::to_vec(&*map).unwrap_or_default(),
             ) {

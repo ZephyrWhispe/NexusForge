@@ -44,6 +44,7 @@
 | D-32 | B7 转裁决：S3 归属（impl/09 §6.3-(b)，三选项待用户裁决） | 改规范 | P2 | — | 待裁决（B8 方案集 §7 汇总表） |
 | D-33 | B8 裁决落地：放行 KVM 拖拽传文件（T-B8-1；附 B8 六题与 D-31/D-32 裁决留痕） | 补实现 | P2 | B8 | 已完成（e329a5c） |
 | D-34 | 全量审查 2026-09-25 整改战役（批次 A–F：SEC-01 P0 热修 + P1 安全/数据完整性 + 治理门禁；附挂账与驳回台账） | 补实现 | P1 | R-A..R-F | 实施中（代码/测试/文档面已落，终态见本条状态行） |
+| D-35 | GOV-02 门禁坐实（联网后 cargo-deny/npm audit/两枚 ps1 真实执行）＋实测揪出的接线缺口与 22 条 RUSTSEC 挂账 | 补实现 | P2 | R-G | 已完成（本条随批入册，见状态行） |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -382,7 +383,23 @@
 - **依据**：审查报告自身即台账（ID 与证据分级逐条在册）；代码内 `SEC-NN/COR-NN/PERF-NN/STD-NN/GOV-NN/DOC-NN` 注释为落地锚。
 - **代价**：在途改动约百文件（+3.5k/−0.6k 行）；前端新增运行时依赖 `dompurify@^3.4.16`；Rust 依赖面按各条标记处核账（多数零新增）。
 - **验收**：批次完成判定四件套（见背景行）＋最终树七门回声行全 0；首轮门禁揪出 FMT=1（`vault-core/tests/entry_crud.rs` 两处空白差异，已 `cargo fmt` 归一）与 TEST=101（`kvm-core discovery::two_instances…` UDP sendto os error 10065 主机不可达——该文件本战役零改动，判环境瞬态，复跑坐实后方翻状态）；真机验收项（TUN 环路、配对抢占、覆盖层/键鼠时序）审查已标注 `[走查]/[框架]`，列入人工冒烟不冒充自动闭环。
-- **状态**：实施中（A/B/C/D/E 代码与文档面已落＋D-34 入册；终态门禁已坐实——fmt/clippy(-D)/cargo build/tsc/eslint/vitest(91 files)/vite build 全 0，cargo test 无网环境下两枚 kvm 组播灯（os 10065）之外 **57/57 目标 1034 passed / 0 failed**；待：挂账四题＋STD-02 驳回的用户复核、各组真机冒烟验收项）。
+- **状态**：实施中（A/B/C/D/E 代码与文档面已落＋D-34 入册；终态门禁已坐实——fmt/clippy(-D)/cargo build/tsc/eslint/vitest(91 files)/vite build 全 0，cargo test 无网环境下两枚 kvm 组播灯（os 10065）之外 **57/57 目标 1034 passed / 0 failed**；GOV-02 三件套已联网真实执行并揪补缺口，见 **D-35**；待：挂账题＋STD-02 驳回的用户复核、各组真机冒烟验收项）。
+
+---
+
+### D-35 GOV-02 门禁坐实：deny/audit/ps1 真实执行＋实测揪出缺口的整改与新增挂账（承 D-34 批次 E 验收条款）
+
+- **背景**：D-34 把 GOV-02（deny.toml＋CI 步骤）与 07 §3 门禁脚本按"配置落地"入账，但其验收条款明写"新增步骤**在本仓库真实执行过**（不接受配置了但跑不通）"，当时本机无外网发而悬置。2026-09-25 晚网络恢复（crates.io/GitHub api 可达；github.com/git/codeload 主域仍阻断），本批把三件套全部实跑一遍。
+- **决策与实测结果**：
+  1. **cargo-deny 0.20.2**（release 二进制经 api 资产端点取回，未入仓）实跑 `check all`：首轮即揪出 **deny.toml 系盲写**——`[advisories].unmaintained="warn"` 不合 0.20 schema（期望 all/workspace/transitive/none）→ 改 `"workspace"`；`vulnerability`/`severity-threshold` 两键非该版本字段 → 删除（漏洞阻断本就是 advisories 的默认语义）。修通后 `licenses` 揪出 **GOV-06 的"根上配了、成员没接线"**：root 已声明 `license="GPL-3.0"`＋LICENSE 在库，但 18 个成员 crate 无一继承 → 逐成员补 `license.workspace = true`；root 声明同步翻正为正式 SPDX `GPL-3.0-only`（旧式 "GPL-3.0" 系 18 枚 parse-error 告警源，且与 THIRD_PARTY_LICENSES 既有声明口径统一），allow 清单收 `"GPL-3.0-only"`。`bans` 揪出 34 处本地 path 依赖无版本=通配符 → 声明面钉 `version = "0.1.0"`（不用 skip，避免把本地 crate 子树摘出检查面制造盲区）。advisories 检查经 api tarball 取 RustSec advisory-db 快照（593df8c，940 目录/1249 条）物化为本地 git 仓＋临时 `db-path` 配置实跑通——命中 **22 条真实漏洞**（wasmtime×18 含沙箱逃逸 RUSTSEC-2026-0269、russh×2、ed25519-dalek×1、lopdf×1），全部**无 semver 兼容位可消**（须跨 API 大版本迁移），按"禁止无理由 ignore"纪律逐条登记理由入 deny.toml `[advisories].ignore` 台账，升级立项转本条挂账。终态 `cargo deny check` **DENY_ALL_EXIT=0**（四检全绿）。
+  2. **npm audit**：`--omit=dev` 运行时面 **exit 0 零漏洞**（dompurify 等新依赖干净）；全量面 4 条（vitest/esbuild/vite 链，均 moderate/dev-only）修复须 vitest@5+vite@8 大版本迁移 → 挂账。ci.yml 的 audit 步由"非阻断 `|| true`"**收严为阻断**（`--omit=dev --audit-level=high`，以本机实测绿为放行前提）。
+  3. **07 §3 两枚 ps1 落地并接 CI**（rust job，pwsh）：`tools/assert-patterns.ps1`（P-02 裸 `std::fs::write`／P-03 提权 `args.to_vec()`／P-09 裸 `limit.unwrap_or`，含 cfg(test) 边界与"豁免锚＋理由"行内台账）与 `tools/check-docs-consistency.ps1`（DESIGN §6.3 命令名 ⊆ generate_handler 注册表、DECISIONS §1 覆盖全部详情条目、文档 `cargo test -p` 的 crate 存在性——artifact-core 按 D-32 暂缓登记豁免、review-* 存档不核）。**首跑即抓到 3 处真裸覆写**（editor 自动保存草稿 `session.rs`、desktop 整理还原台账 `tidy.rs`、sys tweak 回滚备份 `winops.rs`——半截写分别毁上一份草稿/失去撤销能力/灭回滚面），全部换轨 `host_core::util::write_atomic`；其余命中逐处裁决为可豁免形（内容寻址 blob 新建唯一文件、uuid/时间戳新建文件、可丢统计、诊断写、`write_atomic` 本体、`clamp_limit` 定义口），豁免一律行内注释带理由、脚本按命中行+后两行窗口找锚（rustfmt 会下移尾注）。终态 **ASSERT_EXIT=0 / DOCS_EXIT=0**。
+  4. **随批零裁减验证**：本条不改任何 ACL/命令面/线格式；Rust 改动仅 3 处写轨＋1 处注释锚＋18 枚 manifest 元数据。
+- **影响面**：`Cargo.lock` 因 path 依赖补版本号而 source 记录更新（无包增删、无版本变更）；CI 面自本批起 cargo-deny/npm audit/两枚 ps1 全为阻断步骤，**依赖树或文档再失真会在 CI 直接翻红**；wasmtime 挂账期间 automation 插件宿主的已知漏洞面靠 ignore 台账显影，不静默。
+- **依据**：D-34 批次 E 验收条款＋07-prevention §3（脚本形态照其口径收窄落地）；全部判定以命令回声行为准（`DENY_ALL_EXIT=0`/`AUDIT_PROD_EXIT=0`/`ASSERT_EXIT=0`/`DOCS_EXIT=0`）。
+- **代价**：advisories 本机跑依赖手工物化的 db 快照（github git 域被阻断），CI 侧仍走 `cargo-deny-action` 正常拉取——两口径以 CI 为准，本机快照仅为"真实执行过"的证据形；22 条 ignore 是显式债不是豁免完成。
+- **挂账（本批新增，翻案须新决策编号）**：① **wasmtime 29→24 LTS/≥36 升级立项**（automation-core 宿主面，18 条 RUSTSEC 消解口，含沙箱逃逸）；② **russh 0.46→≥0.60 升级立项**（term/file-core SSH 栈，连带消解 ed25519-dalek RUSTSEC-2023-0071）；③ **lopdf 0.36→≥0.42 升级立项**（editor-core）；④ **前端工具链 vitest@5/vite@8 迁移立项**（3 条 dev advisory）。落地即同步删 deny.toml/本条对应行。
+- **状态**：已完成（三件套本机真实执行过，缺口整改随批入库；挂账四题待用户放行，未推送）。
 
 ---
 

@@ -29,6 +29,13 @@ jobs:
       # D-27：基准矩阵必须随代码演进保持可编译（仅构建不执行，判定阈值在 tests/perf_thresholds.rs）
       - name: bench compile check
         run: cargo bench --workspace --no-run
+      # P-01..P-09 源码范式断言 + P-12 文档一致性（GOV-02 批次落地；本机 2026-09-25 双零实测）
+      - name: pattern assertions (P-02/P-03/P-09)
+        shell: pwsh
+        run: ./tools/assert-patterns.ps1
+      - name: docs consistency (P-12)
+        shell: pwsh
+        run: ./tools/check-docs-consistency.ps1
 
   frontend:
     runs-on: ubuntu-latest
@@ -45,9 +52,10 @@ jobs:
         run: npm run lint
       - name: vitest
         run: npm run test
-      # GOV-02：已知漏洞审计（只读报告不阻断；收严须调整审计策略）
-      - name: npm audit (non-blocking)
-        run: npm audit --omit=dev || true
+      # GOV-02：运行时依赖漏洞审计收严为阻断（本机 2026-09-25 实跑 exit 0；
+      # dev 工具链 vitest/esbuild 三条 advisory 需 vitest@5/vite@8 大版本迁移，挂账 D-35）
+      - name: npm audit (runtime, blocking)
+        run: npm audit --omit=dev --audit-level=high
 
   # GOV-02：许可合规 + RUSTSEC 已知漏洞审计（deny.toml 是唯一策略源）
   cargo-deny:

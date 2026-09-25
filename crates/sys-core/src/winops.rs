@@ -771,7 +771,8 @@ impl BackupStore {
         }
         let data = serde_json::to_vec_pretty(&all)
             .map_err(|e| SysError::Catalog(format!("备份序列化失败: {e}")))?;
-        std::fs::write(&self.path, data).map_err(SysError::Io)
+        // P-02：回滚备份半截＝tweak 撤销面全灭，原子写
+        host_core::util::write_atomic(&self.path, &data).map_err(SysError::Io)
     }
 
     /// 取指定 tweak 的备份（回滚用；无备份返回空）
@@ -797,7 +798,7 @@ impl BackupStore {
             .filter(|s| s.tweak_id != tweak_id)
             .collect();
         if let Ok(data) = serde_json::to_vec_pretty(&all) {
-            let _ = std::fs::write(&self.path, data);
+            let _ = std::fs::write(&self.path, data); // P-02豁免:回滚后备份清理失败仅自愈误判面(上注已陈)
         }
     }
 }
@@ -911,7 +912,7 @@ impl AuditStore {
         let path = dir.join(format!("winops-audit-{ts}.json"));
         let data = serde_json::to_vec_pretty(&doc)
             .map_err(|e| SysError::Catalog(format!("导出序列化失败: {e}")))?;
-        std::fs::write(&path, data).map_err(SysError::Io)?;
+        std::fs::write(&path, data).map_err(SysError::Io)?; // P-02豁免:时间戳新建导出文件
         Ok(path)
     }
 }

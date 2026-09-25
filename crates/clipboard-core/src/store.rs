@@ -321,6 +321,7 @@ impl ClipStore {
         } else if c.text.len() > BLOB_THRESHOLD {
             let name = format!("{}.txt", hash);
             let blob = self.blob_dir.join(&name);
+            // P-02豁免:内容寻址 blob 新建唯一文件,半截即无行引用由孤儿GC回收
             std::fs::write(&blob, c.text).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
             (text_preview(c.text), Some(name))
         } else {
@@ -381,7 +382,7 @@ impl ClipStore {
         let (content_col, blob_path): (String, Option<String>) =
             if encrypted_b64.len() > BLOB_THRESHOLD {
                 let name = format!("{}.enc", hash);
-                std::fs::write(self.blob_dir.join(&name), encrypted_b64)
+                std::fs::write(self.blob_dir.join(&name), encrypted_b64) // P-02豁免:内容寻址 blob 新建唯一文件
                     .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
                 (String::new(), Some(name))
             } else {
@@ -782,7 +783,7 @@ impl ClipStore {
         }
         let id = uuid::Uuid::now_v7().to_string();
         let blob = format!("{hash}.{format}");
-        std::fs::write(self.blob_dir.join(&blob), bytes)
+        std::fs::write(self.blob_dir.join(&blob), bytes) // P-02豁免:内容寻址 blob 新建唯一文件
             .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
         conn.execute(
             r#"INSERT INTO clip_entries

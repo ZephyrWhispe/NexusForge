@@ -2,11 +2,12 @@
 name = "notes-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 authors.workspace = true
 
 [dependencies]
 parking_lot = { workspace = true }
-host-core = { path = "../host-core" }
+host-core = { path = "../host-core", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

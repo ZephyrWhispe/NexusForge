@@ -22,6 +22,8 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
+    # GOV-02 实测接线：本仓 18 个第一方 crate 继承 root 的 GPL-3.0-only（LICENSE 在库根）
+    "GPL-3.0-only",
 ]
 # 置信度阈值：低置信度的 license 判定按未许可处理（宁可红不可漏）
 confidence-threshold = 0.93
@@ -41,8 +43,39 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
 [advisories]
 version = 2
-# CI 阻断在已知漏洞（RUSTSEC 有 patch/无 patch 的处理策略：有 patch 必须升级）
-vulnerability = "deny"
-unmaintained = "warn"
+# 只对本仓直接依赖（workspace）告警未维护项，传递依赖降噪
+unmaintained = "workspace"
 yanked = "deny"
-severity-threshold = "medium"
+# GOV-02 实测首轮命中 22 条（2026-09-25，本机 advisory-db 快照 593df8c 实跑）。
+# 全部属"跨 API 依赖升级立项"，逐条挂账 DECISIONS D-35，禁止无理由 ignore：
+#   wasmtime 18 条 → automation-core 宿主面升级立项（29 线无补丁位，须迁 24 LTS 或 ≥36）
+#   russh 2 条 + ed25519-dalek 1 条 → term/file-core SSH 栈升级立项（0.46→≥0.60）
+#   lopdf 1 条 → editor-core 升级立项（0.36→≥0.42）
+# 立项落地即删对应行；期间新增漏洞仍会照常报红（只 ignore 已登记 ID）。
+ignore = [
+    # --- wasmtime（D-35 挂账 ①）---
+    { id = "RUSTSEC-2025-0046", reason = "D-35 挂账：wasmtime 29→24 LTS/≥36 升级立项" },
+    { id = "RUSTSEC-2025-0118", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0006", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0020", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0021", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0085", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0086", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0087", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0088", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0089", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0091", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0092", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0093", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0094", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0095", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0096", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0222", reason = "D-35 挂账：wasmtime 升级立项" },
+    { id = "RUSTSEC-2026-0269", reason = "D-35 挂账：wasmtime 升级立项（沙箱逃逸，插件宿主面重点）" },
+    # --- SSH 栈（D-35 挂账 ②）---
+    { id = "RUSTSEC-2026-0153", reason = "D-35 挂账：russh 0.46→≥0.60 升级立项" },
+    { id = "RUSTSEC-2026-0154", reason = "D-35 挂账：russh 0.46→≥0.60 升级立项" },
+    { id = "RUSTSEC-2023-0071", reason = "D-35 挂账：ed25519-dalek 1.x（russh-keys 传递）随 russh 升级消解；本仓密钥为 DPAPI 封装本地生成，非 HD 派生面" },
+    # --- PDF（D-35 挂账 ③）---
+    { id = "RUSTSEC-2026-0187", reason = "D-35 挂账：lopdf 0.36→≥0.42 升级立项" },
+]

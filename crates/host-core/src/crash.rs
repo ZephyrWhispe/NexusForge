@@ -37,6 +37,7 @@ pub fn install_panic_hook(app_data_dir: PathBuf) {
             "recent_log_hint": "详见 log/ 目录当日日志末尾 50 行",
         });
         let _ = std::fs::write(
+            // P-02豁免:崩溃诊断标记尽力而为,可丢
             dir.join(format!("crash_{ts}.json")),
             serde_json::to_string_pretty(&report).unwrap_or_default(),
         );

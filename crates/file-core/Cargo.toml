@@ -2,12 +2,13 @@
 name = "file-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 authors.workspace = true
 description = "文件与存储模块核心（docs/impl/05 F1–F7）：浏览/操作队列/冲突/预览/搜索/驱动/重命名"
 
 [dependencies]
 parking_lot = { workspace = true }
-host-core = { path = "../host-core" }
+host-core = { path = "../host-core", version = "0.1.0" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

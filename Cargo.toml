@@ -6,7 +6,7 @@ members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/ne
 version = "0.1.0"
 edition = "2021"
 authors = ["ZephyrWhispe"]
-license = "GPL-3.0"
+license = "GPL-3.0-only"  # GOV-02 deny 实测：旧式 "GPL-3.0" 系 18 枚 parse-error 告警源，与 THIRD_PARTY_LICENSES 声明口径统一
 # GOV-06：MSRV 机器可判（DESIGN 声称 Rust 1.80+；CI 锁 stable，本值是下限不是追踪目标）
 rust-version = "1.80"
 

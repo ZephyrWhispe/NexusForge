@@ -2,6 +2,7 @@
 name = "nexusforge-helper"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 authors.workspace = true
 description = "WinOps 提权辅助进程（nexusforge-sys-helper.exe）：命名管道 JSON-RPC + 方法白名单（docs/impl/08 §4）"
 
@@ -10,7 +11,7 @@ name = "nexusforge-sys-helper"
 path = "src/main.rs"
 
 [dependencies]
-host-core = { path = "../host-core" }
-win-integration = { path = "../win-integration" }
+host-core = { path = "../host-core", version = "0.1.0" }
+win-integration = { path = "../win-integration", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true

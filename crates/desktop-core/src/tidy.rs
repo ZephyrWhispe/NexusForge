@@ -305,7 +305,8 @@ impl TidyPlanner {
                 applied_ms: manifest.applied_ms,
                 committed: manifest.committed,
             };
-            std::fs::write(&self.manifest_path, serde_json::to_vec(&m)?)?;
+            // P-02：还原台账半截即失去撤销能力，原子写
+            host_core::util::write_atomic(&self.manifest_path, &serde_json::to_vec(&m)?)?;
         }
         Ok(restored)
     }

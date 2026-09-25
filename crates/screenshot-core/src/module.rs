@@ -1319,7 +1319,7 @@ impl ScreenshotModule {
         let file_rel = format!("pins/{id}.png");
         let path = dir.join(&file_rel);
         let (bytes, _) = util::encode_rgba(util::EncodeFormat::Png, 80, w, h, rgba)?;
-        std::fs::write(&path, &bytes)
+        std::fs::write(&path, &bytes) // P-02豁免:uuid 新建 png 唯一文件
             .map_err(|e| mod_err("SCREENSHOT_PIN_004", format!("写入失败: {e}")))?;
         let record = PinRecord {
             id: id.clone(),

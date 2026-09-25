@@ -2,11 +2,12 @@
 name = "sys-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 authors.workspace = true
 
 [dependencies]
 parking_lot = { workspace = true }
-host-core = { path = "../host-core" }
+host-core = { path = "../host-core", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -14,4 +15,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 # 验收测试（docs/impl/06 尾部清单）：真实回收站路径
-win-integration = { path = "../win-integration" }
+win-integration = { path = "../win-integration", version = "0.1.0" }

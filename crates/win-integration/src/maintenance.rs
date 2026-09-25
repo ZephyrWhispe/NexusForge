@@ -117,7 +117,7 @@ impl MaintenanceWin {
             };
             (path, vec!["/uninstall".to_string()])
         } else {
-            (program.to_string(), args.to_vec())
+            (program.to_string(), args.to_vec()) // SEC-02:已过 EXEC_ALLOWLIST+args_are_templated 模板白名单
         };
         let mut child = std::process::Command::new(&exe)
             .args(&real_args)

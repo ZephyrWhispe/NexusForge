@@ -326,7 +326,8 @@ impl AutomationModule {
         }
         let data = serde_json::to_vec_pretty(rules)
             .map_err(|e| AutomationError::BadRule(format!("规则序列化失败: {e}")))?;
-        std::fs::write(&self.rules_path, data).map_err(AutomationError::Io)
+        // P-02 扫描首跑揪出的裸覆写：规则文件就地写会留半截 JSON，改走原子写
+        host_core::util::write_atomic(&self.rules_path, &data).map_err(AutomationError::Io)
     }
 
     fn load_rules(&self) {

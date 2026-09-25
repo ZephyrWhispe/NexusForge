@@ -462,7 +462,8 @@ impl EditorSessions {
             autosave_path(&s.path)
         };
         // 草稿恒 UTF-8（恢复时重新检测，无需保持原编码）
-        std::fs::write(&p, content.as_bytes())?;
+        // P-02：草稿是"上一份好副本 vs 半截新副本"的博弈面，必须原子写
+        host_core::util::write_atomic(&p, content.as_bytes())?;
         if let Some(s) = self.lock().get_mut(id) {
             s.autosave_draft = true;
         }
