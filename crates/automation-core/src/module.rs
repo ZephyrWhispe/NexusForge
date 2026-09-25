@@ -350,6 +350,12 @@ impl AutomationModule {
 
     /// dispatcher：订阅全部主题 → 匹配规则 → 求值 → 执行（automation 自产事件跳过，防自环）
     fn start_dispatcher(&self) {
+        // COR-30：幂等守卫——未 stop 直接 start 会让旧调度线程持旧令牌（永不置真，
+        // 每日触发双份）、旧订阅任务叠加。shutdown 通道在位 = dispatcher 在跑。
+        if self.shutdown.read().is_some() {
+            tracing::warn!("automation dispatcher 已在运行，跳过重复启动（先 stop 再 start）");
+            return;
+        }
         let Some(bus) = self.bus.read().clone() else {
             return;
         };
@@ -398,7 +404,15 @@ impl AutomationModule {
                                     .cloned()
                                     .collect();
                                 for r in matched {
-                                    engine.fire(&r, &payload, event.ts);
+                                    // PERF-07：fire 内含失败重试的同步 sleep（最长
+                                    // ~1.5s）——放 blocking 池，不占 tokio worker
+                                    let eng = engine.clone();
+                                    let rr = r.clone();
+                                    let pp = payload.clone();
+                                    let ts = event.ts;
+                                    let _ =
+                                        tokio::task::spawn_blocking(move || eng.fire(&rr, &pp, ts))
+                                            .await;
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -450,31 +464,18 @@ impl AutomationModule {
 
 use host_core::util::now_ms;
 
-/// 本地时区当前 "HH:MM" 与 "YYYY-MM-DD"
+/// 本地时区当前 "HH:MM" 与 "YYYY-MM-DD"。
+/// COR-13：应用内触发与 Windows 计划任务（按**本地**时间解释 HH:MM）必须同基准
+/// ——旧实现用 UTC epoch 直除，中国时区下两条路径相差 8 小时（重复/错时触发）。
+/// chrono Local 读系统时区（含夏令时由 OS 处理）；参数 now_ms 仅用于测试注入一致性，
+/// 实际时区偏移取自当前时刻。
 fn current_hhmm_date(now_ms: i64) -> (String, String) {
-    // chrono 未引入 automation-core——用偏移近似（本地时区偏移读取走 desktop-core 同款）
-    let secs = now_ms / 1000;
-    let days = secs.div_euclid(86_400);
-    let secs_of_day = secs.rem_euclid(86_400);
-    let hh = (secs_of_day / 3600) as u8;
-    let mm = ((secs_of_day % 3600) / 60) as u8;
-    // 日期仅用于防重（UTC 日界即可；跨时区误差 ≤ 触发一次的容差）
-    let (y, mo, d) = civil_from_days(days);
-    (format!("{hh:02}:{mm:02}"), format!("{y:04}-{mo:02}-{d:02}"))
-}
-
-/// Howard Hinnant civil_from_days（天数 → 公历日期）
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    let _ = now_ms; // 保留签名兼容既有调用点；时区事实源 = chrono::Local
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    let hhmm = format!("{:02}:{:02}", now.hour(), now.minute());
+    let date = now.format("%Y-%m-%d").to_string();
+    (hhmm, date)
 }
 
 /// dispatcher 任务存活的 RAII 计数守卫（S4）：构造 +1、Drop −1，
@@ -553,6 +554,13 @@ impl Module for AutomationModule {
         {
             let g = self.cancel.read();
             g.store(true, Ordering::SeqCst);
+        }
+        // COR-30：取出本轮调度线程句柄交给短命线程回收（token 已置真，线程在
+        // 下个 tick 自行退出；同步 stop 里不 join，避免阻塞调用方）
+        if let Some(h) = self.thread.write().take() {
+            std::thread::spawn(move || {
+                let _ = h.join();
+            });
         }
         if let Some(tx) = self.shutdown.write().take() {
             let _ = tx.send(true);

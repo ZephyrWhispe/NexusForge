@@ -24,7 +24,7 @@ use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::browse::to_long_path;
+use crate::browse::{safe_rel_path, to_long_path};
 use crate::conflict::{resolve_target, unique_target, ConflictPolicy};
 use crate::error::FileError;
 use crate::namefix::FixPolicy;
@@ -731,9 +731,19 @@ pub fn read_pending(dir: &Path) -> Vec<PendingOp> {
         if p.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(raw) = std::fs::read(&p) {
-            if let Ok(pending) = serde_json::from_slice::<PendingOp>(&raw) {
-                out.push(pending);
+        // COR-23：损坏的恢复记录必须点名（静默跳过 = 用户断点丢失且无从得知）；
+        // 读取失败（占用/权限）同样记录
+        let raw = match std::fs::read(&p) {
+            Ok(raw) => raw,
+            Err(e) => {
+                tracing::warn!(path = %p.display(), error = %e, "崩溃恢复记录读取失败，已跳过");
+                continue;
+            }
+        };
+        match serde_json::from_slice::<PendingOp>(&raw) {
+            Ok(pending) => out.push(pending),
+            Err(e) => {
+                tracing::warn!(path = %p.display(), error = %e, "崩溃恢复记录解析失败，已跳过");
             }
         }
     }
@@ -1592,8 +1602,17 @@ fn build_remote_items(
                         } else {
                             format!("{prefix}/{rel}")
                         };
-                        let target =
-                            dst_local.join(full_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                        // SEC-06：远端条目名不可信——段级校验 + 词法复核，
+                        // 恶意服务端返回 `..\..\evil` 时拒绝落盘而非写出目标目录
+                        let Some(rel_safe) = safe_rel_path(&full_rel) else {
+                            tracing::warn!(rel = %full_rel, "远端条目名非法，跳过下载");
+                            continue;
+                        };
+                        let target = dst_local.join(&rel_safe);
+                        if !target.starts_with(&dst_local) {
+                            tracing::warn!(rel = %full_rel, "下载落点越出目标目录，跳过");
+                            continue;
+                        }
                         items.push(XferItem {
                             src: Leg::Remote(drv.clone(), rpath),
                             dst: Leg::Local(target),
@@ -2169,6 +2188,11 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
         Err(e) => return zip_err(e),
     };
     rep.cur.files_total = archive.len() as u64;
+    // COR-24：条目数上限（zip bomb 高压缩比包万级条目即可拖垮进度与 fs）
+    const MAX_ENTRIES: usize = 100_000;
+    if archive.len() > MAX_ENTRIES {
+        return Flow::msg(format!("压缩包条目数超过上限（{MAX_ENTRIES}）"));
+    }
     let mut bytes_total = 0u64;
     for i in 0..archive.len() {
         if let Ok(entry) = archive.by_index(i) {
@@ -2189,14 +2213,21 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
             Ok(e) => e,
             Err(e) => return zip_err(e),
         };
-        // zip-slip 防护：拒绝逃逸根目录的条目
+        // zip-slip 防护（SEC-05）：段级校验拒绝 `..`/根相对（`\Windows\x`）/盘符/ADS；
+        // 字符串 contains("..") + is_absolute() 在 Windows 语义下均不充分
         let name = entry.name().to_owned();
-        if name.contains("..") || Path::new(&name).is_absolute() {
-            tracing::warn!(name = %name, "跳过可疑 zip 条目");
+        let Some(rel) = safe_rel_path(&name) else {
+            tracing::warn!(name = %name, "跳过可疑 zip 条目（段级校验失败）");
+            rep.cur.files_done += 1;
+            continue;
+        };
+        let out_path = root.join(&rel);
+        // 纵深防御：词法复核最终路径仍在解压根内
+        if !out_path.starts_with(&root) {
+            tracing::warn!(name = %name, "跳过越出解压根的条目");
             rep.cur.files_done += 1;
             continue;
         }
-        let out_path = root.join(&name);
         if entry.is_dir() {
             if let Err(e) = std::fs::create_dir_all(to_long_path(&out_path)) {
                 return Flow::io(e);
@@ -2208,6 +2239,14 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
             if let Err(e) = std::fs::create_dir_all(to_long_path(parent)) {
                 return Flow::io(e);
             }
+        }
+        // COR-24：单文件解压字节上限 + 实际拷贝限流（声明值仅预检，实际字节为准）
+        const MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 单文件 2 GiB
+        if entry.size() > MAX_ENTRY_BYTES {
+            return Flow::msg(format!(
+                "压缩包内单个文件超过解压上限（{MAX_ENTRY_BYTES} 字节）: {}",
+                entry.name()
+            ));
         }
         // 包内冲突：Skip 之外…——T-B6-7 收口：Ask 不得被当成"已决议"，
         // 静默改名与静默覆盖同罪；Overwrite 显式放行
@@ -2236,8 +2275,15 @@ fn run_extract(spec: &OpSpec, ctl: &OpControl, rep: &mut Reporter) -> Flow {
             Ok(o) => o,
             Err(e) => return Flow::io(e),
         };
-        if let Err(e) = std::io::copy(&mut entry, &mut out) {
-            return Flow::io(e);
+        // take(+1) 探测"实际 > 声明"的谎报条目；超限删除半成品并中止
+        let copied = match std::io::copy(&mut (&mut entry).take(MAX_ENTRY_BYTES + 1), &mut out) {
+            Ok(n) => n,
+            Err(e) => return Flow::io(e),
+        };
+        if copied > MAX_ENTRY_BYTES {
+            drop(out);
+            let _ = std::fs::remove_file(to_long_path(&final_path));
+            return Flow::msg("解压超出单文件上限（实际字节超过声明值），已中止");
         }
         rep.cur.bytes_done += entry.size();
         rep.cur.files_done += 1;
@@ -2537,6 +2583,65 @@ mod tests {
                 .unwrap()
                 .len(),
             5 * 1024 * 1024
+        );
+        q.close();
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    /// SEC-05：zip-slip 变体负例——根相对（`\Windows\x`）、`..` 穿越、盘符条目
+    /// 全部必须跳过且无越界落盘
+    #[test]
+    fn extract_rejects_root_relative_and_parent_entries() {
+        use zip::write::SimpleFileOptions;
+        let dst = tmpdir("zip_slip_out");
+        let zipfile = dst.join("evil.zip");
+        let file = File::create(&zipfile).unwrap();
+        let mut w = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default();
+        // 根相对（Windows 下 is_absolute()==false，join 会替换根——旧判定放行）
+        w.start_file(r"\Windows\System32\evil.dll", opts).unwrap();
+        std::io::Write::write_all(&mut w, b"pwn").unwrap();
+        // 父目录穿越
+        w.start_file(r"..\..\evil_parent.txt", opts).unwrap();
+        std::io::Write::write_all(&mut w, b"pwn").unwrap();
+        // 盘符绝对
+        w.start_file(r"C:\evil_abs.txt", opts).unwrap();
+        std::io::Write::write_all(&mut w, b"pwn").unwrap();
+        // 良性条目（验证包仍解出正常部分）
+        w.start_file("ok.txt", opts).unwrap();
+        std::io::Write::write_all(&mut w, b"fine").unwrap();
+        w.finish().unwrap();
+
+        let ext_dir = dst.join("out");
+        let (cb, _) = sink();
+        let store = tmpdir("zip_slip_store");
+        let q = OpQueue::new(store, 1, cb).unwrap();
+        let op = q
+            .enqueue(OpSpec {
+                name_fix: None,
+                name_overrides: Default::default(),
+                kind: OpKind::Extract,
+                srcs: vec![L(zipfile.clone())],
+                dst: L(ext_dir.clone()),
+                policy: ConflictPolicy::Overwrite,
+                recycle: false,
+            })
+            .unwrap();
+        assert!(wait_until(
+            || op_state(&q, &op) == OpState::Done,
+            Duration::from_secs(10)
+        ));
+        // 良性条目照常解出
+        assert_eq!(std::fs::read(ext_dir.join("ok.txt")).unwrap(), b"fine");
+        // 恶意条目零落盘
+        assert!(!ext_dir.join("Windows").exists(), "根相对条目不得落盘");
+        assert!(
+            !ext_dir.join("evil_parent.txt").exists(),
+            "穿越条目不得落盘"
+        );
+        assert!(
+            !PathBuf::from(r"C:\evil_abs.txt").exists(),
+            "盘符条目不得落盘"
         );
         q.close();
         let _ = std::fs::remove_dir_all(&dst);

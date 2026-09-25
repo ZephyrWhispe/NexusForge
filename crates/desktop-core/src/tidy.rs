@@ -136,6 +136,10 @@ pub struct MovedEntry {
 pub struct TidyManifest {
     pub moves: Vec<MovedEntry>,
     pub applied_ms: i64,
+    /// COR-19：0 = 预登记（尚未完成）；>0 = 提交时间。崩溃后 restore 仍可按
+    /// from→to 反向恢复已移动部分（serde default 旧文件零迁移）
+    #[serde(default)]
+    pub committed: bool,
 }
 
 pub struct TidyPlanner {
@@ -170,12 +174,43 @@ impl TidyPlanner {
     /// 执行整理：建分类文件夹 + 移动；manifest 落盘后才算成功。
     /// 目标夹解析：tidy_map 命中类名 ⇒ 表内绝对路径；否则 `{桌面}/{分类名}`（旧行为）。
     /// 返回 (移动数, 跳过数)。
+    ///
+    /// COR-19：manifest **先写"预登记"再移动**——旧顺序（先移后写）在 manifest
+    /// 写失败时文件已散落而 restore() 的唯一依据不存在，用户看到失败却无法还原。
     pub fn apply(&self, desktop: &Path) -> Result<(usize, usize)> {
         let plan = self.plan(desktop)?;
         if plan.total == 0 {
             return Ok((0, 0));
         }
         let map = self.tidy_map.read().clone();
+
+        // COR-19 ①：预登记 manifest（committed = false 表示尚未完成，崩溃后
+        // restore() 仍可按 from→to 反向恢复已移动部分）
+        let pre = TidyManifest {
+            moves: plan
+                .groups
+                .iter()
+                .flat_map(|(cat, items)| items.iter().map(move |it| (cat.clone(), it.clone())))
+                .map(|(cat, it)| {
+                    let target_dir = map
+                        .as_ref()
+                        .and_then(|m| {
+                            m.categories
+                                .iter()
+                                .find(|(n, _, _)| n == &cat)
+                                .map(|(_, folder, _)| PathBuf::from(folder))
+                        })
+                        .unwrap_or_else(|| desktop.join(&cat));
+                    MovedEntry {
+                        from: it.path.clone(),
+                        to: target_dir.join(&it.name).display().to_string(),
+                    }
+                })
+                .collect(),
+            applied_ms: 0,
+            committed: false,
+        };
+        self.write_manifest(&pre)?;
 
         let mut moves = Vec::new();
         let mut skipped = 0usize;
@@ -210,19 +245,32 @@ impl TidyPlanner {
         }
 
         if moves.is_empty() {
+            // 全部跳过：预登记 manifest 作废（清掉，避免 restore 拿到空计划）
+            let _ = std::fs::remove_file(&self.manifest_path);
             return Ok((0, skipped));
         }
+        // COR-19 ②：提交态 manifest（applied_ms 落定）
         let manifest = TidyManifest {
             moves,
             applied_ms: now_ms(),
+            committed: true,
         };
+        self.write_manifest(&manifest)?;
+        Ok((manifest.moves.len(), skipped))
+    }
+
+    /// manifest 唯一写点（预登记与提交态共用）
+    fn write_manifest(&self, manifest: &TidyManifest) -> Result<()> {
         if let Some(parent) = self.manifest_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| DesktopError::Tidy(format!("manifest 目录创建失败: {e}")))?;
         }
-        std::fs::write(&self.manifest_path, serde_json::to_vec(&manifest)?)
+        let tmp = self.manifest_path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(manifest)?)
             .map_err(|e| DesktopError::Tidy(format!("manifest 写入失败: {e}")))?;
-        Ok((manifest.moves.len(), skipped))
+        std::fs::rename(&tmp, &self.manifest_path)
+            .map_err(|e| DesktopError::Tidy(format!("manifest 写入失败: {e}")))?;
+        Ok(())
     }
 
     /// 还原上次整理：按 manifest 反向移动（目标被占用/已删的跳过）。
@@ -255,6 +303,7 @@ impl TidyPlanner {
             let m = TidyManifest {
                 moves: remaining,
                 applied_ms: manifest.applied_ms,
+                committed: manifest.committed,
             };
             std::fs::write(&self.manifest_path, serde_json::to_vec(&m)?)?;
         }

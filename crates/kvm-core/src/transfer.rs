@@ -315,6 +315,49 @@ impl TransferManager {
         self.root.join(format!("{transfer_id}.part"))
     }
 
+    /// COR-10：对端可控字段的校验表（上限 + 交叉一致性）。
+    /// chunk 上限 = 协议常量 [`CHUNK_SIZE`]（发送端实际使用的块大小）。
+    fn validate_meta(meta: &FileMetaPayload) -> Result<(), AppError> {
+        const MAX_TRANSFER_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB，产品口径
+        if meta.size > MAX_TRANSFER_BYTES {
+            return Err(AppError::module(
+                "KVM_TRANSFER_020",
+                format!("文件超过接收上限（{MAX_TRANSFER_BYTES} 字节）"),
+                None,
+            ));
+        }
+        // 空文件：无块语义（total_chunks 必须为 0），由调用方的 size==0 直通分支处理
+        if meta.size == 0 {
+            if meta.total_chunks != 0 {
+                return Err(AppError::module(
+                    "KVM_TRANSFER_022",
+                    "空文件的块总数必须为 0",
+                    None,
+                ));
+            }
+            return Ok(());
+        }
+        if meta.chunk_size == 0 || meta.chunk_size > CHUNK_SIZE as u32 {
+            return Err(AppError::module(
+                "KVM_TRANSFER_021",
+                "块大小非法（0 或超过协议上限）",
+                None,
+            ));
+        }
+        let expect = meta.size.div_ceil(meta.chunk_size as u64);
+        if meta.total_chunks == 0 || meta.total_chunks != expect {
+            return Err(AppError::module(
+                "KVM_TRANSFER_022",
+                format!(
+                    "块总数与大小不符（声明 {}，按 size 应为 {expect}）",
+                    meta.total_chunks
+                ),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     /// FileMeta：建档 / 续传重入 / 空文件直通
     pub fn on_meta(&self, meta: FileMetaPayload) -> Result<MetaOutcome, AppError> {
         if meta.sha256 != meta.transfer_id {
@@ -324,6 +367,9 @@ impl TransferManager {
                 None,
             ));
         }
+        // COR-10：size/chunk_size/total_chunks 均为已配对对端可控——上限与一致性
+        // 双重校验（防 TB 级稀疏文件耗盘、溢出 panic、错位覆写）
+        Self::validate_meta(&meta)?;
         std::fs::create_dir_all(&self.root).map_err(|e| {
             AppError::module("KVM_TRANSFER_011", format!("创建接收目录失败: {e}"), None)
         })?;
@@ -382,6 +428,17 @@ impl TransferManager {
             let incoming = transfers.get_mut(&transfer_id).ok_or_else(|| {
                 AppError::module("KVM_TRANSFER_012", "收到未建档的 FileChunk", None)
             })?;
+            if index >= incoming.meta.total_chunks {
+                // COR-10：块索引越界（旧写法 index*chunk_size 在 debug 下溢出 panic）
+                return Err(AppError::module(
+                    "KVM_TRANSFER_023",
+                    format!(
+                        "块索引越界（index {index} ≥ total {}）",
+                        incoming.meta.total_chunks
+                    ),
+                    None,
+                ));
+            }
             if !incoming.received.insert(index) {
                 // 重复块（续传重发）：已落盘，跳过写入
             } else {
@@ -392,7 +449,16 @@ impl TransferManager {
                         None,
                     ));
                 }
-                let offset = index * incoming.meta.chunk_size as u64;
+                let offset = index
+                    .checked_mul(incoming.meta.chunk_size as u64)
+                    .ok_or_else(|| AppError::module("KVM_TRANSFER_024", "块偏移计算溢出", None))?;
+                if offset + data.len() as u64 > incoming.meta.size {
+                    return Err(AppError::module(
+                        "KVM_TRANSFER_025",
+                        "块写到声明文件尾之后",
+                        None,
+                    ));
+                }
                 use std::io::{Seek, Write};
                 let f = &mut incoming.file;
                 f.seek(SeekFrom::Start(offset))
@@ -558,6 +624,64 @@ mod tests {
         assert_eq!(std::fs::read(&final_path).unwrap(), body);
         // part 文件已改名消失
         assert!(!mgr.part_path(&sha_hex).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- COR-10：对端可控元数据的校验负例 ----
+
+    #[test]
+    fn meta_rejects_oversize_and_inconsistent_chunks() {
+        let root = temp_root("meta-guard");
+        let mgr = TransferManager::new(&root);
+        let base = |size: u64, chunk: u32, total: u64| FileMetaPayload {
+            transfer_id: "aa".repeat(32),
+            name: "x.bin".into(),
+            size,
+            sha256: "aa".repeat(32),
+            chunk_size: chunk,
+            total_chunks: total,
+        };
+        // TB 级稀疏文件
+        let err = mgr
+            .on_meta(base(9u64 * 1024 * 1024 * 1024, 1024 * 1024, 8640))
+            .unwrap_err();
+        assert!(err.to_string().contains("接收上限"), "{err}");
+        // chunk_size 非法：0 与超过协议上限（CHUNK_SIZE）
+        for chunk in [0u32, CHUNK_SIZE as u32 + 1] {
+            let err = mgr.on_meta(base(1024, chunk, 1)).unwrap_err();
+            assert!(err.to_string().contains("块大小非法"), "{err}");
+        }
+        // 块总数与大小不符
+        let err = mgr.on_meta(base(1024, 300, 99)).unwrap_err();
+        assert!(err.to_string().contains("块总数与大小不符"), "{err}");
+        // 合法组合放行（1024 / 300 → 4 块）
+        assert!(matches!(
+            mgr.on_meta(base(1024, 300, 4)).unwrap(),
+            MetaOutcome::Accepted { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chunk_index_beyond_total_is_rejected() {
+        let root = temp_root("idx-guard");
+        let mgr = TransferManager::new(&root);
+        let body = vec![1u8; 600]; // 2 块（300/块）
+        let sha_hex = sha256_hex(&body);
+        let mut sha = [0u8; 32];
+        sha.copy_from_slice(&hex_to_bytes(&sha_hex));
+        let meta = FileMetaPayload {
+            transfer_id: sha_hex.clone(),
+            name: "idx.bin".into(),
+            size: body.len() as u64,
+            sha256: sha_hex,
+            chunk_size: 300,
+            total_chunks: 2,
+        };
+        mgr.on_meta(meta).unwrap();
+        // 越界索引（修复前 release 下回绕 seek 到错误偏移覆写）
+        let err = mgr.on_chunk(&encode_chunk(sha, 5, b"evil")).unwrap_err();
+        assert!(err.to_string().contains("越界"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

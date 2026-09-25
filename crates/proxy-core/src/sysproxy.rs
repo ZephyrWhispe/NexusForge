@@ -21,6 +21,11 @@ const BACKUP_FILE: &str = "proxy_backup.json";
 struct Backup {
     ts_ms: u64,
     state: SysProxyState,
+    /// SEC-09：开启时**实际写入**的 server（`127.0.0.1:{port}`）。残留识别据此
+    /// 比对，不再依赖"当前配置的 mixed_port"——改端口后强杀的残留才能被识别。
+    /// 旧版备份无此字段 → 回落旧判定（与旧行为一致，不劣化）。
+    #[serde(default)]
+    applied_server: Option<String>,
 }
 
 fn backup_path(proxy_dir: &Path) -> PathBuf {
@@ -45,20 +50,42 @@ pub fn backup_before_enable(proxy_dir: &Path, sp: &dyn SysProxyPort) -> Result<(
     let backup = Backup {
         ts_ms: now_ms(),
         state: current,
+        applied_server: None,
     };
+    write_backup(proxy_dir, &backup)
+}
+
+fn write_backup(proxy_dir: &Path, backup: &Backup) -> Result<()> {
     let tmp = backup_path(proxy_dir).with_extension("json.tmp");
     std::fs::create_dir_all(proxy_dir)?;
-    std::fs::write(&tmp, serde_json::to_vec(&backup)?)?;
+    std::fs::write(&tmp, serde_json::to_vec(backup)?)?;
     std::fs::rename(&tmp, backup_path(proxy_dir))?;
     Ok(())
+}
+
+fn read_backup(proxy_dir: &Path) -> Option<Backup> {
+    let raw = std::fs::read(backup_path(proxy_dir)).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+/// SEC-09：enable 实际写入注册表后，把"我们写入的 server"补记进备份
+/// （backup_before_enable 在写入前执行，此刻才知道 applied 值）。
+fn record_applied_server(proxy_dir: &Path, applied: &str) {
+    if let Some(mut b) = read_backup(proxy_dir) {
+        b.applied_server = Some(applied.to_string());
+        if let Err(e) = write_backup(proxy_dir, &b) {
+            tracing::warn!(error = %e, "记录 applied_server 失败（残留识别将回落旧判定）");
+        }
+    }
 }
 
 /// 启用系统代理：指向本机 mixed 入站并广播生效
 pub fn enable(proxy_dir: &Path, sp: &dyn SysProxyPort, mixed_port: u16) -> Result<()> {
     backup_before_enable(proxy_dir, sp)?;
+    let applied = our_server(mixed_port);
     let state = SysProxyState {
         enable: true,
-        server: our_server(mixed_port),
+        server: applied.clone(),
         // 系统默认例外 + 本机直连（防自旋：应用自身的 IPC/内核流量不走代理）
         bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>".into(),
     };
@@ -66,6 +93,7 @@ pub fn enable(proxy_dir: &Path, sp: &dyn SysProxyPort, mixed_port: u16) -> Resul
         .map_err(|e| ProxyError::SysProxy(format!("写入系统代理失败: {e}")))?;
     sp.refresh()
         .map_err(|e| ProxyError::SysProxy(format!("刷新系统代理失败: {e}")))?;
+    record_applied_server(proxy_dir, &applied);
     Ok(())
 }
 
@@ -99,16 +127,21 @@ pub fn restore_quiet(proxy_dir: &Path, sp: &dyn SysProxyPort) {
     }
 }
 
-/// 启动扫描：备份存在 && 当前系统代理正是我们写入的值 → kill -9 残留，还原。
-/// 返回是否执行了还原（UI 提示用）。用户后来自己改过系统代理则不动。
+/// 启动扫描：备份存在 && 当前系统代理正是**备份中记录的我们写入值** → kill -9
+/// 残留，还原（SEC-09：不再用"当前配置的 mixed_port"反算——改端口后强杀的
+/// 残留也能被识别；旧版备份无记录则回落旧判定）。用户后来自己改过则不动。
 pub fn restore_if_ours(proxy_dir: &Path, sp: &dyn SysProxyPort, mixed_port: u16) -> Result<bool> {
-    if !backup_path(proxy_dir).exists() {
+    let Some(backup) = read_backup(proxy_dir) else {
         return Ok(false);
-    }
+    };
     let current = sp
         .read()
         .map_err(|e| ProxyError::SysProxy(format!("读取当前系统代理失败: {e}")))?;
-    if current.enable && current.server == our_server(mixed_port) {
+    let ours = backup
+        .applied_server
+        .clone()
+        .unwrap_or_else(|| our_server(mixed_port));
+    if current.enable && current.server == ours {
         restore(proxy_dir, sp)?;
         tracing::warn!("检测到上次运行残留的系统代理，已自动还原");
         Ok(true)
@@ -279,6 +312,37 @@ mod tests {
         assert!(!restore_if_ours(&dir, &sp, 7890).unwrap());
         assert_eq!(sp.read().unwrap().server, "8.8.8.8:3128");
         assert!(!has_backup(&dir), "失效备份应清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- SEC-09：改端口后强杀的残留必须仍能识别还原 ----
+
+    #[test]
+    fn restore_works_after_port_change_then_crash() {
+        let dir = tmpdir("scan-port-change");
+        let sp = MockSp::new();
+        // 开启（注册表写入 127.0.0.1:7890）
+        enable(&dir, &sp, 7890).unwrap();
+        // 用户改 mixed_port（只改内存/持久化，注册表仍是旧端口）→ 模拟强杀
+        // 下次启动用新端口 7891 扫描：备份记录的实际写入值仍是 7890 → 必须还原
+        let restored = restore_if_ours(&dir, &sp, 7891).unwrap();
+        assert!(restored, "改端口后强杀的残留必须被识别（SEC-09 核心场景）");
+        assert!(!sp.read().unwrap().enable, "还原后系统代理应关闭");
+        assert!(!has_backup(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn applied_server_recorded_on_enable() {
+        let dir = tmpdir("applied-rec");
+        let sp = MockSp::new();
+        enable(&dir, &sp, 7890).unwrap();
+        let b = read_backup(&dir).expect("备份应存在");
+        assert_eq!(
+            b.applied_server.as_deref(),
+            Some("127.0.0.1:7890"),
+            "开启后备份必须记录实际写入值"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

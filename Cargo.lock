@@ -221,6 +221,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "automation-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "host-core",
  "parking_lot",
  "serde",
@@ -2404,6 +2405,8 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
+ "chardetng",
+ "encoding_rs 0.8.41",
  "hkdf",
  "jsonschema",
  "parking_lot",
@@ -3035,6 +3038,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -3479,6 +3483,7 @@ dependencies = [
 name = "notes-core"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs 0.8.41",
  "host-core",
  "parking_lot",
  "regex",
@@ -5872,6 +5877,7 @@ dependencies = [
  "tracing",
  "uuid",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

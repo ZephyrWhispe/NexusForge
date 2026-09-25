@@ -96,6 +96,14 @@ impl WasmRuntime {
                      len: i32|
                      -> wasmtime::Result<()> {
                         let url = read_guest_str(&mut caller, ptr, len)?;
+                        // SEC-16：ShellExecuteW("open") 对任意字符串都会尝试本地
+                        // 程序/.lnk/自定义协议（ms-settings: 等）——插件授权
+                        // "open" 拿到的必须是"浏览器开网页"，不是"启动任意目标"
+                        if !is_openable_url(&url) {
+                            return Err(wasmtime::Error::msg(
+                                "open_url 仅接受 http/https URL（本地程序与自定义协议不允许）",
+                            ));
+                        }
                         (caller.data().host)
                             .open_url(&url)
                             .map_err(|e| wasmtime::Error::msg(e.to_string()))
@@ -145,21 +153,53 @@ impl WasmRuntime {
     }
 }
 
-/// 从 guest 线性内存读 (ptr, len) 字符串（lossy UTF-8）
+/// 从 guest 线性内存读 (ptr, len) 字符串（lossy UTF-8）。
+/// COR-02：先校验长度上限与边界、**后分配**——guest 给出的 len 可达 i32::MAX，
+/// 先 `vec![0; len]` 会触发宿主 ~2GB 分配（OOM/abort，绕过仅约束 guest 内存的
+/// StoreLimits），把插件缺陷放大成宿主崩溃。
 fn read_guest_str(
     caller: &mut Caller<'_, HostCtx<'_>>,
     ptr: i32,
     len: i32,
 ) -> wasmtime::Result<String> {
+    /// 单次 host 调用可读取的 guest 字符串上限（协议层语义上限；日志/通知足够）
+    const MAX_GUEST_STR: usize = 1 << 20; // 1 MiB
+
     let mem: Memory = caller
         .get_export("memory")
         .and_then(|e| e.into_memory())
         .ok_or_else(|| wasmtime::Error::msg("guest 未导出 memory"))?;
-    let start = ptr.max(0) as usize;
-    let size = len.max(0) as usize;
-    let mut buf = vec![0u8; size];
+    let start = usize::try_from(ptr).map_err(|_| wasmtime::Error::msg("ptr 为负"))?;
+    let size = usize::try_from(len).map_err(|_| wasmtime::Error::msg("len 为负"))?;
+    if size > MAX_GUEST_STR {
+        return Err(wasmtime::Error::msg(format!(
+            "guest 字符串长度 {size} 超过上限 {MAX_GUEST_STR}"
+        )));
+    }
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| wasmtime::Error::msg("ptr+len 溢出"))?;
+    if end > mem.data_size(&mut *caller) {
+        return Err(wasmtime::Error::msg(format!(
+            "越界读取 guest 内存: {start}..{end} > {}",
+            mem.data_size(caller)
+        )));
+    }
+    let mut buf = vec![0u8; size]; // 此刻 size 已被上限与边界双重约束
     mem.read(caller, start, &mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// SEC-16：仅接受带 host 的 http/https URL（不引 url crate，前缀 + host 段判定足够）
+fn is_openable_url(s: &str) -> bool {
+    let rest = match s.strip_prefix("https://") {
+        Some(r) => r,
+        None => match s.strip_prefix("http://") {
+            Some(r) => r,
+            None => return false,
+        },
+    };
+    !rest.is_empty() && !rest.starts_with('/')
 }
 
 fn wasm_err(e: wasmtime::Error) -> AutomationError {
@@ -257,6 +297,15 @@ mod tests {
         );
     }
 
+    /// SEC-16 配套：open 腿的正对照载荷（合法 https URL，ptr=8 len=18）
+    const WAT_OPEN_URL_OK: &str = r#"
+        (module
+          (import "nf" "open_url" (func (param i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 8) "https://example.com")
+          (func (export "run") (call 0 (i32.const 8) (i32.const 18))))
+    "#;
+
     #[test]
     fn capped_import_is_unresolved() {
         // allow_open=false 时插件 import nf.open_url → 链接失败（未注册），权限即沙箱边界
@@ -280,10 +329,11 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("实例化失败"));
-        // 允许 open → 链接成功，宿主回调（本测试宿主返回 Err → 执行 Err）
+        // 允许 open → 链接成功，宿主回调（本测试宿主返回 Err → 执行 Err）。
+        // SEC-16：open_url 现要求 http/https，wat 载荷改为合法 URL（指针 8 处放 18 字节）
         let err = rt
             .run(
-                wat.as_bytes(),
+                WAT_OPEN_URL_OK.as_bytes(),
                 "run",
                 WasmCaps {
                     allow_open: true,
@@ -302,5 +352,138 @@ mod tests {
         let host: Arc<dyn WasmHost> = Arc::new(FakeHost::default());
         rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), host.as_ref())
             .unwrap();
+    }
+
+    // ---- COR-02：guest (ptr, len) 读取先校验后分配 ----
+
+    /// 恶意样本 3：nf.log 传 len = i32::MAX → 修复前宿主先分配 ~2GB（OOM/abort），
+    /// 修复后直接 Err（零分配）
+    #[test]
+    fn oversized_guest_len_is_rejected_without_host_alloc() {
+        let rt = WasmRuntime::new().unwrap();
+        let host = FakeHost::default();
+        let wat = r#"
+            (module
+              (import "nf" "log" (func (param i32 i32)))
+              (memory (export "memory") 1)
+              (func (export "run") (call 0 (i32.const 0) (i32.const 0x7FFFFFFF))))
+        "#;
+        let err = rt
+            .run(wat.as_bytes(), "run", WasmCaps::default(), &host)
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("超过上限") || msg.contains("越界"),
+            "巨量 len 必须在校验期拒绝: {msg}"
+        );
+        assert!(host.logs.lock().is_empty(), "宿主不得收到日志");
+    }
+
+    // ---- SEC-16：nf.open_url 仅接受 http/https ----
+
+    /// 恶意样本 4：open_url 传本地 exe 路径 → 校验期拒绝（宿主 open_url 不被触达）
+    #[test]
+    fn open_url_rejects_local_path_and_custom_scheme() {
+        let rt = WasmRuntime::new().unwrap();
+        let host = FakeHost::default();
+        // "C:\Windows\System32\calc.exe" = 29 字节（wat 内 \ 转义）
+        let wat_path = r#"
+            (module
+              (import "nf" "open_url" (func (param i32 i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 8) "C:\\Windows\\System32\\calc.exe")
+              (func (export "run") (call 0 (i32.const 8) (i32.const 29))))
+        "#;
+        let err = rt
+            .run(
+                wat_path.as_bytes(),
+                "run",
+                WasmCaps {
+                    allow_open: true,
+                    allow_notify: false,
+                },
+                &host,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("http/https"),
+            "本地路径必须被拒: {err}"
+        );
+        // "ms-settings:" = 12 字节
+        let wat_scheme = r#"
+            (module
+              (import "nf" "open_url" (func (param i32 i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 8) "ms-settings:")
+              (func (export "run") (call 0 (i32.const 8) (i32.const 12))))
+        "#;
+        let err = rt
+            .run(
+                wat_scheme.as_bytes(),
+                "run",
+                WasmCaps {
+                    allow_open: true,
+                    allow_notify: false,
+                },
+                &host,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("http/https"), "{err}");
+    }
+
+    /// 正对照：http(s) URL 形态通过校验（到达宿主；FakeHost 恒 Err 亦可证明已触达）
+    #[test]
+    fn open_url_allows_http_https() {
+        let rt = WasmRuntime::new().unwrap();
+        let host = FakeHost::default();
+        // "https://example.com/x" = 21 字节
+        let wat = r#"
+            (module
+              (import "nf" "open_url" (func (param i32 i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 8) "https://example.com/x")
+              (func (export "run") (call 0 (i32.const 8) (i32.const 21))))
+        "#;
+        let err = rt
+            .run(
+                wat.as_bytes(),
+                "run",
+                WasmCaps {
+                    allow_open: true,
+                    allow_notify: false,
+                },
+                &host,
+            )
+            .unwrap_err();
+        // FakeHost.open_url 恒 Err("open 未授权于测试")——到达宿主即证明校验放行
+        assert!(err.to_string().contains("未授权于测试"), "{err}");
+    }
+
+    #[test]
+    fn is_openable_url_predicate() {
+        assert!(is_openable_url("https://example.com"));
+        assert!(is_openable_url("http://a.b/c?d=1"));
+        assert!(!is_openable_url("https:///no-host"));
+        assert!(!is_openable_url("file:///C:/x"));
+        assert!(!is_openable_url("ms-settings:"));
+        assert!(!is_openable_url(""));
+    }
+
+    /// 越界 ptr（超出线性内存）拒绝而非宿主侧 trap 后才失败
+    #[test]
+    fn out_of_bounds_guest_read_is_rejected() {
+        let rt = WasmRuntime::new().unwrap();
+        let host = FakeHost::default();
+        let wat = r#"
+            (module
+              (import "nf" "log" (func (param i32 i32)))
+              (memory (export "memory") 1)
+              (func (export "run") (call 0 (i32.const 0xFFFF0000) (i32.const 64))))
+        "#;
+        let err = rt
+            .run(wat.as_bytes(), "run", WasmCaps::default(), &host)
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("越界") || msg.contains("失败"), "实际: {msg}");
     }
 }

@@ -17,6 +17,7 @@ pub mod clipboard;
 pub mod conpty;
 pub mod docker;
 pub mod dpapi;
+pub mod dwm;
 pub mod envelope;
 pub mod hello;
 pub mod helper;

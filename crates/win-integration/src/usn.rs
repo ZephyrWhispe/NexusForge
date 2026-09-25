@@ -108,6 +108,8 @@ fn open_volume(drive: &str) -> Result<HANDLE, AppError> {
         .unwrap_or('C');
     let path = format!(r"\\.\{letter}:");
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY：wide 以 NUL 结尾且在本调用内存活；参数为字面常量组合，
+    // 成功返回的句柄由调用方 CloseHandle 收口（见本文件 cleanup 路径）
     unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
@@ -148,12 +150,17 @@ fn enumerate_mft(drive: &str) -> Result<FrnMap, AppError> {
     };
     let med_ptr = &mut med as *mut MFT_ENUM_DATA_V0 as *const u8;
     let med_len = std::mem::size_of::<MFT_ENUM_DATA_V0>() as u32;
+    // SAFETY：med 在本函数栈上存活且 size_of 与切片长度一致——把结构体按字节
+    // 只读视图交给 DeviceIoControl 的输入缓冲（FSCTL 输入契约）
     let med_bytes = unsafe { std::slice::from_raw_parts(med_ptr, med_len as usize) };
 
     let result = (|| -> Result<(), AppError> {
         let mut buffer = vec![0u8; OUT_BUF];
         loop {
             let mut returned = 0u32;
+            // SAFETY：handle 为 open_volume 打开的合法卷句柄；输入/输出缓冲与
+            // 长度一一配对（med_bytes/med_len、buffer/buffer.len()）；returned
+            // 为合法可写出参。失败码在下方按 EOF/权限分支处理。
             if let Err(e) = unsafe {
                 DeviceIoControl(
                     handle,
@@ -210,6 +217,7 @@ fn enumerate_mft(drive: &str) -> Result<FrnMap, AppError> {
         }
         Ok(())
     })();
+    // SAFETY：handle 为本函数打开的合法句柄，枚举结束后无条件关闭
     unsafe {
         let _ = CloseHandle(handle);
     }

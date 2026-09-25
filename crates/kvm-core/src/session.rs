@@ -21,8 +21,9 @@ use host_core::device::DeviceIdentity;
 use host_core::error::AppError;
 
 pub use host_core::wire::{
-    decode_frame, derive_session_key, encode_frame, read_frame, write_frame, Frame, FrameCipher,
-    MsgType, HANDSHAKE_TIMEOUT, HEADER_LEN, MAX_PAYLOAD,
+    decode_frame, derive_directional_keys, directional_pair, encode_frame, read_frame, write_frame,
+    DirectionalKeys, Frame, FrameCipher, MsgType, HANDSHAKE_TIMEOUT, HEADER_LEN, MAX_PAYLOAD,
+    PROTO_VER,
 };
 
 use crate::pairing::{b64_decode, b64_encode, PairStore, PairedCb, PairedPeer, PairingService};
@@ -44,6 +45,10 @@ pub struct HelloPayload {
     pub fingerprint: String,
     /// base64(本会话临时 X25519 公钥)
     pub eph_pubkey_b64: String,
+    /// 会话协议版本（SEC-01：v2 起方向化密钥 + 帧序号校验）。
+    /// 旧版对端缺字段 → 视为 v1，明确拒连并提示升级，禁止"半升级"会话。
+    #[serde(default)]
+    pub proto_ver: u32,
 }
 
 /// 会话事件（模块层消费：发布 kvm.session_state / 交付输入帧）
@@ -158,8 +163,19 @@ fn parse_hello(frame: Frame) -> Result<HelloPayload, AppError> {
             None,
         ));
     }
-    serde_json::from_slice(&frame.payload)
-        .map_err(|e| AppError::module("KVM_SESSION_010", format!("Hello 载荷非法: {e}"), None))
+    let hello: HelloPayload = serde_json::from_slice(&frame.payload)
+        .map_err(|e| AppError::module("KVM_SESSION_010", format!("Hello 载荷非法: {e}"), None))?;
+    if hello.proto_ver != PROTO_VER {
+        return Err(AppError::module(
+            "KVM_SESSION_013",
+            format!(
+                "会话协议版本不匹配（本端 v{PROTO_VER}，对端 v{}）",
+                hello.proto_ver
+            ),
+            Some("两端需升级到同一版本后重试（旧版密钥方案存在 SEC-01 缺陷，已禁用）"),
+        ));
+    }
+    Ok(hello)
 }
 
 /// 白名单准入：device_id 必须已配对且指纹一致；返回配对记录与对端静态公钥
@@ -205,31 +221,37 @@ fn own_hello(identity: &DeviceIdentity, eph_pub: &X25519PublicKey) -> Frame {
             device_name: identity.device_name.clone(),
             fingerprint: identity.pubkey_fingerprint.clone(),
             eph_pubkey_b64: b64_encode(&eph_pub.to_bytes()),
+            proto_ver: PROTO_VER,
         })
         .unwrap_or_default(),
     }
 }
 
-/// 会话密钥：shared = 静态 DH（鉴权，配对即知对端静态公钥）|| 临时 DH（保新鲜）；
+/// 会话方向密钥：shared = 静态 DH（鉴权，配对即知对端静态公钥）|| 临时 DH（保新鲜）；
 /// salt = 双方指纹按字典序拼接（双方独立计算结果一致）。
-fn session_key_from(
+/// SEC-01：收发两方向各派生独立密钥，杜绝 (key, nonce) 复用；中间密钥材料即用即清。
+fn session_keys_from(
     identity: &DeviceIdentity,
     peer_static: &[u8; 32],
     dh2: [u8; 32],
     peer_fingerprint: &str,
-) -> Result<[u8; 32], AppError> {
-    let dh1 = identity
+) -> Result<DirectionalKeys, AppError> {
+    use zeroize::Zeroize;
+    let mut dh1 = identity
         .diffie_hellman(peer_static)
         .ok_or_else(|| AppError::module("KVM_SESSION_011", "静态 DH 共享密钥非法（全零）", None))?;
     let mut shared = Vec::with_capacity(64);
     shared.extend_from_slice(&dh1);
+    dh1.zeroize();
     shared.extend_from_slice(&dh2);
     let mut salt = [
         identity.pubkey_fingerprint.as_bytes(),
         peer_fingerprint.as_bytes(),
     ];
     salt.sort();
-    Ok(derive_session_key(&shared, &salt.concat()))
+    let keys = derive_directional_keys(&shared, &salt.concat());
+    shared.zeroize();
+    Ok(keys)
 }
 
 async fn ephemeral_dh2(eph: EphemeralSecret, peer_eph: [u8; 32]) -> Result<[u8; 32], AppError> {
@@ -269,9 +291,16 @@ async fn server_handshake(
     write_frame(&mut stream, &own_hello(identity, &eph_pub)).await?;
 
     let dh2 = ephemeral_dh2(eph, peer_eph).await?;
-    let key = session_key_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let keys = session_keys_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let (rx_key, tx_key) = directional_pair(&keys, false); // 服务端 = responder
     let (rd, wr) = stream.into_split();
-    Ok((rd, wr, FrameCipher::new(key), FrameCipher::new(key), peer))
+    Ok((
+        rd,
+        wr,
+        FrameCipher::new(rx_key),
+        FrameCipher::new(tx_key),
+        peer,
+    ))
 }
 
 /// 客户端握手：发 Hello → 收 Hello → 校验 → 派生 → 拆分读写半
@@ -299,9 +328,16 @@ async fn client_handshake(
     let peer_eph = peer_eph_pubkey(&hello)?;
 
     let dh2 = ephemeral_dh2(eph, peer_eph).await?;
-    let key = session_key_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let keys = session_keys_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let (rx_key, tx_key) = directional_pair(&keys, true); // 客户端 = initiator
     let (rd, wr) = stream.into_split();
-    Ok((rd, wr, FrameCipher::new(key), FrameCipher::new(key), peer))
+    Ok((
+        rd,
+        wr,
+        FrameCipher::new(rx_key),
+        FrameCipher::new(tx_key),
+        peer,
+    ))
 }
 
 /// 启动读写循环并登记会话。writer 持有写半与 tx cipher；reader 持有读半与
@@ -644,11 +680,21 @@ mod tests {
 
     #[test]
     fn derived_keys_match_for_same_material() {
-        let k1 = derive_session_key(&[1u8; 32], b"fpA fpB");
-        let k2 = derive_session_key(&[1u8; 32], b"fpA fpB");
-        let k3 = derive_session_key(&[1u8; 32], b"fpB fpA");
-        assert_eq!(k1, k2);
-        assert_ne!(k1, k3, "salt 顺序不同（角色互换）应派生不同密钥");
+        let k1 = derive_directional_keys(&[1u8; 32], b"fpA fpB");
+        let k2 = derive_directional_keys(&[1u8; 32], b"fpA fpB");
+        let k3 = derive_directional_keys(&[1u8; 32], b"fpB fpA");
+        assert_eq!(
+            k1.initiator_to_responder, k2.initiator_to_responder,
+            "同材料必派生同密钥"
+        );
+        assert_ne!(
+            k1.initiator_to_responder, k3.initiator_to_responder,
+            "salt 顺序不同（角色互换）应派生不同密钥"
+        );
+        assert_ne!(
+            k1.initiator_to_responder, k1.responder_to_initiator,
+            "SEC-01：两方向密钥必须不同"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

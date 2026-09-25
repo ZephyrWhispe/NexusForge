@@ -837,21 +837,27 @@ impl Module for KvmModule {
             let tx_for_cb = cmd_tx.clone();
             let rect = own_screen;
             hook.start_capture(Box::new(move |ev: &RawInput| {
-                let decision = {
+                // PERF-01：回调内**单次**取锁。决策状态机逐事件可变（按键集合/armed/
+                // last_forwarded），锁不可全免；此前 Forward 臂会再取一次锁——worker
+                // 正持同一锁时，低级钩子线程的阻塞被放大一倍（WH_KEYBOARD_LL 在系统
+                // 输入路径上同步执行）。设备名在决策同一临界区内解析，语义与原先
+                // "决策后快查"完全一致（受控态下 on_local_event 不改变 controlling_device）。
+                let (decision, forward_device) = {
                     let mut es = es_for_cb.lock();
-                    es.on_local_event(ev, &rect)
+                    let d = es.on_local_event(ev, &rect);
+                    let dev = if matches!(d, Decision::Forward) {
+                        Some(es.controlling_device().unwrap_or_default().to_string())
+                    } else {
+                        None
+                    };
+                    (d, dev)
                 };
                 match decision {
                     Decision::Passthrough => true,
                     Decision::Suppress => false,
                     Decision::Forward => {
-                        // 目标设备取自状态机（锁外快查）
-                        let device = es_for_cb
-                            .lock()
-                            .controlling_device()
-                            .unwrap_or_default()
-                            .to_string();
-                        let _ = tx_for_cb.send(Cmd::Forward(ev.clone(), device));
+                        let _ = tx_for_cb
+                            .send(Cmd::Forward(ev.clone(), forward_device.unwrap_or_default()));
                         false // 抑制本地（接管模式）
                     }
                     Decision::SwitchTo(device) => {

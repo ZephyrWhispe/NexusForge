@@ -27,6 +27,8 @@ features = [
     "Win32_System_Pipes",
     # 系统强调色：DwmGetColorizationColor
     "Win32_Graphics_Dwm",
+    # COR-26：Mica 能力探测读 OS build 号（RegGetValueW）
+    "Win32_System_Registry",
     "Win32_Foundation",
     # WNDCLASSW/RegisterClassW 依赖 HBRUSH（Gdi feature）
     "Win32_Graphics_Gdi",

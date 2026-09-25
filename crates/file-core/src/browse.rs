@@ -36,6 +36,32 @@ pub fn to_long_path(p: &Path) -> PathBuf {
     PathBuf::from(format!(r"\\?\{s}"))
 }
 
+/// 段级相对路径安全校验（SEC-05/SEC-06 统一入口）：仅接受由 Normal 段组成、
+/// 双向分隔符切分的相对路径；拒绝 `..`、`.`、空段、盘符/前缀、根相对（前导
+/// 分隔符）与 `:`（盘符 / NTFS ADS）。全平台一致（不依赖 OS 路径语义——
+/// Windows 下 `\Windows\x` 非 absolute 但 `join` 会替换根，字符串判定不充分）。
+///
+/// 用于：解压条目名、远端条目名落盘、批量重命名目标等一切"外部来源相对路径"。
+pub fn safe_rel_path(name: &str) -> Option<PathBuf> {
+    if name.contains('\0') {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for seg in name.split(['/', '\\']) {
+        match seg {
+            // 空段：前导（根相对）、尾部、内部（a//b）一律拒；"." 同拒（从严）
+            "" | "." => return None,
+            ".." => return None,
+            s if s.contains(':') => return None, // 盘符（C:）与 ADS（a.txt:evil）
+            s => out.push(s),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
 /// 去掉 `\\?\` / `\\?\UNC\` 前缀（展示与事件 payload 用）
 pub fn display_path(p: &Path) -> PathBuf {
     let s = p.as_os_str().to_string_lossy();
@@ -265,5 +291,32 @@ mod tests {
         let ds = drives();
         assert!(!ds.is_empty(), "测试机至少有 C: 盘");
         assert!(ds.iter().any(|d| d.letter == "C"));
+    }
+
+    // ---- SEC-05/06：safe_rel_path 段级校验 ----
+
+    #[test]
+    fn safe_rel_path_accepts_normal_and_rejects_escape() {
+        // 良性：普通相对路径（正/反斜杠混排）
+        assert!(safe_rel_path("a/b/c.txt").is_some());
+        assert!(safe_rel_path("a\\b.txt").is_some());
+        // 恶意：父目录穿越 / 根相对 / 盘符 / UNC / ADS / 空段
+        for bad in [
+            r"..\..\evil",
+            "a/../../evil",
+            r"\Windows\evil.dll",
+            "/etc/passwd",
+            r"C:\evil",
+            "C:evil",
+            r"\\server\share\x",
+            "a.txt:evil",
+            "a//b",
+            "a/",
+            "",
+            ".",
+            "..",
+        ] {
+            assert!(safe_rel_path(bad).is_none(), "{bad:?} 必须被拒");
+        }
     }
 }

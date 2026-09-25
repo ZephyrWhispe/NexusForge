@@ -423,8 +423,20 @@ pub fn install_binary_from_zip(
             .by_index(i)
             .map_err(|e| ProxyError::Download(format!("zip 条目读取失败: {e}")))?;
         if f.name().ends_with(spec.entry_suffix) {
-            let mut buf = Vec::with_capacity(f.size() as usize);
-            std::io::copy(&mut f, &mut buf).map_err(ProxyError::Io)?;
+            // COR-24：声明尺寸来自 zip 头（不受信）——不得用于预分配；
+            // take 限流拷贝，超上限即中止
+            const MAX_EXE_BYTES: u64 = 256 * 1024 * 1024;
+            let mut buf: Vec<u8> = Vec::new();
+            let copied = std::io::copy(
+                &mut std::io::Read::take(&mut f, MAX_EXE_BYTES + 1),
+                &mut buf,
+            )
+            .map_err(ProxyError::Io)?;
+            if copied > MAX_EXE_BYTES {
+                return Err(ProxyError::Download(format!(
+                    "可执行文件超过 {MAX_EXE_BYTES} 字节上限（疑似非官方包）"
+                )));
+            }
             exe_bytes = Some(buf);
             break;
         }

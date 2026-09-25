@@ -25,6 +25,45 @@ const OUTPUT_CAP: usize = 256 * 1024;
 /// Exec 白名单（固定程序名精确匹配；onedrive_uninstall 为固定脚本映射非透传）
 const EXEC_ALLOWLIST: &[&str] = &["powercfg", "dism", "sfc", "netsh", "onedrive_uninstall"];
 
+/// powercfg 允许切换的电源计划 GUID（与内置 catalog 一致；自由 GUID 拒绝）
+const POWER_SCHEME_GUIDS: &[&str] = &["e9a42b02-d546-448a-9c71-0b2ca57cbcb7"];
+
+/// SEC-02：参数模板白名单——提权进程只执行**预置维护动作**，调用方 args 不再
+/// 逐字透传（模块文档承诺"禁止透传任意字符串"自此成立）。组合与内置 catalog
+/// 及 repair 模板一一对应；新增组合 = 改代码 + 评审 + 测试。
+fn args_are_templated(program: &str, args: &[String]) -> bool {
+    let eq = |i: usize, v: &str| args.get(i).map(String::as_str) == Some(v);
+    match program {
+        "sfc" => args.len() == 1 && (eq(0, "/scannow") || eq(0, "/verifyonly")),
+        "dism" => {
+            args.len() == 3
+                && eq(0, "/Online")
+                && eq(1, "/Cleanup-Image")
+                && matches!(
+                    args[2].as_str(),
+                    "/ScanHealth" | "/RestoreHealth" | "/StartComponentCleanup"
+                )
+        }
+        "netsh" => {
+            args.len() == 5
+                && eq(0, "interface")
+                && eq(1, "teredo")
+                && eq(2, "set")
+                && eq(3, "state")
+                && eq(4, "disabled")
+        }
+        "powercfg" => {
+            (args.len() == 1 && (eq(0, "/?") || eq(0, "-?")))
+                || (args.len() == 2
+                    && eq(0, "-duplicatescheme")
+                    && POWER_SCHEME_GUIDS.contains(&args[1].to_ascii_lowercase().as_str()))
+        }
+        // onedrive_uninstall 展开为固定卸载命令，不接受外部参数
+        "onedrive_uninstall" => args.is_empty(),
+        _ => false,
+    }
+}
+
 /// exec 输出截断（保尾部——错误信息通常在尾部）
 fn cap_output(mut s: String) -> String {
     if s.len() > OUTPUT_CAP {
@@ -46,7 +85,8 @@ impl MaintenanceWin {
         Self
     }
 
-    /// 执行白名单程序（超时 try_wait 轮询强杀；stdout+stderr 合并截断）
+    /// 执行白名单程序（超时 try_wait 轮询强杀；stdout+stderr 合并截断）。
+    /// SEC-02：程序名与参数组合双白名单，任意参数组合直接拒绝。
     fn run_exec(program: &str, args: &[String], timeout_ms: u32) -> Result<String, AppError> {
         if !EXEC_ALLOWLIST.contains(&program) {
             return Err(AppError::module(
@@ -55,6 +95,13 @@ impl MaintenanceWin {
                     "程序 {program} 不在执行白名单（powercfg/dism/sfc/netsh/onedrive_uninstall）"
                 ),
                 None,
+            ));
+        }
+        if !args_are_templated(program, args) {
+            return Err(AppError::module(
+                "SYS_MAINT_010",
+                format!("参数不在模板白名单: {program} {args:?}"),
+                Some("仅支持预置维护动作（参数模板见 maintenance.rs）"),
             ));
         }
         // 参数模板：白名单程序 + 固定参数集由 catalog 提供；onedrive_uninstall 展开为固定卸载命令
@@ -429,6 +476,96 @@ mod tests {
             .exec("cmd", &["/c".into(), "echo hi".into()], 1000)
             .unwrap_err();
         assert!(err2.to_string().contains("白名单"));
+    }
+
+    /// SEC-02：白名单程序 + 任意参数组合必须被拒（提权输入面收口）
+    #[test]
+    fn exec_rejects_args_outside_template() {
+        let m = MaintenanceWin::new();
+        let cases: Vec<(&str, Vec<String>)> = vec![
+            (
+                "netsh",
+                ["advfirewall", "set", "allprofiles", "state", "off"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "netsh",
+                ["interface", "teredo", "set", "state", "enabled"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "powercfg",
+                ["-setactive", "381b4222-f694-41f0-9685-ff5bb260df2e"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "dism",
+                ["/Online", "/Add-Package", "/PackagePath:\\\\evil\\x.cab"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "sfc",
+                ["/scannow", "/extra"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "onedrive_uninstall",
+                ["--evil"].iter().map(|s| s.to_string()).collect(),
+            ),
+        ];
+        for (program, args) in cases {
+            let err = m.exec(program, &args, 1000).unwrap_err();
+            assert!(
+                err.to_string().contains("模板白名单"),
+                "{program} {args:?} 必须被拒: {err}"
+            );
+        }
+    }
+
+    /// SEC-02：模板内组合放行（与 catalog/repair 实际使用的组合一致）
+    #[test]
+    fn args_template_accepts_catalog_combos() {
+        let combos: Vec<(&str, Vec<String>)> = vec![
+            (
+                "netsh",
+                ["interface", "teredo", "set", "state", "disabled"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "dism",
+                ["/Online", "/Cleanup-Image", "/ScanHealth"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            ("sfc", ["/scannow"].iter().map(|s| s.to_string()).collect()),
+            (
+                "powercfg",
+                ["-duplicatescheme", "E9A42B02-D546-448A-9C71-0B2CA57CBCB7"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            ("onedrive_uninstall", vec![]),
+        ];
+        for (program, args) in combos {
+            assert!(
+                args_are_templated(program, &args),
+                "{program} {args:?} 应在模板白名单内"
+            );
+        }
     }
 
     /// 超时强杀：非提权下 sfc 立即失败（无法构造白名单长任务）→ #[ignore] 提权环境手动跑：

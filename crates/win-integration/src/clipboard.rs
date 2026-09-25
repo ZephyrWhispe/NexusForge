@@ -631,10 +631,18 @@ pub fn register_custom_format(name: &str) -> Option<u32> {
 /// 监听侧见到即知这次变更源于自己——比 500ms 回写窗口更早，也不受时钟抖动影响。
 const SELF_WRITE_FORMAT: &str = "NexusForgeSelf";
 
+/// SEC-13：进程内自写时间戳。注册的自定义格式是**全局**的——任何进程都能
+/// 以同名格式置位标记让监听侧静默跳过捕获（掩盖窃取痕迹）；标记的可信判定
+/// 必须叠加"本进程近期确有写入"这一不可伪造的进程内事实。
+static LAST_SELF_WRITE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 /// 登记自写标记：以 NULL 数据占位该格式（不覆盖正文，正文由 write 各分支已置好），
 /// 格式可用性问题在下一次任意程序写入（必然 EmptyClipboard）前恒为真。
 /// 须在 write() 的同一 OpenClipboard 会话内、CloseClipboard 之前调用。
 pub fn mark_self_write() -> Result<(), AppError> {
+    if let Ok(mut g) = LAST_SELF_WRITE.lock() {
+        *g = Some(std::time::Instant::now());
+    }
     let fmt = register_custom_format(SELF_WRITE_FORMAT).ok_or_else(|| {
         AppError::module(
             "CLIPBOARD_WRITE_007",
@@ -654,8 +662,21 @@ pub fn mark_self_write() -> Result<(), AppError> {
     Ok(())
 }
 
-/// 系统剪贴板当前是否带本应用自写标记（查格式可用性，无需 OpenClipboard）。
+/// 系统剪贴板当前是否带本应用自写标记。
+/// SEC-13：判定 = 格式在场 **且** 本进程 2s 内确有写入（WM_CLIPBOARDUPDATE
+/// 在 CloseClipboard 后数毫秒内到达，2s 窗口裕量充分）。外部进程伪造标记时
+/// 进程内时间戳缺失/过期 → 判否，捕获照常执行（标记 spoof 失效）。
 pub fn has_self_write_marker() -> bool {
+    let recent = LAST_SELF_WRITE
+        .lock()
+        .map(|g| {
+            g.map(|t| t.elapsed() < std::time::Duration::from_secs(2))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if !recent {
+        return false;
+    }
     let Some(fmt) = register_custom_format(SELF_WRITE_FORMAT) else {
         return false;
     };

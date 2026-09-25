@@ -31,6 +31,21 @@ use crate::types::{EngineStatusDto, OcrConfig, OcrConfigPatch, OcrRequest, OcrRe
 
 use host_core::util::app_err as mod_err;
 
+/// SEC-18：启动清空 `ocr-tmp`——崩溃/强杀后遗留的整帧明文 PNG 是用户屏幕内容的
+/// 永久驻留（unlink 后仍可被文件恢复工具还原）。识别期的逐次删除不变，这里是兜底。
+fn sweep_leftover_tmp(dir: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return; // 目录不存在 = 无残留
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_file() {
+            let _ = std::fs::remove_file(&p);
+            tracing::debug!(path = %p.display(), "启动清理：删除 OCR 临时文件");
+        }
+    }
+}
+
 pub struct OcrModule {
     engines: RwLock<Option<Arc<EngineRegistry>>>,
     bus: RwLock<Option<Arc<EventBus>>>,
@@ -324,6 +339,9 @@ impl Module for OcrModule {
         // O1：唯一内置引擎以注册表项形式登记（D-09 第 1 步）；第二引擎（Tesseract CLI）
         // 按设置在此重建——默认关，故启动期注册表仍只有 win-ocr 一项
         *self.app_data.write() = Some(ctx.app_data_dir.clone());
+        // SEC-18：启动清空 ocr-tmp——崩溃/强杀后遗留的整帧明文 PNG 是用户屏幕
+        // 内容的永久驻留（unlink 后仍可被文件恢复工具还原），对齐截图模块 sweep
+        sweep_leftover_tmp(&ctx.app_data_dir.join("ocr-tmp"));
         let base: Vec<Arc<dyn crate::engine::OcrEngine>> = vec![Arc::new(WinOcrEngine::new(port))];
         *self.engines.write() = Some(build_registry(
             base,
@@ -519,9 +537,42 @@ impl HotkeyProvider for OcrModule {
 
 // ---------------- 像素工具（与 screenshot-core/util 解耦：模块间不互依赖）----------------
 
+/// PERF-05：解码预算——字节上限 + header 像素预检 + 解码即缩采样。
+/// 旧路径先整图解码（20000×20000 → ~1.6GB RGBA）再缩 4096，一张大图即可 OOM；
+/// 现在先读 header（不解码像素），超预算直接拒。
 fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), AppError> {
+    const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_PIXELS: u64 = 40_000_000; // ≈ 6320×6320
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(mod_err(
+            "OCR_INPUT_004",
+            format!("图像超过 {MAX_IMAGE_BYTES} 字节输入上限"),
+        ));
+    }
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| mod_err("OCR_INPUT_003", format!("图像格式识别失败: {e}")))?;
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|e| mod_err("OCR_INPUT_003", format!("图像尺寸读取失败: {e}")))?;
+    if (w as u64) * (h as u64) > MAX_PIXELS {
+        return Err(mod_err(
+            "OCR_INPUT_004",
+            format!("图像分辨率 {w}×{h} 超过 {MAX_PIXELS} 像素上限"),
+        ));
+    }
+    // 解码时直接缩到 OCR 上限（4096），峰值内存与目标尺寸成正比而非原图
+    const MAX: u32 = 4096;
     let img = image::load_from_memory(bytes)
         .map_err(|e| mod_err("OCR_INPUT_003", format!("PNG 解码失败: {e}")))?;
+    let img = if w > MAX || h > MAX {
+        let scale = MAX as f32 / (w.max(h) as f32);
+        let nw = ((w as f32 * scale) as u32).max(1);
+        let nh = ((h as f32 * scale) as u32).max(1);
+        img.resize(nw, nh, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
     let rgba = img.to_rgba8();
     Ok((rgba.width(), rgba.height(), rgba.into_raw()))
 }

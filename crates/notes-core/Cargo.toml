@@ -15,3 +15,6 @@ uuid = { workspace = true }
 rusqlite = { workspace = true }
 regex = { workspace = true }
 walkdir = { workspace = true }
+
+[dev-dependencies]
+encoding_rs = { workspace = true }

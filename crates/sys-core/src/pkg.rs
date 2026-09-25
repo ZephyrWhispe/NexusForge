@@ -203,6 +203,23 @@ fn split_columns(line: &str) -> Vec<String> {
 ///   钉首页防翻页
 ///
 /// 处置红线：query 含 CR/LF（换行注入/参数走私面）直接拒；空白与引号作字面量原样传递。
+/// SEC-15：经 `cmd /C`（scoop 腿）的参数必须过字符白名单——cmd.exe 不按
+/// CommandLineToArgvW 规则解析命令行，`git&calc` 这类**无空格**元字符载荷
+/// 不会被 Rust 加引号，`&` 直接成为命令分隔符。包名/查询串只允许安全字符；
+/// 含空格的参数由 Command 引号包裹（cmd 对带引号参数整段透传），故空格放行。
+fn reject_cmd_metachars(s: &str, what: &str) -> Result<()> {
+    let ok = !s.trim().is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | '/' | '@' | ' ')
+        });
+    if !ok {
+        return Err(SysError::BadParam(format!(
+            "{what} 含非法字符（cmd 元字符防护）: {s}"
+        )));
+    }
+    Ok(())
+}
+
 pub fn build_search_args(source: &str, query: &str) -> Result<(&'static str, Vec<String>)> {
     if query.contains(['\r', '\n']) {
         return Err(SysError::BadParam("搜索词含换行符，已拒绝".into()));
@@ -219,7 +236,10 @@ pub fn build_search_args(source: &str, query: &str) -> Result<(&'static str, Vec
                 "--disable-interactivity",
             ]),
         )),
-        "scoop" => Ok(("cmd", argv(&["/C", "scoop", "search", q]))),
+        "scoop" => {
+            reject_cmd_metachars(q, "查询串")?;
+            Ok(("cmd", argv(&["/C", "scoop", "search", q])))
+        }
         "choco" => Ok((
             "choco.exe",
             argv(&["list", q, "-r", "--page", "1", "--page-size", "50"]),
@@ -295,9 +315,16 @@ pub fn build_action_args(
             _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
         },
         "scoop" => match action {
-            "install" => Ok(("cmd", argv(&["/C", "scoop", "install", pkg]))),
-            "uninstall" => Ok(("cmd", argv(&["/C", "scoop", "uninstall", pkg]))),
-            "upgrade" => Ok(("cmd", argv(&["/C", "scoop", "update", pkg]))),
+            // SEC-15：包名来自前端 IPC 与远端 bucket 列表（远端数据不可信），
+            // 经 cmd /C 前必须过白名单
+            "install" | "uninstall" | "upgrade" => {
+                reject_cmd_metachars(pkg, "包名")?;
+                match action {
+                    "install" => Ok(("cmd", argv(&["/C", "scoop", "install", pkg]))),
+                    "uninstall" => Ok(("cmd", argv(&["/C", "scoop", "uninstall", pkg]))),
+                    _ => Ok(("cmd", argv(&["/C", "scoop", "update", pkg]))),
+                }
+            }
             "upgrade_all" => Ok(("cmd", argv(&["/C", "scoop", "update", "*"]))),
             _ => Err(SysError::BadParam(format!("未知操作: {action}"))),
         },
@@ -746,9 +773,28 @@ mod tests {
                     "{source}: CRLF 搜索词必须 BadParam 拒（实际 {e}）"
                 );
             }
-            // 合法形制不误伤：空白/制表/引号原样放行
-            assert!(build_search_args(source, "some pack\tage\"x\"").is_ok());
+            // 合法形制不误伤（winget/choco 直连 exe，不经 cmd）：空白/制表/引号原样放行
+            if source != "scoop" {
+                assert!(build_search_args(source, "some pack\tage\"x\"").is_ok());
+            }
         }
+        // SEC-15：scoop 腿经 cmd /C（cmd 不按 argv 语义解析）→ 字符白名单：
+        // 元字符一律拒；常规包名与含空格短语的合法形态放行
+        assert!(build_search_args("scoop", "some package").is_ok());
+        assert!(build_search_args("scoop", "nmap --main").is_ok());
+        for evil in ["git&calc", "a|b", "%TEMP%", "a; b", "(x)"] {
+            let e = build_search_args("scoop", evil).unwrap_err();
+            assert!(
+                matches!(e, SysError::BadParam(_)),
+                "scoop 查询 {evil:?} 必须被拒"
+            );
+        }
+        // 动作腿同谱：包名注入载荷拒绝，正常 id 放行
+        for evil in ["git&calc", "a|b"] {
+            assert!(build_action_args("scoop", "install", evil).is_err());
+        }
+        assert!(build_action_args("scoop", "install", "extras/7zip.zip").is_ok());
+        assert!(build_action_args("scoop", "upgrade", "git").is_ok());
     }
 
     #[test]

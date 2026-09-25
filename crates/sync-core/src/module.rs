@@ -507,20 +507,27 @@ impl SyncCtx {
     /// **可失败**是 T-B5-5 的红线收口：过去应用器不在位/未知 entity 走 `(0,0,0)` 静默返回，
     /// 而游标照样 `set_cursor` 前进 ⇒ 对端那批变更在本机既没落地又被记成"已同步"，
     /// 是"谎报进度"最便宜的一种写法。现在整会话 Err，游标停在原地，下轮重来。
+    ///
+    /// COR-08：`apply_remote` 失败同样**停批**——变更有序，跳过失败继续会把该条
+    /// op 永久甩在游标之后（磁盘满/占用/权限类失败不会自愈）；游标只推进到
+    /// 最后一条成功应用的 op，并如实回报失败（下轮同步重拉重试）。
     fn apply_ops(&self, ops: &[crate::oplog::OpEntry], peer_key: &str) -> R<(u32, u32, u32)> {
         let mut applied = 0u32;
         let mut lost = 0u32;
         let mut conflicts = 0u32;
-        let mut max_ts = 0i64;
+        let mut last_ok_ts = 0i64;
         for op in ops {
             // 每条 op 按自己的 entity 取应用器：没有应用器 ⇒ 拒收到此为止（不跳过后继续）
             let applier = self.applier_for(&op.entity)?;
-            max_ts = max_ts.max(op.ts);
             match SyncEngine::apply_remote(&self.log, applier.as_ref(), op) {
-                Ok(ApplyOutcome::Applied) => applied += 1,
+                Ok(ApplyOutcome::Applied) => {
+                    applied += 1;
+                    last_ok_ts = last_ok_ts.max(op.ts);
+                }
                 Ok(ApplyOutcome::LostLww) => {
                     lost += 1;
                     conflicts += 1;
+                    last_ok_ts = last_ok_ts.max(op.ts);
                     // 落盘先于事件：这一刻之前败方原文只活在这条待广播的 op 里（承重⑤）
                     let winner = self
                         .log
@@ -537,12 +544,25 @@ impl SyncCtx {
                     }
                     self.notify_conflict(op, &entry.conflict_id);
                 }
-                Ok(ApplyOutcome::Noop) => {}
-                Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "远端变更应用失败（跳过）"),
+                Ok(ApplyOutcome::Noop) => {
+                    last_ok_ts = last_ok_ts.max(op.ts);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        op_id = %op.op_id,
+                        entity = %op.entity,
+                        error = %e,
+                        "远端变更应用失败：停止本批，游标停在最后成功处（下轮重试）"
+                    );
+                    if last_ok_ts > 0 {
+                        self.log.set_cursor(peer_key, last_ok_ts)?;
+                    }
+                    return Err(e);
+                }
             }
         }
-        if max_ts > 0 {
-            self.log.set_cursor(peer_key, max_ts)?;
+        if last_ok_ts > 0 {
+            self.log.set_cursor(peer_key, last_ok_ts)?;
         }
         Ok((applied, lost, conflicts))
     }
@@ -934,6 +954,8 @@ pub struct SyncModule {
     auto: AutoSync,
     db_path: PathBuf,
     cancel: Arc<AtomicBool>,
+    /// COR-07：本地变更订阅任务句柄（start 登记 / stop abort，防重启叠加订阅者）
+    sub_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl SyncModule {
@@ -954,6 +976,7 @@ impl SyncModule {
             auto: AutoSync::new(),
             db_path: app_data_dir.join("db").join("sync.db"),
             cancel: Arc::new(AtomicBool::new(false)),
+            sub_task: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1355,7 +1378,16 @@ impl Module for SyncModule {
         };
         // SYNC1：accept 循环（bind 失败仍可主动发起同步，但监听真态如实落 listening）
         let port = self.port.load(Ordering::SeqCst);
+        // COR-06：先把取消信号复位——stop 置 true 后 start 不复位会让 accept_loop
+        // bind 成功后第一轮即 break（重启后监听永久失效，UI 还报绿）
+        self.cancel.store(false, Ordering::SeqCst);
         let cancel = self.cancel.clone();
+        let cancel_for_sub = cancel.clone();
+        // COR-07：先收掉上一轮订阅任务（stop 不 abort 时它还在跑，重复 start
+        // 会叠加订阅者 → 同一变更写两条 op 且 UUID 去不了重）
+        if let Some(h) = self.sub_task.lock().take() {
+            h.abort();
+        }
         // 每次启动先把两枚事实清零：上一轮遗留的 true 会让面板在"这一轮其实没听上"时仍报绿
         self.listening.store(false, Ordering::SeqCst);
         *self.bind_error.write() = None;
@@ -1372,8 +1404,14 @@ impl Module for SyncModule {
             if let Ok(mut rx) = bus.subscribe("notes.changed") {
                 let ctx2 = ctx.clone();
                 let auto = self.auto.clone();
-                tokio::spawn(async move {
+                let cancel2 = cancel_for_sub.clone();
+                // COR-07：JoinHandle 归属结构体，stop 时 abort——任务不再"仅发送端
+                // 关闭才退出"（总线长期持有 Sender，实际永不退出）
+                let handle = tokio::spawn(async move {
                     loop {
+                        if cancel2.load(Ordering::SeqCst) {
+                            break; // 二道保险：abort 之外的体面退出
+                        }
                         match rx.recv().await {
                             Ok(event) => {
                                 if event.source == "sync" {
@@ -1392,6 +1430,7 @@ impl Module for SyncModule {
                         }
                     }
                 });
+                *self.sub_task.lock() = Some(handle);
             }
         }
         self.state.set(ModuleState::Running);
@@ -1400,6 +1439,10 @@ impl Module for SyncModule {
 
     fn stop(&self) -> Result<(), ModuleError> {
         self.cancel.store(true, Ordering::SeqCst);
+        // COR-07：abort 本轮订阅任务（句柄在 start 时登记）
+        if let Some(h) = self.sub_task.lock().take() {
+            h.abort();
+        }
         // 取消信号发出即不再接受新会话：监听真态跟着落，不等 accept_loop 下一轮醒来
         self.listening.store(false, Ordering::SeqCst);
         self.state.set(ModuleState::Stopped);
@@ -1486,6 +1529,102 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nf_syncmod_{tag}_{}", uuid::Uuid::now_v7()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// COR-06 回归：stop→start 重启后监听必须恢复（修复前 cancel 不复位，
+    /// accept_loop bind 成功后第一轮即 break，监听永久失效而 UI 报绿）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_restores_sync_listening() {
+        let dir = temp_appdata("restart");
+        let m = Arc::new(SyncModule::new(&dir));
+        // 端口 0 = 由内核指派，避免与真实例/并行测试抢固定口
+        m.set_port(0);
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: dir.clone(),
+            ports: Arc::new(host_core::ports::Ports::new()),
+            event_bus: Arc::new(EventBus::new()),
+        });
+        m.init(ctx).unwrap();
+        m.start().unwrap();
+        assert!(
+            wait_for(
+                || m.listening.load(std::sync::atomic::Ordering::SeqCst),
+                2000
+            )
+            .await,
+            "首轮启动应进入监听"
+        );
+        m.stop().unwrap();
+        assert!(!m.listening.load(std::sync::atomic::Ordering::SeqCst));
+
+        m.start().unwrap();
+        assert!(
+            wait_for(
+                || m.listening.load(std::sync::atomic::Ordering::SeqCst),
+                2000
+            )
+            .await,
+            "COR-06：重启后监听必须恢复（cancel 须在 start 复位）"
+        );
+        m.stop().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// COR-07 回归：重启不得叠加订阅者——同一 notes.changed 事件在
+    /// start→stop→start 后只能记一条 op（修复前每轮 spawn 一个订阅任务，
+    /// Uuid::now_v7 生成的 op_id 使 INSERT OR IGNORE 去不了重）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_does_not_duplicate_subscription() {
+        let dir = temp_appdata("dupsub");
+        let bus = Arc::new(EventBus::new());
+        let m = Arc::new(SyncModule::new(&dir));
+        let store = Arc::new(MemStore::default());
+        m.attach_applier(ENTITY_NOTE, store.clone()).unwrap();
+        store.put("sub/note-a.md", "正文");
+        let ctx = Arc::new(ModuleContext {
+            app_data_dir: dir.clone(),
+            ports: Arc::new(host_core::ports::Ports::new()),
+            event_bus: bus.clone(),
+        });
+        m.init(ctx).unwrap();
+        m.start().unwrap();
+        m.stop().unwrap();
+        m.start().unwrap();
+        // 发布一条 notes.changed（订阅臂消费形状：action + path）
+        let payload = serde_json::json!({
+            "entity": ENTITY_NOTE,
+            "path": "sub/note-a.md",
+            "action": "write"
+        });
+        bus.publish(host_core::events::Event::new(
+            "notes.changed",
+            "test",
+            payload,
+        ))
+        .unwrap();
+        // 订阅任务异步入库
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let log = OpLog::open(&dir.join("db").join("sync.db")).unwrap();
+        // 该 payload 恰好产生一条 note op：总数即订阅者处理次数
+        // （修复前 start→stop→start 后有 2 个订阅者 → count == 2）
+        let count = log.count();
+        assert_eq!(
+            count, 1,
+            "COR-07：重启后同一条变更只允许记一条 op（实得 {count}）"
+        );
+        m.stop().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn wait_for(f: impl Fn() -> bool, timeout_ms: u64) -> bool {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        while tokio::time::Instant::now() < deadline {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        f()
     }
 
     /// D-12 归位断言：sync.db 父目录必须是 db/（防止后续新增模块重犯）

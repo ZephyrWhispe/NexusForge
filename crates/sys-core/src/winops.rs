@@ -237,13 +237,15 @@ fn parse_catalog(raw: &str) -> SysResult<Vec<Tweak>> {
     Ok(tweaks)
 }
 
-/// 合并目录：外置同 id 覆盖内置，其余追加（顺序：内置在前）
+/// 合并目录：外置项**只允许新增**，同 id 覆盖内置一律拒绝（SEC-02：外置目录
+/// 位于用户可写的 {appData}，若允许覆盖则"一次 UAC ⇒ 提权执行任意参数"）
 fn merge_tweaks(mut base: Vec<Tweak>, extra: Vec<Tweak>) -> Vec<Tweak> {
     for t in extra {
-        match base.iter_mut().find(|b| b.id == t.id) {
-            Some(slot) => *slot = t,
-            None => base.push(t),
+        if base.iter().any(|b| b.id == t.id) {
+            tracing::warn!(id = %t.id, "外置 catalog 试图覆盖内置 tweak，已拒绝");
+            continue;
         }
+        base.push(t);
     }
     base
 }
@@ -1255,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_external_overrides_by_id() {
+    fn catalog_external_cannot_override_builtin() {
         let dir = std::env::temp_dir().join(format!("nf_winops_cat_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1266,11 +1268,25 @@ mod tests {
         )
         .unwrap();
         let tweaks = load_catalog(Some(&dir)).unwrap();
+        // SEC-02：外置同 id 不得覆盖内置定义
+        let builtin_count = load_catalog(None).unwrap();
         let w = tweaks
             .iter()
             .find(|t| t.id == "winops.taskbar.hide_widgets")
             .unwrap();
-        assert_eq!(w.name, "覆盖版");
+        assert_ne!(
+            w.name, "覆盖版",
+            "外置 catalog 禁止覆盖内置 tweak（提权输入面收口）"
+        );
+        assert_eq!(
+            w.name,
+            builtin_count
+                .iter()
+                .find(|t| t.id == "winops.taskbar.hide_widgets")
+                .unwrap()
+                .name
+        );
+        // 新增项放行
         assert!(tweaks.iter().any(|t| t.id == "winops.brand.new"));
         // 损坏文件跳过不阻断
         std::fs::write(dir.join("bad.json"), "not json").unwrap();
@@ -1342,7 +1358,8 @@ mod tests {
         .unwrap();
         let tweaks = load_catalog(Some(&dir)).unwrap();
         assert!(!tweaks.iter().any(|t| t.id == "Not-Compliant"));
-        assert_eq!(
+        // SEC-02：同 id 覆盖被拒，保持内置定义
+        assert_ne!(
             tweaks
                 .iter()
                 .find(|t| t.id == "winops.taskbar.hide_widgets")
@@ -1350,7 +1367,7 @@ mod tests {
                 .name,
             "覆盖版"
         );
-        // 内置 42 条 + 覆盖 1 条 = 总数不变
+        // 内置 43 条（覆盖被拒、坏 id 文件跳过）= 总数不变
         assert_eq!(tweaks.len(), 43);
         let _ = std::fs::remove_dir_all(&dir);
     }

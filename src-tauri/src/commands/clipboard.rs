@@ -451,7 +451,7 @@ pub async fn clipboard_suggestions(
     state: State<'_, HostState>,
 ) -> Result<Vec<clipboard_core::types::SuggestionDto>, AppError> {
     let clipboard = state.clipboard.clone();
-    let limit = limit.unwrap_or(100);
+    let limit = super::clamp_limit(limit);
     tauri::async_runtime::spawn_blocking(move || clipboard.suggestions(limit))
         .await
         .map_err(|e| AppError::module("CLIPBOARD_QUERY_002", e.to_string(), None))?

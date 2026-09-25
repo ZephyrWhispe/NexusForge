@@ -220,7 +220,7 @@ pub async fn file_search(
     let svc = file_service(&state)?;
     let opts = file_core::SearchOpts {
         query,
-        limit: limit.unwrap_or(50),
+        limit: limit.map(|l| l.min(500)).unwrap_or(50),
         root,
         max_depth: 6,
     };

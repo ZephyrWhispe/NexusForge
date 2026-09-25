@@ -128,6 +128,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::host_system_accent,
+            commands::host_capabilities,
             commands::host_log,
             commands::host_modules_status,
             commands::host_module_restart,

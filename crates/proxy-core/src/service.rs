@@ -383,7 +383,10 @@ impl ProxyService {
         let spec = resolve_install_kernel(kernel)?;
         let version = version.unwrap_or_else(|| spec.default_version.to_string());
         let url = (spec.url_for)(&version);
-        let bytes = self.http_get(&url).await?;
+        let bytes = self
+            .http_get_ex(&url, None, Self::MAX_BIN_BYTES)
+            .await?
+            .bytes;
         let manifest =
             sidecar::install_binary_from_zip(spec, &self.bin_dir(), &bytes, &version, false)?;
         tracing::info!(kernel = %spec.id, version = %version, sha256 = %manifest.sha256, "内核安装完成");
@@ -395,7 +398,10 @@ impl ProxyService {
     pub async fn wintun_install(&self) -> Result<()> {
         let spec = &sidecar::WINTUN_ASSET;
         let url = (spec.url_for)(spec.default_version);
-        let bytes = self.http_get(&url).await?;
+        let bytes = self
+            .http_get_ex(&url, None, Self::MAX_BIN_BYTES)
+            .await?
+            .bytes;
         sidecar::install_binary_from_zip(
             spec,
             &self.bin_dir(),
@@ -419,9 +425,15 @@ impl ProxyService {
     ) -> Result<sidecar::Manifest> {
         let spec = sidecar::artifact_for(artifact)?;
         let version = spec.default_version;
-        let bytes = self.http_get(&(spec.url_for)(version)).await?;
+        let bytes = self
+            .http_get_ex(&(spec.url_for)(version), None, Self::MAX_BIN_BYTES)
+            .await?
+            .bytes;
         if let Some(sha_url) = spec.checksum_url {
-            let sha_raw = self.http_get(&(sha_url)(version)).await?;
+            let sha_raw = self
+                .http_get_ex(&(sha_url)(version), None, Self::MAX_SHA_BYTES)
+                .await?
+                .bytes;
             let sha_text = String::from_utf8_lossy(&sha_raw);
             let expected = sha_text
                 .split_whitespace()
@@ -442,19 +454,43 @@ impl ProxyService {
         Ok(manifest)
     }
 
+    /// 订阅/文本类上限（SEC-10：gzip bomb/巨响应内存耗尽防护）
+    const MAX_SUB_BYTES: usize = 8 * 1024 * 1024;
+    /// 内核/wintun/geo 二进制上限
+    const MAX_BIN_BYTES: usize = 256 * 1024 * 1024;
+    /// 校验和文本上限
+    const MAX_SHA_BYTES: usize = 64 * 1024;
+
     /// 统一 HTTP 拉取（rustls + 显式 UA；订阅重试上限 3 次）
+    #[allow(dead_code)] // SEC-10 后调用方全部改走 http_get_ex 显式上限；包装保留作缺省上限入口
     async fn http_get(&self, url: &str) -> Result<Vec<u8>> {
-        Ok(self.http_get_ex(url, None).await?.bytes)
+        Ok(self
+            .http_get_ex(url, None, Self::MAX_SUB_BYTES)
+            .await?
+            .bytes)
     }
 
     /// 带条件请求的拉取（T-B2-10 订阅 304 面）：`if_none_match` 附 If-None-Match 头，
     /// 命中 304 短路返回（零字节、零头）。响应头一律小写键归一（reqwest/HTTP2 内部
     /// 表示即小写，parse_sub_headers 约定单一真源）。非 2xx 语义沿用旧 http_get
     /// （不检查状态码——订阅面板方言混杂，正文解析失败自有诚实报错）。
-    async fn http_get_ex(&self, url: &str, if_none_match: Option<&str>) -> Result<FetchOutcome> {
+    /// 带条件请求的拉取（T-B2-10 订阅 304 面）：`if_none_match` 附 If-None-Match 头，
+    /// 命中 304 短路返回（零字节、零头）。响应头一律小写键归一（reqwest/HTTP2 内部
+    /// 表示即小写，parse_sub_headers 约定单一真源）。
+    ///
+    /// SEC-10：① 重定向 ≤3 跳；② 非 2xx 明确报错（不再"不检查状态码"——错误页
+    /// 被当订阅解析是更差的谎报）；③ content_length 预检 + 流式累计硬上限
+    /// （gzip bomb 与谎报头均不可绕过）。
+    async fn http_get_ex(
+        &self,
+        url: &str,
+        if_none_match: Option<&str>,
+        max_bytes: usize,
+    ) -> Result<FetchOutcome> {
         let client = reqwest::Client::builder()
             .user_agent(APP_UA)
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::limited(3))
             .build()
             .map_err(|e| ProxyError::Download(format!("HTTP 客户端构建失败: {e}")))?;
         let mut last_err = String::new();
@@ -472,6 +508,19 @@ impl ProxyService {
                             bytes: Vec::new(),
                         });
                     }
+                    let status = resp.status();
+                    if !status.is_success() {
+                        return Err(ProxyError::Download(format!(
+                            "下载失败：HTTP {status}（{url}）"
+                        )));
+                    }
+                    if let Some(len) = resp.content_length() {
+                        if len as usize > max_bytes {
+                            return Err(ProxyError::Download(format!(
+                                "响应过大：{len} > {max_bytes} 字节上限（{url}）"
+                            )));
+                        }
+                    }
                     let headers = resp
                         .headers()
                         .iter()
@@ -481,15 +530,31 @@ impl ProxyService {
                                 .map(|s| (k.as_str().to_lowercase(), s.to_string()))
                         })
                         .collect();
-                    match resp.bytes().await {
-                        Ok(b) => {
-                            return Ok(FetchOutcome {
-                                not_modified: false,
-                                headers,
-                                bytes: b.to_vec(),
-                            })
+                    // 流式累计：content_length 谎报/缺失时以实际字节兜底
+                    let mut bytes: Vec<u8> = Vec::new();
+                    let mut stream = resp;
+                    loop {
+                        match stream.chunk().await {
+                            Ok(Some(chunk)) => {
+                                if bytes.len() + chunk.len() > max_bytes {
+                                    return Err(ProxyError::Download(format!(
+                                        "下载超过 {max_bytes} 字节上限（{url}）"
+                                    )));
+                                }
+                                bytes.extend_from_slice(&chunk);
+                            }
+                            Ok(None) => {
+                                return Ok(FetchOutcome {
+                                    not_modified: false,
+                                    headers,
+                                    bytes,
+                                });
+                            }
+                            Err(e) => {
+                                last_err = format!("读取响应体失败: {e}");
+                                break;
+                            }
                         }
-                        Err(e) => last_err = format!("读取响应体失败: {e}"),
                     }
                 }
                 Err(e) => last_err = format!("请求失败: {e}"),
@@ -499,7 +564,7 @@ impl ProxyService {
             }
         }
         Err(ProxyError::Download(format!(
-            "下载失败（已重试 {FETCH_RETRIES} 次）: {last_err}"
+            "订阅拉取失败（重试 {FETCH_RETRIES} 次）: {last_err}"
         )))
     }
 
@@ -559,7 +624,9 @@ impl ProxyService {
                 .map(|s| (s.url.clone(), s.etag.clone()))
                 .ok_or_else(|| ProxyError::NotFound(format!("订阅 {id} 不存在")))?
         };
-        let fetched = self.http_get_ex(&url, old_etag.as_deref()).await?;
+        let fetched = self
+            .http_get_ex(&url, old_etag.as_deref(), Self::MAX_SUB_BYTES)
+            .await?;
         if fetched.not_modified {
             return self.apply_sub_not_modified(id);
         }
@@ -701,14 +768,26 @@ impl ProxyService {
         Ok(())
     }
 
-    /// mixed 端口（设置中心可改；改后需重新切模式生效）
+    /// mixed 端口（设置中心可改）。System 态下改端口会**同步重写注册表**
+    /// （SEC-09：不变式"代理开启 ⇒ 注册表 server == our_server(当前端口)"），
+    /// 否则改端口后强杀，残留识别会把旧端口判为"用户改过"→ 删备份不还原 → 断网。
     pub fn set_mixed_port(&self, port: u16) -> Result<()> {
         if port == 0 {
             return Err(ProxyError::BadState("端口不能为 0".into()));
         }
         let mut inner = self.inner.write();
+        let was_system = inner.mode == Mode::System;
         inner.mixed_port = port;
-        self.persist_state(&inner)
+        self.persist_state(&inner)?;
+        drop(inner);
+        if was_system {
+            if let Err(e) = sysproxy::enable(&self.proxy_dir, self.sp.as_ref(), port) {
+                return Err(ProxyError::SysProxy(format!(
+                    "System 态改端口重写注册表失败（已持久化新端口，请重切一次系统代理）: {e}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// 持久化状态文件唯一写点（整包写，杜绝 set_mixed_port 曾有的 kernel 覆盖；

@@ -163,20 +163,49 @@ pub fn decode_frame(buf: &[u8]) -> Result<Option<(Frame, usize)>, AppError> {
     )))
 }
 
-/// 由 X25519 共享密钥派生 ChaCha20-Poly1305 会话密钥
-/// （salt = 双方指纹拼接的 SHA256，info = b"nexusforge-kvm-v1"）。
-/// shared 通常为 64B 双 DH 拼接：静态配对 DH（鉴权）|| 临时 DH（保新鲜）。
-pub fn derive_session_key(shared: &[u8], salt_material: &[u8]) -> [u8; 32] {
+/// 会话协议版本（SEC-01 升版：v2 起收发方向密钥分离 + 帧序号校验）。
+/// Hello 携带该值，不匹配即拒连（避免"升级一半仍用旧密钥方案"）。
+pub const PROTO_VER: u32 = 2;
+
+/// 方向化会话密钥对：按发起方/应答方分离，杜绝 (key, nonce) 在两方向复用。
+pub struct DirectionalKeys {
+    /// 发起方（先发 Hello 的一端，即客户端）→ 应答方 的发送密钥
+    pub initiator_to_responder: [u8; 32],
+    /// 应答方 → 发起方 的发送密钥
+    pub responder_to_initiator: [u8; 32],
+}
+
+/// SEC-01 修复：HKDF info 按方向分离派生两把密钥。
+/// salt 仍为双方指纹（字典序拼接的 SHA256，绑定设备对），shared 为双 DH 拼接。
+pub fn derive_directional_keys(shared: &[u8], salt_material: &[u8]) -> DirectionalKeys {
     use sha2::Digest;
     let salt: [u8; 32] = Sha256::digest(salt_material).into();
     let hk = Hkdf::<Sha256>::new(Some(&salt), shared);
-    let mut okm = [0u8; 32];
-    hk.expand(b"nexusforge-kvm-v1", &mut okm)
+    let mut i2r = [0u8; 32];
+    let mut r2i = [0u8; 32];
+    hk.expand(b"nexusforge-kvm-v2/initiator", &mut i2r)
         .expect("HKDF 扩展长度合法");
-    okm
+    hk.expand(b"nexusforge-kvm-v2/responder", &mut r2i)
+        .expect("HKDF 扩展长度合法");
+    DirectionalKeys {
+        initiator_to_responder: i2r,
+        responder_to_initiator: r2i,
+    }
 }
 
-/// 会话加密器：单一方向一个实例（收/发各一，nonce 计数器独立）
+/// 按会话角色拆出 (接收密钥, 发送密钥)。
+/// initiator = 先发 Hello 的一端（KVM/SYNC 的 client）。
+pub fn directional_pair(keys: &DirectionalKeys, initiator: bool) -> ([u8; 32], [u8; 32]) {
+    if initiator {
+        (keys.responder_to_initiator, keys.initiator_to_responder)
+    } else {
+        (keys.initiator_to_responder, keys.responder_to_initiator)
+    }
+}
+
+/// 会话加密器：单一方向一个实例（收/发各一，nonce 计数器独立）。
+/// SEC-01：两侧必须持有不同密钥（方向化派生），同方向 nonce 计数器单调；
+/// `open` 校验帧内序号 == 期望接收序号，拒绝重放/乱序。
 pub struct FrameCipher {
     cipher: ChaCha20Poly1305,
     counter: u64,
@@ -205,13 +234,29 @@ impl FrameCipher {
         Ok((*nonce, ct))
     }
 
+    /// 解密并校验帧序号：nonce 内计数必须等于期望接收序号（TCP 有序，帧既不可
+    /// 重放也不可跳号），否则拒绝。序号校验先于 AEAD，暴露面最小。
     pub fn open(&mut self, nonce: &[u8; 12], ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
         use chacha20poly1305::aead::Aead;
-        self.cipher
+        let got = u64::from_le_bytes(nonce[4..].try_into().expect("nonce 低 8B 即计数器"));
+        if got != self.counter {
+            return Err(AppError::module(
+                "KVM_SESSION_012",
+                format!(
+                    "帧序号失序（期望 {} 收到 {got}）：疑似重放或乱序",
+                    self.counter
+                ),
+                Some("断开并重连该会话以重建密钥"),
+            ));
+        }
+        let pt = self
+            .cipher
             .decrypt(chacha20poly1305::Nonce::from_slice(nonce), ciphertext)
             .map_err(|_| {
                 AppError::module("KVM_SESSION_005", "帧解密失败（密钥或序号不匹配）", None)
-            })
+            })?;
+        self.counter = self.counter.wrapping_add(1);
+        Ok(pt)
     }
 
     fn next_nonce(&mut self) -> [u8; 12] {
@@ -280,14 +325,14 @@ mod tests {
 
     #[test]
     fn cipher_seal_open_roundtrip_and_counter_nonce() {
-        let key = derive_session_key(&[7u8; 64], b"fpAfpB");
-        let mut tx = FrameCipher::new(key);
-        let mut rx = FrameCipher::new(key);
+        let keys = derive_directional_keys(&[7u8; 64], b"fpAfpB");
+        let mut tx = FrameCipher::new(keys.initiator_to_responder);
+        let mut rx = FrameCipher::new(keys.initiator_to_responder);
         let (n1, c1) = tx.seal(b"first").unwrap();
         let (n2, c2) = tx.seal(b"second").unwrap();
         let (n1, n2) = (nonce_arr(n1), nonce_arr(n2));
         assert_ne!(n1, n2, "nonce 必随计数器推进");
-        // 负例：密文与 nonce 不匹配（重放/乱序）→ AEAD 认证失败
+        // 负例：密文与 nonce 不匹配（同序号下密文错位）→ AEAD 认证失败
         assert!(rx.open(&n1, &c2).is_err());
         assert_eq!(rx.open(&n1, &c1).unwrap(), b"first");
         assert_eq!(rx.open(&n2, &c2).unwrap(), b"second");
@@ -299,12 +344,74 @@ mod tests {
         assert!(rx.open(&n3, &c3).is_err());
     }
 
+    // ---- SEC-01：方向化密钥与重放防护 ----
+
     #[test]
-    fn derive_session_key_binds_salt_and_shared() {
-        let k1 = derive_session_key(&[1u8; 64], b"AA||BB");
-        let k2 = derive_session_key(&[1u8; 64], b"AA||CC");
-        let k3 = derive_session_key(&[2u8; 64], b"AA||BB");
-        assert_ne!(k1, k2, "salt 不同必异key");
-        assert_ne!(k1, k3, "shared 不同必异key");
+    fn directional_keys_differ() {
+        let k = derive_directional_keys(&[9u8; 64], b"fpAfpB");
+        assert_ne!(
+            k.initiator_to_responder, k.responder_to_initiator,
+            "方向密钥必须不同"
+        );
+    }
+
+    #[test]
+    fn directional_pair_assigns_by_role() {
+        let keys = derive_directional_keys(&[9u8; 64], b"fpAfpB");
+        let (client_rx, client_tx) = directional_pair(&keys, true);
+        let (server_rx, server_tx) = directional_pair(&keys, false);
+        assert_eq!(
+            client_rx, server_tx,
+            "客户端收 = 服务端发（responder 方向）"
+        );
+        assert_eq!(
+            client_tx, server_rx,
+            "客户端发 = 服务端收（initiator 方向）"
+        );
+        assert_ne!(client_rx, client_tx, "同端收发密钥必须不同");
+    }
+
+    #[test]
+    fn same_counter_different_direction_yields_distinct_keystream() {
+        let keys = derive_directional_keys(&[9u8; 64], b"fpAfpB");
+        let mut a = FrameCipher::new(keys.initiator_to_responder);
+        let mut b = FrameCipher::new(keys.responder_to_initiator);
+        let (na, ca) = a.seal(b"AAAAAAAA").unwrap();
+        let (nb, cb) = b.seal(b"AAAAAAAA").unwrap();
+        assert_eq!(
+            nonce_arr(na),
+            nonce_arr(nb),
+            "序号相同是允许的——安全性必须来自密钥不同"
+        );
+        assert_ne!(ca, cb, "同明文同序号必须产生不同密文");
+    }
+
+    #[test]
+    fn replayed_frame_is_rejected() {
+        let mut tx = FrameCipher::new([3u8; 32]);
+        let mut rx = FrameCipher::new([3u8; 32]);
+        let (n, c) = tx.seal(b"op").unwrap();
+        assert!(rx.open(&n.into(), &c).is_ok());
+        assert!(rx.open(&n.into(), &c).is_err(), "重放必须被拒");
+        // 跳号（未来帧）同样拒绝：TCP 有序，期望严格递增
+        let (_n2, c2) = tx.seal(b"op2").unwrap();
+        let mut future = nonce_arr(n);
+        future[4..].copy_from_slice(&5u64.to_le_bytes());
+        assert!(rx.open(&future, &c2).is_err(), "跳号帧必须被拒");
+    }
+
+    #[test]
+    fn directional_keys_bind_salt_and_shared() {
+        let k1 = derive_directional_keys(&[1u8; 64], b"AA||BB");
+        let k2 = derive_directional_keys(&[1u8; 64], b"AA||CC");
+        let k3 = derive_directional_keys(&[2u8; 64], b"AA||BB");
+        assert_ne!(
+            k1.initiator_to_responder, k2.initiator_to_responder,
+            "salt 不同必异key"
+        );
+        assert_ne!(
+            k1.initiator_to_responder, k3.initiator_to_responder,
+            "shared 不同必异key"
+        );
     }
 }

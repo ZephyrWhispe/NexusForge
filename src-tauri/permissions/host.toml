@@ -6,6 +6,11 @@ description = "允许前端调用 host_system_accent 命令（D-28 按窗最小�
 commands.allow = ["host_system_accent"]
 
 [[permission]]
+identifier = "allow-host-capabilities"
+description = "允许前端调用 host_capabilities 命令（COR-26：Mica 能力探测，只读）"
+commands.allow = ["host_capabilities"]
+
+[[permission]]
 identifier = "allow-host-log"
 description = "允许前端调用 host_log 命令（D-28 按窗最小授权）"
 commands.allow = ["host_log"]

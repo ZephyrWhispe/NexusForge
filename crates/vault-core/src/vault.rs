@@ -152,8 +152,11 @@ impl VaultService {
         };
         self.persist_header(&header)?;
         *self.header.write() = Some(header.clone());
-        dek.lock_in_memory(); // D-24：进解锁态即锁页（失败仅 warn）
-        *inner = Inner::Unlocked { dek };
+        *inner = Inner::Unlocked { dek }; // 先落位
+                                          // COR-03：落位后再锁页——SecretKey 已 Box 化（地址稳定），显式顺序便于审阅
+        if let Inner::Unlocked { dek } = &*inner {
+            dek.lock_in_memory(); // D-24：进解锁态即锁页（失败仅 warn）
+        }
         self.touch();
         Ok(header)
     }
@@ -190,8 +193,10 @@ impl VaultService {
                 // 密码解锁成功 = Hello 熔断恢复（D-24 决策①：forced 只能被密码路径清除）
                 *self.hello_failures.lock() = 0;
                 *self.hello_forced.lock() = false;
-                dek.lock_in_memory();
-                *inner = Inner::Unlocked { dek };
+                *inner = Inner::Unlocked { dek }; // 先落位再锁页（COR-03）
+                if let Inner::Unlocked { dek } = &*inner {
+                    dek.lock_in_memory();
+                }
                 self.touch();
                 Ok(())
             }
@@ -353,9 +358,13 @@ impl VaultService {
         };
         let wrapped = host_core::util::b64_decode_lenient(&envelope.wrapped_dek_b64)
             .ok_or_else(|| err("VAULT_HELLO_005", "免密信封损坏"))?;
-        let dek_bytes = crypto_port
-            .unprotect(&wrapped)
-            .map_err(|e| fail(err("VAULT_HELLO_006", e.to_string())))?;
+        // COR-12：DPAPI 解出的明文 DEK 中间缓冲用 Zeroizing 承载，释放即清零，
+        // 不残留明文密钥于已释放堆内存
+        let dek_bytes: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(
+            crypto_port
+                .unprotect(&wrapped)
+                .map_err(|e| fail(err("VAULT_HELLO_006", e.to_string())))?,
+        );
         if dek_bytes.len() != crypto::KEY_LEN {
             return Err(fail(err("VAULT_HELLO_006", "免密密钥长度非法")));
         }
@@ -375,8 +384,10 @@ impl VaultService {
         }
         let mut inner = self.inner.lock();
         *self.hello_failures.lock() = 0;
-        dek.lock_in_memory();
-        *inner = Inner::Unlocked { dek };
+        *inner = Inner::Unlocked { dek }; // 先落位再锁页（COR-03）
+        if let Inner::Unlocked { dek } = &*inner {
+            dek.lock_in_memory();
+        }
         self.touch();
         Ok(())
     }
@@ -446,8 +457,9 @@ impl VaultService {
             .map_err(|e| err("VAULT_META_005", format!("meta 序列化失败: {e}")))?;
         let tmp = self.meta_path.with_extension("json.tmp");
         std::fs::write(&tmp, raw).map_err(|e| err("VAULT_META_004", e.to_string()))?;
-        // Windows rename 不覆盖已存在目标
-        let _ = std::fs::remove_file(&self.meta_path);
+        // COR-11：Windows 的 rename 走 MOVEFILE_REPLACE_EXISTING 会覆盖目标——
+        // 先 remove 再 rename 会制造"删旧→写新"窗口，此间崩溃 = vault.meta.json
+        // 丢失 = 保险库永久不可解锁。原子替换，绝不先删。
         std::fs::rename(&tmp, &self.meta_path).map_err(|e| err("VAULT_META_004", e.to_string()))?;
         Ok(())
     }

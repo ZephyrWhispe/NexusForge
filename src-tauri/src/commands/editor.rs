@@ -72,8 +72,18 @@ pub async fn editor_save(
 pub async fn editor_save_as(
     id: String,
     target: std::path::PathBuf,
+    overwrite: Option<bool>,
     state: State<'_, HostState>,
 ) -> Result<editor_core::SessionInfo, AppError> {
+    // COR-27：目标已存在默认拒绝（可逆确认由前端弹后携 overwrite=true 重试）——
+    // 旧实现静默覆盖，与面板其他破坏性操作的确认纪律不一致
+    if !overwrite.unwrap_or(false) && target.exists() {
+        return Err(AppError::module(
+            "EDITOR_SAVEAS_001",
+            format!("目标文件已存在: {}", target.display()),
+            Some("确认覆盖后重试，或更换目标路径"),
+        ));
+    }
     let sessions = state.editor.sessions().clone();
     let blocking = sessions.clone();
     let info = tauri::async_runtime::spawn_blocking(move || blocking.save_as(&id, &target))

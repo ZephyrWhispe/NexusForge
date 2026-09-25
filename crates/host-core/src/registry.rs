@@ -161,7 +161,12 @@ impl ModuleRegistry {
             let Some(values) = stored_config(config, &id) else {
                 continue;
             };
-            let r = module.apply_config(values);
+            // PERF-08：apply_config 内含 SQLite/文件 IO（sync 的 DELETE 等），
+            // 不得占用运行时工作线程（与 init/start/stop 同纪律）
+            let r = match tokio::task::spawn_blocking(move || module.apply_config(values)).await {
+                Ok(r) => r,
+                Err(e) => Err(ModuleError::Config(format!("配置派发任务失败: {e}"))),
+            };
             if let Err(e) = &r {
                 self.report_failure(&id, e).await;
             }
@@ -178,7 +183,13 @@ impl ModuleRegistry {
     ) -> Option<Result<(), ModuleError>> {
         let module = self.get(id)?;
         let values = stored_config(config, id)?;
-        Some(module.apply_config(values))
+        // PERF-08：同 apply_configs——派发是阻塞 IO，进 blocking 池
+        Some(
+            match tokio::task::spawn_blocking(move || module.apply_config(values)).await {
+                Ok(r) => r,
+                Err(e) => Err(ModuleError::Config(format!("配置派发任务失败: {e}"))),
+            },
+        )
     }
 
     /// 重启单个模块：stop → init → start

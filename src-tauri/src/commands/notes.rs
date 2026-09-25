@@ -269,7 +269,7 @@ pub async fn notes_search(
         .notes
         .library()
         .ok_or_else(|| AppError::module("NOTE_IPC_001", "笔记模块未就绪", None))?;
-    tauri::async_runtime::spawn_blocking(move || m.search(&query, limit))
+    tauri::async_runtime::spawn_blocking(move || m.search(&query, limit.min(500)))
         .await
         .map_err(|e| AppError::module("NOTE_IPC_001", e.to_string(), None))?
         .map_err(notes_err)

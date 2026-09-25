@@ -256,15 +256,22 @@ fn remote_rt() -> &'static tokio::runtime::Runtime {
 /// 从任意线程（含 tokio 上下文，如 `#[tokio::test]`）同步等待远端 IO：
 /// spawn 到专用 runtime + 通道阻塞收取，避开「在同一 current-thread
 /// runtime 上嵌套 block_on」的重入限制。
+/// COR-29：未来量必须产出 `Result<T, FileError>`，runtime 停摆（通道断开）返回
+/// 可控 `BadState` 而非 panic——panic 会打断调用它的 worker 线程（非隔离崩溃）；
+/// 返回 Err 后由调用臂落 Flow::Failed（可重试），线程继续存活。
 pub(crate) fn remote_block_on<T: Send + 'static>(
-    fut: impl Future<Output = T> + Send + 'static,
-) -> T {
+    fut: impl Future<Output = Result<T, FileError>> + Send + 'static,
+) -> Result<T, FileError> {
     let (tx, rx) = std::sync::mpsc::channel();
     remote_rt().handle().clone().spawn(async move {
         let _ = tx.send(fut.await);
     });
-    rx.recv()
-        .expect("file-core remote runtime 意外停摆，远端请求无法收取")
+    match rx.recv() {
+        Ok(result) => result,
+        Err(_) => Err(FileError::BadState(
+            "file-core remote runtime 意外停摆，远端请求无法收取（可重试或重启远端模块）".into(),
+        )),
+    }
 }
 
 /// 供 WebDavDriver::new 在 runtime 上下文内构建 reqwest::Client

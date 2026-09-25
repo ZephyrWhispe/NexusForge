@@ -37,16 +37,19 @@ pub const SALT_LEN: usize = 16;
 
 /// 32B 对称密钥。**故意不实现 Debug/Display**（clippy 约束见 crate 根），
 /// Drop 时内存清零；[`wipe`](Self::wipe) 供锁定流程显式调用。
-pub struct SecretKey([u8; KEY_LEN]);
+///
+/// COR-03：内层数组用 `Box` 承载——内联数组**移动即复制**，`VirtualLock` 锁的
+/// 地址会随移动失效；堆分配使地址跨移动稳定，锁页/解锁始终作用于同一块内存。
+pub struct SecretKey(Box<[u8; KEY_LEN]>);
 
 impl SecretKey {
     pub fn new(bytes: [u8; KEY_LEN]) -> Self {
-        Self(bytes)
+        Self(Box::new(bytes))
     }
 
     pub fn generate() -> Self {
-        let mut k = [0u8; KEY_LEN];
-        OsRng.fill_bytes(&mut k);
+        let mut k = Box::new([0u8; KEY_LEN]);
+        OsRng.fill_bytes(k.as_mut());
         Self(k)
     }
 
@@ -79,10 +82,14 @@ impl SecretKey {
         }
     }
 
-    /// 解锁缓冲区（锁定前调用；端口缺失时为 no-op）
+    /// 解锁缓冲区（锁定前调用；端口缺失时为 no-op）。
+    /// COR-03：解锁失败必须可见——VirtualUnlock 失败通常意味着"从未锁过该地址"，
+    /// 是内存锁状态不一致的信号，静默吞掉会掩盖锁错地址类缺陷。
     pub fn unlock_memory(&self) {
         if let Some(port) = mem_lock_port() {
-            port.unlock(self.0.as_ptr() as usize, KEY_LEN);
+            if !port.unlock(self.0.as_ptr() as usize, KEY_LEN) {
+                tracing::warn!("VirtualUnlock 失败：地址可能从未锁定（内存锁状态不一致）");
+            }
         }
     }
 }
@@ -417,6 +424,20 @@ mod tests {
         assert_eq!(k.expose(), &[0xABu8; KEY_LEN]);
         k.wipe();
         assert_eq!(k.expose(), &[0u8; KEY_LEN], "wipe 后必须全 0");
+    }
+
+    #[test]
+    fn secret_key_lock_address_is_stable_across_moves() {
+        // COR-03：VirtualLock 锁的是地址——内联数组移动即复制会使锁失效。
+        // Box 化后移动只搬指针，堆地址必须不变。
+        let k = SecretKey::new([7u8; KEY_LEN]);
+        let p1 = k.expose().as_ptr() as usize;
+        let moved = k; // 移动
+        assert_eq!(
+            p1,
+            moved.expose().as_ptr() as usize,
+            "移动后堆地址必须不变（否则 VirtualLock 失效）"
+        );
     }
 
     #[test]

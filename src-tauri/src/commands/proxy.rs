@@ -248,7 +248,10 @@ pub async fn proxy_logs(
     state: State<'_, HostState>,
 ) -> Result<Vec<proxy_core::LogLine>, AppError> {
     let svc = proxy_service(&state)?;
-    tauri::async_runtime::spawn_blocking(move || Ok(svc.logs(limit.unwrap_or(100))))
-        .await
-        .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let l = limit.map(|l| l.min(500)).unwrap_or(100);
+        Ok(svc.logs(l))
+    })
+    .await
+    .map_err(|e| AppError::module("PROXY_IPC_001", e.to_string(), None))?
 }

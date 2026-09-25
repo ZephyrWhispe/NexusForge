@@ -6,6 +6,21 @@ members = ["src-tauri", "crates/host-core", "crates/win-integration", "crates/ne
 version = "0.1.0"
 edition = "2021"
 authors = ["ZephyrWhispe"]
+license = "GPL-3.0"
+# GOV-06：MSRV 机器可判（DESIGN 声称 Rust 1.80+；CI 锁 stable，本值是下限不是追踪目标）
+rust-version = "1.80"
+
+# GOV-06：跨 crate lint 统一（各 crate 可 [lints] workspace = true 继承）
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# 项目主线纪律：错误必须可传播（COR-29：生产路径 expect/unwrap 打断 worker）
+unwrap_used = "allow"        # 分步收紧：先挂账计数，逐 crate 豁免后翻 deny
+expect_used = "allow"
+# 历史缺陷高发形：吞错、伪 static、误用语义
+redundant_clone = "warn"
+verbose_file_reads = "warn"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

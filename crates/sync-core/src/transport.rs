@@ -17,7 +17,8 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 use host_core::device::{b64_decode, b64_encode, DeviceIdentity, PairStore, PairedPeer};
 use host_core::wire::{
-    derive_session_key, read_frame, write_frame, Frame, FrameCipher, MsgType, HANDSHAKE_TIMEOUT,
+    derive_directional_keys, directional_pair, read_frame, write_frame, DirectionalKeys, Frame,
+    FrameCipher, MsgType, HANDSHAKE_TIMEOUT, PROTO_VER,
 };
 
 use crate::error::{Result, SyncError};
@@ -30,6 +31,9 @@ pub struct SyncHello {
     device_name: String,
     fingerprint: String,
     eph_pubkey_b64: String,
+    /// 会话协议版本（SEC-01：v2 起方向化密钥 + 帧序号校验；缺字段视为 v1 拒连）
+    #[serde(default)]
+    proto_ver: u32,
 }
 
 /// 同步协议消息（加密帧内 JSON）
@@ -86,31 +90,36 @@ fn own_hello(identity: &DeviceIdentity, eph_pub: &X25519PublicKey) -> Frame {
             device_name: identity.device_name.clone(),
             fingerprint: identity.pubkey_fingerprint.clone(),
             eph_pubkey_b64: b64_encode(&eph_pub.to_bytes()),
+            proto_ver: PROTO_VER,
         })
         .unwrap_or_default(),
     }
 }
 
-/// shared = 静态 DH（鉴权）‖ 临时 DH（保新鲜）；salt = 双方指纹字典序拼接
-/// （与 kvm session_key_from 同式，info 仍为 kvm 常量——信任根同源）
-fn session_key_from(
+/// shared = 静态 DH（鉴权）‖ 临时 DH（保新鲜）；salt = 双方指纹字典序拼接。
+/// SEC-01：按方向派生两把密钥（与 kvm 同式——信任根同源），中间材料即用即清。
+fn session_keys_from(
     identity: &DeviceIdentity,
     peer_static: &[u8; 32],
     dh2: [u8; 32],
     peer_fingerprint: &str,
-) -> Result<[u8; 32]> {
-    let dh1 = identity
+) -> Result<DirectionalKeys> {
+    use zeroize::Zeroize;
+    let mut dh1 = identity
         .diffie_hellman(peer_static)
         .ok_or_else(|| SyncError::Peer("静态 DH 共享密钥非法（全零）".into()))?;
     let mut shared = Vec::with_capacity(64);
     shared.extend_from_slice(&dh1);
+    dh1.zeroize();
     shared.extend_from_slice(&dh2);
     let mut salt = [
         identity.pubkey_fingerprint.as_bytes(),
         peer_fingerprint.as_bytes(),
     ];
     salt.sort();
-    Ok(derive_session_key(&shared, &salt.concat()))
+    let keys = derive_directional_keys(&shared, &salt.concat());
+    shared.zeroize();
+    Ok(keys)
 }
 
 async fn ephemeral_dh2(eph: EphemeralSecret, peer_eph: [u8; 32]) -> Result<[u8; 32]> {
@@ -135,8 +144,15 @@ where
             frame.msg_type
         )));
     }
-    serde_json::from_slice(&frame.payload)
-        .map_err(|e| SyncError::Proto(format!("Hello 载荷非法: {e}")))
+    let hello: SyncHello = serde_json::from_slice(&frame.payload)
+        .map_err(|e| SyncError::Proto(format!("Hello 载荷非法: {e}")))?;
+    if hello.proto_ver != PROTO_VER {
+        return Err(SyncError::Proto(format!(
+            "会话协议版本不匹配（本端 v{PROTO_VER}，对端 v{}）",
+            hello.proto_ver
+        )));
+    }
+    Ok(hello)
 }
 
 async fn write_hello_frame<S>(stream: &mut S, hello: &Frame) -> Result<()>
@@ -167,13 +183,14 @@ pub async fn handshake_client(
         .try_into()
         .map_err(|_| SyncError::Proto("对端临时公钥长度非法".into()))?;
     let dh2 = ephemeral_dh2(eph, peer_eph).await?;
-    let key = session_key_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let keys = session_keys_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let (rx_key, tx_key) = directional_pair(&keys, true); // 客户端 = initiator
     let (rd, wr) = stream.into_split();
     Ok(SyncSession {
         rd,
         wr,
-        rx: FrameCipher::new(key),
-        tx: FrameCipher::new(key),
+        rx: FrameCipher::new(rx_key),
+        tx: FrameCipher::new(tx_key),
         peer,
     })
 }
@@ -197,13 +214,14 @@ pub async fn handshake_server(
     write_hello_frame(&mut stream, &own_hello(identity, &eph_pub)).await?;
 
     let dh2 = ephemeral_dh2(eph, peer_eph).await?;
-    let key = session_key_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let keys = session_keys_from(identity, &peer_static, dh2, &peer.fingerprint)?;
+    let (rx_key, tx_key) = directional_pair(&keys, false); // 服务端 = responder
     let (rd, wr) = stream.into_split();
     Ok(SyncSession {
         rd,
         wr,
-        rx: FrameCipher::new(key),
-        tx: FrameCipher::new(key),
+        rx: FrameCipher::new(rx_key),
+        tx: FrameCipher::new(tx_key),
         peer,
     })
 }
@@ -369,6 +387,7 @@ mod tests {
             device_name: id_x.device_name.clone(),
             fingerprint: id_x.pubkey_fingerprint.clone(),
             eph_pubkey_b64: b64_encode(&id_x.public_key()),
+            proto_ver: PROTO_VER,
         };
         let err = verify_peer(&store_a, &hello).unwrap_err();
         assert!(err.to_string().contains("未配对"));
@@ -386,5 +405,43 @@ mod tests {
         assert!(err.to_string().contains("指纹"));
         let _ = std::fs::remove_dir_all(&dir_x);
         let _ = (id_a, store_a);
+    }
+
+    /// SEC-01 负例：旧版对端（Hello 缺 proto_ver → 视为 v1）必须被拒，禁止半升级会话
+    #[tokio::test]
+    async fn v1_hello_is_rejected() {
+        use host_core::wire::HEADER_LEN;
+        let (id_a, _store_a, id_b, store_b) = paired_devices("v1");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = stream;
+            match read_hello_frame(&mut stream).await {
+                Ok(_) => panic!("v1 Hello 必须被拒"),
+                Err(e) => assert!(e.to_string().contains("版本不匹配"), "实际: {e}"),
+            }
+        });
+
+        // 手工构造缺 proto_ver 的 v1 Hello 帧（模拟旧版对端）
+        let eph = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+        let legacy = SyncHello {
+            device_id: id_a.device_id.clone(),
+            device_name: id_a.device_name.clone(),
+            fingerprint: id_a.pubkey_fingerprint.clone(),
+            eph_pubkey_b64: b64_encode(&X25519PublicKey::from(&eph).to_bytes()),
+            proto_ver: 0,
+        };
+        let payload = serde_json::to_vec(&legacy).unwrap();
+        let mut wire = Vec::with_capacity(4 + HEADER_LEN + payload.len());
+        wire.extend_from_slice(&((HEADER_LEN + payload.len()) as u32).to_be_bytes());
+        wire.push(MsgType::Hello as u8);
+        wire.push(0u8);
+        wire.extend_from_slice(&payload);
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(&wire).await.unwrap();
+        server.await.unwrap();
+        let _ = (id_b, store_b);
     }
 }

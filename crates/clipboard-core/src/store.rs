@@ -18,6 +18,13 @@ use serde::Serialize;
 use crate::backup::BackupRow;
 use crate::types::{now_ms, ClipEntry, Page, SearchQuery, StatsDto, SuggestionDto, BLOB_THRESHOLD};
 
+/// blob 条目在主表保留的截断预览长度（仅列表展示；全量正文在 blob，读取侧 blob 优先）
+const PREVIEW_CHARS: usize = 512;
+
+fn text_preview(text: &str) -> String {
+    text.chars().take(PREVIEW_CHARS).collect()
+}
+
 pub struct ClipStore {
     conn: Arc<Mutex<Connection>>,
     blob_dir: PathBuf,
@@ -269,9 +276,18 @@ impl ClipStore {
     /// dedup 命中只刷新鲜度/计数/归属——分组、建议与 pinned 一律不动
     /// （用户手工组名与已忽略的建议都不因重复复制而复活或覆写）。
     pub fn insert_row(&self, c: &NewClip) -> Result<String, AppError> {
+        let conn = self.conn.lock();
+        self.insert_row_conn(&conn, c)
+    }
+
+    /// COR-22：可传入外部连接/事务的内部臂（import_rows 事务化用）
+    fn insert_row_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        c: &NewClip,
+    ) -> Result<String, AppError> {
         let hash = content_hash(c.text);
         let now = now_ms();
-        let conn = self.conn.lock();
         let existing: Option<String> = conn
             .query_row(
                 "SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1",
@@ -297,13 +313,16 @@ impl ClipStore {
         }
 
         let id = uuid::Uuid::now_v7().to_string();
-        let (content_col, blob_path): (String, Option<String>) = if c.text.len() > BLOB_THRESHOLD {
+        // COR-01：blob 条目在主表保留**截断预览**（列表展示用），全量正文只在 blob；
+        // 读取侧（get_payload/get_content）一律 blob 优先，绝不把预览当正文返回。
+        // secret 优先于 blob：敏感文本永远走加密路径，杜绝明文落 blob 文件。
+        let (content_col, blob_path): (String, Option<String>) = if c.secret {
+            (String::new(), None) // 密文由管线层写入（insert_encrypted）
+        } else if c.text.len() > BLOB_THRESHOLD {
             let name = format!("{}.txt", hash);
             let blob = self.blob_dir.join(&name);
             std::fs::write(&blob, c.text).map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
-            (String::new(), Some(name))
-        } else if c.secret {
-            (String::new(), None) // 密文由管线层写入前替换 content
+            (text_preview(c.text), Some(name))
         } else {
             (c.text.to_string(), None)
         };
@@ -340,18 +359,43 @@ impl ClipStore {
         source_app: Option<&str>,
         origin: &str,
     ) -> Result<String, AppError> {
+        let conn = self.conn.lock();
+        self.insert_encrypted_conn(&conn, encrypted_b64, group, suggested, source_app, origin)
+    }
+
+    fn insert_encrypted_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        encrypted_b64: &str,
+        group: Option<&str>,
+        suggested: Option<(&str, f32)>,
+        source_app: Option<&str>,
+        origin: &str,
+    ) -> Result<String, AppError> {
         let hash = content_hash(encrypted_b64);
         let id = uuid::Uuid::now_v7().to_string();
         let (sugg_group, sugg_conf) = split_suggestion(suggested);
-        let conn = self.conn.lock();
+        // COR-28：密文超过 BLOB_THRESHOLD 走 blob（密文本身已是安全内容）——
+        // 与明文 insert_row 同语义，杜绝 base64 密文内联膨胀主表；
+        // 读取侧 get_content/get_payload 均 blob 优先，两臂天然一致
+        let (content_col, blob_path): (String, Option<String>) =
+            if encrypted_b64.len() > BLOB_THRESHOLD {
+                let name = format!("{}.enc", hash);
+                std::fs::write(self.blob_dir.join(&name), encrypted_b64)
+                    .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
+                (String::new(), Some(name))
+            } else {
+                (encrypted_b64.to_string(), None)
+            };
         conn.execute(
             r#"INSERT INTO clip_entries
-               (id, content_type, content, content_hash, origin, source_app, pinned, group_name, secret, created_at, suggested_group, suggested_confidence)
-               VALUES (?1, 'text', ?2, ?3, ?7, ?4, 0, ?5, 1, ?6, ?8, ?9)"#,
+               (id, content_type, content, content_hash, blob_path, origin, source_app, pinned, group_name, secret, created_at, suggested_group, suggested_confidence)
+               VALUES (?1, 'text', ?2, ?3, ?4, ?8, ?5, 0, ?6, 1, ?7, ?9, ?10)"#,
             params![
                 id,
-                encrypted_b64,
+                content_col,
                 hash,
+                blob_path,
                 source_app,
                 group,
                 now_ms(),
@@ -499,6 +543,15 @@ impl ClipStore {
 
     pub fn pin(&self, id: &str, pinned: bool) -> Result<(), AppError> {
         let conn = self.conn.lock();
+        self.pin_conn(&conn, id, pinned)
+    }
+
+    fn pin_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+        pinned: bool,
+    ) -> Result<(), AppError> {
         conn.execute(
             "UPDATE clip_entries SET pinned = ?2 WHERE id = ?1",
             params![id, pinned as i64],
@@ -763,9 +816,20 @@ impl ClipStore {
         source_app: Option<&str>,
         origin: &str,
     ) -> Result<String, AppError> {
+        let conn = self.conn.lock();
+        self.insert_typed_conn(&conn, content, content_type, source_app, origin)
+    }
+
+    fn insert_typed_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        content: &str,
+        content_type: &'static str,
+        source_app: Option<&str>,
+        origin: &str,
+    ) -> Result<String, AppError> {
         let hash = content_hash(content);
         let now = now_ms();
-        let conn = self.conn.lock();
         let existing: Option<String> = conn
             .query_row(
                 "SELECT id FROM clip_entries WHERE content_hash = ?1 LIMIT 1",
@@ -826,6 +890,18 @@ impl ClipStore {
                     .collect(),
             ))),
             _ => {
+                // COR-01：blob 优先——>64KB 文本的全量正文在 blob 文件里，content 列
+                // 只是截断预览；粘贴/读回必须与原文逐字节一致，不得返回预览或空串
+                if let Some(blob) = blob_path.as_deref() {
+                    let bytes = std::fs::read(self.blob_dir.join(blob))
+                        .map_err(|e| err("CLIPBOARD_STORAGE_002", e))?;
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    return Ok(Some(if secret == 1 {
+                        Payload::SecretB64(text)
+                    } else {
+                        Payload::Text(text)
+                    }));
+                }
                 let Some(content) = content_opt else {
                     return Ok(None);
                 };
@@ -980,12 +1056,17 @@ impl ClipStore {
         } else {
             "UPDATE clip_entries SET suggestion_dismissed = 1 WHERE id = ?1"
         };
+        // COR-22：批量采纳同属一个用户意图——事务包裹，全成或全败
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         let mut n = 0u32;
         for id in ids {
-            n += conn
+            n += tx
                 .execute(sql, params![id])
                 .map_err(|e| err("CLIPBOARD_STORAGE_001", e))? as u32;
         }
+        tx.commit().map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(n)
     }
 
@@ -1102,6 +1183,12 @@ impl ClipStore {
         protect: &dyn CryptoPort,
     ) -> Result<ImportReport, AppError> {
         let mut report = ImportReport::default();
+        // COR-22：整批一个事务——中途失败（磁盘满/IO）整体回滚，不留"半套导入"，
+        // 且报告只在成功提交后返回（调用方看到的 Imported 数与库内事实一致）
+        let conn = self.conn.lock();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         for row in rows {
             if row.content_type == "image" {
                 // 图片正文住在 blob 文件里、从不进备份，故这行在导入侧无物可落
@@ -1120,7 +1207,8 @@ impl ClipStore {
                     .protect(&plain)
                     .map_err(|e| err("CLIPBOARD_IMPORT_004", e))?;
                 let b64 = host_core::util::b64_encode(&cipher);
-                self.insert_encrypted(
+                self.insert_encrypted_conn(
+                    &tx,
                     &b64,
                     row.group_name.as_deref(),
                     None,
@@ -1128,13 +1216,13 @@ impl ClipStore {
                     "local",
                 )?
             } else if row.content_type == "files" {
-                fresh = !self.content_hash_exists(&content_hash(&row.text))?;
+                fresh = !self.content_hash_exists_conn(&tx, &content_hash(&row.text))?;
                 if !fresh {
                     report.duplicates += 1;
                 }
-                self.insert_typed(&row.text, "files", row.source_app.as_deref(), "local")?
+                self.insert_typed_conn(&tx, &row.text, "files", row.source_app.as_deref(), "local")?
             } else {
-                fresh = !self.content_hash_exists(&content_hash(&row.text))?;
+                fresh = !self.content_hash_exists_conn(&tx, &content_hash(&row.text))?;
                 if !fresh {
                     report.duplicates += 1;
                 }
@@ -1142,7 +1230,7 @@ impl ClipStore {
                 clip.group = row.group_name.as_deref();
                 clip.source_app = row.source_app.as_deref();
                 clip.html = row.html.as_deref();
-                self.insert_row(&clip)?
+                self.insert_row_conn(&tx, &clip)?
             };
             if fresh {
                 report.imported += 1;
@@ -1151,14 +1239,19 @@ impl ClipStore {
                 report.secrets += 1;
             }
             if row.pinned {
-                self.pin(&id, true)?;
+                self.pin_conn(&tx, &id, true)?;
             }
         }
+        tx.commit().map_err(|e| err("CLIPBOARD_STORAGE_001", e))?;
         Ok(report)
     }
 
-    fn content_hash_exists(&self, hash: &str) -> Result<bool, AppError> {
-        let conn = self.conn.lock();
+    #[allow(dead_code)] // 旧封装保留给非事务调用点（COR-22 后当前仅测试路径可及）
+    fn content_hash_exists_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        hash: &str,
+    ) -> Result<bool, AppError> {
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM clip_entries WHERE content_hash = ?1)",
             params![hash],
@@ -1295,6 +1388,7 @@ impl ClipStore {
 }
 
 /// 条目载荷
+#[derive(Debug)]
 pub enum Payload {
     Text(String),
     Files(Vec<std::path::PathBuf>),
@@ -1491,6 +1585,34 @@ mod tests {
         assert!(entry.blob_path.is_some(), ">64KB 内容应转 blob");
         let back = s.get_content(&id, |c| Ok(c.to_vec())).unwrap().unwrap();
         assert_eq!(back.len(), big.len());
+    }
+
+    // ---- COR-01：>64KB 文本的三段一致性（预览非空 / 粘贴全文 / 读口一致） ----
+
+    #[test]
+    fn big_text_preview_nonempty_and_payload_is_full() {
+        let s = open_temp("blob_payload");
+        // 含中文的多字节大文本（预览按字符截断，不得切出半个 UTF-8 序列）
+        let unit = "中文A";
+        let big = unit.repeat((BLOB_THRESHOLD / unit.len()) + 10);
+        assert!(big.len() > BLOB_THRESHOLD);
+        let id = s.insert_row(&NewClip::new(&big)).unwrap();
+
+        // ① 列表预览非空（修复前 content 列为空串 → 预览空白）
+        let entry = &s.search(&SearchQuery::default()).unwrap().items[0];
+        assert!(entry.blob_path.is_some());
+        assert!(!entry.preview.is_empty(), "列表预览不得为空");
+        assert!(entry.preview.chars().count() <= 512, "预览必须截断");
+
+        // ② 粘贴（get_payload）= 全文（修复前文本臂不读 blob → 返回空串）
+        match s.get_payload(&id).unwrap() {
+            Some(Payload::Text(text)) => assert_eq!(text, big, "粘贴内容必须与原文逐字节相等"),
+            other => panic!("期望文本载荷，实际 {other:?}"),
+        }
+
+        // ③ clipboard_get（get_content）同样返回全文（两读口一致）
+        let back = s.get_content(&id, |c| Ok(c.to_vec())).unwrap().unwrap();
+        assert_eq!(back, big);
     }
 
     // ---- D-05 blob 生命周期（安全红线，含负例） ----

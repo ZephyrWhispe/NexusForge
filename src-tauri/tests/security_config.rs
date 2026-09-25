@@ -145,7 +145,9 @@ fn bundle_targets_ship_nsis_and_msi() {
     }
 }
 
-/// CSP 判定：必需指令齐全且无 'unsafe-eval'（纯函数自带负例）
+/// CSP 判定：必需指令齐全且无 'unsafe-eval'（纯函数自带负例）。
+/// SEC-14：object-src/base-uri/form-action/frame-src 不回落 default-src，
+/// 必须显式声明（base-uri 缺失 = <base href> 注入可改写全部相对 URL 基准）。
 fn csp_ok(csp: &str) -> bool {
     if csp.contains("unsafe-eval") {
         return false;
@@ -153,10 +155,14 @@ fn csp_ok(csp: &str) -> bool {
     let mut directives = csp.split(';').map(str::trim).collect::<Vec<_>>();
     directives.sort();
     let required = [
+        "base-uri",
         "connect-src",
         "default-src",
         "font-src",
+        "form-action",
+        "frame-src",
         "img-src",
+        "object-src",
         "script-src",
         "style-src",
         "worker-src",
@@ -175,6 +181,11 @@ fn csp_ok(csp: &str) -> bool {
         && directives.iter().any(|d| {
             d.starts_with("connect-src") && d.contains("ipc:") && d.contains("http://ipc.localhost")
         })
+        // SEC-14 关键值：object 嵌入与 iframe 全禁、URL 基准与表单目标锁 self
+        && directives.iter().any(|d| d.starts_with("object-src") && d.contains("'none'"))
+        && directives.iter().any(|d| d.starts_with("base-uri") && d.contains("'self'"))
+        && directives.iter().any(|d| d.starts_with("form-action") && d.contains("'self'"))
+        && directives.iter().any(|d| d.starts_with("frame-src") && d.contains("'none'"))
 }
 
 #[test]
@@ -187,7 +198,14 @@ fn csp_predicate_itself_can_fail() {
     )); // unsafe-eval 一票否决
     assert!(csp_ok(
         "default-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; \
-         worker-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'"
+         worker-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'; \
+         object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'"
+    ));
+    // SEC-14 负例：缺 base-uri / object-src 即判否（不回落 default-src，必须显式）
+    assert!(!csp_ok(
+        "default-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; \
+         worker-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'; \
+         form-action 'self'; frame-src 'none'"
     ));
 }
 
@@ -198,6 +216,75 @@ fn csp_is_landed_in_config() {
         .as_str()
         .expect("D-28：csp 不得为 null");
     assert!(csp_ok(csp), "CSP 指令集不完整: {csp}");
+}
+
+/// SEC-08：asset 协议 scope 禁止整根授权（`$APPDATA/**` 会让任一窗口——含
+/// overlay/pin/quickpanel——读到 config/log/加密库等全部数据文件）；只允许
+/// 具体媒体子目录。新增子目录须在此显式登记。
+#[test]
+fn asset_protocol_scope_is_narrow() {
+    let cfg = config();
+    let scope = cfg["app"]["security"]["assetProtocol"]["scope"]
+        .as_array()
+        .expect("assetProtocol.scope 应为数组");
+    let pats: Vec<&str> = scope.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        !pats.is_empty(),
+        "asset scope 不得为空（前端画布图片依赖 notes/**）"
+    );
+    assert!(
+        !pats.contains(&"$APPDATA/**"),
+        "assetProtocol 禁止整根授权（SEC-08）"
+    );
+    for p in &pats {
+        assert!(
+            p.starts_with("$APPDATA/") && p.ends_with("/**") && *p != "$APPDATA/**",
+            "scope 必须是具体子目录: {p}"
+        );
+    }
+}
+
+/// SEC-07：`dangerouslySetInnerHTML` 全仓仅允许出现在 MarkdownView（净化唯一出口）。
+/// 纯源码扫描断言：新增渲染点必须复用 renderMarkdown / MarkdownView。
+#[test]
+fn dangerously_set_inner_html_only_in_markdown_view() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("目录应可读") {
+            let path = entry.expect("目录项").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("tsx") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    assert!(
+        files.len() >= 50,
+        "正对照：src 源文件应成规模，实得 {}",
+        files.len()
+    );
+    for path in &files {
+        // 测试文件中的字面量引用（如 htmlFormat 元测试）不算渲染点
+        if path.components().any(|c| c.as_os_str() == "__tests__") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(path).unwrap();
+        if name == "MarkdownView.tsx" {
+            assert!(
+                text.contains("dangerouslySetInnerHTML"),
+                "正对照：MarkdownView 自身应使用该口"
+            );
+            continue;
+        }
+        assert!(
+            !text.contains("dangerouslySetInnerHTML"),
+            "{name} 出现 dangerouslySetInnerHTML——渲染必须经 MarkdownView/renderMarkdown 净化（SEC-07）"
+        );
+    }
 }
 
 fn load_capabilities() -> Vec<(String, serde_json::Value)> {

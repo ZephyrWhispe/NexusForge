@@ -60,7 +60,9 @@ pub const TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)] = &[
     ("screenshot.upload_failed", "链式上传失败（截图本身已完成）。payload: {source, code, message}", BackpressurePolicy::None),
     ("ocr.completed", "OCR 完成。payload: {source_task_id?, result}", BackpressurePolicy::None),
     ("ocr.failed", "OCR 失败。payload: {reason}", BackpressurePolicy::None),
-    ("operation.conflict", "文件操作同名冲突，等待 UI 应答。payload: {op_id, target}", BackpressurePolicy::None),
+    // STD-10：operation.conflict 已摘除——全仓无发布方亦无订阅方（Ask 策略在
+    // 入队口被拒，同名冲突走冲突面板数据面）；未来若做"逐文件中断式询问"需
+    // 先恢复登记（file-core/conflict.rs 顶部注释保留去向）。
     ("operation.progress", "文件操作进度（200ms 合并，key=op_id；终态经 flush_merged 立即冲刷）。payload: {key: op_id, op_id, kind, state, current, files_done, files_total, bytes_done, bytes_total}", BackpressurePolicy::Merged { window_ms: 200 }),
     ("operation.done", "文件操作完成。payload: {op_id, kind}", BackpressurePolicy::None),
     ("operation.failed", "文件操作失败/取消。payload: {op_id, kind, state, error?}", BackpressurePolicy::None),
@@ -318,6 +320,10 @@ impl EventBus {
     /// 去抖订阅：同 (topic, payload["key"]) 在 window 内只投递最后一条。
     /// payload 无 "key" 字段时使用固定键 "default"。
     /// 必须在 tokio 运行时内调用；返回的接收器供单消费者使用。
+    /// PERF-10（预留面登记）：消费端去抖/节流订阅当前**无生产调用方**——
+    /// 生产侧背压已由 `Merged`/`Batched` 承担（TOPIC_REGISTRY 驱动）。保留
+    /// 本 API 供未来高频主题（sys.metrics 转发等）接入；接入前不得宣称
+    /// "消费端已受保护"。
     pub fn subscribe_debounced(
         &self,
         topic: &str,

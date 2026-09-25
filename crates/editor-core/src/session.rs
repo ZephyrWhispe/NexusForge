@@ -298,7 +298,9 @@ impl EditorSessions {
     pub fn save(&self, id: &str) -> Result<SessionInfo> {
         // 懒读防线：未载入的清单行直接保存=拿空缓冲覆盖盘上真文，必须先读
         self.ensure_loaded(id)?;
-        let (raw, info) = {
+        // 一次取锁同时拿 path 与编码后内容（COR-04：两次取锁之间会话可能被
+        // close/reload，TOCTOU 会把内容写进旧路径）
+        let (path, raw, info) = {
             let mut map = self.lock();
             let s = map
                 .get_mut(id)
@@ -306,14 +308,14 @@ impl EditorSessions {
             // 整文件统一 EOL；转码时序=保存时算不落中间盘（T-B7-18）
             let unified = normalize_eol(&s.content, s.eol);
             let bytes = encode(&unified, s.effective_encoding());
-            (bytes, session_info(id, s))
+            (s.path.clone(), bytes, session_info(id, s))
         };
-        // 写锁已释放再写文件（避免 IO 慢操作持锁）
-        if let Some(s) = self.lock().get(id) {
-            std::fs::write(&s.path, &raw)?;
-            // 删除自动保存草稿
-            let _ = std::fs::remove_file(autosave_path(&s.path));
-        }
+        // 写锁已释放再写文件（避免 IO 慢操作持锁）。
+        // COR-04：原子写（同目录 tmp + fsync + rename）——fs::write 先截断再写，
+        // 写中途崩溃/断电/磁盘满 = 源文件截断且草稿已删，数据不可恢复。
+        write_atomic(&path, &raw)?;
+        // 仅原子替换成功后才删草稿（失败路径草稿保留 = 仍有恢复依据）
+        let _ = std::fs::remove_file(autosave_path(&path));
         let mut map = self.lock();
         if let Some(s) = map.get_mut(id) {
             s.dirty = false;
@@ -339,7 +341,8 @@ impl EditorSessions {
             let unified = normalize_eol(&s.content, s.eol);
             encode(&unified, s.effective_encoding())
         };
-        std::fs::write(target, &raw)?;
+        // COR-04：与 save 同一原子写语义
+        write_atomic(target, &raw)?;
         let mut map = self.lock();
         let s = map
             .get_mut(id)
@@ -678,6 +681,12 @@ fn autosave_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}{AUTOSAVE_SUFFIX}", path.display()))
 }
 
+/// 原子写（COR-04）：同目录临时文件 → fsync → rename。复用 host-core 收敛的
+/// 全仓唯一落盘入口（失败清理 tmp，原文件保持完整；Windows rename 覆盖目标）。
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    host_core::util::write_atomic(path, bytes).map_err(EditorError::Io)
+}
+
 /// 草稿是否比盘上文件更新（mtime 比较；任一侧取不到 mtime 按 false——
 /// 无事实源就不提示，宁可不恢复也不拿陈旧草稿覆盖编辑缓冲）
 fn draft_newer_than(path: &Path) -> bool {
@@ -909,6 +918,67 @@ mod tests {
         assert_eq!(new_info.path, b.display().to_string());
         assert_eq!(std::fs::read(&b).unwrap(), b"content v2");
         assert!(!new_info.dirty);
+    }
+
+    #[test]
+    fn save_failure_keeps_source_and_draft_intact() {
+        // COR-04：保存失败（写目标被只读占位）→ 原文件不被截断、草稿保留。
+        // 原子写先写 tmp 再 rename；目标只读时 rename 失败 → 源文件完整无损。
+        let dir = tmpdir("savefail");
+        let path = dir.join("doc.txt");
+        std::fs::write(&path, b"original").unwrap();
+
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&path).unwrap();
+        sessions.update(&info.id, "changed content").unwrap();
+        sessions
+            .autosave(&info.id, "changed content", None)
+            .unwrap();
+        let draft = path.with_file_name("doc.txt.nforge-autosave");
+        assert!(draft.is_file());
+
+        // 目标文件置只读 → 原子替换的 rename 失败
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let r = sessions.save(&info.id);
+        // Windows 下只读目标的 rename 覆盖被拒；若平台放行则保存成功也成立
+        if r.is_err() {
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"original",
+                "失败路径源文件必须保持完整"
+            );
+            assert!(draft.is_file(), "失败路径草稿必须保留（唯一恢复依据）");
+            assert!(sessions.list()[0].dirty, "失败不得清脏标记");
+        }
+        // 还原只读位清理
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    #[test]
+    fn save_writes_atomically_no_truncate_window() {
+        // COR-04 正向对照：保存成功后文件内容正确、无残留 tmp 文件
+        let dir = tmpdir("atomic-ok");
+        let path = dir.join("ok.txt");
+        std::fs::write(&path, b"v1").unwrap();
+        let sessions = EditorSessions::new();
+        let info = sessions.open(&path).unwrap();
+        sessions.update(&info.id, "v2").unwrap();
+        sessions.save(&info.id).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"v2");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("nf-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不得残留临时文件: {leftovers:?}");
     }
 
     #[test]

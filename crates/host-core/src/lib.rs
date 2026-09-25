@@ -20,6 +20,7 @@ pub mod ports;
 pub mod registry;
 pub mod ssh_trust;
 pub mod storage;
+pub mod text;
 pub mod util;
 pub mod wire;
 

@@ -186,8 +186,11 @@ pub fn rgba_to_rgb_over(rgba: &[u8], bg: [u8; 3]) -> Vec<u8> {
 }
 
 /// 文件名解析：`{ts}` 换时间戳、`{fmt}` 换实际扩展名；未知占位符原样留字面
-/// （吞掉它等于把用户的模板写错伪装成写对——留字面才看得见）
-pub fn resolve_filename(template: &str, ts: &str, fmt: EncodeFormat) -> String {
+/// （吞掉它等于把用户的模板写错伪装成写对——留字面才看得见）。
+///
+/// SEC-17：返回值强制 basename——模板（用户/导入可配置）含 `/`、`\`、`..`、`:` 时
+/// 返回 Err，杜绝 `dir.join(stem)` 越出 save_dir（配置可被同步/导入携带穿越模板）。
+pub fn resolve_filename(template: &str, ts: &str, fmt: EncodeFormat) -> Result<String, AppError> {
     let mut out = String::with_capacity(template.len() + 16);
     let mut rest = template;
     while let Some(i) = rest.find('{') {
@@ -209,7 +212,18 @@ pub fn resolve_filename(template: &str, ts: &str, fmt: EncodeFormat) -> String {
         }
     }
     out.push_str(rest);
-    out
+    // SEC-17：强 basename 校验（含 Windows 尾部点/空格的静默剥离防御）
+    if out.contains(['/', '\\']) || out.contains("..") || out.contains(':') || out.is_empty() {
+        return Err(err(
+            "SCREENSHOT_CONFIG_002",
+            format!("文件名模板解析结果含非法字符（路径分隔符/.. /冒号）: {out}"),
+        ));
+    }
+    let trimmed = out.trim_matches([' ', '.']);
+    if trimmed.is_empty() {
+        return Err(err("SCREENSHOT_CONFIG_002", "文件名模板解析结果为空"));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// PNG（Base64）→ RGBA 字节
@@ -480,28 +494,57 @@ mod tests {
     fn resolveFilename_fmtAndTsPlaceholders() {
         let ts = "2026-09-22_070500";
         assert_eq!(
-            resolve_filename("shot_{ts}", ts, EncodeFormat::Jpeg),
+            resolve_filename("shot_{ts}", ts, EncodeFormat::Jpeg).unwrap(),
             format!("shot_{ts}")
         );
         // {fmt} 给的是扩展名词表（jpg 而非 jpeg），与磁盘名一致
         assert_eq!(
-            resolve_filename("{ts}_export_{fmt}", ts, EncodeFormat::Jpeg),
+            resolve_filename("{ts}_export_{fmt}", ts, EncodeFormat::Jpeg).unwrap(),
             format!("{ts}_export_jpg")
         );
-        assert_eq!(resolve_filename("a_{fmt}", ts, EncodeFormat::Png), "a_png");
         assert_eq!(
-            resolve_filename("b_{fmt}", ts, EncodeFormat::WebP),
+            resolve_filename("a_{fmt}", ts, EncodeFormat::Png).unwrap(),
+            "a_png"
+        );
+        assert_eq!(
+            resolve_filename("b_{fmt}", ts, EncodeFormat::WebP).unwrap(),
             "b_webp"
         );
         // 重复占位符全部替换（不是只换第一个：模板里写两次 {ts} 的用户不该收到半个时间戳）
         assert_eq!(
-            resolve_filename("{ts}@{ts}", ts, EncodeFormat::Png),
+            resolve_filename("{ts}@{ts}", ts, EncodeFormat::Png).unwrap(),
             format!("{ts}@{ts}")
         );
         // 无占位符模板原样返回（正对照：函数不会凭空加后缀）
-        assert_eq!(resolve_filename("fixed", ts, EncodeFormat::Jpeg), "fixed");
+        assert_eq!(
+            resolve_filename("fixed", ts, EncodeFormat::Jpeg).unwrap(),
+            "fixed"
+        );
+
+        // SEC-17：模板解析结果强制 basename——穿越/分隔符/盘符一律拒
+        for evil in [
+            r"..\\..\\evil",
+            r"sub\\dir",
+            "sub/dir",
+            "C:screenshot",
+            "a:b",
+        ] {
+            let e = resolve_filename(evil, ts, EncodeFormat::Png).unwrap_err();
+            assert!(
+                e.to_string().contains("非法字符"),
+                "模板 {evil:?} 必须被拒: {e}"
+            );
+        }
+        // 合法模板不受影响（尾部点/空格被剥离防御）
+        assert_eq!(
+            resolve_filename("shot {ts} ", ts, EncodeFormat::Png).unwrap(),
+            format!("shot {ts}")
+        );
         // 未闭合的花括号原样留下（吞掉=把用户的笔误伪装成正常名）
-        assert_eq!(resolve_filename("x{ts", ts, EncodeFormat::Png), "x{ts");
+        assert_eq!(
+            resolve_filename("x{ts", ts, EncodeFormat::Png).unwrap(),
+            "x{ts"
+        );
     }
 
     #[test]
@@ -510,14 +553,17 @@ mod tests {
         let ts = "2026-09-22_070500";
         // 红线：{nope} 连同花括号原样保留
         assert_eq!(
-            resolve_filename("shot_{nope}_{ts}", ts, EncodeFormat::Png),
+            resolve_filename("shot_{nope}_{ts}", ts, EncodeFormat::Png).unwrap(),
             format!("shot_{{nope}}_{ts}")
         );
         // {} 空占位符同样是"不认识的东西"，不吞
-        assert_eq!(resolve_filename("a{}b", ts, EncodeFormat::Png), "a{}b");
+        assert_eq!(
+            resolve_filename("a{}b", ts, EncodeFormat::Png).unwrap(),
+            "a{}b"
+        );
         // 正对照：认识的键照常展开
         assert_eq!(
-            resolve_filename("{ts}{fmt}", ts, EncodeFormat::Jpeg),
+            resolve_filename("{ts}{fmt}", ts, EncodeFormat::Jpeg).unwrap(),
             format!("{ts}jpg")
         );
     }

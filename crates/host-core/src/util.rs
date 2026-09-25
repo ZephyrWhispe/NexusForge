@@ -55,6 +55,29 @@ pub fn app_err(code: &str, msg: impl std::fmt::Display) -> AppError {
     AppError::module(code, msg.to_string(), None)
 }
 
+/// 原子写盘（COR-04 收敛为全仓唯一落盘入口）：同目录临时文件 → fsync → rename。
+///
+/// Windows 上 `std::fs::rename` 走 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` 会
+/// 覆盖已存在目标，因此**禁止**在 rename 前 remove 旧文件（COR-11：那会制造
+/// "删旧→写新"的丢失窗口）。失败时清理临时文件并透传 IO 错误，原文件保持完整。
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("nf-tmp-{}", uuid::Uuid::now_v7().simple()));
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

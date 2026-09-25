@@ -102,6 +102,7 @@
     "allow-host-module-restart",
     "allow-host-modules-status",
     "allow-host-system-accent",
+    "allow-host-capabilities",
     "allow-kvm-connect-to",
     "allow-kvm-control-state",
     "allow-kvm-discovered-peers",

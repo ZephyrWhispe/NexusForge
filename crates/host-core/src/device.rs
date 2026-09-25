@@ -76,26 +76,57 @@ impl DeviceIdentity {
         }
     }
 
-    /// 加载或创建身份文件（{appData}/kvm/identity.json）
+    /// 加载或创建身份文件（{appData}/kvm/identity.json）。
+    ///
+    /// COR-05：fail-closed——"文件存在但解不开"（损坏/DPAPI 上下文变化/CryptoPort
+    /// 缺失）绝不覆盖重生：device_id 与密钥对改变会使 paired.json 全部指纹失配，
+    /// KVM/同步信任根被摧毁且不可逆。隔离留证 + 报错；只有"确实不存在"才生成。
     pub fn load_or_create(
         dir: &PathBuf,
         crypto: Option<Arc<dyn CryptoPort>>,
     ) -> Result<Self, ModuleError> {
         let path = dir.join("identity.json");
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(id) = deserialize_identity(&bytes, crypto.clone()) {
-                tracing::info!(device_id = %id.device_id, "设备身份已加载");
-                return Ok(id);
+        match std::fs::read(&path) {
+            Ok(bytes) => match deserialize_identity(&bytes, crypto.clone()) {
+                Ok(id) => {
+                    tracing::info!(device_id = %id.device_id, "设备身份已加载");
+                    Ok(id)
+                }
+                Err(e) => {
+                    // 存在但不可解：隔离留证、报错、绝不覆盖
+                    let quarantine = path.with_extension("json.corrupt");
+                    if let Err(qe) = std::fs::rename(&path, &quarantine) {
+                        tracing::error!(
+                            error = %qe,
+                            "身份文件隔离失败（保持原名原地不动，不覆盖）"
+                        );
+                        return Err(ModuleError::Init(format!(
+                            "设备身份无法解析（{e}），且隔离失败（{qe}）；已拒绝重建，请人工检查 identity.json"
+                        )));
+                    }
+                    Err(ModuleError::Init(format!(
+                        "设备身份无法解析（{e}）；原文件已保留为 {}。若确认要重建身份，请手动删除该文件后重启（注意：将导致既有配对全部失效）",
+                        quarantine.display()
+                    )))
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 仅"确实不存在"才生成；无 CryptoPort 时明确告知降级风险
+                if crypto.is_none() {
+                    tracing::warn!("CryptoPort 未注册：设备私钥将以未加密明文落盘");
+                }
+                let device_name =
+                    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "NexusForge".into());
+                let id = Self::generate(device_name);
+                let bytes = serialize_identity(&id, crypto)?;
+                std::fs::create_dir_all(dir).map_err(|e| ModuleError::Init(e.to_string()))?;
+                crate::util::write_atomic(&path, &bytes)
+                    .map_err(|e| ModuleError::Init(format!("身份文件写入失败: {e}")))?;
+                tracing::info!(device_id = %id.device_id, "设备身份已创建");
+                Ok(id)
             }
-            tracing::warn!("身份文件损坏，重新生成");
+            Err(e) => Err(ModuleError::Init(format!("读取身份文件失败: {e}"))),
         }
-        let device_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "NexusForge".into());
-        let id = Self::generate(device_name);
-        let bytes = serialize_identity(&id, crypto)?;
-        std::fs::create_dir_all(dir).map_err(|e| ModuleError::Init(e.to_string()))?;
-        std::fs::write(&path, bytes).map_err(|e| ModuleError::Init(e.to_string()))?;
-        tracing::info!(device_id = %id.device_id, "设备身份已创建");
-        Ok(id)
     }
 }
 
@@ -281,6 +312,49 @@ mod tests {
         assert_eq!(id.device_id, reloaded.device_id);
         assert_eq!(id.pubkey_fingerprint, reloaded.pubkey_fingerprint);
         assert_eq!(id.public_key(), reloaded.public_key());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- COR-05：身份文件 fail-closed（负例） ----
+
+    #[test]
+    fn corrupt_identity_is_quarantined_and_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("nf-device-id-bad-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("identity.json");
+        std::fs::write(&path, b"{broken json").unwrap();
+
+        let r = DeviceIdentity::load_or_create(&dir, None);
+        assert!(r.is_err(), "损坏身份必须报错而非重生");
+        // 原文件被隔离留证（可人工取证），且未生成任何新身份覆盖
+        let quarantine = dir.join("identity.json.corrupt");
+        assert!(quarantine.is_file(), "原文件必须隔离留证");
+        assert!(!path.exists(), "不得静默生成新身份覆盖");
+        // 恢复现场：把隔离文件放回去再读一次 → 仍然报错（不因重试而洗白）
+        std::fs::rename(&quarantine, &path).unwrap();
+        assert!(DeviceIdentity::load_or_create(&dir, None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn protected_identity_without_crypto_port_fails_closed() {
+        // "读得到但解不开"的典型：身份受 DPAPI 保护但本次启动 CryptoPort 缺失。
+        // 修复前被当"损坏"覆盖重生 = 信任根被摧毁；修复后必须报错保留。
+        let dir = std::env::temp_dir().join(format!("nf-device-id-nc-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("identity.json");
+        let body = format!(
+            r#"{{"device_id":"dev-1","device_name":"PC","secret_b64":"{}","protected":true}}"#,
+            b64_encode(&[1u8; 32])
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let before = std::fs::read(&path).unwrap();
+        let r = DeviceIdentity::load_or_create(&dir, None);
+        assert!(r.is_err(), "CryptoPort 缺失必须 fail-closed");
+        let after = std::fs::read(dir.join("identity.json.corrupt")).unwrap();
+        assert_eq!(before, after, "原文件内容必须原样保留");
+        assert!(!path.exists(), "不得生成新身份");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

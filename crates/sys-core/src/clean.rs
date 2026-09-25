@@ -170,18 +170,39 @@ pub fn execute_target(
     // 再次收集具体文件路径（与扫描同白名单）
     let mut paths = Vec::new();
     collect_files(&dir, target, now_ms, &mut paths);
-    let bytes = scan.reclaim_bytes;
+    let _scan = scan; // COR-20：释放字节改为逐项实际大小累计（freed），扫描聚合值仅参考
     if paths.is_empty() {
         return Ok((0, 0));
     }
-    if recycle {
-        recycle_delete(&paths)?;
-    } else {
-        for p in &paths {
-            let _ = std::fs::remove_file(p); // 占用/权限错误静默跳过（更新缓存被进程锁定的文件）
+    // COR-20：逐项统计**真实成功**数——被占用/权限失败的文件不得计入
+    // "已删除 N 个 / 释放 X 字节"（占用文件在更新缓存目录常见，静默谎报会误导用户）
+    let mut removed = 0u64;
+    let mut freed = 0u64;
+    let mut failed = 0u64;
+    for p in &paths {
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let ok = if recycle {
+            recycle_delete(std::slice::from_ref(p))
+                .map(|n| n > 0)
+                .unwrap_or(false)
+        } else {
+            std::fs::remove_file(p).is_ok()
+        };
+        if ok {
+            removed += 1;
+            freed += size;
+        } else {
+            failed += 1;
         }
     }
-    Ok((paths.len() as u64, bytes))
+    if failed > 0 {
+        tracing::warn!(
+            failed,
+            total = paths.len(),
+            "部分文件删除失败（被占用或权限不足），未计入已清理"
+        );
+    }
+    Ok((removed, freed))
 }
 
 fn collect_files(dir: &Path, target: &CleanTarget, now_ms: i64, out: &mut Vec<PathBuf>) {

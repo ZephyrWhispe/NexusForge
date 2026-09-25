@@ -851,7 +851,9 @@ impl ScreenshotModule {
                 ocr_text: None,
             };
             if let Some(store) = self.store.read().clone() {
-                store.insert(&item).ok();
+                if let Err(e) = store.insert(&item) {
+                    tracing::warn!(error = %e, file = ?item.file, "滚动截图入库失败：历史将缺少该条目");
+                }
             }
             if let Some(bus) = self.bus.read().clone() {
                 bus.publish(Event::new(
@@ -989,7 +991,11 @@ impl ScreenshotModule {
             }
         };
         if let Some(store) = self.store.read().clone() {
-            store.insert(&item).ok();
+            // COR-21：入库失败必须可见——SQLite 写失败（锁/磁盘满）时用户看到
+            // "已保存"但历史里没有这条，screenshot.taken 还会把下游带偏
+            if let Err(e) = store.insert(&item) {
+                tracing::warn!(error = %e, file = ?item.file, "截图入库失败：历史将缺少该条目");
+            }
             if let Err(e) = store.set_annotations(&item.id, annotations_json.as_deref()) {
                 tracing::warn!(error = %e, "标注写库失败");
             }
@@ -1269,7 +1275,7 @@ impl ScreenshotModule {
 
         let ext = fmt.ext();
         let ts = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
-        let resolved = util::resolve_filename(&cfg.filename_template, &ts, fmt);
+        let resolved = util::resolve_filename(&cfg.filename_template, &ts, fmt)?;
         // 模板已经写了 `.{fmt}` 的不再补一次后缀（否则 shot_x.jpg.jpg），没写的补上——
         // 后缀由格式决定这件事只有一个真源，模板里的 {fmt} 只是让用户能控制它出现的位置
         let dot_ext = format!(".{ext}");
@@ -1413,10 +1419,19 @@ impl ScreenshotModule {
         Ok(())
     }
 
-    /// OCR 文本回填（识别完成后由 ocr 命令层调用；仅记录，失败静默）
+    /// OCR 文本回填（识别完成后由 ocr 命令层调用）
     pub fn record_ocr_text(&self, task_id: &str, text: &str) {
         if let Some(store) = self.store.read().clone() {
-            store.set_ocr_text(task_id, text).ok();
+            if let Err(e) = store.set_ocr_text(task_id, text) {
+                // COR-21：写失败（锁/磁盘）必须出声——OCR 结果丢失不能伪装成功。
+                // 行不存在（条目已被用户删除）属正常，降 debug 不刷屏
+                let msg = e.to_string();
+                if msg.contains("不存在") || msg.contains("no such") {
+                    tracing::debug!(task_id, error = %msg, "OCR 回填目标条目不存在（已删除？）");
+                } else {
+                    tracing::warn!(task_id, error = %msg, "OCR 文本回填失败");
+                }
+            }
         }
     }
 

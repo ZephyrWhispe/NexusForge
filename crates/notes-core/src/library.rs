@@ -49,15 +49,34 @@ impl NoteLibrary {
 
     // ---------- 路径工具 ----------
 
-    /// 规范化相对路径：`/` 分隔；拒绝空段、`.`、`..`（防越界）
+    /// 规范化相对路径：`/` 分隔；拒绝空段、`.`、`..`、盘符前缀、`:`（ADS）、
+    /// 根相对（前导分隔符）与 UNC（SEC-04：PathBuf::join 遇盘符前缀会替换根，
+    /// 字符串级 `is_absolute()` 在 Windows 语义下不充分，故按段显式拒绝）。
+    /// 全平台一致（同时按 `/` 与 `\` 切分，不依赖 OS 路径语义）。
     pub fn norm_rel(rel: &str) -> Result<String> {
-        let t = rel.trim().trim_start_matches(['/', '\\']);
-        if t.is_empty() {
+        let raw = rel.trim();
+        if raw.is_empty() {
             return Err(NoteError::BadPath("路径为空".into()));
         }
-        let segs: Vec<&str> = t.split(['/', '\\']).collect();
-        if segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
-            return Err(NoteError::BadPath(format!("路径含非法段: {rel}")));
+        let segs: Vec<&str> = raw.split(['/', '\\']).collect();
+        for (i, seg) in segs.iter().enumerate() {
+            if seg.is_empty() {
+                // 首段为空："/x"（根相对）或 "\\server"（UNC 前缀）；中间空段："a//b"
+                return Err(NoteError::BadPath(format!(
+                    "路径含空段（拒绝根相对/UNC）: {rel}"
+                )));
+            }
+            if *seg == "." || *seg == ".." {
+                return Err(NoteError::BadPath(format!("路径含非法段: {rel}")));
+            }
+            // 盘符前缀（"C:"/"C:\x"）与 NTFS 备用数据流（"a.txt:evil"）：段含 ':' 一律拒
+            if seg.contains(':') {
+                return Err(NoteError::BadPath(format!("不接受盘符/冒号段: {rel}")));
+            }
+            // 段内保留字符：Windows 文件名不得以点/空格结尾（会被系统静默剥离）
+            if i + 1 == segs.len() && (seg.ends_with('.') || seg.ends_with(' ')) {
+                return Err(NoteError::BadPath(format!("路径段以点/空格结尾: {rel}")));
+            }
         }
         Ok(segs.join("/"))
     }
@@ -70,22 +89,44 @@ impl NoteLibrary {
         Ok(())
     }
 
-    fn disk(&self, rel: &str) -> PathBuf {
-        self.root.join(rel.replace('/', "\\"))
+    /// rel → 库内磁盘路径：norm_rel 校验 + 词法复核（纵深防御，SEC-04）
+    fn disk(&self, rel: &str) -> Result<PathBuf> {
+        let norm = Self::norm_rel(rel)?;
+        let p = self
+            .root
+            .join(norm.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !p.starts_with(&self.root) {
+            return Err(NoteError::BadPath(format!("越出笔记库: {rel}")));
+        }
+        Ok(p)
     }
 
     fn read_text(&self, rel: &str) -> Result<String> {
-        let bytes = self
-            .driver
-            .read_file(&self.disk(rel))
-            .map_err(|e| NoteError::Driver(e.to_string()))?;
+        let bytes = self.read_bytes(rel)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    fn write_text(&self, rel: &str, content: &str) -> Result<()> {
+    /// 供展示/索引的读取（lossy 容忍）；编码信息保留的读取用 [`Self::read_text_decoded`]
+    fn read_bytes(&self, rel: &str) -> Result<Vec<u8>> {
         self.driver
-            .write_file(&self.disk(rel), content.as_bytes())
+            .read_file(&self.disk(rel)?)
             .map_err(|e| NoteError::Driver(e.to_string()))
+    }
+
+    /// 编码闭环读取（COR-09）：检测原编码并标记是否发生过有损替换
+    fn read_text_decoded(&self, rel: &str) -> Result<host_core::text::DecodedText> {
+        Ok(host_core::text::detect_and_decode(&self.read_bytes(rel)?))
+    }
+
+    /// 按字节原子回写（保留原编码；与 [`Self::write_text`] 的 UTF-8 语义区分）
+    fn write_bytes(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+        self.driver
+            .write_file(&self.disk(rel)?, bytes)
+            .map_err(|e| NoteError::Driver(e.to_string()))
+    }
+
+    fn write_text(&self, rel: &str, content: &str) -> Result<()> {
+        self.write_bytes(rel, content.as_bytes())
     }
 
     fn file_meta(rel_disk: &Path) -> (i64, u64) {
@@ -128,7 +169,7 @@ impl NoteLibrary {
                 (dst, resolved)
             })
             .collect();
-        let (mtime_ms, size) = Self::file_meta(&self.disk(rel));
+        let (mtime_ms, size) = Self::file_meta(&self.disk(rel)?);
         self.index.upsert(NoteIndexRow {
             path: rel.to_string(),
             title,
@@ -263,7 +304,7 @@ impl NoteLibrary {
     pub fn create(&self, rel: &str, content: &str) -> Result<NoteMeta> {
         let rel = Self::norm_rel(rel)?;
         Self::require_md(&rel)?;
-        if self.disk(&rel).exists() {
+        if self.disk(&rel)?.exists() {
             return Err(NoteError::BadState(format!("笔记已存在: {rel}")));
         }
         self.write_text(&rel, content)?;
@@ -288,7 +329,7 @@ impl NoteLibrary {
     pub fn write(&self, rel: &str, content: &str) -> Result<()> {
         let rel = Self::norm_rel(rel)?;
         Self::require_md(&rel)?;
-        if !self.disk(&rel).exists() {
+        if !self.disk(&rel)?.exists() {
             return Err(NoteError::NotFound(rel));
         }
         self.write_text(&rel, content)?;
@@ -299,11 +340,11 @@ impl NoteLibrary {
     pub fn delete(&self, rel: &str) -> Result<()> {
         let rel = Self::norm_rel(rel)?;
         Self::require_md(&rel)?;
-        if !self.disk(&rel).exists() {
+        if !self.disk(&rel)?.exists() {
             return Err(NoteError::NotFound(rel.clone()));
         }
         self.driver
-            .remove(&self.disk(&rel), false)
+            .remove(&self.disk(&rel)?, false)
             .map_err(|e| NoteError::Driver(e.to_string()))?;
         self.index.remove(&rel)?;
         self.cards.detach_note(&rel)
@@ -369,10 +410,10 @@ impl NoteLibrary {
         if old == new {
             return Err(NoteError::BadState("新旧路径相同".into()));
         }
-        if !self.disk(&old).exists() {
+        if !self.disk(&old)?.exists() {
             return Err(NoteError::NotFound(old.clone()));
         }
-        if self.disk(&new).exists() {
+        if self.disk(&new)?.exists() {
             return Err(NoteError::BadState(format!("目标已存在: {new}")));
         }
 
@@ -381,30 +422,41 @@ impl NoteLibrary {
 
         // 2. 磁盘改名（先于内容改写：读新路径内容语义一致）
         self.driver
-            .rename(&self.disk(&old), &self.disk(&new))
+            .rename(&self.disk(&old)?, &self.disk(&new)?)
             .map_err(|e| NoteError::Driver(e.to_string()))?;
 
         // 3. 逐文件原子改写；任一失败回滚全部已改文件
         let old_stem = stem_of(&old);
         let new_stem = stem_of(&new);
-        let mut rewritten: Vec<(String, String)> = Vec::new(); // (src, 旧内容)
+        let mut rewritten: Vec<(String, Vec<u8>)> = Vec::new(); // (src, 原始字节)
         for (src, _) in &affected {
             if src == &old {
                 continue; // 自引用由改名后的新路径处理
             }
-            let Ok(content) = self.read_text(src) else {
+            // COR-09：按检测到的原编码读/写闭环；lossy（含兜底分支）一律跳过——
+            // 绝不把 from_utf8_lossy 的替换结果以 UTF-8 覆盖回原文件。
+            let Ok(decoded) = self.read_text_decoded(src) else {
                 continue;
             };
-            let next = rewrite_links(&content, &old_stem, &new_stem);
-            if next != content {
-                if let Err(e) = self.write_text(src, &next) {
-                    // 回滚已改写文件（旧内容写回；当前文件未写无需回滚）
+            if decoded.lossy {
+                tracing::warn!(path = %src, "文件含非当前编码字节，跳过链接改写以避免损坏");
+                continue;
+            }
+            let next = rewrite_links(&decoded.text, &old_stem, &new_stem);
+            if next != decoded.text {
+                let next_bytes = host_core::text::encode_with(&decoded, &next);
+                let orig_bytes = match self.read_bytes(src) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if let Err(e) = self.write_bytes(src, &next_bytes) {
+                    // 回滚已改写文件（原始字节写回；当前文件未写无需回滚）
                     for (back, old_content) in &rewritten {
-                        let _ = self.write_text(back, old_content);
+                        let _ = self.write_bytes(back, old_content);
                     }
                     return Err(NoteError::Driver(format!("引用改写失败已回滚 {src}: {e}")));
                 }
-                rewritten.push((src.clone(), content));
+                rewritten.push((src.clone(), orig_bytes));
             }
         }
 
@@ -431,7 +483,7 @@ impl NoteLibrary {
         } else {
             Self::norm_rel(dir_rel)?
         };
-        Ok(canvas::load(&self.root, &dir))
+        canvas::load(&self.root, &dir)
     }
 
     pub fn canvas_save(&self, dir_rel: &str, doc: &CanvasDoc) -> Result<()> {
@@ -621,10 +673,50 @@ mod tests {
     #[test]
     fn norm_rel_rejects_escape() {
         assert!(NoteLibrary::norm_rel("a/b.md").is_ok());
-        assert_eq!(NoteLibrary::norm_rel("/a\\b.md").unwrap(), "a/b.md");
+        // SEC-04：前导分隔符不再剥除——根相对路径一律拒绝（更严格、语义清晰）
         assert!(NoteLibrary::norm_rel("").is_err());
         assert!(NoteLibrary::norm_rel("../x.md").is_err());
         assert!(NoteLibrary::norm_rel("a//b.md").is_err());
+    }
+
+    // ---- SEC-04：盘符前缀 / 根相对 / UNC / ADS 负例 ----
+
+    #[test]
+    fn norm_rel_rejects_prefix_and_absolute() {
+        for bad in [
+            r"C:\Windows\x.md",
+            r"C:/Windows/x.md",
+            r"\\server\share\x.md",
+            r"\\.\C:\x.md",
+            r"..\..\x.md",
+            r"a/../../x.md",
+            r"\Windows\x.md",
+            r"/Windows/x.md",
+            r"C:x.md",
+            r"a.txt:evil",
+            r"a/b.",
+        ] {
+            assert!(NoteLibrary::norm_rel(bad).is_err(), "{bad} 必须被拒");
+        }
+        assert_eq!(NoteLibrary::norm_rel("a/b/c.md").unwrap(), "a/b/c.md");
+    }
+
+    #[test]
+    fn create_write_delete_cannot_escape_root() {
+        let l = lib("escape_guard");
+        // 盘符绝对路径（join 会替换根的经典逃逸）必须被拒且无磁盘副作用
+        let outside = std::env::temp_dir().join("nf_outside_probe.md");
+        let _ = std::fs::remove_file(&outside);
+        assert!(l
+            .create(r"C:\Users\Public\nf_outside_probe.md", "x")
+            .is_err());
+        assert!(!outside.exists(), "库外文件不得被创建");
+        // 相对穿越同样被拒
+        assert!(l.create(r"..\nf_outside_probe.md", "x").is_err());
+        assert!(!outside.exists());
+        // 根相对（\Windows\x 形态）
+        assert!(l.read(r"\Windows\x.md").is_err());
+        let _ = std::fs::remove_file(&outside);
     }
 
     #[test]
@@ -766,5 +858,59 @@ mod tests {
             "new",
         );
         assert_eq!(out, "[[new]] [[new|a]] [[x/new]] [[new.md]] [[oldx]]");
+    }
+
+    // ---- COR-09：重命名改写必须保持原编码 ----
+
+    #[test]
+    fn rename_rewrites_links_preserving_gbk_files() {
+        let l = lib("gbk_rename");
+        l.create("a.md", "引言 [[old]] 结尾\n").unwrap();
+        // g.md 以 GBK 字节直接落盘，含指向 old 的链接（lossy 解码下 ASCII 链接仍可索引）
+        let gbk_text = "# 笔记\n链接 [[old]] 中文内容\n";
+        let gbk_bytes: Vec<u8> = encoding_rs::GBK.encode(gbk_text).0.into_owned();
+        std::fs::write(l.root().join("g.md"), &gbk_bytes).unwrap();
+        // old.md 本体也用 GBK（自引用按实现跳过，字节应原样随改名迁移）
+        let old_bytes: Vec<u8> = encoding_rs::GBK.encode("# 旧\n").0.into_owned();
+        std::fs::write(l.root().join("old.md"), &old_bytes).unwrap();
+        l.reindex().unwrap();
+
+        l.rename("old.md", "new.md").unwrap();
+
+        // a.md（UTF-8）链接已改写
+        let (content, _) = l.read("a.md").unwrap();
+        assert!(content.contains("[[new]]"), "{content}");
+        // g.md 仍是 GBK 编码：链接已改写、中文无损、无 U+FFFD
+        let after = std::fs::read(l.root().join("g.md")).unwrap();
+        assert_ne!(after, gbk_bytes, "g.md 的链接改写应发生");
+        let (decoded, enc, had_errors) = encoding_rs::GBK.decode(&after);
+        assert!(!had_errors, "GBK 解码必须无错");
+        assert_eq!(enc, encoding_rs::GBK, "编码必须保持 GBK");
+        assert!(!decoded.contains('\u{FFFD}'), "不得出现替换符: {decoded}");
+        assert!(
+            decoded.contains("[[new]]"),
+            "GBK 文件内链接应已改写: {decoded}"
+        );
+        assert!(decoded.contains("中文内容"), "中文内容必须无损: {decoded}");
+        // old.md 本体：自引用跳过 → 字节原样迁移
+        let moved = std::fs::read(l.root().join("new.md")).unwrap();
+        assert_eq!(moved, old_bytes);
+    }
+
+    #[test]
+    fn rename_skips_lossy_decode() {
+        let l = lib("lossy_skip");
+        l.create("a.md", "见 [[old]]\n").unwrap();
+        // old.md 含非法 UTF-8 且 chardetng 也解不了的混合字节 → lossy
+        let mut mixed = b"# \xff\xfe\x00\xd8 title [[nothing]]\n".to_vec();
+        mixed.extend([0x81, 0x40, 0xFF, 0xFF, 0x00]);
+        std::fs::write(l.root().join("old.md"), &mixed).unwrap();
+        l.reindex().unwrap();
+
+        l.rename("old.md", "new.md").unwrap();
+
+        // a.md 正常改写；old.md 字节级原样保留（改名为 new.md）
+        let after = std::fs::read(l.root().join("new.md")).unwrap();
+        assert_eq!(after, mixed, "lossy 文件必须字节不变地跳过改写");
     }
 }
