@@ -55,11 +55,9 @@ yanked = "deny"
 #     （Marvin 计时侧信道，上游 patched=[] 无安全升级位）。摘除需砍 russh "rsa"
 #     feature＝砍用户 id_rsa 认证能力，属功能裁决待用户；桌面客户端本地用
 #     +TOFU 钉服模型下威胁面收窄（恶意服务端观测签名时序）。
-#   lopdf 1 条 → editor-core 升级立项（0.36→≥0.42）
+#   lopdf 1 条 → D-36 R-H3 已消解（0.36→0.45 零 API 漂移，ignore 行随批删除）
 # 立项落地即删对应行；期间新增漏洞仍会照常报红（只 ignore 已登记 ID）。
 ignore = [
     # --- 换形挂账（D-36 R-H2 登记，威胁面与处置见上方注释）---
     { id = "RUSTSEC-2023-0071", reason = "D-36 R-H2 换形挂账：rsa 0.10.0-rc.18 Marvin 计时侧信道，上游 patched=[] 无安全升级位；摘除=砍 RSA 认证能力属功能裁决待用户" },
-    # --- PDF（D-35 挂账 ③）---
-    { id = "RUSTSEC-2026-0187", reason = "D-35 挂账：lopdf 0.36→≥0.42 升级立项" },
 ]
