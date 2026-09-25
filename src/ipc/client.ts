@@ -887,7 +887,13 @@ export function vaultEntryAdd(input: {
   fields: EntryFieldDto[];
   totp_secret: string | null;
 }): Promise<VaultEntryDto> {
-  return invoke("vault_entry_add", input);
+  return invoke("vault_entry_add", {
+    title: input.title,
+    folder_id: input.folder_id,
+    favorite: input.favorite,
+    fields: input.fields,
+    totp_secret: input.totp_secret,
+  });
 }
 export function vaultEntryUpdate(entry: VaultEntryDto): Promise<VaultEntryDto> {
   return invoke("vault_entry_update", { entry });
