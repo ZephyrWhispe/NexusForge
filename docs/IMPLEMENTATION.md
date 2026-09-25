@@ -17,7 +17,7 @@
 | [UI-DEMO.md](./UI-DEMO.md) | UI 原型（[demo/index.html](../demo/index.html)） | 阶段一前 | 交互/视觉基准（Fluent 令牌映射） |
 | [UI-PLAN.md](./UI-PLAN.md) | 前端开发实施计划 | 阶段一 | U1–U8 任务分解 + M1–M4 里程碑 |
 | [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) | 全量审查报告（代码质量 / UI / 功能） | 2026-09-18 | 三维发现 + 实测证据 + 整改批次 |
-| [DECISIONS.md](./DECISIONS.md) | 决策记录（D-01…D-23） | 2026-09-18 | 偏离裁决 + 批次执行依据（与 DESIGN §11 配套） |
+| [DECISIONS.md](./DECISIONS.md) | 决策记录（D-01…D-33） | 2026-09-25 | 偏离裁决 + 批次执行依据（与 DESIGN §11 配套；DOC-06 更新） |
 
 ## 2. 实施顺序与依赖图
 

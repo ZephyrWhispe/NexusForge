@@ -1,6 +1,6 @@
 # 15 宿主壳详细设计（导航 / 设置中心 / 状态栏 / 快捷键 / 托盘 / 命令面板）
 
-> 总纲：docs/impl/09 §3（B0 主体在此）+ B8 提案；对标：蓝本 §4.1-4.4 + PowerToys Run/uTools/Flow Launcher；状态：未开工。宿主壳是其余 14 档的**公共地基**：SUBNAV 机制、PANELS 注册表、设置中心 schema、DeferredBadge 全部在本档定义，各面板档直接引用不再各自发明。
+> 总纲：docs/impl/09 §3（B0 主体在此）+ B8 提案；对标：蓝本 §4.1-4.4 + PowerToys Run/uTools/Flow Launcher；状态：**已交付**（DOC-04 翻正，2026-09-25：B0 批落地——SUBNAV/PANELS 注册表、设置中心 schema、DeferredBadge 全部在库，见 DECISIONS D-29 B0 实施记录）。原始规划留档如下。
 
 ## 1. 现状问题
 

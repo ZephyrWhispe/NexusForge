@@ -1,0 +1,23 @@
+# GOV-05：编辑器层归一（与 .gitattributes 的 LF 入库一致）
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.{rs,ts,tsx,js,mjs,json,yml,yaml,toml,css,html}]
+indent_size = 2
+max_line_length = 100
+
+[*.md]
+# Markdown 行尾空格有意义（硬换行）
+trim_trailing_whitespace = false
+
+[*.bat]
+end_of_line = crlf
+
+[*.cmd]
+end_of_line = crlf

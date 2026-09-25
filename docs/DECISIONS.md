@@ -38,6 +38,12 @@
 | D-26 | 托盘原生实现实施路线（tauri tray-icon 接入 / TrayProvider 动作回路 / Error 置灰 / vault 预警标题接线） | 补实现 | P1 | 3 | 已完成 |
 | D-27 | 性能基准与 §9.1 阈值断言实施路线（criterion 基准 / 搜索与捕获延迟断言 / 启动与内存的判定归属） | 补实现 | P1 | 3 | 已完成 |
 | D-28 | 发布安全面收口实施路线（updater 真实签名公钥 + MSI 双格式 / Capabilities 按窗最小授权全量 ACL / CSP 落地） | 补实现 | P1 | 3 | 已完成 |
+| D-29 | 蓝图对齐·面板内容补深实施路线（代理多内核 / 文件网盘多协议 / sync 深化 / 全模块对齐；附方案文档前置流程裁定，部分取代 §5） | 补实现 | P1 | B0–B8 | 进行中（B0/B6/B7 已完成，B8 方案集已落） |
+| D-30 | （预留编号——正文无定义；如启用须按 D-22 规则 4 补五要素） | — | — | — | 预留 |
+| D-31 | B7 转裁决：SSH 连接池（impl/09 §7.3-(a)，三选项待用户裁决） | 改规范 | P2 | — | 待裁决（B8 方案集 §7 汇总表） |
+| D-32 | B7 转裁决：S3 归属（impl/09 §6.3-(b)，三选项待用户裁决） | 改规范 | P2 | — | 待裁决（B8 方案集 §7 汇总表） |
+| D-33 | B8 裁决落地：放行 KVM 拖拽传文件（T-B8-1；附 B8 六题与 D-31/D-32 裁决留痕） | 补实现 | P2 | B8 | 已完成（e329a5c） |
+| D-34 | 全量审查 2026-09-25 整改战役（批次 A–F：SEC-01 P0 热修 + P1 安全/数据完整性 + 治理门禁；附挂账与驳回台账） | 补实现 | P1 | R-A..R-F | 实施中（代码/测试/文档面已落，终态见本条状态行） |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -359,6 +365,24 @@
 - **代价**：窗口级 drop 对主窗全局——靠"仅面板挂载期订阅"圈定作用域；jsdom 无法模拟原生拖放——接线层以本地 `vi.mock("@tauri-apps/api/window")` 捕获处理器覆盖、裁决层纯函数测覆盖，真 drop 属人工冒烟项；DragDropSendDialog 与 DryRunDialog 两枚清单确认组件并存（形状差异=选择槽），登记为可接受的轻度重复。
 - **验收**：vitest 字面测名全集见 11 档 §8 六栏任务书 T-B8-1 回归列（planner 四枚 + 对话框三枚 + 接线退订一枚 + deferred 翻正两枚）；`cargo test --workspace`/`security_config` 恒绿（本行零 Rust/零 ACL 变更，跑即是负证）；实启冒烟两则：①资源管理器拖文件入 KVM 面板→清单确认→对端收妥；②无会话时 drop→拒且点名"无活跃会话"，不开对话框。
 - **实施记录（T-B8-1 已落，2026-09-25）**：三层落码——`dragDropFlow.ts` 纯裁决（`planDropSend`/`aggregateSends`，拒态先于对话框）＋ `DragDropSendDialog.tsx` 按次挂载清单确认（逐文件 `sendOne(deviceId, path)` 顺序腿，登记偏差：任务书单 `onSend` 形制与测名 OncePerFile 矛盾，按测名做）＋ `KvmPanel.tsx` 窗口级 `onDragDropEvent` 仅面板挂载期订阅（`__TAURI_INTERNALS__` 守卫，卸载 unlisten）；发送腿全走既有 `kvmSendFile`，零新命令/零配置键/零 Rust/零 ACL。徽标退役双向翻正（kvm deferred 必在场锚＋ocr 跨模块锚收缩为 kvm/KvmPanel.tsx 恰一枚）。11 档 §8 字面测名全绿＋超集两枚；七门最终树回声行全 0：vitest 复跑 **348/90 files**（基线 339/87，首跑 1 红＝ocr 锚，翻正后复跑绿）、workspace 985/56 零 Rust 负证、tsc/lint 复跑 0。人工冒烟三则待执行（真 drop 收妥／无会话点名拒／`dragDropEnabled` 可达性——不可达按本决策判红回挂徽标）。详证＝09 §12「T-B8-1 已落」段。未推送（standing ruling）。
+
+---
+
+### D-34 全量审查 2026-09-25 整改战役（批次 A–F，承 07-prevention §6 批次序与 D-22 规则 4）
+
+- **背景**：第三方全量审查（`docs/review-2026-09-25/`，99 条：P0×1 / P1×19 / P2×50 / P3×29，方法与实测基线见其 README）对 master 工作区开列整改清单；用户令"继续完成未完成工作"，按审查 README §6"批次完成判定"（cargo test 全绿 + clippy -D warnings 零告警 + 前端 tsc/lint/test 全绿 + 每缺陷带先失败后通过负例）逐批落地。
+- **决策**：
+  1. **批次 A（P0 热修）SEC-01**：`host-core::wire` 升 `PROTO_VER=2`——HKDF info 按方向分离派生两把密钥（`nexusforge-kvm-v2/initiator` / `…/responder`，salt 仍为设备指纹对），`FrameCipher` 收/发各持一实例、nonce 计数器独立，`open()` 校验帧内序号==期望接收序号（失序即 `KVM_SESSION_012` 拒绝，序号校验先于 AEAD）；KVM 与 sync 两域同改；Hello 版本不匹配**拒连带 hint**（v1 对端被有意拒斥）。P-04 三性质测试全落：`directional_keys_differ` / `same_counter_different_direction_yields_distinct_keystream` / `replayed_frame_is_rejected`（另两枚绑定/角色分配对照）。
+  2. **批次 B（P1 安全）**：SEC-02 提权面（helper `dispatch.rs` 参数枚举化＋catalog 只读内置/外置不可覆盖内置，随批 SEC-19 BusyGuard）；SEC-03/04/05/06 四处路径穿越收口（`resolve_in_root`/`safe_rel_path` 唯一入口形态）；SEC-07 `marked` 输出经 DOMPurify——新增共用 `MarkdownView.tsx` 为全仓唯一 `dangerouslySetInnerHTML` 落点（`security_config::dangerously_set_inner_html_only_in_markdown_view` 扫断）；SEC-08 asset scope 去 `$APPDATA/**` 整根＋`asset_protocol_scope_is_narrow` 断言；SEC-09 系统代理还原不变式。
+  3. **批次 C（P1 数据完整性）**：COR-01 blob 读回 / COR-02 WASM 分配次序 / COR-03 密钥堆化锁页配对 / COR-04 `write_atomic` 铺开 / COR-05 设备身份 fail-closed（不可解→留证拒覆盖）/ COR-06/07 取消令牌复位＋handle 归属 / COR-08 失败不越游标 / COR-09 编码回写闭环（逐条以 `COR-NN` 注释标记＋负例测试钉在改动文件内）。
+  4. **批次 D/E（P2＋治理）**：SEC-10/13/14/15/16/17/18/19、COR-10..27、PERF-01..10、STD-01/03/04/06..10、GOV-01..08（rustfmt/clippy.toml/deny.toml+CI/dependabot/SECURITY/CODEOWNERS/CONTRIBUTING/.editorconfig/.gitattributes/MSRV+workspace.lints/工作区清理/基准门禁）、DOC-01..14 文档失真修订（DESIGN §6/§11 对齐、impl/03、impl/04、panels 09/10/15/02 状态翻正、README React 版本、DECISIONS §1 摘要表补 D-29..D-33）逐条落地；TEST-01/02/03（CSP 断言扩 base-uri/object-src/form-action、asset scope 断言、路径穿越负例）随对应安全批落。
+- **影响面（批次 A2 条款）**：KVM 遥控（输入注入/剪贴板/文件）与 sync 会话的**线格式变更**——升级后新旧版本互不兼容（Hello v1 被拒并提示升级对端），换来的是 (key,nonce) 全域唯一、方向分离、重放/乱序拒绝三条性质成立；两端须同版本部署属预期运维代价。
+- **挂账（明示未做，翻案须新决策编号）**：① **SEC-11**（KVM 配对无 PAKE）——SPAKE2 属协议级重设计＋双端升级协商面，另批评估（短期缓解：缩短窗口/限速/成功强提醒亦一并权衡）；② **SEC-12**（TUN 宿主排除依赖内核隐式 strict_route）——显式防火墙/路由规则须真机验收，禁在无实机证据下写入网络栈副作用；③ **STD-05**（前端 magic px 552 处/内联 style 168 处）——随 UI 迭代逐批收口，按 07 §7 看板"只减不增"追踪；④ **GOV-09 参数级契约**——命令↔权限**命名集合差集**已由 security_config 双向断言覆盖（`every_registered_command_is_acl_declared_and_main_granted` + `dead_permission_surface_is_trimmed`），255 命令逐参数名/返回形状契约测试另批；⑤ **PERF-03 半项**——`manualChunks` 分包已落（vite.config.ts），monaco **全量入口改 editor.core 按需装配**未动（波及三面板共用的 worker/语言注册面，随下批 UI 迭代评估）。
+- **驳回（登记假阳性，不改码）**：**STD-02**——所引三处 `placeholder="…C:\Users…"` 均为 **JSX 属性字符串**，其值不解转义反斜杠（本仓 T-B7-3 已实测并以测试 `\\\\Users` 形制定钉；`\r`→回车只发生于 JS 字符串表达式），placeholder 实渲正常；review"显示错乱"判定不成立。
+- **依据**：审查报告自身即台账（ID 与证据分级逐条在册）；代码内 `SEC-NN/COR-NN/PERF-NN/STD-NN/GOV-NN/DOC-NN` 注释为落地锚。
+- **代价**：在途改动约百文件（+3.5k/−0.6k 行）；前端新增运行时依赖 `dompurify@^3.4.16`；Rust 依赖面按各条标记处核账（多数零新增）。
+- **验收**：批次完成判定四件套（见背景行）＋最终树七门回声行全 0；首轮门禁揪出 FMT=1（`vault-core/tests/entry_crud.rs` 两处空白差异，已 `cargo fmt` 归一）与 TEST=101（`kvm-core discovery::two_instances…` UDP sendto os error 10065 主机不可达——该文件本战役零改动，判环境瞬态，复跑坐实后方翻状态）；真机验收项（TUN 环路、配对抢占、覆盖层/键鼠时序）审查已标注 `[走查]/[框架]`，列入人工冒烟不冒充自动闭环。
+- **状态**：实施中（A/B/C/D/E 代码与文档面已落＋D-34 入册；终态门禁已坐实——fmt/clippy(-D)/cargo build/tsc/eslint/vitest(91 files)/vite build 全 0，cargo test 无网环境下两枚 kvm 组播灯（os 10065）之外 **57/57 目标 1034 passed / 0 failed**；待：挂账四题＋STD-02 驳回的用户复核、各组真机冒烟验收项）。
 
 ---
 

@@ -1,6 +1,6 @@
 # 09 截图与贴图面板详细设计（B0 补壳 + B4 深化）
 
-> 总纲：docs/impl/09 §9；对标：蓝本 §3.9（OpenSnap+ShareX）+ Snipaste/PixPin/Flameshot/Ksnip；状态：未开工。**本模块是用户报告"显示模块待构建"的直接对象**：后端 10 命令齐备（lib.rs:145-154），`src/modules/` 下**没有 screenshot 目录**，MainWorkbench 落入"模块界面待实现"兜底三元尾（MainWorkbench.tsx:266）。
+> 总纲：docs/impl/09 §9；对标：蓝本 §3.9（OpenSnap+ShareX）+ Snipaste/PixPin/Flameshot/Ksnip；状态：**已交付**（DOC-04 翻正，2026-09-25：T-B0-2 落 ScreenshotPanel + 覆盖层，B4 批补齐标注/滚动/上传/删除；"无 screenshot 目录与兜底三元"的描述已成历史，见 DECISIONS D-29 B0 实施记录）。原始诊断留档如下。
 
 ## 1. 现状问题
 

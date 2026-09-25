@@ -1,6 +1,6 @@
 # 10 OCR 面板详细设计（B0 补壳 + B4 深化）
 
-> 总纲：docs/impl/09 §9（与截图同批）；对标：蓝本 §3.10（Umi-OCR+PaddleOCR）+ eSearch/Textract；状态：未开工。与 09 同病根：后端管线完整（engine.rs/pipeline.rs/module.rs），`src/modules/` **无 ocr 目录**，主窗落"模块界面待实现"兜底。PaddleOCR 与翻译维持 D-08 v1.1 裁决不动（挂 DeferredBadge，动工前需独立 sidecar 子方案文档）。
+> 总纲：docs/impl/09 §9（与截图同批）；对标：蓝本 §3.10（Umi-OCR+PaddleOCR）+ eSearch/Textract；状态：**已交付**（DOC-04 翻正，2026-09-25：T-B0-3 落 OcrPanel，零新命令纯接线；PaddleOCR 与翻译维持 D-08 v1.1 裁决不动）。原始诊断留档如下。PaddleOCR 与翻译维持 D-08 v1.1 裁决不动（挂 DeferredBadge，动工前需独立 sidecar 子方案文档）。
 
 ## 1. 现状问题
 

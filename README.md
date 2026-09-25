@@ -10,7 +10,7 @@ Windows 桌面效率集成套件：宿主框架 + 13 个功能模块，本地优
 ## 技术栈
 
 - 后端：Rust（workspace，17 个 crate）+ Tauri 2
-- 前端：React 19 + TypeScript + Fluent UI 9 + Vite
+- 前端：React 18 + TypeScript + Fluent UI 9 + Vite（DOC-05：以 package.json 为准）
 - 存储：每模块独立 SQLite（FTS5），数据集中于 `{appData}/db/`
 - 平台：仅 Windows 10 1809+（Win32 能力统一收敛在 `crates/win-integration`）
 

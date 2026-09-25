@@ -1,0 +1,14 @@
+# CODEOWNERS — 评审归属（GOV-04）
+# 语法：https://docs.github.com/en/repositories/managing-a-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# 缺省 owner：@ZephyrWhispe（workspace 单维护者阶段；多人后按目录拆分）
+
+*                               @ZephyrWhispe
+
+# 安全敏感面：双人评审（当前单维护者，显式钉住"改动必须过 owner"这一底线）
+/crates/host-core/src/wire.rs   @ZephyrWhispe
+/crates/host-core/src/device.rs @ZephyrWhispe
+/crates/nexusforge-helper/      @ZephyrWhispe
+/crates/win-integration/src/maintenance.rs @ZephyrWhispe
+/src-tauri/tauri.conf.json      @ZephyrWhispe
+/src-tauri/tests/security_config.rs @ZephyrWhispe
+/crates/vault-core/             @ZephyrWhispe

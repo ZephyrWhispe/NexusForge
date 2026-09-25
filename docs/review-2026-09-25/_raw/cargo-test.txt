@@ -1,0 +1,1333 @@
+﻿cargo : [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test`
+ profile [unoptimized + debuginfo]]8;;\ target(s) in 1.16s
+At line:15 char:2235
++ ... xt"; "CLIPPY_EXIT=$LASTEXITCODE"; cargo test --workspace 2>&1 | Out-F ...
++                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([1m[92m    Fi...get(s) in 1.16s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\automation_core-a9ad3c746af1a98a.exe)
+
+running 26 tests
+test engine::tests::cooldown_gates_rapid_refires ... ok
+test dryrun::tests::dryRun_listsAllActionKinds ... ok
+test dryrun::tests::dryRun_emitsNothing_portZeroEffects ... ok
+test engine::tests::when_filter_blocks_execution ... ok
+test engine::tests::fire_runs_serially_and_success_swallows ... ok
+test history::tests::history_corruptFile_emptyWithWarn_notSilentWipe ... ok
+test engine::tests::failing_action_retries_then_dead_letter ... ok
+test engine::tests::deadClear_emptiesDiskAndMemory ... ok
+test plugins::tests::install_list_remove_roundtrip ... ok
+test plugins::tests::install_rejects_bad_manifest ... ok
+test plugins::tests::load_rejects_tampered_wasm ... ok
+test rule::tests::logic_combinators_and_contains ... ok
+test rule::tests::path_getter_and_leaf_compare ... ok
+test rule::tests::rule_validate_and_match ... ok
+test rule::tests::schedule_format_checked ... ok
+test wasm::tests::capped_import_is_unresolved ... ok
+test wasm::tests::host_via_arc_object_safe ... ok
+test wasm::tests::infinite_loop_killed_by_fuel ... ok
+test module::tests::dispatcher_tasks_shutdown_and_do_not_accumulate ... ok
+test wasm::tests::runs_and_reads_guest_string ... ok
+test wasm::tests::unknown_function_rejected ... ok
+test history::tests::history_ringCaps_dropsOldest ... ok
+test engine::tests::replay_removes_on_success_keeps_on_failure ... ok
+test engine::tests::history_partialOutcome_recordsFailedIndices ... ok
+test history::tests::runsGet_limitBounded ... ok
+test wasm::tests::memory_bomb_killed_by_limit ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.55s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\clipboard_core-bda4e2c61bf16131.exe)
+
+running 90 tests
+test backup::tests::export_gate_requires_passphrase_only_when_secrets_included ... ok
+test classifier::tests::plain_text_and_secrets ... ok
+test classifier::tests::classifies_url_json_color_code ... ok
+test module::tests::applyConfigs_emptyStoredFile_doesNotOverwriteRuntime ... ok
+test backup::tests::export_envelope_roundtrip_and_aad_tamper_detected ... ok
+test module::tests::get_secretRow_refusedWithRevealHint_notPlaintext ... ok
+test backup::tests::derive_key_is_deterministic_and_salt_sensitive ... ok
+test module::tests::hostConfig_bootstrap_appliesPersistedValues ... ok
+test module::tests::hostConfig_changeAtRuntime_reachesRunningModule ... ok
+test module::tests::export_secretsWithoutPassphrase_rejected001 ... ok
+test module::tests::kvm_clip_consumer_end_to_end_with_symmetric_shutdown ... ok
+test module::tests::parse_clip_event_accepts_valid_and_drops_malformed ... ok
+test module::tests::pasteFormat_html_carriesHtmlWhenPresent ... ok
+test module::tests::pasteFormat_html_degradesToPlainWhenAbsent_andReports ... ok
+test module::tests::pasteFormat_plain_writesTextWithoutHtml ... ok
+test module::tests::paste_secretEntry_stillRefused004 ... ok
+test module::tests::revealSecret_auditLogTargetPresent ... ok
+test module::tests::search_previewForSecret_neverContainsPlaintext ... ok
+test module::tests::secretReveal_nonSecret_rejected001 ... ok
+test module::tests::secretReveal_returnsPlaintextOnce ... ok
+test module::tests::stack_pasteAll_stopsAtFirstInjectFailure ... ok
+test module::tests::stack_pasteEmpty_returnsNone ... ok
+test module::tests::stack_pasteNext_secretEntry_refusedAndStaysOnStack ... ok
+test module::tests::stack_pasteNext_writesThenInjectsCtrlV ... ok
+test module::tests::trayMenu_hasCaptureItem_withDynamicLabel ... ok
+test module::tests::tray_action_publishes_quick_panel_toggle_observable_on_bus ... ok
+test pipeline::tests::blockPattern_appliesToTextOnly_filesAndImagePassThrough ... ok
+test pipeline::tests::blockPattern_badRegex_warnsAndDoesNotBlockOthers ... ok
+test module::tests::exportImport_roundtrip_underPassphrase_reencryptsSecrets ... ok
+test pipeline::tests::blockPattern_otpLikeText_neverStoredOrSearchable ... ok
+test pipeline::tests::capturePause_precedesBlockRules_orderingPinned ... ok
+test pipeline::tests::burst_captures_merge_into_fewer_events_than_entries ... ok
+test pipeline::tests::capturePause_resumeDeliversAgain ... ok
+test pipeline::tests::captureSkip_precedenceMatrix_allFourCombinations ... ok
+test pipeline::tests::capturePause_skipsIngestAndCountsSkipped ... ok
+test pipeline::tests::clipHtml_cfHtmlFormat_storedAlongsideText ... ok
+test pipeline::tests::classifierSuggestion_notAutoAppliedWhenAutoGroupOff ... ok
+test pipeline::tests::clipHtml_secretRow_neverStoresHtml ... ok
+test pipeline::tests::clipHtml_plainTextOnly_staysNull ... ok
+test pipeline::tests::remote_history_survives_clipboard_write_failure ... ok
+test pipeline::tests::remote_second_arrival_does_not_overwrite_local_origin ... ok
+test pipeline::tests::restart_does_not_accumulate_workers ... ok
+test module::tests::backup_truncatedOrForeignJson_rejected003 ... ok
+test pipeline::tests::selfWriteMarker_portReportsTrue_dropsCaptureBeforeEnqueue ... ok
+test pipeline::tests::remote_ingest_writes_clipboard_records_remote_row_and_suppresses_recapture ... ok
+test query::tests::parseSyntax_quotedGroupKeepsSpaces ... ok
+test query::tests::parseSyntax_unknownPrefixAndEmptyValueStayLiteral ... ok
+test query::tests::parseSyntax_urlToken_staysLiteralText ... ok
+test query::tests::secretRow_neverStore_patternEscapesLiterals ... ok
+test secrets::tests::detects_api_key ... ok
+test secrets::tests::detects_pem_and_jwt ... ok
+test secrets::tests::luhn_guards_credit_card ... ok
+test secrets::tests::normal_text_not_sensitive ... ok
+test secrets::tests::phone_only_exact_match ... ok
+test module::tests::export_noPlaintextSecretInFileBytes ... ok
+test store::tests::big_content_goes_to_blob ... ok
+test store::tests::clear_removes_all_blobs_and_keeps_pinned_blob ... ok
+test store::tests::dedup_hit_keepsPinnedAndRefreshesRecency ... ok
+test store::tests::dedup_promotes_local_only_never_remote_overwrite ... ok
+test store::tests::delete_entry_removes_blob_file ... ok
+test store::tests::entrySetGroup_userName_withUnicodeAndSpaces_roundtrip ... ok
+test store::tests::dirty_or_legacy_origin_value_reads_as_local ... ok
+test store::tests::fts_search_finds_text ... ok
+test store::tests::groupRename_andDelete_retargetRows ... ok
+test pipeline::tests::worker_processes_then_shuts_down_despite_live_sender ... ok
+test store::tests::insert_dedup_pins_and_bumps_usage ... ok
+test store::tests::origin_roundtrip_local_and_remote ... ok
+test store::tests::pin_clear_and_delete ... ok
+test store::tests::migration_reopen_legacyDb_addsHtmlColumnIdempotent ... ok
+test store::tests::purge_max_entries_removes_blobs ... ok
+test store::tests::searchSyntax_bareWordWithColon_staysLiteralText ... ok
+test store::tests::reopen_legacyDb_fillsSuggestedColumnsWithDefaults ... ok
+test store::tests::reopen_migrates_old_db_and_preserves_rows_blob_fts ... ok
+test store::tests::searchSyntax_contentTypeField_andSyntax_agreeOnSameResult ... ok
+test store::tests::searchSyntax_groupAndTypePrefixes_extractedFromText ... ok
+test store::tests::searchSyntax_groupInjection_matchesNothingAndTableIntact ... ok
+test store::tests::searchSyntax_quotedGroupName_matchesSpaceBearingGroup ... ok
+test store::tests::searchSyntax_repeatedPrefix_lastWins ... ok
+test store::tests::searchSyntax_unknownTypeValue_returnsNothingNotError ... ok
+test store::tests::stack_list_skipsDeletedEntryWithoutLosingOrder ... ok
+test store::tests::stack_takeNext_isFifoInPushOrder ... ok
+test store::tests::stack_pushListMoveRemoveClear_roundtrip ... ok
+test store::tests::startup_gc_removes_orphans_only ... ok
+test store::tests::suggestionAccept_writesGroupAndClearsQueue ... ok
+test store::tests::stats_countsByTypeGroupAndSource ... ok
+test store::tests::suggestionIgnore_dismissedSticky ... ok
+test store::tests::userGroup_survivesClassifierRerun ... ok
+test module::tests::import_twice_isIdempotentByHash ... ok
+test module::tests::import_wrongPassphrase_rejectedAndStoreUntouched ... ok
+test pipeline::tests::write_back_window_suppresses_self_capture ... ok
+
+test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.14s
+
+[1m[92m     Running[0m tests\perf_thresholds.rs (target\debug\deps\perf_thresholds-f9445eacbdfd3da4.exe)
+
+running 3 tests
+test percentile_detects_slow_series_across_threshold ... ok
+test capture_insert_p95_below_100ms_unique_and_dedup ... ok
+test fts_search_p95_below_50ms_at_5k_corpus ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.94s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\desktop_core-b594c7a840dc5ba9.exe)
+
+running 37 tests
+test config::tests::merged_absentKeyKeepsRuntime_explicitNullReverts ... ok
+test index::tests::register_action_overrides_and_launchable ... ok
+test index::tests::search_before_build_is_not_indexed ... ok
+test module::tests::dead_config_keys_are_revived_or_removed ... ok
+test index::tests::dedup_keeps_first_source ... ok
+test module::tests::launcher_reindex_preserves_registered_actions ... ok
+test index::tests::usage_boosts_ranking_and_persists ... ok
+test index::tests::build_indexes_start_menu_and_path ... ok
+test note::tests::no_remind_words_returns_none ... ok
+test note::tests::add_rejects_empty ... ok
+test note::tests::add_extracts_tags_and_persists ... ok
+test note::tests::noteList_tagAbsentFromDoneSet_stillFiltered ... ok
+test note::tests::parse_remind_basic_days ... ok
+test note::tests::parse_remind_half_and_pm ... ok
+test note::tests::parse_remind_weekday_is_future ... ok
+test note::tests::done_and_remove_roundtrip ... ok
+test score::tests::boundary_word_start_detection ... ok
+test score::tests::case_insensitive ... ok
+test score::tests::contiguity_prefers_consecutive_match ... ok
+test note::tests::get_roundtrip ... ok
+test score::tests::empty_query_matches_everything ... ok
+test score::tests::exact_prefix_scores_higher_than_word_start ... ok
+test score::tests::freq_decays_over_time ... ok
+test score::tests::non_subsequence_is_none ... ok
+test note::tests::noteList_tagFilter_exactMatch_notSubstring ... ok
+test note::tests::noteList_tagNone_returnsAll ... ok
+test tidy::tests::categorizeWith_customMap_routesExtension ... ok
+test tidy::tests::categorizeWith_noneEqualsBuiltinSix ... ok
+test tidy::tests::categorize_by_extension ... ok
+test tidy::tests::apply_moves_and_manifest_enables_restore ... ok
+test tidy::tests::apply_routesCustomCategory_toDeclaredFolder ... ok
+test tidy::tests::tidyMap_illegalTargetFolder_rejected ... ok
+test note::tests::take_due_marks_reminded_once ... ok
+test tidy::tests::plan_scans_and_groups ... ok
+test tidy::tests::apply_skips_conflicts_never_overwrites ... ok
+test tidy::tests::restore_keeps_manifest_when_partial ... ok
+test module::tests::tidyMap_runtimeApply_noRestart ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\editor_core-4c31a0112096d7fc.exe)
+
+running 28 tests
+test pdf::tests::parseRanges_malformed_named ... ok
+test pdf::tests::invalid_pdf_is_rejected ... ok
+test pdf::tests::info_reads_pages ... ok
+test pdf::tests::compress_never_grows_file ... ok
+test pdf::tests::split_outOfRange_errsNamingTotal ... ok
+test pdf::tests::split_creates_single_page_files ... ok
+test pdf::tests::merge_appends_pages_in_order ... ok
+test session::tests::autosave_and_close_cleanup ... ok
+test session::tests::decode_gbk_fallback ... ok
+test session::tests::decode_utf8_and_bom ... ok
+test session::tests::encode_roundtrip_all_kinds ... ok
+test session::tests::eolNormalize_onlyLineEnders_touched ... ok
+test session::tests::eol_mixed_normalized_on_save ... ok
+test session::tests::autosaveDraft_resumesOnOpen ... ok
+test pdf::tests::split_subset_namedByOriginalPageNumbers ... ok
+test session::tests::preferredNone_keepsLegacySaveVerbatim ... ok
+test session::tests::open_update_save_roundtrip_keeps_encoding ... ok
+test pdf::tests::watermark_keeps_page_count_and_marks_pages ... ok
+test session::tests::save_as_reports_disk_byte_size_not_char_len ... ok
+test session::tests::save_as_switches_path ... ok
+test session::tests::sessionManifest_deletedOnDisk_rowDroppedWithWarn ... ok
+test session::tests::setEncoding_lossyChars_reportedNotSilent ... ok
+test session::tests::sessionManifest_corruptFile_emptyWithWarn ... ok
+test session_store::tests::manifest_corrupt_keeps_evidence ... ok
+test session::tests::sessionRestore_lazyRead_noFileAccessUntilOpen ... ok
+test session_store::tests::manifest_atomic_write_roundtrip ... ok
+test session::tests::sessionManifest_roundTripsReopen ... ok
+test session::tests::setEncoding_utf8ToGbk_roundTripsBytes ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+[1m[92m     Running[0m tests\pdf_merge_acceptance.rs (target\debug\deps\pdf_merge_acceptance-3187bb4ef0107b74.exe)
+
+running 1 test
+test pdf_merge_100_files_peak_memory_under_300mb ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\file_core-9f65a58913331e3f.exe)
+
+running 138 tests
+test browse::tests::breadcrumbs_split_drive_and_segments ... ok
+test browse::tests::long_path_prefix_roundtrip ... ok
+test browse::tests::list_missing_dir_errors ... ok
+test browse::tests::drives_nonempty_and_valid ... ok
+test conflict::tests::no_conflict_ask_passthrough ... ok
+test conflict::tests::conflictAskArm_noLongerSharesCodeWithSkip ... ok
+test conflict::tests::rename_policy_generates_sequenced_name ... ok
+test browse::tests::list_desc_order ... ok
+test browse::tests::list_dirs_first_then_sorted ... ok
+test conflict::tests::scan_conflicts_reports_existing_only ... ok
+test conflict::tests::unique_target_skips_existing_sequence ... ok
+test driver::tests::capabilities_localDriverDefaultsUnchanged ... ok
+test driver::tests::dynamic_driver_registration_replaces_same_id ... ok
+test driver::tests::readStream_unimplementedDriver_refusesNotPanics ... ok
+test conflict::tests::conflictPairs_localAndRemoteEnginesAgree ... ok
+test driver::tests::remoteDriver_satisfiesStorageDriver ... ok
+test driver::tests::registry_unregister_keepsLocalDriver ... ok
+test driver::tests::registerAs_dynamicKey_neverTouchesLocal ... ok
+test driver::tests::sameIdRegistration_stillReplacesWithinNamespace ... ok
+test driver::tests::storage_port_bridge_resolves_local_driver ... ok
+test module::tests::fileConfig_badValue_rejectsNamingKeyAndWholeSet ... ok
+test module::tests::fileConfig_merged_absentKeysKeepRuntimeState ... ok
+test driver::tests::local_driver_built_in_and_operates ... ok
+test namefix::tests::probeSftp_onlyNulAndSlash_flagged ... ok
+test module::tests::module_lifecycle_with_tmp_appdata ... ok
+test namefix::tests::badCharMapFile_wholeSegmentRejected ... ok
+test namefix::tests::suggestRename_fullwidthMap_dataFileDriven ... ok
+test module::tests::dead_config_keys_are_revived_or_removed ... ok
+test ops::remote_exec_tests::crossDriverMove_refuses_and_message_says_copy_then_delete ... ok
+test ops::remote_exec_tests::queueRemote_download_movesBytesAndResumableStaysNullWhenFresh ... ok
+test ops::remote_exec_tests::remoteDelete_afterDisconnect_failsNamingDriver_notFakeSuccess ... ok
+test ops::remote_exec_tests::autoRenameExecutor_firstSegmentRenamed_nestedUntouched ... ok
+test ops::remote_exec_tests::resumeRange_whenPeerHonorsOffset_promisesDriverDeclaredTier ... ok
+test ops::remote_exec_tests::resumeWhole_whenRangeRefused_restartsFromZeroAndPromisesOnlyWhole ... ok
+test ops::remote_exec_tests::queueRemote_upload_commitsOnlyThroughWriteFinish ... ok
+test module::tests::fileConfig_appliedViaConfigStoreDispatch_withoutRestart ... ok
+test ops::tests::askPolicy_conflictAfterPreScan_neverSilentlySkips ... ok
+test ops::tests::cancel_removes_partial_dst ... ok
+test ops::tests::askPolicy_deleteCompressExtract_reachTheSameGate ... ok
+test ops::tests::copy_dir_recursive_with_progress_and_done ... ok
+test ops::tests::direction_of_uploadDownloadAndMixed ... ok
+test ops::tests::direction_of_matchesPanelCopySemantics ... ok
+test ops::tests::copyPumped_resumeAtOffset_seeksBothEnds ... ok
+test ops::tests::parentKey_pureNoFilesystemCall ... ok
+test ops::tests::delete_permanent_directory ... ok
+test ops::tests::pendingLegacy_localFormatBytes_stillDeserializes ... ok
+test ops::tests::move_dir_cross_volume_falls_back_to_copy_delete ... ok
+test ops::tests::move_file_rename_fast_path ... ok
+test ops::tests::pruneFinished_keepsTerminalRowsWithinBudget ... ok
+test ops::tests::progressPayload_directionAndResumablePresent ... ok
+test ops::tests::pruneFinished_neverDropsRunningOrPaused ... ok
+test ops::tests::remoteDelete_recycleTrue_rejectsAndNamesNoRecycleBin ... ok
+test ops::tests::rename_policy_on_conflict ... ok
+test ops::tests::queue_resumeAcrossReopen_remoteDirectionSurvives ... ok
+test ops::tests::resumeDto_reopenService_preservesChain ... ok
+test ops::tests::compress_and_extract_roundtrip ... ok
+test ops::tests::xferStatus_resumableMatchesPeerClaim_notAssumed ... ok
+test ops::tests::xferStatus_shapeKeysExactlyMatchStruct ... ok
+test ops::tests::pause_then_resume_completes_big_file ... ok
+test preset::tests::presets_builtin_coversFourProtocolsWithEightRows ... ok
+test preset::tests::presets_shapeValidated ... ok
+test preset::tests::presets_unknownProtocol_wholeFileRejected ... ok
+test preview::tests::binary_falls_back_to_unsupported ... ok
+test preset::tests::presetStore_userDirFailClosedAndIdConflict ... ok
+test preview::tests::missing_file_errors ... ok
+test preview::tests::shell_ext_without_port_reports_unsupported ... ok
+test ops::tests::xferStatus_afterResume_pointsAtNewOpId ... ok
+test profile::tests::authKind_serializedHasNoSecretKeys ... ok
+test preview::tests::text_preview_reads_prefix_and_flags_truncation ... ok
+test profile::tests::profileDelete_missingId_returnsFalseNotError ... ok
+test profile::tests::profileSave_badHostOrPort_rejectedNamingField ... ok
+test profile::tests::profileSave_rejectsReservedLocalId ... ok
+test profile::tests::profileStore_emptyDir_isNotAnError ... ok
+test profile::tests::profileSave_noCredentialField_serializedKeySetExactlyMatches ... ok
+test profile::tests::profileStore_roundTripPersistedAndReopened ... ok
+test remote::ftp::tests::ftpLogin_withoutPassword_honestFail ... ok
+test remote::ftp::tests::ftpPath_joinTraversalAndLiteralSegments ... ok
+test remote::ftp::tests::modePlan_isAlwaysBinary ... ok
+test remote::ftp::tests::parseControlLine_multiAndMalformed ... ok
+test remote::ftp::tests::parseMlsd_timeAndSizeAndDirType ... ok
+test remote::ftp::tests::parsePasv_rejectsExternalIp_butAcceptsOrdinaryPassive ... ok
+test remote::ftp::tests::plainFtpRefusedUnlessInsecurePlaintextEnabled ... ok
+test remote::ftp::tests::redact_hidesPassPassword ... ok
+test remote::http::tests::classify_resume_onlyOn206 ... ok
+test remote::ftp::tests::ftpAgainstFakeServer_endToEnd ... ok
+test remote::http::tests::httpsDownload_againstFakeServer_resumesWithRange ... ok
+test remote::http::tests::httpsDriver_listRefusesNotEmptyList ... ok
+test remote::http::tests::httpsThrottle_shareKbpsSplitsAcrossActiveTransfers ... ok
+test remote::http::tests::range_plan_boundaries ... ok
+test remote::http::tests::remoteError_messageMasksSecretsAndCrlf ... ok
+test remote::http::tests::resumeWhole_restartsFromZeroAndStillReportsProgress ... ok
+test remote::http::tests::downloadConsumesConfigKbps_whenNoExplicitBudget ... ok
+test remote::ssh::tests::sftpResume_offsetsMatchPlan ... ok
+test remote::ssh::tests::sftpStat_modePopulated_matchesAttrs ... ok
+test remote::ssh::tests::sshDriver_implementsStorageDriverForRemoteBrowse ... ok
+test remote::ssh::tests::knownHosts_corruptFile_isErrorNotSilentlyEmpty ... ok
+test remote::ssh::tests::tofu_changedKey_errsNamingBothFingerprints ... ok
+test ops::tests::resume_noGhostRows_afterThreePauseResumeCycles ... ok
+test remote::ssh::tests::sshPassword_neverHitsDiskOrDisplay ... ok
+test remote::tests::mode_serdeDefault_legacyEntriesJson_stillReads ... ok
+test remote::tests::throttleGate_zeroMeansUnlimited ... ok
+test remote::tests::webdavAuth_secretNeverSerialized ... ok
+test remote::tests::webdavList_hrefsNeverBecomePathBuf ... ok
+test remote::ssh::tests::tofu_firstSight_refusesConnectionAndNamesFingerprint ... ok
+test remote::webdav::put_assembly_tests::assemblePut_shapesUrlHeaders_andRefusesEscapes ... ok
+test remote::webdav::tests::joinRemote_url_noDoubleSlashAndNoTraversal ... ok
+test remote::webdav::tests::status_arm_covers_auth_rejection ... ok
+test remote::webdav::tests::webdavList_parsesPropfindFixture_intoEntries ... ok
+test rename::tests::chinese_names_survive ... ok
+test rename::tests::conflicts_flagged_target_exists_and_duplicates ... ok
+test rename::tests::duplicate_targets_within_plan_conflict ... ok
+test remote::webdav::tests::webdavAgainstFakeServer_endToEnd ... ok
+test rename::tests::invalid_template_errors ... ok
+test rename::tests::regex_replace_and_case ... ok
+test rename::tests::template_variables_and_padding ... ok
+test search::tests::empty_query_returns_empty ... ok
+test search::tests::usn_port_takes_priority ... ok
+test search::tests::walk_search_scores_prefix_over_contains_and_skips_noise ... ok
+test remote::ssh::tests::tofu_trusted_matchesWholeKeyNotJustBase64 ... ok
+test preview::tests::image_preview_downscales_to_thumb ... ok
+test service::tests::askPolicy_previewsBeforeEnqueue ... ok
+test service::tests::chmod_bitSanity_upperLimit_rejects ... ok
+test service::tests::authSource_columnReportsSourceNotValue ... ok
+test service::tests::autoRenameConfig_takesOverWithoutCallerOverride ... ok
+test service::tests::connect_unsupportedProtocol_errs004NamingNextRow ... ok
+test service::tests::connect_hijacksNoLocalDriver ... ok
+test service::tests::enqueue_appliesDefaultPolicy_whenCallerLeftAsk ... ok
+test service::tests::chmod_unsupportedProtocols_errsNamingEach ... ok
+test service::tests::httpsDriver_listRefusesNotEmptyList_serviceMouth ... ok
+test service::tests::fileDrivers_exposesIdAndRoots ... ok
+test service::tests::nameFixPoison_blocksRemoteEnqueue ... ok
+test service::tests::progressEvent_payloadEqualsOpProgressSerialization ... ok
+test service::tests::listDir_nowGoesThroughRegistry_localBehaviourIdentical ... ok
+test service::tests::plaintextNonLoopback_requiresExplicitConfirm_eachConnection ... ok
+test service::tests::remoteBrowse_unknownDriverId_errsNotEmpty ... ok
+test ops::tests::progressMergedWindow_unchangedByNewKeys ... ok
+test service::tests::progress_merges_on_bus_and_done_flushes_immediately ... ok
+test ops::remote_exec_tests::uploadThrottle_uploadKbps_gatesTheUploadPump ... ok
+
+test result: ok. 138 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\host_core-e2580a2699ec47fa.exe)
+
+running 61 tests
+test capability::tests::tray_actions_default_empty_and_override_collected ... ok
+test capability::tests::aggregate_grays_error_modules_only ... ok
+test capability::tests::aggregate_sorts_by_priority ... ok
+test crash::tests::panic_hook_writes_crash_file_and_runs_hooks ... ok
+test crash::tests::scan_reports_crash_and_pending ... ok
+test device::tests::b64_helpers_reject_garbage ... ok
+test device::tests::fingerprint_is_deterministic_and_truncated ... ok
+test config::tests::set_module_without_schema_fails ... ok
+test error::tests::error_codes_follow_naming_convention ... ok
+test error::tests::module_error_maps_to_app_error_with_code ... ok
+test config::tests::load_creates_default_global ... ok
+test error::tests::network_error_carries_retryable_flag ... ok
+test error::tests::serialization_shape_matches_ipc_contract ... ok
+test device::tests::roundtrip_plain_identity ... ok
+test device::tests::pair_store_roundtrip_persists ... ok
+test events::tests::backpressure_lagged_not_fatal ... ok
+test config::tests::migration_backfills_language_and_backups ... ok
+test events::tests::publish_merged_from_plain_thread_and_rejects_unregistered ... ok
+test events::tests::flush_merged_publishes_immediately ... ok
+test events::tests::publish_subscribe_roundtrip ... ok
+test events::tests::debounce_empty_window_passthrough ... ok
+test events::tests::publish_survives_panic_under_lock ... ok
+test events::tests::publish_unregistered_fails ... ok
+test events::tests::register_rejects_unknown_topic ... ok
+test events::tests::topic_policies_match_o8_spec ... ok
+test hotkey::tests::equal_or_lower_priority_rejected ... ok
+test hotkey::tests::higher_priority_displaces_lower ... ok
+test hotkey::tests::os_failure_maps_to_hotkey_002 ... ok
+test hotkey::tests::os_registration_invoked_when_port_ready ... ok
+test logging::tests::redact_keeps_head_tail ... ok
+test events::tests::subscribe_throttled_leading_and_trailing ... ok
+test module::tests::context_shares_ports_across_clones ... ok
+test module::tests::priority_table_covers_all_shipped_modules ... ok
+test module::tests::state_cell_roundtrip_and_unknown_failsafe ... ok
+test ports::tests::port_register_and_downcast ... ok
+test module::tests::mock_module_lifecycle_transitions ... ok
+test registry::tests::duplicate_register_rejected ... ok
+test config::tests::set_module_rejects_invalid_against_schema ... ok
+test registry::tests::full_lifecycle_transitions ... ok
+test registry::tests::module_state_events_cover_init_and_stop ... ok
+test registry::tests::panic_is_isolated_and_reported ... ok
+test events::tests::debounce_merges_burst_to_last ... ok
+test registry::tests::restart_unknown_module_fails ... ok
+test registry::tests::registry_and_module_share_single_state_source ... ok
+test ssh_trust::tests::merge_legacy_conflict_prefersTermAndWarns ... ok
+test ssh_trust::tests::wholeKeyAgrees_threeArms ... ok
+test ssh_trust::tests::store_corruptFile_isErrWithNamedPath ... ok
+test storage::tests::mode_serdeDefault_legacyEntriesJson_stillReads ... ok
+test tests::version_available ... ok
+test util::tests::app_err_keeps_code_and_stringifies_msg ... ok
+test util::tests::b64_roundtrip_and_lenient ... ok
+test util::tests::hex_lower_matches_known_vector ... ok
+test util::tests::now_ms_monotonic_and_epoch_sane ... ok
+test wire::tests::derive_session_key_binds_salt_and_shared ... ok
+test wire::tests::frame_codec_roundtrip_and_guards ... ok
+test wire::tests::cipher_seal_open_roundtrip_and_counter_nonce ... ok
+test wire::tests::read_write_frame_over_duplex ... ok
+test ssh_trust::tests::store_decide_bareLegacyRecord_trustedAndUpgraded ... ok
+test ssh_trust::tests::merge_legacy_twoOldFiles_unionOnce_idempotent ... ok
+test events::tests::publish_merged_keeps_distinct_keys ... ok
+test events::tests::publish_merged_thousand_burst_delivers_one ... ok
+
+test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\kvm_core-d9843b23b4e40813.exe)
+
+running 40 tests
+test config::tests::kvm_config_merged_absent_key_keeps ... ok
+test config::tests::edge_map_config_roundtrip_deterministic ... ok
+test discovery::tests::peerInfo_syncAddr_prefersAdvertisedPort ... ok
+test discovery::tests::heartbeat_absentSyncPort_decodesAsZero ... ok
+test edge::tests::cornerEdge_diagonalSplit_deterministic ... ok
+test edge::tests::edge_serde_roundtrip ... ok
+test edge::tests::controlTake_legacyPayloadWithoutLocks_parsesNone ... ok
+test edge::tests::switch_requires_arm_cooldown_and_mapped_edge ... ok
+test edge::tests::remote_edge_return_releases ... ok
+test edge::tests::unmapped_edge_never_switches ... ok
+test discovery::tests::stale_seq_ignored ... ok
+test edge::tests::vertical_edge_switch_and_return_release ... ok
+test locksync::tests::lockDiff_capsOnly_emitsOneToggle ... ok
+test locksync::tests::lockDiff_symmetric_empty ... ok
+test locksync::tests::lockDiff_threeWayAllCombination ... ok
+test module::tests::edgeMap_legacyTwoEdgeJson_stillLoads ... ok
+test module::tests::setEdgeMap_illegalName_rejectedNamingValue ... ok
+test pairing::tests::code_attempt_limit ... ok
+test pairing::tests::code_issue_and_validate ... ok
+test module::tests::dead_config_keys_are_revived_or_removed ... ok
+test pairing::tests::pair_handshake_roundtrip ... ok
+test pairing::tests::pair_wrong_code_rejected ... ok
+test session::tests::cipher_roundtrip_and_tamper ... ok
+test session::tests::derived_keys_match_for_same_material ... ok
+test session::tests::frame_roundtrip ... ok
+test session::tests::partial_frame_returns_none ... ok
+test session::tests::encrypted_stream_roundtrip_via_duplex ... ok
+test session::tests::unknown_type_rejected ... ok
+test pairing::tests::pair_store_persist_roundtrip ... ok
+test session::tests::session_handshake_and_encrypted_exchange ... ok
+test transfer::tests::chunk_codec_roundtrip ... ok
+test transfer::tests::corrupted_file_fails_verification ... ok
+test transfer::tests::duplicate_chunks_resume_and_empty_file ... ok
+test transfer::tests::final_path_collision_gets_numeric_suffix ... ok
+test transfer::tests::receive_file_completes_with_sha256_verification ... ok
+test edge::tests::rearm_and_cooldown_prevent_pingpong ... ok
+test module::tests::edgeMap_fourEdges_roundTripViaConfigStore ... ok
+test session::tests::unpaired_device_rejected ... ok
+test transfer::tests::file_transfer_roundtrip_over_session ... ok
+test discovery::tests::two_instances_see_each_other_and_offline ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+[1m[92m     Running[0m tests\loopback.rs (target\debug\deps\loopback-c7bf8b0d20cc3e92.exe)
+
+running 1 test
+test two_instances_loopback_pair_session_transfer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.50s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\nexusforge_lib-627754f3df76c566.exe)
+
+running 21 tests
+test commands::clipboard::tests::pasteKeySeq_fourElementsCtrlVInOrder ... ok
+test commands::clipboard::tests::pasteFormatParam_unknown_rejects005 ... ok
+test commands::term::tests::malformed_port_falls_back_to_22 ... ok
+test commands::term::tests::bracketed_ipv6_host_keeps_explicit_port ... ok
+test commands::term::tests::plain_or_unclosed_host_defaults_to_22 ... ok
+test commands::vault::tests::state_maps_to_stable_wire_strings ... ok
+test commands::winops::tests::system_scoped_routes_to_elevation ... ok
+test commands::winops::tests::user_scoped_stays_in_process ... ok
+test state::tests::kvmAddrBridge_hitMissFromDiscoveryTable ... ok
+test state::tests::syncDefaultPort_agreesBetweenKvmAndSync ... ok
+test tray::tests::dead_config_keys_are_revived_or_removed ... ok
+test tray::tests::menu_plan_host_only_when_sections_empty ... ok
+test state::tests::kvmAddrBridge_notReadyYieldsNone ... ok
+test tray::tests::lookup_action_hits_and_misses_without_panic ... ok
+test tray::tests::menu_plan_prefixes_module_ids_and_keeps_enabled_flags ... ok
+test tray::tests::parse_lock_in_secs_positive_and_negatives ... ok
+test tray::tests::trayPlan_offConfig_emitsNoneAlways ... ok
+test tray::tests::trayPlan_throttleGapFiveSeconds ... ok
+test tray::tests::trayPlan_warningOverridesLoad_thenRestores ... ok
+test commands::notes::tests::syncEntity_renameRecordsDeleteOldAndUpsertNew ... ok
+test commands::clipboard::tests::derive_key_matchesVaultCoreKdfTier ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.85s
+
+[1m[92m     Running[0m unittests src\main.rs (target\debug\deps\nexusforge-4816fa395d6c04d2.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests\file_resolve_auth.rs (target\debug\deps\file_resolve_auth-3f89d1fd350d3dee.exe)
+
+running 3 tests
+test resolveAuth_missingEntry_errsNamingIdNotFallbackPrompt ... ok
+test resolveAuth_vaultUnlocked_returnsEntrySecretAndNeverLogsIt ... ok
+test resolveAuth_lockedVault_errsNamingState ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.01s
+
+[1m[92m     Running[0m tests\ipc_contract.rs (target\debug\deps\ipc_contract-7679fa4f04449f99.exe)
+
+running 7 tests
+test generate_password_policy_errors_use_vault_gen_001 ... ok
+test generate_password_contract ... ok
+test system_accent_returns_hex_or_typed_error ... ok
+test generate_password_avoid_ambiguous_excludes_confusable_chars ... ok
+test totp_now_returns_six_digit_code_and_step_remaining ... ok
+test modules_status_reads_the_same_cell_as_module_status ... ok
+test modules_status_json_shape_is_stable ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+[1m[92m     Running[0m tests\module_lifecycle.rs (target\debug\deps\module_lifecycle-714ba14097ad304f.exe)
+
+running 2 tests
+test empty_ports_init_names_missing_port ... ok
+test portfree_roundtrip_and_restart ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+[1m[92m     Running[0m tests\remote_vault_pointer.rs (target\debug\deps\remote_vault_pointer-b3941d8d6fca1889.exe)
+
+running 1 test
+test vaultEntryPointer_resolvesViaPortsAndErrsNamedByState ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.82s
+
+[1m[92m     Running[0m tests\security_config.rs (target\debug\deps\security_config-094da6037d48d58d.exe)
+
+running 50 tests
+test automation_history_events_are_bell_only ... ok
+test allowPlaintextOnce_failClosed ... ok
+test auxWindows_neverGrantClipboardSecretReveal ... ok
+test auxWindows_neverGrantClipboardBackup ... ok
+test auxWindows_neverGrantClipboardHtmlGet ... ok
+test auxWindows_neverGrantClipboardGroupsAndSuggestions ... ok
+test auxWindows_neverGrantClipboardCapture ... ok
+test auxWindows_neverGrantClipboardStack ... ok
+test auxWindows_neverGrantForwardCommands ... ok
+test auxWindows_neverGrantOcrExport ... ok
+test auxWindows_neverGrantOcrConfigGet ... ok
+test auxWindows_neverGrantProxyKernelSelect ... ok
+test auxWindows_neverGrantProxyKernelRestart ... ok
+test auxWindows_neverGrantProxyArtifactInstall ... ok
+test auxWindows_neverGrantRemoteChmod ... ok
+test auxWindows_neverGrantProxyRulesV2 ... ok
+test auxWindows_neverGrantProxyNodeSelectAndEgressProbe ... ok
+test auxWindows_neverGrantRemoteFingerprintAck ... ok
+test auxWindows_neverGrantRemoteConnectAndBrowse ... ok
+test auxWindows_neverGrantRemotePresetsAndDrivers ... ok
+test auxWindows_neverGrantScreenshotBeautifyApply ... ok
+test auxWindows_neverGrantScreenshotHistoryDelete ... ok
+test auxWindows_neverGrantRemoteProfileCommands ... ok
+test auxWindows_neverGrantScreenshotScroll ... ok
+test auxWindows_neverGrantScreenshotUpload ... ok
+test auxWindows_neverGrantScreenshotWindows ... ok
+test auxWindows_neverGrantSshConfigHosts ... ok
+test auxWindows_neverGrantSshFingerprintAck ... ok
+test auxWindows_neverGrantSshExec ... ok
+test auxWindows_neverGrantSyncConflictsAndRestore ... ok
+test auxWindows_neverGrantSyncDatasetsGet ... ok
+test auxWindows_neverGrantSyncRuns ... ok
+test auxWindows_neverGrantSyncSetPaused ... ok
+test bundle_targets_ship_nsis_and_msi ... ok
+test auxWindows_neverGrantSysKill ... ok
+test commands_never_accept_raw_password_args ... ok
+test auxWindows_neverGrantXferStatus ... ok
+test csp_predicate_itself_can_fail ... ok
+test csp_is_landed_in_config ... ok
+test aux_windows_never_reach_main_only_commands ... ok
+test events_are_bell_only ... ok
+test global_css_carries_transparent_window_base ... ok
+test dead_permission_surface_is_trimmed ... ok
+test updater_pubkey_is_a_real_minisign_key ... ok
+test valid_minisign_pubkey_rejects_placeholders_and_garbage ... ok
+test sessionStore_persistWhitelistExcludesSecrets ... ok
+test vault_entry_pointer_never_duplicated_into_file_domain ... ok
+test file_domain_never_downloads_artifacts ... ok
+test capabilities_are_split_per_window_and_reference_only_defined_permissions ... ok
+test every_registered_command_is_acl_declared_and_main_granted ... ok
+
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+[1m[92m     Running[0m tests\ssh_trust.rs (target\debug\deps\ssh_trust-e3410efb2435a621.exe)
+
+running 1 test
+test fileAndTerm_shareSingleStore ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+[1m[92m     Running[0m unittests src\main.rs (target\debug\deps\nexusforge_sys_helper-86e1d61e731687bb.exe)
+
+running 7 tests
+test dispatch::tests::ping_whitelisted ... ok
+test dispatch::tests::clean_dir_allowlist ... ok
+test dispatch::tests::service_start_type_parse ... ok
+test dispatch::tests::appx_name_validation ... ok
+test dispatch::tests::unknown_method_rejected ... ok
+test dispatch::tests::registry_whitelist_roundtrip ... ok
+test tests::pipe_protocol_roundtrip ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\notes_core-3a3638e87d3fd4c0.exe)
+
+running 29 tests
+test frontmatter::tests::no_frontmatter_returns_body ... ok
+test frontmatter::tests::frontmatter_tags_list_form ... ok
+test frontmatter::tests::frontmatter_title_and_tags ... ok
+test frontmatter::tests::h1_found ... ok
+test frontmatter::tests::links_and_alias ... ok
+test frontmatter::tests::tags_skip_headings ... ok
+test canvas::tests::save_load_roundtrip_and_corrupt_fallback ... ok
+test index::tests::notesByTag_deletedNote_excluded ... ok
+test index::tests::notesByTag_exactMatch_excludesWorkshop ... ok
+test index::tests::notesSearch_injectionString_noResultsNoPanic ... ok
+test index::tests::notesSearch_cjkQuery_hitsBody ... ok
+test index::tests::notesSearch_limitBounded ... ok
+test library::tests::norm_rel_rejects_escape ... ok
+test index::tests::notesSearch_titlePathBody_rankedGroups ... ok
+test index::tests::rename_path_updates_all_tables ... ok
+test index::tests::upsert_list_remove_roundtrip ... ok
+test library::tests::link_resolution_variants ... ok
+test library::tests::rewrite_links_rules ... ok
+test review::tests::quality_out_of_range ... ok
+test review::tests::sm2_fail_resets_and_ef_floor ... ok
+test review::tests::sm2_first_grades ... ok
+test review::tests::sm2_interval_progression ... ok
+test review::tests::statsFromCards_bucketCounts_nowInjected ... ok
+test review::tests::stats_streakCountsConsecutiveDays ... ok
+test library::tests::create_read_write_index_and_sync ... ok
+test library::tests::notesSearch_reindexTwice_idempotentCount ... ok
+test review::tests::card_store_roundtrip_and_queue ... ok
+test library::tests::rename_rollback_on_write_failure ... ok
+test library::tests::rename_rewrites_references_with_rollback ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+[1m[92m     Running[0m tests\acceptance.rs (target\debug\deps\acceptance-b8290162b918edb9.exe)
+
+running 3 tests
+test rename_conflict_and_missing_are_clean_errors ... ok
+test module_init_resolves_driver_via_storage_port ... ok
+test external_edit_syncs_within_10s_and_rename_never_fails ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\ocr_core-48ba0df27e6733f4.exe)
+
+running 41 tests
+test engine::tests::ocrConfig_bothEmpty_engineAutoSelectEmptyString ... ok
+test engine::tests::ocrConfig_langs_usedWhenRequestOmits ... ok
+test engine::tests::ocrConfig_requestLangsOverrideConfig ... ok
+test engine::tests::pick_defaults_to_first_registered_engine ... ok
+test engine::tests::pick_all_unavailable_returns_engine_001_with_hint ... ok
+test engine::tests::ocrResult_winOcr_reportsConfidenceFalse_tesseractTrue ... ok
+test engine::tests::pick_honours_preferred_order ... ok
+test engine::tests::pick_falls_back_when_preferred_unavailable ... ok
+test engine::tests::pick_unsupported_lang_falls_back_to_empty ... ok
+test engine::tests::resolveLangs_precedence_pinned ... ok
+test engine::tests::set_preferred_rejects_unknown_id ... ok
+test engine::tests::status_and_languages_union_follow_registry ... ok
+test engine::tests::win_engine_adapts_port ... ok
+test export::tests::exportFileName_seqZeroIsLiteralTemplate ... ok
+test module::tests::applyConfig_translateTargetLang_togglesSlotAndPersists ... ok
+test module::tests::applyConfig_langsPersistAndUnknownEngineStillRejects ... ok
+test export::tests::ocrExport_emptyText_rejects002 ... ok
+test export::tests::ocrExport_atomicRename_leavesNoTmp ... ok
+test export::tests::ocrExport_formatWhitelist_rejectsOtherExtensions ... ok
+test module::tests::configSchema_engineEnumFollowsRegistryNotHardcoded ... ok
+test module::tests::apply_config_sets_preferred_and_rejects_unknown ... ok
+test export::tests::ocrExport_writesUnderAppDataExportOnly ... ok
+test pipeline::tests::confidenceFalse_neverClaimedAsHundred ... ok
+test pipeline::tests::merge_bands_split_with_newline ... ok
+test pipeline::tests::merge_cjk_joins_without_space ... ok
+test pipeline::tests::merge_latin_joins_with_space ... ok
+test module::tests::recognize_translateProviderErr_surfacesReasonKeepsResult ... ok
+test pipeline::tests::ocrLineRectAndConfidence_alreadyTransported_1to1 ... ok
+test pipeline::tests::segment_pure_list_falls_back_to_y_order ... ok
+test pipeline::tests::segment_sorts_bands_and_columns ... ok
+test tesseract::tests::tesseractArgs_languageWithShellMetas_staysSingleArg ... ok
+test tesseract::tests::tesseractDisabled_neverRegisteredAndStatusListsOne ... ok
+test tesseract::tests::tesseractAvailable_relativePathOrMissing_rejects001NamingPath ... ok
+test tesseract::tests::tesseractTsv_rowsNormalizedAndMalformedSkipped ... ok
+test module::tests::direct_recognize_publishes_completed ... ok
+test translate::tests::translateSlot_absent_returnsNoneNotError ... ok
+test tesseract::tests::tesseractTempPng_removedOnSuccessAndFailure ... ok
+test translate::tests::translateSlot_providerErr_propagatesNotSwallowed ... ok
+test tesseract::tests::tesseractTimeout_killsAndMapsToErr ... ok
+test module::tests::ocr_requested_unreadable_frame_publishes_failed ... ok
+test module::tests::ocr_requested_roundtrip_publishes_completed ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\proxy_core-e3b1c5b820bdc3d2.exe)
+
+running 100 tests
+test clash_yaml::tests::clashYaml_unknownTopKey_rejectedWhole ... ok
+test clash_yaml::tests::clashYaml_jsProviderField_rejected ... ok
+test clash_yaml::tests::clashGroup_membersParsedIntoNodeGroups ... ok
+test config::tests::empty_nodes_rejected ... ok
+test clash_yaml::tests::clashYaml_unsupportedTypeItem_skippedNotFatal ... ok
+test ir::tests::irBuild_emptyNodes_rejected ... ok
+test config::tests::generates_tun_config ... ok
+test config::tests::rule_mode_includes_direct_domains ... ok
+test config::tests::generates_mixed_global_config ... ok
+test ir::tests::irBuild_userRuleUnknownTarget_rejected ... ok
+test ir::tests::irRouteFinalUnknownTag_rejected ... ok
+test kernel::tests::registry_mihomoArm_thirdKernelLanded ... ok
+test kernel::tests::registry_unknownKernel_rejected ... ok
+test kernel::tests::registry_xrayArm_landsSecondKernel ... ok
+test mihomo::tests::mihomoDialect_tunInboundAndGroups ... ok
+test mihomo::tests::mihomoDriver_registryShape_cfgWorkdir ... ok
+test mihomo::tests::geoRules_mihomoNativeAutoUpdate ... ok
+test mihomo::tests::mihomoExternalControllerOff_byDefault ... ok
+test mihomo::tests::mihomoRule_commaPattern_rejected ... ok
+test mihomo::tests::mihomoRender_newKindsAndSsr ... ok
+test mihomo::tests::mihomoUrltestGroupRendered ... ok
+test mihomo::tests::mihomoYamlScalarEscaping_injectionSafe ... ok
+test rules::tests::rulesToIR_groupsByKindTargetAndHonorsRouteMode ... ok
+test rules::tests::rulesV2_badDomain_rejected ... ok
+test rules::tests::rulesV2_sanitize_cidr_and_process ... ok
+test service::tests::b64_helper_still_works_for_sub_content ... ok
+test rules::tests::rulesBlock_outboundAddedOnlyWhenUsed ... ok
+test service::tests::direct_rules_roundtrip ... ok
+test clash_yaml::tests::clashYaml_aliasBomb_rejected ... ok
+test service::tests::egressProbe_kernelOff_honestErr ... ok
+test service::tests::enterTun_startFails_stateHonestOff ... ok
+test service::tests::installKernel_command_kernelParamPassthrough ... ok
+test service::tests::geoPrecheck_missingAsset_blocksThenPasses ... ok
+test kernel::tests::handle_reports_unexpected_exit_code ... ok
+test service::tests::kernelSelect_persistsAcrossReopen ... ok
+test service::tests::mode_rejects_unknown_and_tun_without_admin ... ok
+test kernel::tests::log_ring_buffer_caps_at_500 ... ok
+test kernel::tests::stop_does_not_fire_on_exit ... ok
+test service::tests::nodeSelect_absentTag_rejected ... ok
+test service::tests::nodeSelect_staleAfterSubUpdate_fallsBackFirstAndFlagsStale ... ok
+test service::tests::publishNodes_eventCarriesRealSubId ... ok
+test service::tests::restartKernel_offHonestErr ... ok
+test service::tests::open_restores_residual_proxy ... ok
+test service::tests::rulesV2_badCidr_rejected ... ok
+test service::tests::rulesV2_legacyFile_derivesSuffixDirect ... ok
+test service::tests::selectorDefaultTag_followsSelected ... ok
+test service::tests::kernelSwap_newKernelFails_rollsBackOld ... ok
+test service::tests::restartKernel_running_keepsModeAndRestartsSameKernel ... ok
+test service::tests::setDirectRules_nonAdjacentDup_removed ... ok
+test service::tests::stateLegacy_missingKernel_defaultsSingbox ... ok
+test service::tests::kernelSwap_running_restartsNewDriverAndKeepsSysproxy ... ok
+test service::tests::setMode_sameMode_isNoop ... ok
+test service::tests::subEtagNotModified_keepsNodesRefreshStamp ... ok
+test sidecar::tests::assetFor_threeKernelsAndWintun_unknownRejected ... ok
+test service::tests::xrayTun_rejectedWithHonestError ... ok
+test sidecar::tests::download_urls_are_official_endpoints ... ok
+test service::tests::sub_crud_persists_across_reopen ... ok
+test sidecar::tests::install_rejects_zip_without_exe ... ok
+test sidecar::tests::artifactInstall_pinMismatch_rejects ... ok
+test sidecar::tests::install_singbox_extracts_exe_and_writes_manifest ... ok
+test sidecar::tests::install_wintun_finds_amd64_dll ... ok
+test sidecar::tests::geoAsset_xrayDatBinaryChannel ... ok
+test singbox::tests::geoRules_singboxRenderRuleSet ... ok
+test sidecar::tests::sidecarZipSlipEntry_writesFixedNameOnly ... ok
+test singbox::tests::singboxRender_newKinds_supported ... ok
+test singbox::tests::singboxRender_ssr_rejected ... ok
+test sub::tests::deviationGate_halfChangeOrEmpty_confirms ... ok
+test sidecar::tests::sidecarInstall_perKernelBinaries_coexist ... ok
+test sub::tests::outboundTag_nonAscii_noPanic ... ok
+test sub::tests::outbound_tag_prefixes_sub ... ok
+test sub::tests::parses_legacy_ss ... ok
+test sub::tests::parses_sip002_ss ... ok
+test sub::tests::parses_trojan_and_vless ... ok
+test sub::tests::parses_vmess_json ... ok
+test sub::tests::parses_whole_b64_subscription ... ok
+test sub::tests::rejects_empty_and_unknown ... ok
+test sub::tests::ssPluginParam_parsedIntoExtra ... ok
+test sub::tests::subHysteria2_missingPort_rejected ... ok
+test sub::tests::subHeaders_trafficIntervalEtag_parsed ... ok
+test sub::tests::subDetectsClashYaml_beforeB64Heuristic ... ok
+test sub::tests::subReality_badHexShortId_rejected ... ok
+test sub::tests::subSsr_badBase64Url_rejected ... ok
+test sub::tests::subTuic5_badUuid_rejected ... ok
+test sub::tests::subWireGuard_missingEndpoint_rejected ... ok
+test sysproxy::tests::enable_backups_user_state_and_writes_ours ... ok
+test sysproxy::tests::restore_recovers_original_then_clears_backup ... ok
+test sysproxy::tests::backup_is_idempotent_across_cycles ... ok
+test sidecar::tests::sidecarLegacyManifest_singboxOnly ... ok
+test sysproxy::tests::restore_without_backup_disables ... ok
+test xray::tests::xrayDualInbound_probePortHttp ... ok
+test xray::tests::xrayRender_geoFieldSegments_aux ... ok
+test sysproxy::tests::startup_scan_leaves_user_changed_state_alone ... ok
+test xray::tests::xrayNoPolicyGroups_selectedOrFirstSingleOutbound ... ok
+test xray::tests::xrayRender_ruleTargetsRemappedToEgress ... ok
+test xray::tests::xrayRender_socksPortOverflow_rejected ... ok
+test xray::tests::xrayRender_tunInbound_rejected ... ok
+test xray::tests::xrayRender_unsupportedKinds_rejected ... ok
+test sidecar::tests::sidecarPinMismatch_rejectsWithoutAck ... ok
+test sysproxy::tests::startup_scan_restores_our_residual ... ok
+test service::tests::delayTest_resultVectorFixedLength ... ok
+
+test result: ok. 100 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+[1m[92m     Running[0m tests\golden_mihomo.rs (target\debug\deps\golden_mihomo-06bf87401d55a805.exe)
+
+running 1 test
+test mihomoGolden_yamlByteEqual ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests\golden_singbox.rs (target\debug\deps\golden_singbox-4f63673b66482ab0.exe)
+
+running 5 tests
+test irGolden_singboxTunByteEqual ... ok
+test outboundTag_existingUuidTags_stable ... ok
+test irGolden_singboxGlobalMixed_byteEqual ... ok
+test irGolden_singboxRuleMixed_byteEqual ... ok
+test singboxNewKindsGolden_beqFixture ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests\golden_xray.rs (target\debug\deps\golden_xray-38c68bf4c9aac043.exe)
+
+running 1 test
+test xrayGolden_mixedByteEqual ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\screenshot_core-420d3c33a1de52e6.exe)
+
+running 74 tests
+test beautify::tests::beautify_badColor_rejectsNamingValue_andBufferShortfallRejects ... ok
+test beautify::tests::beautify_oversizeTarget_rejects001NamingSizes ... ok
+test beautify::tests::beautify_allZeroSpec_isByteIdentical ... ok
+test beautify::tests::beautify_paddingCentersSourceOnGradient ... ok
+test beautify::tests::beautify_shadowAddsAlphaBelowBottomEdge ... ok
+test beautify::tests::beautify_roundCorners_areTransparentOutsideMask ... ok
+test beautify::tests::hex_color_parse_accepts_case_and_trim_rejects_shapes ... ok
+test module::tests::dispatch_ocr_request_requires_init ... ok
+test module::tests::applyConfig_unknownPostAction_rejectsNamingValue ... ok
+test module::tests::actionSave_usesConfigFormat_endToEnd ... ok
+test module::tests::dispatch_ocr_request_writes_frame_and_publishes_ref ... ok
+test module::tests::actionSave_nameCollision_appendsSuffixSameExt ... ok
+test module::tests::beautifyApply_emptyActions_previewsOnly ... ok
+test module::tests::beautifyApply_saveAction_writesFileAndKeepsHistoryRow ... ok
+test module::tests::finish_annotationsPersistedAsJson_layersOrdered ... ok
+test module::tests::finish_beautifyDefaultSpec_isNoOp ... ok
+test module::tests::finish_beautifyAppliedOnceForAllThreeActions ... ok
+test module::tests::finish_noAnnotations_storesNullNotEmptyJson ... ok
+test module::tests::historyDelete_missingId_rejects001NamingId ... ok
+test module::tests::parse_ocr_backfill_accepts_text_completion ... ok
+test module::tests::parse_ocr_backfill_rejects_copied_and_malformed ... ok
+test module::tests::prune_fileRemovalFailure_doesNotSwallowError ... ok
+test module::tests::historyDelete_fileGoneAlready_stillRemovesRowAndWarns ... ok
+test module::tests::historyGet_annotationsAbsent_returnsEmptyNotError ... ok
+test module::tests::historyDelete_removesRowAndFile ... ok
+test module::tests::historyGet_formatSniffed_notFromSuffix ... ok
+test module::tests::startCapture_hwndPassed_routesToWindowTarget_notFullScreen ... ok
+test module::tests::history_export_error_paths_are_distinguishable ... ok
+test module::tests::tray_action_publishes_overlay_request_observable_on_bus ... ok
+test module::tests::windowTargets_portWithoutList_returnsEmptyNotError ... ok
+test scroll::tests::scrollOverlap_differentWidth_returnsNoneNotPanic ... ok
+test scroll::tests::scrollOverlap_findsShiftedByRowsBand ... ok
+test scroll::tests::scrollOverlap_identicalRows_isCappedNotClaimingFullMatch ... ok
+test scroll::tests::scrollStitch_appendsOnlyNewTailRows ... ok
+test scroll::tests::stitch_v_widthMismatch_keepsPrevUnchanged ... ok
+test module::tests::uploadDisabled_actionUpload_makesZeroProviderCalls ... ok
+test module::tests::scrollAppend_afterMaxSteps_honestStopNotLossyDrop ... ok
+test module::tests::scrollFinish_emptySession_rejects001 ... ok
+test module::tests::scrollAppend_overlap_stitchesOneSegmentAndCountsNewRows ... ok
+test module::tests::scrollAppend_degradesWhenNoOverlap_andKeepsBothSegments ... ok
+test store::tests::annotations_roundtrip_json_and_null_clear ... ok
+test store::tests::annotations_of_corruptJson_errors_not_empty ... ok
+test types::tests::annotationFillAlpha_deserializeDefaultsForLegacyJson ... ok
+test types::tests::effectiveActions_explicitRequest_winsOverConfig ... ok
+test types::tests::effectiveActions_legacyBools_deriveInStableOrder ... ok
+test types::tests::effectiveActions_postActionsEmptyWithBools_prefersConfigKey ... ok
+test types::tests::effectiveActions_unknownName_droppedWithWarn_notStored ... ok
+test upload::tests::uploadEndpoint_plainHttpRemote_rejected ... ok
+test upload::tests::uploadFormBody_base64FieldAndNoShellOfValue ... ok
+test upload::tests::uploadHeader_valueNeverSerializedIntoConfig ... ok
+test upload::tests::uploadProvider_linkTemplate_replacesIdAndUrl ... ok
+test upload::tests::uploadRegistry_fromConfig_emptyOrInsecureEndpoint_registersNothing ... ok
+test upload::tests::uploadRegistry_unknownTarget_rejectsListingRegistered ... ok
+test store::tests::insert_list_order_and_paging ... ok
+test upload::webdav_tests::webdavUploadProvider_registryListsItAndAcceptsSelection ... ok
+test upload::webdav_tests::webdavUpload_linkTemplate_rejectsCrossOriginRedirect ... ok
+test upload::webdav_tests::webdavUpload_missingBridge_registersNothing ... ok
+test upload::webdav_tests::webdavUpload_twoTargets_oneImage_publishesToBoth ... ok
+test upload::webdav_tests::webdavUpload_secretTravelsPerCall_notInConfig ... ok
+test util::tests::black_frame_detection ... ok
+test util::tests::bgra_to_rgba_swizzles_and_forces_alpha ... ok
+test util::tests::crop_clamps_and_swizzles ... ok
+test util::tests::encodeRgba_jpegFlattensAlphaOverWhite ... ok
+test util::tests::encodeRgba_threeFormats_extensionsAndMagicBytes ... ok
+test util::tests::encodeRgba_unknownFormat_rejectsNamingValue ... ok
+test util::tests::png_roundtrip ... ok
+test util::tests::resolveFilename_fmtAndTsPlaceholders ... ok
+test util::tests::encodeRgba_webpPreservesAlpha ... ok
+test util::tests::resolveFilename_unknownPlaceholder_keptLiterally ... ok
+test util::tests::sniff_content_type_matches_encode_side ... ok
+test store::tests::ocr_text_update ... ok
+test store::tests::reopen_preserves_history_and_ocr_backfill ... ok
+test store::tests::shot_store_get_roundtrip_and_missing ... ok
+test store::tests::migration_reopen_legacyShotDb_addsAnnotationsColumnIdempotent ... ok
+
+test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\sync_core-f366b818dc42fb09.exe)
+
+running 29 tests
+test engine::tests::applier_object_safe ... ok
+test engine::tests::plan_push_boundary_exactLimit_setsMore ... ok
+test engine::tests::new_entity_applies_and_lww_wins_by_ts ... ok
+test engine::tests::record_local_appends_with_device ... ok
+test engine::tests::delete_propagates ... ok
+test module::tests::datasets_attachedReflectsApplierRegistry ... ok
+test module::tests::db_path_is_under_db_dir ... ok
+test module::tests::conflictLog_lostRemoteValue_persistedAndQueryable ... ok
+test module::tests::legacy_db_moved_once_and_idempotent ... ok
+test module::tests::conflictLog_sameLoserReplay_singleRow ... ok
+test engine::tests::tie_broken_by_device_id ... ok
+test module::tests::conflictLog_unknownId_honestErr ... ok
+test module::tests::conflictRestore_reappliesAsNewerLocalOp ... ok
+test module::tests::syncEntity_actionNotInWhitelist_ignored ... ok
+test module::tests::syncRegistry_missingSnapshot_neverBecomesDelete ... ok
+test module::tests::syncConfig_badValue_rejectedRuntimeKeepsOld ... ok
+test module::tests::syncRegistry_secondEntityNeedsNoEngineChange ... ok
+test oplog::tests::allCursors_twoDimensionsIndependent ... ok
+test module::tests::syncConfig_threeKeys_roundTrip ... ok
+test oplog::tests::append_idempotent_and_latest ... ok
+test oplog::tests::conflictLog_pruneKeepsUnexpiredRows ... ok
+test oplog::tests::conflictLog_survivesReopen ... ok
+test oplog::tests::pushCursor_staleAck_neverRewinds ... ok
+test transport::tests::handshake_and_encrypted_roundtrip ... ok
+test transport::tests::unpaired_device_rejected ... ok
+test oplog::tests::runs_boundedLimit_honoursRequest ... ok
+test oplog::tests::since_and_cursor_monotonic ... ok
+test module::tests::syncConfig_autoSyncFalse_neverFiresTimer ... ok
+test module::tests::syncAuto_quietPeriod_coalescesStorm ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s
+
+[1m[92m     Running[0m tests\loopback.rs (target\debug\deps\loopback-5a0a804a4f87ae01.exe)
+
+running 17 tests
+test status_listeningFalse_whenPortAlreadyBound ... ok
+test status_listeningTrue_afterSuccessfulBind ... ok
+test status_shapeIsTyped_notRawJson ... ok
+test runInitiator_secondRoundPushesZero ... ok
+test loopback_replayFromEmptyPushCursor_isIdempotent ... ok
+test countOpsAfter_matchesPushedSemantics ... ok
+test status_peersCarryCursorsAndPending ... ok
+test syncAuto_noAddressPeer_recordsErrorNotSuccess ... ok
+test syncAuto_pausedSkipsAndReports ... ok
+test syncEntity_vaultNeverAdmitted ... ok
+test syncNow_noCandidate_honestErrNoGuess ... ok
+test syncNow_resolverHit_syncsWithoutAddr ... ok
+test syncRun_responderSideRecorded ... ok
+test two_instances_converge_bidirectionally ... ok
+test syncNow_manualAddr_stillWorks ... ok
+test syncRun_errorPath_stillRecorded ... ok
+test runInitiator_moreThanBatchLimit_pushesAllNewestOps ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.11s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\sys_core-69ca4e2ac2690487.exe)
+
+running 42 tests
+test clean::tests::missing_target_errors_unless_optional ... ok
+test metrics::tests::ring_buffer_capacity_300 ... ok
+test pkg::tests::cmd_previews_show_exact_command ... ok
+test clean::tests::recent_files_skipped ... ok
+test clean::tests::execute_deletes_collected_files ... ok
+test pkg::tests::merge_prefers_first_source_and_sorts ... ok
+test pkg::tests::searchArgs_crlfQuery_rejected ... ok
+test pkg::tests::searchArgs_queryNeverEntersShell_oneEntrypoint ... ok
+test pkg::tests::search_unknownSource_errsNamingThree ... ok
+test pkg::tests::split_columns_basic ... ok
+test pkg::tests::upgrade_singlePackage_mapsCorrectArgs ... ok
+test pkg::tests::winget_table_parse ... ok
+test clean::tests::scan_respects_whitelist_and_exts ... ok
+test process::tests::processRow_diskBps_noneOnFirstSample_notZero ... ok
+test process::tests::processTopN_sortedAndQueryCaseInsensitive ... ok
+test winops::tests::apply_bavr_success_and_backup_payload ... ok
+test process::tests::kill_confirmNameMismatch_refuses ... ok
+test winops::tests::apply_restores_when_verify_fails ... ok
+test winops::tests::appx_remove_e2e ... ok
+test winops::tests::backup_failure_aborts_before_touching_system ... ok
+test process::tests::kill_protectedPid4_refusesNamingReason ... ok
+test winops::tests::builtin_catalog_ids_compliant_and_unique ... ok
+test winops::tests::catalog_embedded_loads ... ok
+test winops::tests::clear_cache_with_disabled_service ... ok
+test winops::tests::exec_action_serde_roundtrip ... ok
+test process::tests::kill_guardFileCorrupt_disablesAllKills ... ok
+test winops::tests::exec_and_maintenance_actions_e2e ... ok
+test winops::tests::maintenance_scan_and_clear_cache_e2e ... ok
+test winops::tests::parse_catalog_rejects_bad_prefix_and_duplicates ... ok
+test winops::tests::backup_store_roundtrip_and_overwrite ... ok
+test winops::tests::catalog_external_overrides_by_id ... ok
+test winops::tests::regression_check_appx_reinstall ... ok
+test winops::tests::external_bad_id_file_skipped_without_harming_builtin ... ok
+test winops::tests::restore_deletes_when_originally_absent ... ok
+test winops::tests::scan_reports_applied_state ... ok
+test winops::tests::service_action_bavr_roundtrip ... ok
+test winops::tests::scan_needs_admin_gate ... ok
+test winops::tests::task_action_bavr_roundtrip_and_missing ... ok
+test winops::tests::valid_tweak_id_accepts_spec_shape_and_rejects_deviation ... ok
+test winops::tests::regression_check_detects_deleted_value ... ok
+test winops::tests::regression_check_detects_self_heal ... ok
+test pkg::tests::availability_probe_does_not_panic ... ok
+
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+
+[1m[92m     Running[0m tests\clean_acceptance.rs (target\debug\deps\clean_acceptance-b1a0c25498b1dc28.exe)
+
+running 3 tests
+test recycle_mode_collects_exact_paths_for_recovery ... ok
+test scan_estimate_matches_reclaimed_within_10_percent ... ok
+test recycle_bin_real_delete_and_restore_via_port ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+[1m[92m     Running[0m tests\winops_e2e.rs (target\debug\deps\winops_e2e-447367138d2cc50c.exe)
+
+running 2 tests
+test catalog_contains_defender_family ... ok
+test hksu_sandbox_full_chain ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\term_core-4db8e0685457afe6.exe)
+
+running 41 tests
+test docker::tests::lifecycle_maps_status ... ok
+test docker::tests::logs_multiplexed_and_tty_fallback ... ok
+test docker::tests::logs_error_status ... ok
+test docker::tests::containers_list_parses ... ok
+test forward::tests::bindGate_defaultLoopback_allows_nonLoopbackRequiresExplicit ... ok
+test session::tests::batch_params_sourced_from_registry ... ok
+test forward::tests::remoteForward_sendsTcpipForwardRequest ... ok
+test session::tests::default_shell_title ... ok
+test session::tests::list_and_missing_session ... ok
+test session::tests::kill_all_on_empty_is_ok ... ok
+test ssh::tests::exec_emptyCommand_rejected ... ok
+test ssh::tests::exec_returnsExitCodeAndStreams ... ok
+test ssh::tests::exec_timeout_setsTimedOutNotZero ... ok
+test ssh::tests::host_key_names ... ok
+test forward::tests::fwd_sessionClose_tearsDownAllListeners ... ok
+test forward::tests::fwd_portConflict_reportsRefusedState ... ok
+test ssh::tests::jump_authPerHop_independent ... ok
+test forward::tests::socks5_udpRefusedNaming ... ok
+test forward::tests::socks5_greetingConnectRoundtrip ... ok
+test ssh::tests::jump_firstHopUnknown_refuses ... ok
+test ssh::tests::jump_depthExceeded_errsBeforeAnyConnect ... ok
+test ssh::tests::exec_tofuUnknown_refusesBeforeChannelOpen ... ok
+test ssh::tests::sftpRemove_dirNotEmpty_errsNaming ... ok
+test ssh::tests::sftpMkdir_nested_parents ... ok
+test ssh::tests::sftpRename_targetExists_refusesNotOverwrite ... ok
+test ssh::tests::termSftp_and_fileSftp_sameOperationNames ... ok
+test ssh::tests::tofu_firstSight_returnsUnknownAndZeroWrites ... ok
+test ssh::tests::tofu_jumpSecondHop_refusesNamingHopIndex ... ok
+test sshconfig::tests::configHosts_missingFile_isEmptyNotError ... ok
+test sshconfig::tests::parser_firstValueWins ... ok
+test sshconfig::tests::parser_identityFileTilde_notExpanded ... ok
+test ssh::tests::tofu_changed_errsNamingBothFingerprints ... ok
+test sshconfig::tests::parser_keyEqualsAndQuotes_forms ... ok
+test wsl::tests::decode_empty ... ok
+test sshconfig::tests::parser_wildcardSkipped_notWholeFileRejected ... ok
+test wsl::tests::decode_utf16_list_parses_names ... ok
+test ssh::tests::knownHosts_corruptFile_isErrNotSilentlyEmpty ... ok
+test ssh::tests::tofu_trusted_matchesWholeKeyVerbatim ... ok
+test ssh::tests::known_hosts_roundtrip_and_forget ... ok
+test wsl::tests::wsl_availability_does_not_panic ... ok
+test ssh::tests::jump_none_keepsLegacyPath ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.10s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\vault_core-bc8bb06cd892f1d3.exe)
+
+running 27 tests
+test autolock::tests::blur_line_independent_of_idle ... ok
+test autolock::tests::clipboard_cleared_only_when_still_the_same_secret ... ok
+test autolock::tests::earliest_warning_wins_and_clock_skew_safe ... ok
+test autolock::tests::idle_threshold_triggers_lock ... ok
+test autolock::tests::idle_warn_window_before_lock ... ok
+test autolock::tests::zero_policy_never_fires ... ok
+test crypto::tests::secret_key_wipe_zeroes_buffer ... ok
+test crypto::tests::field_seal_open_and_aad_binding ... ok
+test generator::tests::avoid_ambiguous_excludes_confusables ... ok
+test generator::tests::covers_all_classes_and_respects_length ... ok
+test generator::tests::rejects_empty_pool_and_too_short ... ok
+test generator::tests::single_class_works ... ok
+test crypto::tests::hello_verifier_binds_dek_and_vault ... ok
+test crypto::tests::tampered_ciphertext_rejected ... ok
+test module::tests::tray_actions_empty_before_init ... ok
+test totp::tests::rejects_invalid_base32 ... ok
+test totp::tests::rfc6238_vectors ... ok
+test model::tests::entry_update_delete_search ... ok
+test model::tests::folder_crud_and_entry_isolation ... ok
+test crypto::tests::envelope_roundtrip_and_wrong_password ... ok
+test crypto::tests::change_password_preserves_hello_envelope ... ok
+test vault::tests::entry_crud_and_db_never_stores_plaintext ... ok
+test vault::tests::create_unlock_lock_cycle ... ok
+test crypto::tests::change_password_rewraps_same_dek ... ok
+test vault::tests::reopen_persists_locked_state ... ok
+test vault::tests::change_password_via_service ... ok
+test vault::tests::five_wrong_attempts_trigger_cooldown ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+
+[1m[92m     Running[0m tests\hello_vault.rs (target\debug\deps\hello_vault-907e3bd8de183603.exe)
+
+running 6 tests
+test watchdog_policy_maps_config_minutes_and_defaults ... ok
+test hello_failures_force_password_unlock_until_reset ... ok
+test cross_vault_hello_envelope_rejected ... ok
+test tampered_hello_envelope_stays_locked ... ok
+test hello_paths_degrade_without_ports_or_envelope_and_memlock_failure_is_soft ... ok
+test cooling_blocks_hello_unlock ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s
+
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\win_integration-d91d729f4ba86401.exe)
+
+running 46 tests
+test accent::tests::colorref_channel_order ... ok
+test accent::tests::to_hex_format ... ok
+test appx::tests::name_validation_rejects_injection ... ok
+test capture::tests::listWindows_filtersZeroSizeAndNoTitle ... ok
+test clipboard::tests::clipHtml_rawOverCap_droppedNotTruncated ... ok
+test docker::tests::docker_pipe_unavailable_error ... ok
+test clipboard::tests::png_to_dib_header_and_pixel_layout ... ok
+test docker::tests::parse_chunked_response ... ok
+test docker::tests::parse_status_line_bad ... ok
+test docker::tests::parse_content_length_response ... ok
+test envelope::tests::aad_mismatch_rejected ... ok
+test envelope::tests::envelope_roundtrip_and_randomness ... ok
+test envelope::tests::legacy_dpapi_blob_passes_through_untouched ... ok
+test envelope::tests::tampered_ciphertext_fails_authentication ... ok
+test envelope::tests::truncated_or_corrupt_envelope_rejected ... ok
+test envelope::tests::wrong_kek_fails_authentication ... ok
+test helper::tests::pipe_name_format ... ok
+test envelope::tests::dpapi_kek_roundtrip_real ... ok
+test helper::tests::query_image_path_self ... ok
+test helper::tests::same_dir_check ... ok
+test input::tests::inject_xbuttonOnLegacyTarget_errs006NotSilent ... ok
+test input::tests::normalize_maps_virtual_desktop_to_u16_range ... ok
+test input::tests::rawInput_buttonRoundTripInjectsMouseeventf ... ok
+test input::tests::rawInput_xbuttonCaptureMaps3And4 ... ok
+test input::tests::wheel_delta_extracts_hiword_signed ... ok
+test input::tests::wheel_horizontalFlag_legacyPeerPayloadStillParses ... ok
+test led::tests::applyLockState_alreadyTarget_noToggle ... ok
+test input::tests::hook_start_stop_roundtrip ... ok
+test input::tests::hook_cb_visible_via_lockfree_snapshot ... ok
+test led::tests::applyLockState_readbackFlipsAfterToggle_okOnce ... ok
+test maintenance::tests::cap_output_keeps_tail ... ok
+test input::tests::virtual_desktop_reports_positive_extent ... ok
+test maintenance::tests::exec_allowlist_rejects_unknown_program ... ok
+test maintenance::tests::exec_timeout_kills_long_task ... ignored
+test maintenance::tests::clean_dir_whitelist_and_count ... ok
+test memlock::tests::lock_unlock_roundtrip_on_real_buffer ... ok
+test registry::tests::unsupported_prefix_rejected ... ok
+test service::tests::parse_numeric_forms ... ok
+test appx::tests::list_current_user_packages ... ok
+test registry::tests::hkcu_roundtrip ... ok
+test taskschd::tests::tr_quoting ... ok
+test led::tests::applyLockState_readBackMismatch_warnsNotSilent ... ok
+test taskschd::tests::remove_idempotent ... ok
+test service::tests::query_system_service ... ok
+test taskschd::tests::query_enabled_system_task ... ok
+test maintenance::tests::exec_powercfg_help ... ok
+
+test result: ok. 45 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.70s
+
+[1m[92m     Running[0m tests\conpty_acceptance.rs (target\debug\deps\conpty_acceptance-ba623c1a37abb493.exe)
+
+running 2 tests
+test conpty_10k_lines_throughput_and_integrity ... ignored, 需要真实桌面会话：无头 agent 环境下 ConPTY 渲染链静默失效（进程层正常、conhost 活但零渲染输出）；人工在桌面会话 `cargo test -p win-integration --test conpty_acceptance -- --ignored` 验证
+test conpty_kill_produces_eof_without_hang ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.02s
+
+[1m[92m     Running[0m tests\conpty_min.rs (target\debug\deps\conpty_min-5af1274fb0cb3057.exe)
+
+running 1 test
+test conpty_min_echocon_reference ... ignored, 分诊诊断探针（D-20）：含 FreeConsole() 宿主副作用，仅在一次性终端中手动复现 ConPTY 渲染问题时运行
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests\conpty_portable.rs (target\debug\deps\conpty_portable-48354e23fd0bb841.exe)
+
+running 1 test
+test portable_pty_echo_reference ... ignored, 分诊诊断探针（D-20）：验证本机 conhost 渲染能力的对照实验，仅手动运行
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m automation_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m clipboard_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m desktop_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m editor_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m file_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m host_core
+
+running 1 test
+test crates\host-core\src\error.rs - error::AppError::module (line 89) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+
+[1m[92m   Doc-tests[0m kvm_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m nexusforge_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m notes_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m ocr_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m proxy_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m screenshot_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m sync_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m sys_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m term_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m vault_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m win_integration
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

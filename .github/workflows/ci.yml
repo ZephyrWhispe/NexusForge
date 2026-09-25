@@ -45,3 +45,13 @@ jobs:
         run: npm run lint
       - name: vitest
         run: npm run test
+      # GOV-02：已知漏洞审计（只读报告不阻断；收严须调整审计策略）
+      - name: npm audit (non-blocking)
+        run: npm audit --omit=dev || true
+
+  # GOV-02：许可合规 + RUSTSEC 已知漏洞审计（deny.toml 是唯一策略源）
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2

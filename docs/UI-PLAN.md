@@ -9,7 +9,7 @@
 
 将 [demo/index.html](../demo/index.html) 锁定的交互与视觉基准，落地为正式前端代码：
 
-- **技术基线**：React 18 + TypeScript 5 + Vite 5 + Fluent UI React v9 + Zustand 4 + TanStack Virtual + Tauri 2 IPC
+- **技术基线**：React 18 + TypeScript 5 + Vite 5 + Fluent UI React v9 + Zustand 5（DOC-09：以 package.json ^5.0.15 为准）+ TanStack Virtual + Tauri 2 IPC
 - **范围**：主工作台、剪切板 UI、截图/OCR 覆盖层 UI、设置中心、通知体系（P0 全量 + 其余模块空状态框架）
 - **不在范围**：P1/P2 模块完整 UI（阶段二/三按各自 impl 文档执行，但空状态与导航框架在本计划内交付）
 

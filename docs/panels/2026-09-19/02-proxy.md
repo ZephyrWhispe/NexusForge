@@ -36,7 +36,7 @@
 | 12 | 进程规则分流（按程序名走代理） | sing-box/xray process_name | ❌ | IR Rule 加 process；UI 分流页"应用"类型行 |
 | 13 | TUN 模式 | ✅ | 在 | 补栈选择/MTU/strict route 设置位 |
 | 14 | Pre-Socks 双核协作 | v2rayN | ❌ | 总纲明示二期（B8 子方案） |
-| 15 | 系统代理兜底恢复 | FlowZ | ✅ D-06 | — |
+| 15 | 系统代理兜底恢复 | FlowZ | ✅ 实现（DOC-12：原引 D-06 系笔误——D-06 是 blob 扁平路径；本项按 PR4 备份-识别-还原落地） | — |
 | 16 | 内核启停/重启按钮 | 全体 | ❌ | `proxy_kernel_restart`（新命令+权限 ACL 同步） |
 | 17 | 带宽/流量统计 | Clash Verge/AureStream | ❌ | API 轮询（mihomo /traffic ws、sing-box experimental API；勘查后定，缺则降级"仅连接自检"并如实挂 DeferredBadge） |
 | 18 | 多用户配置方案(profile 切换) | v2rayN profiles | ❌ | 拓展项 §5-③ 承接 |

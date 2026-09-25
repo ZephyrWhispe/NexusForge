@@ -1,0 +1,25 @@
+# GOV-05：跨平台归一（Windows 开发 + ubuntu CI 跑 fmt/lint）。
+# 文本文件统一 LF 入库；Windows 侧编辑器经 .editorconfig 对齐，杜绝 CRLF 噪声 diff 与 fmt 抖动。
+
+* text=auto eol=lf
+
+# Windows 专属文件保持 CRLF（工具链自身要求）
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+*.nsh    text eol=crlf
+
+# 二进制（防止 diff/合并破坏）
+*.ico    binary
+*.png    binary
+*.jpg    binary
+*.gif    binary
+*.woff   binary
+*.woff2  binary
+*.zip    binary
+*.exe    binary
+*.dll    binary
+
+# 生成物不入 diff 噪声
+Cargo.lock text eol=lf
+package-lock.json text eol=lf

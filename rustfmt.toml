@@ -1,0 +1,8 @@
+# GOV-01：格式随工具版本漂移的收敛锚（CI 在跑 cargo fmt --all --check，本文件是唯一事实源）
+# 基线选择：nightly 专属选项一律不启用（CI 跑 stable）；宽裕的行宽以减少"结构体一行拆三行"的 diff 噪声
+edition = "2021"
+max_width = 100
+use_small_heuristics = "Default"
+# 函数式链调用保持竖排（与现有代码风格一致）
+# 注意：group_imports/imports_granularity 为 nightly 专属，CI 跑 stable 故不启用
+chain_width = 60

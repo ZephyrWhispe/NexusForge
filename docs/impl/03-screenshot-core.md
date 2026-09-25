@@ -1,6 +1,8 @@
 # 03 screenshot-core 截图与录屏细化（代码级）
 
-> 依赖：S1–S7 ｜ crate：`crates/screenshot-core/` ｜ Windows 能力：Windows.Graphics.Capture（主）、GDI PrintWindow（窗口回退）
+> 依赖：S1–S7 ｜ crate：`crates/screenshot-core/`
+>
+> **DOC-02 修订（2026-09-25，对齐 DESIGN §11 与 D-23）**：本文件起草于 D-07/D-23 改判之前——v1 交付的捕获主路径是 **GDI（全屏/区域）+ PrintWindow（窗口）**；Windows.Graphics.Capture 仅列 v1.1；录屏（`screenshot_record_*`）已随 D-08 移出 v1 且未实现。下文涉及二者的段落按此口径阅读；v1 实际命令面见 `src-tauri/src/commands/screenshot.rs`。
 
 ## 实现步骤总览
 

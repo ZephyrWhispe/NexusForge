@@ -1,0 +1,9 @@
+# GOV-06：clippy 工作区级配置（与根 Cargo.toml 的 [workspace.lints.clippy] 同源）
+# 阈值按本仓代码库实测校准：过严会在宏展开/测试夹具上产生不可行动的噪声。
+
+# 认知复杂度上限（历史超长函数审查成本教训）
+cognitive-complexity-threshold = 60
+# 过长函数（TerminalPanel 1307 行的单组件教训已在 STD-04 登记；rust 侧先行设限）
+too-many-arguments-threshold = 10
+# 类型复杂度放宽（serde DTO 嵌套合法）
+type-complexity-threshold = 300

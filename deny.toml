@@ -1,0 +1,48 @@
+# GOV-02：许可合规与已知漏洞审计的自动化门禁（THIRD_PARTY_LICENSES.md 声明的
+# "cargo-deny 复核"由此落地）。CI 侧 `cargo deny check`（见 ci.yml）。
+
+[graph]
+# 私有依赖 全部为本仓 workspace 内 crate；all-features 以覆盖条件编译面
+all-features = true
+
+[licenses]
+version = 2
+# 允许清单：与 THIRD_PARTY_LICENSES.md 保持同源（MIT/Apache-2.0/BSD/ISC/Unicode/Zlib/MPL-2.0）
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+# 置信度阈值：低置信度的 license 判定按未许可处理（宁可红不可漏）
+confidence-threshold = 0.93
+exceptions = []
+
+[bans]
+# 重复版本：只记日志不阻断（依赖树历史上存在多版本共存；收紧须先清树）
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+version = 2
+# CI 阻断在已知漏洞（RUSTSEC 有 patch/无 patch 的处理策略：有 patch 必须升级）
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "deny"
+severity-threshold = "medium"

@@ -114,6 +114,7 @@ pub trait TranslateEngine: Send + Sync {
 ```rust
 // 覆盖层：跟随选区的置顶小窗，结果文本可选中复制；"复制全部"按钮写剪贴板（经 ClipboardPort，标记回写窗口）
 #[tauri::command] ocr_recognize(input: OcrInputDto) -> Result<OcrResultDto, AppError>
+> DOC-10：**v1.1 未交付**——v1 单引擎无翻译命令（D-09 与 DESIGN §11 修订口径）；下行仅为 v1.1 预留接口形状记录。
 #[tauri::command] ocr_translate(text: String, to: String) -> Result<String, AppError>
 #[tauri::command] ocr_engine_status() -> Result<Vec<EngineStatus>, AppError>   // 可用性/默认引擎设置
 // 事件：ocr.completed {source_task_id?, result} | ocr.failed {reason}

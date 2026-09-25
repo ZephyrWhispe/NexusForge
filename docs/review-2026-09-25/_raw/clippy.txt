@@ -1,0 +1,26 @@
+﻿cargo : [1m[92m    Checking[0m host-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\host-core)
+At line:15 char:2065
++ ... es\nodejs"; cargo clippy --workspace --all-targets --message-format=s ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([1m[92m    Ch...ates\host-core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[1m[92m   Compiling[0m nexusforge v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\src-tauri)
+[1m[92m    Checking[0m win-integration v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\win-integration)
+[1m[92m    Checking[0m proxy-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\proxy-core)
+[1m[92m    Checking[0m clipboard-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\clipboard-core)
+[1m[92m    Checking[0m sys-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\sys-core)
+[1m[92m    Checking[0m vault-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\vault-core)
+[1m[92m    Checking[0m sync-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\sync-core)
+[1m[92m    Checking[0m notes-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\notes-core)
+[1m[92m    Checking[0m kvm-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\kvm-core)
+[1m[92m    Checking[0m editor-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\editor-core)
+[1m[92m    Checking[0m screenshot-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\screenshot-core)
+[1m[92m    Checking[0m file-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\file-core)
+[1m[92m    Checking[0m ocr-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\ocr-core)
+[1m[92m    Checking[0m desktop-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\desktop-core)
+[1m[92m    Checking[0m automation-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\automation-core)
+[1m[92m    Checking[0m term-core v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\term-core)
+[1m[92m    Checking[0m nexusforge-helper v0.1.0 (C:\Users\86151\Documents\Code\NexusForge\crates\nexusforge-helper)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile 
+[unoptimized + debuginfo]]8;;\ target(s) in 58.36s

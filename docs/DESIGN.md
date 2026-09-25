@@ -8,7 +8,7 @@
 
 ## 1. 项目定位
 
-一款**深度集成 Windows 原生能力**的集合型可拓展桌面工具：通过统一的模块化架构集成剪切板、代理/VPN、密码库、文件与存储、截图录屏、OCR 翻译、文本文档、笔记知识管理、桌面效率、键鼠共享、终端运维、系统管理、自动化拓展共 13 个模块。每个模块可独立启用/禁用，统一设置、统一快捷键、统一托盘。
+一款**深度集成 Windows 原生能力**的集合型可拓展桌面工具：通过统一的模块化架构集成剪切板、代理/VPN、密码库、文件与存储、截图录屏、OCR 翻译、文本文档、笔记知识管理、桌面效率、键鼠共享、终端运维、系统管理、自动化拓展共 14 个模块（DOC-03：以 src/layout/modules.ts 的 MODULES 在册表为真源；早期文档写 13）。每个模块可独立启用/禁用，统一设置、统一快捷键、统一托盘。
 
 设计原则（按优先级排序）：
 
@@ -43,7 +43,7 @@
 ├─────────────────────────────────────────────────────────────────┤
 │                Windows 集成层 win-integration（Rust）             │
 │  Shell 扩展 │ Windows Hello │ USN/MFT │ ConPTY │ Task Scheduler  │
-│  Toast 通知 │ Graphics.Capture │ 注册表代理设置 │ 服务            │
+│  Toast 通知 │ GDI+PrintWindow  │ 注册表代理设置 │ 服务            │
 ├─────────────────────────────────────────────────────────────────┤
 │                外部进程层 Sidecar（按需下载，不打包）              │
 │  sing-box │ PaddleOCR │ Rclone │ 7-Zip │ FFmpeg                  │
@@ -77,11 +77,13 @@ NexusForge/
 │   ├── file-core/  screenshot-core/  ocr-core/
 │   ├── editor-core/  notes-core/  desktop-core/
 │   ├── kvm-core/  term-core/  sys-core/  automation-core/
+│   ├── sync-core/  nexusforge-helper/  clipboard-core 等共 18 crate
+│   │   （DOC-14 修订：初稿清单漏 sync-core 与 nexusforge-helper）
 ├── src/                            # React 前端
 │   ├── modules/                    # 各模块 UI（与 crate 一一对应）
-│   ├── dock/ layout/ quick-panels/ widgets/ overlays/
-│   ├── settings/ stores/ ipc/ components/
-├── resources/                      # 图标、tessdata 等静态资源
+│   ├── layout/ settings/ stores/ ipc/ components/ modules/ windows/
+│   │   （DOC-14 修订：规划中的 dock/quick-panels/widgets/overlays 子目录未建，
+│   │     实际结构以仓库为准；静态资源随构建管线内联，无独立 resources/）
 ├── docs/                           # 本方案与开发文档
 ├── .github/workflows/              # ci.yml / release.yml / nightly.yml
 ├── Cargo.toml                      # workspace
@@ -96,8 +98,8 @@ NexusForge/
 |--------|------|-------|----------|
 | **P0** | 宿主核心 | host-core | 模块注册/生命周期/事件总线/配置中心/托盘/快捷键/崩溃恢复 |
 | **P0** | 剪切板中枢 | clipboard-core | 历史、搜索(FTS5)、智能分组、堆栈粘贴、敏感数据保护 |
-| **P0** | 截图与录屏 | screenshot-core | Windows.Graphics.Capture 捕获、选区、标注、贴图置顶 |
-| **P0** | OCR 与翻译 | ocr-core | Windows.Media.Ocr 系统引擎 + PaddleOCR Sidecar 双引擎、截图 OCR、划词翻译 |
+| **P0** | 截图与录屏 | screenshot-core | GDI BitBlt + PrintWindow 捕获（§11：Graphics.Capture 归 v1.1 录屏前置）、选区、标注、贴图置顶；录屏属 v1.1 |
+| **P0** | OCR 与翻译 | ocr-core | Windows.Media.Ocr 系统引擎（v1 单引擎，§11/D-09：保留 `OcrEngine` 抽象与注册表扩展点；PaddleOCR 与翻译列 v1.1）、截图 OCR |
 | **P1** | 代理与 VPN | proxy-core | sing-box Sidecar、规则分流、系统代理/TUN 互斥、崩溃恢复 |
 | **P1** | 安全与凭据 | vault-core | Argon2id+AES-256-GCM、TOTP、Windows Hello 解锁、自动锁定 |
 | **P1** | 文件与存储 | file-core | 多面板文件管理、USN/MFT 秒搜、StorageDriver 网盘抽象、批量重命名 |
@@ -146,15 +148,15 @@ CREATE VIRTUAL TABLE clip_fts USING fts5(
 
 ### 4.2 截图与录屏
 
-流水线：**捕获（Windows.Graphics.Capture / PrintWindow）→ 选区覆盖层 → 标注 → 任务后处理（保存/复制/贴图/上传插件）**。
+流水线：**捕获（GDI BitBlt + PrintWindow，§11 改判；Windows.Graphics.Capture 归 v1.1 录屏前置）→ 选区覆盖层 → 标注 → 任务后处理（保存/复制/贴图/上传插件）**。
 - 任务流水线异步化，每步可插拔（参考 ShareX 设计，独立自研实现）
 - 贴图置顶 = 无边框置顶窗口 + DWM 材质
-- 录屏输出走 FFmpeg Sidecar（按需下载）
+- 录屏输出走 FFmpeg Sidecar（按需下载；v1.1 范畴，§11/D-08：v1 UI 不得暗示录屏可用）
 
 ### 4.3 OCR 与翻译
 
-管线：**触发（快捷键/截图联动/划词）→ 图像预处理 → 引擎识别 → 后处理（换行合并/段落重排）→ 翻译（可选）→ 结果覆盖层**。
-- 引擎抽象 `OcrEngine` trait：默认 Windows.Media.Ocr（系统原生、零依赖），PaddleOCR Sidecar 作为高精度备选，用户可配置优先级
+管线：**触发（快捷键/截图联动）→ 图像预处理 → 引擎识别 → 后处理（换行合并/段落重排）→ 结果覆盖层**（划词触发与翻译列 v1.1，§11/D-09）。
+- 引擎抽象 `OcrEngine` trait：v1 仅 Windows.Media.Ocr 单引擎（系统原生、零依赖），保留引擎注册表扩展点；PaddleOCR Sidecar 为 v1.1 高精度备选（§11/D-09），接线截图联动
 - 引擎不可用时（如系统语言包缺失）自动降级并给出可操作的错误提示
 
 ### 4.4 键鼠共享（P1，对应既有 TCP/UDP 设计）
@@ -183,7 +185,7 @@ CREATE VIRTUAL TABLE clip_fts USING fts5(
 
 1. **写入顺序**：捕获 → 内存队列 → 批量落库（≤50ms 窗口）→ FTS 索引 → 发事件。崩溃时队列丢弃可接受（剪贴板类）；文件操作类必须"临时文件 + 原子 rename"。
 2. **读取**：FTS5 查询 + 游标分页（禁止无 LIMIT 全表查询）；虚拟列表渲染。
-3. **blob**：`{appData}/blobs/{module}/{yyyy-mm}/{hash}` ，入库前先写 blob 再写主表，删除时先删主表记录再清理 blob（孤儿 blob 由启动期 GC 清理）。
+3. **blob**：`{appData}/blobs/{module}/{hash}`（扁平路径，§11/D-06 改判：hash 全局唯一，便于 GC 与去重），入库前先写 blob 再写主表，删除时先删主表记录再清理 blob（孤儿 blob 由启动期 GC 清理）。
 4. **配置**：`{appData}/config/global.json` + `{appData}/config/{module}.json`，每文件带 `schema_version`，升级自动迁移并先备份；设置 UI 由 `config_schema` 自动生成，不手写表单。
 5. **迁移**：数据库用 `rusqlite_migration`，事务执行、失败回滚，保留最近 3 个版本备份。
 
@@ -196,10 +198,12 @@ CREATE VIRTUAL TABLE clip_fts USING fts5(
 ```rust
 pub trait Module: Send + Sync {
     fn info(&self) -> ModuleInfo;                       // id/name/version/icon
-    fn init(&self, ctx: &ModuleContext) -> Result<(), ModuleError>;
+    // DOC-01 修订（2026-09-25）：与 host-core/src/module.rs 实现对齐——
+    // ctx 为 Arc<ModuleContext>；config_schema 返回 serde_json::Value（JSON Schema）
+    fn init(&self, ctx: std::sync::Arc<ModuleContext>) -> Result<(), ModuleError>;
     fn start(&self) -> Result<(), ModuleError>;
     fn stop(&self) -> Result<(), ModuleError>;
-    fn config_schema(&self) -> ModuleConfig;            // JSON Schema + 当前值
+    fn config_schema(&self) -> serde_json::Value;       // JSON Schema（settings 中心渲染）
     fn apply_config(&self, values: serde_json::Value) -> Result<(), ModuleError>;
     fn status(&self) -> ModuleState;
 }
@@ -244,7 +248,10 @@ pub async fn clipboard_search(query: String, group: Option<String>,
 #[tauri::command] pub async fn clipboard_delete(id: String) -> Result<(), AppError>;
 #[tauri::command] pub async fn clipboard_clear(keep_pinned: bool) -> Result<(), AppError>;
 #[tauri::command] pub async fn clipboard_stack_push(id: String) -> Result<(), AppError>;
-#[tauri::command] pub async fn clipboard_stack_pop() -> Result<Option<ClipEntry>, AppError>;
+#[tauri::command] pub async fn clipboard_stack_paste_next() -> Result<Option<ClipEntry>, AppError>;
+// DOC-01 修订（2026-09-25）：pop 命令从未落地——粘贴堆栈消费入口为
+// clipboard_stack_paste_next（连同 stack_paste_all / stack_list 等族，见
+// src-tauri/src/commands/clipboard.rs 与 permissions/clipboard.toml）。
 ```
 
 ### 6.4 Port trait（win-integration 适配点）
@@ -351,7 +358,7 @@ pub enum AppError {
 | 单元测试 | 各模块 crate 独立可测（mock ModuleContext/Port）；核心逻辑（分类器、加密、任务流水线）行覆盖 ≥ 80% |
 | 集成测试 | 模块 × 宿主：注册/启停/配置迁移/事件路由；SQLite 迁移脚本前后兼容测试 |
 | 端到端 | 关键场景：复制→历史出现；截图→标注→保存；OCR 触发→结果覆盖层；解锁→复制密码→自动清除；代理开→系统代理生效→崩溃→恢复 |
-| 性能回归 | CI 每次提交跑基准：启动/内存/搜索响应/模块加载，退化超阈值即失败 |
+| 性能回归 | 核心路径阈值断言随 `cargo test` 执行（tests/perf_thresholds.rs：搜索/捕获等延迟上限）；CI 对 criterion 基准仅做编译校验（DOC-13 如实化：启动/内存的自动化门禁未建，见 GOV-08） |
 
 ### 9.3 CI/CD 与部署
 

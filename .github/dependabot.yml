@@ -1,0 +1,43 @@
+# GOV-03：依赖更新自动 PR（DESIGN.md §"dependabot 自动 PR" 的落地）。
+# 分组策略：补丁级依赖合并为一枚 PR 降噪；安全更新永远独立立即开 PR。
+
+version: 2
+updates:
+  # Rust workspace（全仓单一 Cargo.toml 管 18 crate）
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # 前端 npm
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    labels:
+      - "dependencies"
+      - "frontend"
+
+  # GitHub Actions 版本跟进
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "dependencies"
+      - "ci"
