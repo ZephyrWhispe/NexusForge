@@ -128,8 +128,9 @@ export default function StatusBar() {
           {unseenErrors} 条错误
         </button>
       )}
-      <span className={styles.st}>SQLite WAL · 就绪</span>
-      <span className={styles.hot}>Enter 粘贴</span>
+      {/* COR-31：移除硬编码假状态——"SQLite WAL · 就绪" 与真实健康度无关（模块
+          健康点已逐模块真实呈现）；"Enter 粘贴" 仅在剪贴板历史成立，常驻为假提示。
+          恢复原则：状态栏不出现不随事实变化的文案。 */}
     </div>
   );
 }

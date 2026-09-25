@@ -9,7 +9,7 @@ import {
   Dropdown,
   Option,
 } from "@fluentui/react-components";
-import { marked } from "marked";
+import MarkdownView from "../../components/MarkdownView";
 import {
   notesBacklinks,
   notesByTag,
@@ -335,8 +335,12 @@ export default function NotesPanel() {
     }
   }, []);
 
+  // COR-15：切换/新建前守卫的句柄（guardDirty 定义在 saveNote 之后，经 ref 解耦
+  // 声明顺序；默认直通，首次渲染后即被真守卫覆写）
+  const guardDirtyRef = useRef<() => Promise<boolean>>(async () => true);
   const openNote = useCallback(
     async (path: string) => {
+      if (!(await guardDirtyRef.current())) return; // 有未保存修改先自动保存/确认
       setErr(null);
       try {
         const r = await notesRead(path);
@@ -421,8 +425,8 @@ export default function NotesPanel() {
     }
   }, [startSync, refreshList, fail]);
 
-  const saveNote = useCallback(async () => {
-    if (!active) return;
+  const saveNote = useCallback(async (): Promise<boolean> => {
+    if (!active) return true;
     setErr(null);
     try {
       await notesWrite(active, content);
@@ -430,10 +434,25 @@ export default function NotesPanel() {
       setMsg(`已保存 ${active}`);
       setLinks(await notesLinks(active));
       setBacklinks(await notesBacklinks(active));
+      return true;
     } catch (e) {
       fail(e);
+      return false;
     }
   }, [active, content, fail]);
+
+  // COR-15：离开守卫——dirty 时先自动保存（纯文本、开销小），保存失败再让用户
+  // 显式确认放弃（与 EditorPanel 关闭脏缓冲同纪律，杜绝静默丢内容）
+  const guardDirty = useCallback(async (): Promise<boolean> => {
+    if (!dirty) return true;
+    if (await saveNote()) return true;
+    return confirmAction({
+      title: "放弃未保存的修改？",
+      impact: [`「${active ?? "当前笔记"}」的修改尚未保存，继续将丢弃这些修改。`],
+      confirmLabel: "放弃并继续",
+    });
+  }, [dirty, active, saveNote]);
+  guardDirtyRef.current = guardDirty;
 
   // Ctrl+S 保存
   useEffect(() => {
@@ -495,6 +514,7 @@ export default function NotesPanel() {
   const createNote = useCallback(async () => {
     const name = newName.trim();
     if (!name) return;
+    if (!(await guardDirty())) return; // COR-15：同 openNote 守卫
     const rel = name.endsWith(".md") ? name : `${name}.md`;
     setErr(null);
     try {
@@ -505,7 +525,7 @@ export default function NotesPanel() {
     } catch (e) {
       fail(e);
     }
-  }, [newName, refreshList, openNote, fail]);
+  }, [newName, refreshList, openNote, fail, guardDirty]);
 
   const deleteNote = useCallback(async () => {
     if (!active) return;
@@ -982,12 +1002,7 @@ export default function NotesPanel() {
                       保存（Ctrl+S）
                     </Button>
                   </div>
-                  {preview && (
-                    <div
-                      className={styles.preview}
-                      dangerouslySetInnerHTML={{ __html: marked.parse(content) as string }}
-                    />
-                  )}
+                  {preview && <MarkdownView source={content} className={styles.preview} />}
                   {/* 编辑器常驻不卸载（预览仅隐藏）——重建会丢撤销栈且违 B1 建一次纪律 */}
                   <div
                     ref={editorHostRef}

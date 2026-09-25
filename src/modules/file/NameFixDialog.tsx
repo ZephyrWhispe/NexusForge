@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { reportError } from "../../stores/notifications";
 import {
   Badge,
   Button,
@@ -106,9 +107,10 @@ export default function NameFixDialog(props: {
               title={unfixable ? "存在映射不出干净新名的行，逐行改名后再投" : undefined}
               onClick={() => {
                 setBusy(true);
+                // STD-01：不再吞错——失败经全局错误通道可见（busy 收尾不变）
                 void props
                   .onConfirm()
-                  .catch(() => {})
+                  .catch((e) => reportError(e, { context: "确认执行失败" }))
                   .finally(() => setBusy(false));
               }}
             >

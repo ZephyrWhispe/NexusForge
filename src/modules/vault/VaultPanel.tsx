@@ -164,21 +164,37 @@ function TotpBadge({ secret }: { secret: string }) {
   const [remaining, setRemaining] = useState(0);
   useEffect(() => {
     let alive = true;
-    const tick = async () => {
+    let timer: number | undefined;
+    // PERF-06：仅跨周期时向后端取码（30s 一次而非每秒 1 次 IPC）；
+    // 秒级倒计时用本地时钟推算，零 IPC、每秒仅本组件一次 setState
+    const fetchCode = async () => {
       try {
         const [code, rem] = await vaultTotpNow(secret);
         if (!alive) return;
         setOtp(code);
-        setRemaining(rem);
+        scheduleCountdown(rem);
       } catch {
         if (alive) setOtp("------");
       }
     };
-    void tick();
-    const t = setInterval(tick, 1000);
+    const scheduleCountdown = (rem: number) => {
+      const endAt = Date.now() + Math.max(1, rem) * 1000;
+      const tickLocal = () => {
+        if (!alive) return;
+        const left = Math.max(0, Math.round((endAt - Date.now()) / 1000));
+        setRemaining(left);
+        if (left <= 0) {
+          void fetchCode();
+        } else {
+          timer = window.setTimeout(tickLocal, 1000);
+        }
+      };
+      tickLocal();
+    };
+    void fetchCode();
     return () => {
       alive = false;
-      clearInterval(t);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [secret]);
   return (
@@ -196,6 +212,10 @@ function TotpBadge({ secret }: { secret: string }) {
 function FieldValue({ field, entryId }: { field: EntryFieldDto; entryId: string }) {
   const styles = useStyles();
   const [shown, setShown] = useState(false);
+  // COR-18 自保：字段值变化即复位打码态（key 已按条目+字段稳定，这里是双保险）
+  useEffect(() => {
+    setShown(false);
+  }, [field.value, field.key]);
   // 密码字段走后端 vault_copy_password：write_back（D-10 回写窗口，防自捕获）
   // + 到期条件清除（D-24）；非敏感字段直接浏览器剪贴板
   const copy = () => {
@@ -389,6 +409,7 @@ export default function VaultPanel({ search }: PanelProps) {
   useEffect(() => {
     if (!IN_TAURI) return;
     let unlisten: (() => void) | null = null;
+    let cancelled = false; // COR-17：卸载早于 listen resolve 时迟到监听器立即注销
     import("@tauri-apps/api/event").then(({ listen }) =>
       listen("nf:event", (e) => {
         const p = e.payload as { topic?: string; payload?: { lock_in_secs?: number } };
@@ -402,9 +423,11 @@ export default function VaultPanel({ search }: PanelProps) {
           );
       }),
     ).then((u) => {
-      unlisten = u;
+      if (cancelled) u();
+      else unlisten = u;
     });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);
@@ -850,6 +873,7 @@ export default function VaultPanel({ search }: PanelProps) {
                     size="small"
                     icon={<DeleteRegular />}
                     title="删除文件夹"
+                    aria-label={`删除文件夹 ${f.name ?? ""}`.trim()}
                     onClick={(e) => {
                       e.stopPropagation();
                       void doDeleteFolder(f);
@@ -868,7 +892,12 @@ export default function VaultPanel({ search }: PanelProps) {
               onChange={(_, d) => setNewFolderName(d.value)}
               onKeyDown={(e) => e.key === "Enter" && void doAddFolder()}
             />
-            <Button size="small" icon={<AddRegular />} onClick={() => void doAddFolder()} />
+            <Button
+            size="small"
+            icon={<AddRegular />}
+            aria-label="新建文件夹"
+            onClick={() => void doAddFolder()}
+          />
           </div>
         </div>
 
@@ -900,11 +929,14 @@ export default function VaultPanel({ search }: PanelProps) {
                   appearance="subtle"
                   size="small"
                   icon={<DeleteRegular />}
+                  aria-label={`删除条目 ${entry.title}`}
                   onClick={() => void doDeleteEntry(entry)}
                 />
               </div>
-              {entry.fields.map((f, i) => (
-                <FieldValue key={i} field={f} entryId={entry.id} />
+              {entry.fields.map((f) => (
+                // COR-18：业务键（条目 id + 字段名）替代位置索引——entries_changed/
+                // 解锁刷新后组件实例不跨数据复用，shown 明文态不得残留
+                <FieldValue key={`${entry.id}:${f.key}`} field={f} entryId={entry.id} />
               ))}
               {entry.totp_secret && <TotpBadge secret={entry.totp_secret} />}
             </div>

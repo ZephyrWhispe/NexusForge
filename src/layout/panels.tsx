@@ -1,5 +1,4 @@
 import { lazy, type ComponentType } from "react";
-import { makeStyles, tokens, Text } from "@fluentui/react-components";
 // PERF3（docs/impl/07）：剪切板为默认首屏，其余模块按需分 chunk
 import ClipboardPanel from "../modules/clipboard/ClipboardPanel";
 import { MODULES, type ModuleId } from "./modules";
@@ -22,41 +21,8 @@ export interface PanelDef {
   subtitle: string;
 }
 
-const useStyles = makeStyles({
-  empty: {
-    flex: 1,
-    display: "grid",
-    placeItems: "center",
-    textAlign: "center",
-    color: tokens.colorNeutralForeground3,
-    padding: "0 24px",
-  },
-});
-
-/** 显式占位（差距登记可见化轨道）：面板未落地时指名道姓给出细案文档去处，而非假装有内容 */
-function ModulePlaceholder({ moduleId, planDoc }: { moduleId: ModuleId; planDoc: string }) {
-  const styles = useStyles();
-  const name = MODULES.find((m) => m.id === moduleId)?.name ?? moduleId;
-  return (
-    <div className={styles.empty}>
-      <div>
-        <Text size={400} weight="semibold" block>
-          {name} · 面板施工中
-        </Text>
-        <Text size={300} block style={{ marginTop: "8px" }}>
-          实施细案：docs/panels/2026-09-19/{planDoc}.md（批次排期见 docs/impl/09-blueprint-alignment.md）
-        </Text>
-      </div>
-    </div>
-  );
-}
-
-/** 供未来新模块在面板落地前显式挂占位（穷尽性由 Record 保证，禁默认兜底） */
-export function placeholderFor(moduleId: ModuleId, planDoc: string): PanelDef["panel"] {
-  return function Placeholder() {
-    return <ModulePlaceholder moduleId={moduleId} planDoc={planDoc} />;
-  };
-}
+// STD-08：ModulePlaceholder/placeholderFor 已删（全库零使用者——B0 之后每个
+// 模块 id 都有真面板，穷尽性由 Record 保证；新模块缺面板时编译失败而非占位）。
 
 const ScreenshotPanel = lazy(() => import("../modules/screenshot/ScreenshotPanel"));
 const OcrPanel = lazy(() => import("../modules/ocr/OcrPanel"));

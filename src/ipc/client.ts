@@ -1638,8 +1638,12 @@ export function editorUpdate(id: string, content: string): Promise<boolean> {
 export function editorSave(id: string): Promise<EditorSessionInfoDto> {
   return invoke("editor_save", { id });
 }
-export function editorSaveAs(id: string, target: string): Promise<EditorSessionInfoDto> {
-  return invoke("editor_save_as", { id, target });
+export function editorSaveAs(
+  id: string,
+  target: string,
+  overwrite: boolean,
+): Promise<EditorSessionInfoDto> {
+  return invoke("editor_save_as", { id, target, overwrite });
 }
 /** 自动保存草稿（3s 防抖）；cursorLine=编辑器光标行，顺带更新重启定位锚（T-B7-20） */
 export function editorAutosave(
@@ -1651,6 +1655,10 @@ export function editorAutosave(
 }
 export function editorClose(id: string): Promise<boolean> {
   return invoke("editor_close", { id });
+}
+/** COR-26：OS 能力探测（mica = Win11 非远程会话）；只读，无副作用 */
+export function hostCapabilities(): Promise<{ mica: boolean }> {
+  return invoke("host_capabilities");
 }
 export function editorSessions(): Promise<EditorSessionInfoDto[]> {
   return invoke("editor_sessions");

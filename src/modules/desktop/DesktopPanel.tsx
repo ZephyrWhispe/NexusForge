@@ -597,7 +597,18 @@ export default function DesktopPanel() {
           <Button
             size="small"
             disabled={busy !== "" || mapRows === null}
-            onClick={() => saveTidyMap(null)}
+            onClick={async () => {
+              // COR-27：一键清空全部自定义映射且无快照——破坏性，需确认
+              if (
+                !(await confirmAction({
+                  title: "回退为内置六类分类？",
+                  impact: [`将清除 ${mapRows?.length ?? 0} 条自定义映射，且无法撤销。`],
+                  confirmLabel: "回退",
+                }))
+              )
+                return;
+              void saveTidyMap(null);
+            }}
           >
             回退内置六类
           </Button>

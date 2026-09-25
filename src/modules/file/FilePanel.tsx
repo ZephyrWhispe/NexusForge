@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   makeStyles,
   tokens,
@@ -230,19 +231,34 @@ export default function FilePanel() {
     setError(err ? `${err.data.code}: ${err.data.message}` : fallback);
   }, []);
 
+  // PERF-04：虚拟滚动（滚动容器 = tableWrap；行高 32px 固定）
+  const listRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: entries.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 32,
+    overscan: 12,
+    // jsdom 无布局（clientHeight=0）：给初始视口矩形，保证首轮即渲染可见行
+    initialRect: { width: 1024, height: 1024 },
+  });
+
+  // COR-16：目录切换请求序号守卫——快速连点时慢响应不得覆盖新响应
+  const dirSeqRef = useRef(0);
   const loadDir = useCallback(
     async (path: string) => {
+      const seq = ++dirSeqRef.current;
       try {
         const [list, bc] = await Promise.all([fileList(path), fileBreadcrumbs(path)]);
+        if (seq !== dirSeqRef.current) return; // 已有更新的目录请求，丢弃本次结果
         setEntries(list);
         setCrumbs(bc.map(([n, p]) => [n, String(p)] as [string, string]));
         setCwd(path);
         setSelected(new Set());
         setError(null);
       } catch (e) {
-        applyError(e, "目录读取失败");
+        if (seq === dirSeqRef.current) applyError(e, "目录读取失败");
       } finally {
-        setLoaded(true);
+        if (seq === dirSeqRef.current) setLoaded(true);
       }
     },
     [applyError],
@@ -949,39 +965,63 @@ export default function FilePanel() {
         />
       )}
 
-      {/* 目录列表 */}
-      <div className={styles.tableWrap}>
+      {/* 目录列表（PERF-04：窗口化虚拟滚动——万级目录只渲染可视区 + overscan。
+          保留 tr/td 行语义：首尾垫 spacer 行撑开虚拟总高，行高固定 32px） */}
+      <div className={styles.tableWrap} ref={listRef}>
         <Table>
           <TableBody>
-            {entries.map((e) => {
-              const isSel = selected.has(e.path);
+            {(() => {
+              const items = virtualizer.getVirtualItems();
+              const padTop = items.length > 0 ? items[0].start : 0;
+              const last = items.length > 0 ? items[items.length - 1] : null;
+              const padBottom =
+                last !== null ? Math.max(0, virtualizer.getTotalSize() - last.end) : 0;
               return (
-                <TableRow
-                  key={e.path}
-                  className={`${styles.row} ${isSel ? styles.rowSelected : ""}`}
-                  onClick={() => toggleSelect(e.path)}
-                  onDoubleClick={() => openEntry(e)}
-                >
-                  <TableCell className={styles.nameCell}>
-                    {e.is_dir ? "📁 " : "📄 "}
-                    {e.name}
-                    {e.hidden ? " (隐藏)" : ""}
-                  </TableCell>
-                  <TableCell>
-                    <Text size={200} className={styles.muted}>
-                      {e.is_dir ? "目录" : fmtSize(e.size)}
-                    </Text>
-                  </TableCell>
-                  <TableCell>
-                    <Tooltip content={fmtTime(e.modified_ms)} relationship="label">
-                      <Text size={200} className={styles.muted}>
-                        {fmtTime(e.modified_ms)}
-                      </Text>
-                    </Tooltip>
-                  </TableCell>
-                </TableRow>
+                <>
+                  {padTop > 0 && (
+                    <TableRow aria-hidden>
+                      <TableCell style={{ height: padTop, padding: 0, border: "none" }} />
+                    </TableRow>
+                  )}
+                  {items.map((vi) => {
+                    const e = entries[vi.index];
+                    const isSel = selected.has(e.path);
+                    return (
+                      <TableRow
+                        key={e.path}
+                        className={`${styles.row} ${isSel ? styles.rowSelected : ""}`}
+                        style={{ height: "32px" }}
+                        onClick={() => toggleSelect(e.path)}
+                        onDoubleClick={() => openEntry(e)}
+                      >
+                        <TableCell className={styles.nameCell}>
+                          {e.is_dir ? "📁 " : "📄 "}
+                          {e.name}
+                          {e.hidden ? " (隐藏)" : ""}
+                        </TableCell>
+                        <TableCell>
+                          <Text size={200} className={styles.muted}>
+                            {e.is_dir ? "目录" : fmtSize(e.size)}
+                          </Text>
+                        </TableCell>
+                        <TableCell>
+                          <Tooltip content={fmtTime(e.modified_ms)} relationship="label">
+                            <Text size={200} className={styles.muted}>
+                              {fmtTime(e.modified_ms)}
+                            </Text>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                  {padBottom > 0 && (
+                    <TableRow aria-hidden>
+                      <TableCell style={{ height: padBottom, padding: 0, border: "none" }} />
+                    </TableRow>
+                  )}
+                </>
               );
-            })}
+            })()}
             {entries.length === 0 && (
               <TableRow>
                 <TableCell>

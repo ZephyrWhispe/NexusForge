@@ -6,5 +6,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}"],
+    // 全局直通虚拟器桩（jsdom 无 ResizeObserver；见 src/test-setup/virtualGlobal.ts）
+    setupFiles: ["src/test-setup/virtualGlobal.ts"],
   },
 });

@@ -1,9 +1,10 @@
 /**
- * DIB（BITMAPINFO）→ PNG dataURL 解码（docs/impl/02 前端预览）。
- * 支持 32bpp（BGRA，含 BI_BITFIELDS 标准掩码）与 24bpp（BGR）；
- * 其余位深/压缩格式返回 null（显示占位）。
+ * PERF-09 ①：DIB 头解析 + 像素搬运（纯函数，主线程与 Worker 共用一份实现）。
+ * 返回 RGBA 像素（已翻转为上-下序）与尺寸；不触碰 DOM，可在 Worker 内运行。
  */
-export function dibToDataUrl(bytes: Uint8Array): string | null {
+export function decodeDibToRgba(
+  bytes: Uint8Array,
+): { w: number; h: number; rgba: Uint8ClampedArray } | null {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.byteLength < 40) return null;
   const biSize = dv.getUint32(0, true);
@@ -22,43 +23,77 @@ export function dibToDataUrl(bytes: Uint8Array): string | null {
     pixOff += colors * 4;
   }
 
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
-  const img = ctx.createImageData(w, h);
+  const img = new Uint8ClampedArray(w * h * 4);
   const bottomUp = hRaw > 0;
 
   if (bpp === 32) {
     for (let y = 0; y < h; y++) {
       const sy = bottomUp ? h - 1 - y : y;
+      const srcRow = pixOff + sy * w * 4;
+      const dstRow = y * w * 4;
       for (let x = 0; x < w; x++) {
-        const o = pixOff + (sy * w + x) * 4;
-        const di = (y * w + x) * 4;
-        img.data[di] = bytes[o + 2];
-        img.data[di + 1] = bytes[o + 1];
-        img.data[di + 2] = bytes[o];
-        img.data[di + 3] = bytes[o + 3];
+        const o = srcRow + x * 4;
+        const di = dstRow + x * 4;
+        img[di] = bytes[o + 2];
+        img[di + 1] = bytes[o + 1];
+        img[di + 2] = bytes[o];
+        img[di + 3] = bytes[o + 3];
       }
     }
   } else if (bpp === 24) {
     const stride = ((w * 24 + 31) & ~31) >> 3;
     for (let y = 0; y < h; y++) {
       const sy = bottomUp ? h - 1 - y : y;
+      const srcRow = pixOff + sy * stride;
+      const dstRow = y * w * 4;
       for (let x = 0; x < w; x++) {
-        const o = pixOff + sy * stride + x * 3;
-        const di = (y * w + x) * 4;
-        img.data[di] = bytes[o + 2];
-        img.data[di + 1] = bytes[o + 1];
-        img.data[di + 2] = bytes[o];
-        img.data[di + 3] = 255;
+        const o = srcRow + x * 3;
+        const di = dstRow + x * 4;
+        img[di] = bytes[o + 2];
+        img[di + 1] = bytes[o + 1];
+        img[di + 2] = bytes[o];
+        img[di + 3] = 255;
       }
     }
   } else {
     return null;
   }
+  return { w, h, rgba: img };
+}
 
-  ctx.putImageData(img, 0, 0);
+/**
+ * PERF-09 ②：RGBA → PNG 字节（Worker 内经 OffscreenCanvas；不产 blob: URL——
+ * CSP img-src 未放行 blob:，主线程以 data: 封装）。
+ */
+export function rgbaToPngBytes(
+  w: number,
+  h: number,
+  rgba: Uint8ClampedArray,
+): Promise<Uint8Array> | null {
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+  return canvas
+    .convertToBlob({ type: "image/png" })
+    .then((blob) => blob.arrayBuffer())
+    .then((buf) => new Uint8Array(buf));
+}
+
+/**
+ * DIB（BITMAPINFO）→ PNG dataURL 解码（docs/impl/02 前端预览）。
+ * 支持 32bpp（BGRA，含 BI_BITFIELDS 标准掩码）与 24bpp（BGR）；
+ * 其余位深/压缩格式返回 null（显示占位）。
+ */
+export function dibToDataUrl(bytes: Uint8Array): string | null {
+  const decoded = decodeDibToRgba(bytes);
+  if (!decoded) return null;
+  const { w, h, rgba } = decoded;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
   return canvas.toDataURL("image/png");
 }

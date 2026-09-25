@@ -18,6 +18,18 @@ export default defineConfig({
     target: "chrome105",
     outDir: "dist",
     emptyOutDir: true,
+    // PERF-03：大依赖分包——monaco/xterm/fluentui 不随业务 chunk 重下载，
+    // 路由级 lazy() 边界 + 独立 chunk 让缓存命中粒度更细
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes("monaco-editor")) return "monaco";
+          if (id.includes("@xterm")) return "xterm";
+          if (id.includes("@fluentui")) return "fluentui";
+          if (id.includes("node_modules")) return "vendor";
+        },
+      },
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
 });

@@ -9,7 +9,8 @@ import {
   Option,
   Spinner,
 } from "@fluentui/react-components";
-import { marked } from "marked";
+import MarkdownView from "../../components/MarkdownView";
+import { sharedTab, sharedTabActive } from "../../components/tabStyles";
 import {
   editorAutosave,
   editorClose,
@@ -68,16 +69,9 @@ const useStyles = makeStyles({
   tabs: { display: "flex", gap: "4px", flexWrap: "wrap" },
   // 标签胶囊 = 容器（边框/底色）+ 真 button 标签 + 真 button 关闭钮：
   // 关闭钮不能嵌套在标签 button 内（按钮内不可有交互内容），故外层为容器而非 button
-  tab: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    padding: "4px 10px",
-    borderRadius: tokens.borderRadiusMedium,
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    fontSize: tokens.fontSizeBase200,
-  },
-  tabActive: { backgroundColor: tokens.colorNeutralBackground3Hover, border: `1px solid ${tokens.colorBrandForeground1}` },
+  // STD-06：Tab 样式收敛（唯一出处 src/components/tabStyles.ts）
+  tab: sharedTab,
+  tabActive: sharedTabActive,
   tabLabel: {
     display: "flex",
     alignItems: "center",
@@ -181,7 +175,7 @@ export default function EditorPanel() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState("");
   const [mdPreview, setMdPreview] = useState(true);
-  const [mdHtml, setMdHtml] = useState("");
+  const [mdHtml, setMdHtml] = useState(""); // 存原文；净化在 MarkdownView 渲染边界（SEC-07）
   // 首轮会话列表是否落定（成功或失败）：未落定前编辑区渲染加载态而非引导文案（D-18 假空态修正）
   const [loaded, setLoaded] = useState(false);
 
@@ -285,7 +279,7 @@ export default function EditorPanel() {
     // E3 Markdown 预览
     if (session.path.toLowerCase().endsWith(".md") && mdPreview) {
       const render = () => {
-        if (model && !model.isDisposed()) setMdHtml(marked.parse(model.getValue()) as string);
+        if (model && !model.isDisposed()) setMdHtml(model.getValue()); // 存原文，净化在渲染边界（SEC-07）
       };
       render();
       const disp = model.onDidChangeContent(render);
@@ -395,7 +389,26 @@ export default function EditorPanel() {
   const doSaveAs = (id: string) =>
     run(`save-as-${id}`, async () => {
       const target = saveAsPath.trim();
-      const info = await editorSaveAs(id, target);
+      // COR-27：目标已存在 = 不可逆覆盖（无备份）。后端先以 overwrite=false 试写，
+      // 撞 EDITOR_SAVEAS_001 时弹确认，用户同意才以 overwrite=true 重试
+      const attempt = (overwrite: boolean) => editorSaveAs(id, target, overwrite);
+      let info;
+      try {
+        info = await attempt(false);
+      } catch (e) {
+        const code = (e as { data?: { code?: string } })?.data?.code;
+        if (code !== "EDITOR_SAVEAS_001") throw e;
+        if (
+          !(await confirmAction({
+            title: "覆盖已存在的文件？",
+            impact: [target],
+            detail: "该路径已有文件，另存为将直接覆盖且不可恢复。",
+            confirmLabel: "覆盖",
+          }))
+        )
+          return;
+        info = await attempt(true);
+      }
       await refreshSessions();
       setSaveAsPath("");
       setStatus(`已另存为 ${info.name}（${info.encoding_label} / ${info.eol.toUpperCase()}）`);
@@ -669,11 +682,11 @@ export default function EditorPanel() {
           <div className={mdPreview && mdHtml ? styles.editorWrap : styles.editorSingle}>
             <div ref={editorHostRef} className={styles.editorHost} />
             {mdPreview && mdHtml ? (
-              <div
-                ref={previewRef}
+              /* SEC-07：本地/外部/同步文件一概不可信，净化在 MarkdownView 内完成 */
+              <MarkdownView
+                divRef={previewRef}
+                source={mdHtml}
                 className={styles.preview}
-                /* marked 输出经 sanitize 需求：v1 内容来自用户本地文件，与编辑器同信任域 */
-                dangerouslySetInnerHTML={{ __html: mdHtml }}
               />
             ) : null}
           </div>

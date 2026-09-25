@@ -190,12 +190,43 @@ describe("EditorPanel 另存为（T-B1-10）", () => {
     await setInput(inputByPlaceholder("另存为"), "  D:\\backup\\renamed.txt  ");
     await click(saveAsBtn);
     expect(editorSaveAs).toHaveBeenCalledTimes(1);
-    expect(editorSaveAs).toHaveBeenCalledWith("s1", "D:\\backup\\renamed.txt");
+    expect(editorSaveAs).toHaveBeenCalledTimes(1);
+    // COR-27：首试 overwrite=false；目标不存在（mock 成功）→ 无确认直达
+    expect(editorSaveAs).toHaveBeenCalledWith("s1", "D:\\backup\\renamed.txt", false);
     // 页签按返回后的会话列表换名；状态行点名新文件名与编码/EOL
     expect(container.textContent).toContain("renamed.txt");
     expect(container.textContent).not.toContain("a.txt");
     expect(container.textContent).toContain("已另存为 renamed.txt（UTF-8 / LF）");
     // 成功后输入框清空，不留陈旧目标
     expect(inputByPlaceholder("另存为").value).toBe("");
+  });
+
+  it("editorSaveAs_existingTarget_requiresConfirm：EDITOR_SAVEAS_001 → 确认 → overwrite=true 重试", async () => {
+    const { confirmAction } = await import("../../../stores/confirm");
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<EditorPanel />);
+    });
+    await act(async () => {});
+    await setInput(inputByPlaceholder("文件绝对路径"), "C:\\notes\\a.txt");
+    await click(buttonByText("打开")!);
+
+    const existsErr = {
+      data: { code: "EDITOR_SAVEAS_001", message: "目标文件已存在", hint: "" },
+    };
+    let calls = 0;
+    vi.mocked(editorSaveAs).mockImplementation(async (_id, _t, overwrite) => {
+      calls += 1;
+      if (!overwrite) throw existsErr;
+      liveList = [SESS_B];
+      return SESS_B;
+    });
+    await setInput(inputByPlaceholder("另存为"), "D:\\backup\\renamed.txt");
+    await click(buttonByText("另存为")!);
+    // 首试被后端拒 → 确认框弹出（mock 恒同意）→ overwrite=true 重试成功
+    expect(calls).toBe(2);
+    expect(editorSaveAs).toHaveBeenLastCalledWith("s1", "D:\\backup\\renamed.txt", true);
+    expect(confirmAction).toHaveBeenCalled();
+    expect(container.textContent).toContain("已另存为 renamed.txt");
   });
 });

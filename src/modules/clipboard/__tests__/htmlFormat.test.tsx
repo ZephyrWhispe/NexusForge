@@ -137,9 +137,11 @@ const srcBodies: [string, string][] = Object.entries(
  * 本行开工前既有的 HTML 注入面（markdown 预览 ×2、xterm 容器清空 ×1）：不在 B3 范围，
  * 但也不能假装不存在。列成清单的含义是"只许少不许多"——任何新增宿主即判红。
  */
+// SEC-07 整改后更新：NotesPanel/EditorPanel 的 marked 直插已收敛进 MarkdownView
+// （DOMPurify 净化唯一出口，security_config.rs 有同谱断言）；TerminalPanel 的
+// host.innerHTML = "" 是 xterm 容器清空（无注入面）。清单含义仍为"只许少不许多"。
 const PREEXISTING_SINKS = [
-  "modules/editor/EditorPanel.tsx",
-  "modules/notes/NotesPanel.tsx",
+  "components/MarkdownView.tsx",
   "modules/term/TerminalPanel.tsx",
 ];
 

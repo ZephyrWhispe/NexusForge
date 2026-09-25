@@ -1585,10 +1585,22 @@ export default function OverlayShot() {
           size="small"
         />
         <span style={{ width: 8 }} />
-        <Button size="small" className={styles.tool} onClick={undo} disabled={stackCounts.undo === 0}>
+        <Button
+          size="small"
+          className={styles.tool}
+          onClick={undo}
+          disabled={stackCounts.undo === 0}
+          aria-label="撤销上一笔标注"
+        >
           ↶
         </Button>
-        <Button size="small" className={styles.tool} onClick={redo} disabled={stackCounts.redo === 0}>
+        <Button
+          size="small"
+          className={styles.tool}
+          onClick={redo}
+          disabled={stackCounts.redo === 0}
+          aria-label="重做标注"
+        >
           ↷
         </Button>
       </div>

@@ -168,6 +168,7 @@ export default function SettingsSection() {
   useEffect(() => {
     if (!IN_TAURI) return;
     let unlisten: (() => void) | null = null;
+    let cancelled = false;
     const topics = new Set(["clipboard.capture_state", "clipboard.groups_changed"]);
     import("@tauri-apps/api/event")
       .then(({ listen }) =>
@@ -176,9 +177,11 @@ export default function SettingsSection() {
         }),
       )
       .then((u) => {
-        unlisten = u;
+        if (cancelled) u();
+        else unlisten = u;
       });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, [refresh]);

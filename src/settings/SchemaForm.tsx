@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   makeStyles,
   tokens,
@@ -19,7 +19,12 @@ import { IN_TAURI } from "../ipc/env";
  * 修改即校验即保存（Rust 侧 schema 校验失败回显错误）。
  * 支持：boolean→Switch；integer(min/max)→SpinButton；string→Input（带 enum 则 Dropdown）；
  * array(string)→Textarea(逗号分隔)。
+ *
+ * PERF-02：文本/数字/多行输入 400ms 防抖合并提交（此前每击键一次 IPC + 一次落盘，
+ * 且触发整链 apply_config 派发）；布尔/下拉等离散控件保持即时提交（点击即意图）。
+ * 失败经顶部错误行如实呈现（不吞、不冒充"已保存"）；输入值保留供改正重试。
  */
+const DEBOUNCE_MS = 400;
 const useStyles = makeStyles({
   root: { flex: 1, overflowY: "auto", padding: "8px 24px 30px", maxWidth: "760px" },
   group: { marginBottom: "22px" },
@@ -98,6 +103,52 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
   const [schema, setSchema] = useState<Record<string, JsonSchemaProp> | null>(null);
   const [values, setValues] = useState<Values | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  // PERF-02：待提交键集合 + 防抖计时器 + 值快照（flush 在锁外读最新值）
+  const dirtyKeys = useRef<Set<string>>(new Set());
+  const timerRef = useRef<number | undefined>(undefined);
+  const valuesRef = useRef<Values | null>(null);
+  valuesRef.current = values;
+  const schemaRef = useRef<Record<string, JsonSchemaProp> | null>(null);
+  schemaRef.current = schema;
+
+  const flush = useCallback(async () => {
+    if (dirtyKeys.current.size === 0) return;
+    dirtyKeys.current = new Set();
+    const snapshot = valuesRef.current;
+    if (!snapshot || !IN_TAURI) return;
+    setSaving(true);
+    try {
+      await hostConfigSet(moduleId, snapshot);
+      setError(null);
+    } catch (e) {
+      // 失败如实显错（顶部错误行）。不自动回滚输入值——校验类拒绝（如路径非法）
+      // 下保留用户所打内容才能"改正即可重试"（T-B4-11 钉住的产品决策）
+      setError(parseErr(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [moduleId]);
+
+  const scheduleSave = useCallback(
+    (key: string, immediate: boolean) => {
+      dirtyKeys.current.add(key);
+      window.clearTimeout(timerRef.current);
+      if (immediate) {
+        void flush();
+        return;
+      }
+      timerRef.current = window.setTimeout(() => void flush(), DEBOUNCE_MS);
+    },
+    [flush],
+  );
+
+  const save = (key: string, value: unknown, immediate = false) => {
+    setValues((prev) => (prev ? { ...prev, [key]: value } : prev));
+    // 同步推进快照：immediate flush 在 setState 渲染前执行，必须已含本次修改
+    if (valuesRef.current) valuesRef.current = { ...valuesRef.current, [key]: value };
+    scheduleSave(key, immediate);
+  };
 
   useEffect(() => {
     if (!IN_TAURI) {
@@ -115,13 +166,14 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
       .catch((e) => setError(String(e)));
   }, [moduleId]);
 
-  const save = (next: Values) => {
-    setValues(next);
-    if (!IN_TAURI) return;
-    hostConfigSet(moduleId, next)
-      .then(() => setError(null))
-      .catch((e) => setError(parseErr(e)));
-  };
+  // 卸载/切换模块前强制 flush：防抖中的最后一次输入不得丢失
+  useEffect(
+    () => () => {
+      window.clearTimeout(timerRef.current);
+      void flush();
+    },
+    [flush, moduleId],
+  );
 
   if (!schema || !values) {
     return (
@@ -134,6 +186,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
   return (
     <div className={styles.root}>
       {error && <Text className={styles.err}>{error}</Text>}
+      {saving && <Text className={styles.desc}>保存中…</Text>}
       {visibleProps(schema).map(([key, prop]) => {
         const choices = enumChoices(prop);
         return (
@@ -145,7 +198,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
             {prop.type === "boolean" && (
               <Switch
                 checked={Boolean(values[key])}
-                onChange={(_, d) => save({ ...values, [key]: d.checked })}
+                onChange={(_, d) => save(key, d.checked, true)}
               />
             )}
             {prop.type === "integer" && (
@@ -155,7 +208,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
                 max={prop.maximum}
                 step={Math.max(1, Math.round(((prop.maximum ?? 100) - (prop.minimum ?? 0)) / 100))}
                 onChange={(_, d) => {
-                  save({ ...values, [key]: d.value ?? toFiniteNum(values[key]) });
+                  save(key, d.value ?? toFiniteNum(values[key]));
                 }}
                 appearance="outline"
               />
@@ -166,7 +219,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
                 style={{ minWidth: "240px" }}
                 value={String(values[key] ?? "")}
                 selectedOptions={[String(values[key] ?? "")]}
-                onOptionSelect={(_, d) => save({ ...values, [key]: d.optionValue })}
+                onOptionSelect={(_, d) => save(key, d.optionValue, true)}
               >
                 {choices.map((v) => (
                   <Option key={v} value={v} text={v}>
@@ -178,7 +231,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
             {prop.type === "string" && !choices && (
               <Input
                 value={String(values[key] ?? "")}
-                onChange={(_, d) => save({ ...values, [key]: d.value })}
+                onChange={(_, d) => save(key, d.value)}
                 style={{ width: "240px" }}
               />
             )}
@@ -189,13 +242,13 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
                 resize="vertical"
                 style={{ width: "280px", minHeight: "40px" }}
                 onChange={(_, d) =>
-                  save({
-                    ...values,
-                    [key]: d.value
+                  save(
+                    key,
+                    d.value
                       .split(/[,\n]/)
                       .map((s) => s.trim())
                       .filter(Boolean),
-                  })
+                  )
                 }
               />
             )}

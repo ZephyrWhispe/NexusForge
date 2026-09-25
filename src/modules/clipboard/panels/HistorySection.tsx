@@ -365,15 +365,19 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   const queryText = clipQueryText(mirror, { group: !groupDismissed, type: !typeTouched });
   const effectiveType = typeTouched ? typeChip : mirror.type;
 
+  // COR-16：搜索请求序号守卫——逐字输入时慢响应不得覆盖新响应
+  const seqRef = useRef(0);
   const load = useCallback(
     async (p: number, append: boolean) => {
+      const seq = ++seqRef.current;
       try {
         const res = await clipboardSearch(clipSearchParams(queryText, group, p, 50, typeChip));
+        if (seq !== seqRef.current) return; // 已有更新的查询，丢弃本次结果
         setEntries((prev) => (append ? [...prev, ...res.items] : res.items));
         setHasMore(res.has_more);
         setPage(p);
       } finally {
-        setLoaded(true);
+        if (seq === seqRef.current) setLoaded(true);
       }
     },
     [queryText, group, typeChip],
@@ -406,6 +410,7 @@ export default function HistorySection({ search, group, onCounts }: Props) {
   useEffect(() => {
     if (!IN_TAURI) return;
     let unlisten: (() => void) | null = null;
+  let cancelled = false;
     import("@tauri-apps/api/event").then(({ listen }) =>
       listen("nf:event", (e) => {
         const topic = (e.payload as { topic?: string }).topic;
@@ -429,9 +434,11 @@ export default function HistorySection({ search, group, onCounts }: Props) {
         if (topic === "clipboard.capture_state") refreshCapture();
       }),
     ).then((u) => {
-      unlisten = u;
+      if (cancelled) u();
+      else unlisten = u;
     });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, [load, refreshCounts, refreshCapture]);

@@ -85,8 +85,9 @@ export default function Toaster() {
   if (shown.length === 0) return null;
 
   return (
+    // STD-07：入场动画 keyframes 已移入 src/styles/global.css（静态样式）——
+    // 运行时注入 <style> 与"清空内联样式/收紧 style-src"的既定路线冲突
     <div className={styles.root} role="status" aria-live="polite">
-      <style>{"@keyframes nf-toast-in{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}"}</style>
       {shown.map((n) => {
         const ico = ICON[n.kind];
         return (

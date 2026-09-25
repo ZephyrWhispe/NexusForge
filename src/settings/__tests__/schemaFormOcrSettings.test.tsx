@@ -322,6 +322,10 @@ describe("Tesseract 第二引擎表观面（T-B4-11）", () => {
       },
     });
     await typeInput(exeInput!, "tesseract.exe");
+    // PERF-02：文本输入 400ms 防抖合并提交——推进防抖窗后落盘
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 450));
+    });
     expect(hostConfigSet).toHaveBeenCalledWith(
       "ocr",
       expect.objectContaining({ tesseract_exe: "tesseract.exe" }),
@@ -333,6 +337,9 @@ describe("Tesseract 第二引擎表观面（T-B4-11）", () => {
     // 正对照：填对路径后错误行消失
     vi.mocked(hostConfigSet).mockResolvedValue(undefined);
     await typeInput(exeInput!, "C:\\Program Files\\Tesseract-OCR\\tesseract.exe");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 450));
+    });
     expect(container.textContent).not.toContain("必须是绝对路径");
   });
 });

@@ -65,6 +65,7 @@ import {
 import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
+import { sharedTab, sharedTabActive } from "../../components/tabStyles";
 import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
@@ -93,20 +94,9 @@ const useStyles = makeStyles({
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "120px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  tab: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    padding: "4px 10px",
-    borderRadius: tokens.borderRadiusMedium,
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    cursor: "pointer",
-    fontSize: tokens.fontSizeBase200,
-  },
-  tabActive: {
-    backgroundColor: tokens.colorNeutralBackground3Hover,
-    border: `1px solid ${tokens.colorBrandForeground1}`,
-  },
+  // STD-06：Tab 样式收敛（唯一出处 src/components/tabStyles.ts）
+  tab: sharedTab,
+  tabActive: sharedTabActive,
   termHost: {
     height: "420px",
     border: `1px solid ${tokens.colorNeutralStroke1}`,
@@ -854,9 +844,15 @@ export default function TerminalPanel() {
 
           <div className={styles.row}>
             {sessions.map((s) => (
-              <button
+              // STD-03：<button> 内嵌 role=button 是非法 HTML（交互内容嵌套）——
+              // 外层降为 span[role=button]，内层 ✕ 与之成为兄弟可激活元素
+              <span
                 key={s.id}
                 className={`${styles.tab} ${active === s.id ? styles.tabActive : ""}`}
+                role="button"
+                tabIndex={0}
+                aria-pressed={active === s.id}
+                onKeyDown={keyActivate(() => setActive(s.id))}
                 onClick={() => setActive(s.id)}
               >
                 {s.title}
@@ -868,12 +864,13 @@ export default function TerminalPanel() {
                     void killSession(s);
                   }}
                   role="button"
+                  aria-label={`关闭会话 ${s.title}`}
                   tabIndex={0}
                   onKeyDown={keyActivate(() => void killSession(s))}
                 >
                   ✕
                 </span>
-              </button>
+              </span>
             ))}
           </div>
 
