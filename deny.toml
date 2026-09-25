@@ -49,14 +49,17 @@ yanked = "deny"
 # GOV-02 实测首轮命中 22 条（2026-09-25，本机 advisory-db 快照 593df8c 实跑）。
 # 全部属"跨 API 依赖升级立项"，逐条挂账 DECISIONS D-35，禁止无理由 ignore：
 #   wasmtime 18 条 → D-36 R-H1 已消解（29→36 LTS，ignore 行随批删除，deny 复绿为验收）
-#   russh 2 条 + ed25519-dalek 1 条 → term/file-core SSH 栈升级立项（0.46→≥0.60）
+#   russh 2 条 → D-36 R-H2 已消解（0.46→0.63.3，ignore 行随批删除）；ed25519-dalek 1.x
+#     源随升级消失（现 russh 直依 dalek 3.0.0，无通告命中）
+#   RUSTSEC-2023-0071 挂账换形（D-36 R-H2 实测）：db 现值指向 rsa 0.10.0-rc.18
+#     （Marvin 计时侧信道，上游 patched=[] 无安全升级位）。摘除需砍 russh "rsa"
+#     feature＝砍用户 id_rsa 认证能力，属功能裁决待用户；桌面客户端本地用
+#     +TOFU 钉服模型下威胁面收窄（恶意服务端观测签名时序）。
 #   lopdf 1 条 → editor-core 升级立项（0.36→≥0.42）
 # 立项落地即删对应行；期间新增漏洞仍会照常报红（只 ignore 已登记 ID）。
 ignore = [
-    # --- SSH 栈（D-35 挂账 ②）---
-    { id = "RUSTSEC-2026-0153", reason = "D-35 挂账：russh 0.46→≥0.60 升级立项" },
-    { id = "RUSTSEC-2026-0154", reason = "D-35 挂账：russh 0.46→≥0.60 升级立项" },
-    { id = "RUSTSEC-2023-0071", reason = "D-35 挂账：ed25519-dalek 1.x（russh-keys 传递）随 russh 升级消解；本仓密钥为 DPAPI 封装本地生成，非 HD 派生面" },
+    # --- 换形挂账（D-36 R-H2 登记，威胁面与处置见上方注释）---
+    { id = "RUSTSEC-2023-0071", reason = "D-36 R-H2 换形挂账：rsa 0.10.0-rc.18 Marvin 计时侧信道，上游 patched=[] 无安全升级位；摘除=砍 RSA 认证能力属功能裁决待用户" },
     # --- PDF（D-35 挂账 ③）---
     { id = "RUSTSEC-2026-0187", reason = "D-35 挂账：lopdf 0.36→≥0.42 升级立项" },
 ]

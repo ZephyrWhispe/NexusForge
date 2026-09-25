@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use russh::client::{self, Handle};
-use russh::keys::key::PublicKey;
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -188,9 +188,12 @@ impl KnownHosts {
 }
 
 /// 整键描述符组形口：russh 公钥 → `"{algo} {SHA256:base64}"`（盘上比对与
-/// UI 展示的是同一串，永不只取 base64 段）
-fn whole_key_of(key: &PublicKey) -> String {
-    format!("{} {}", key.name(), key.fingerprint())
+/// UI 展示的是同一串，永不只取 base64 段）。D-36 R-H2：russh 0.63 起入参为
+/// `PublicKeyOrCertificate`（证书取其内嵌公钥）；`Algorithm`/`Fingerprint` 的
+/// Display 即线名与 OpenSSH 裸 base64 口径，与 0.46 落盘格式逐字一致。
+fn whole_key_of(key: &PublicKeyOrCertificate) -> String {
+    let pk = key.public_key();
+    format!("{} {}", pk.algorithm(), pk.fingerprint(HashAlg::Sha256))
 }
 
 /// TOFU 三态 → TermError 的统一裁决出口（Handler 臂与测试臂共用一枚——
@@ -221,13 +224,13 @@ struct TofuHandler {
     fwd_inbox: FwdInbox,
 }
 
-#[async_trait]
+// D-36 R-H2：russh 0.63 的 Handler 已是 RPITIT 原生 async trait（不再经 async-trait 宏）
 impl client::Handler for TofuHandler {
     type Error = TermError;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
         tofu_verdict(
             &self.known,
@@ -239,7 +242,8 @@ impl client::Handler for TofuHandler {
     }
 
     /// 服务端为已批准的 -R 监听拨入的新连接（T-B7-5）：有 Remote 腿在等
-    /// 就把通道交出去，没人在等则关通道——不静默吞掉一条外部连接
+    /// 就把通道交出去，没人在等则显式拒开——不静默吞掉一条外部连接。
+    /// D-36 R-H2：0.63 起带 `reply` 受理柄（accept/reject 前通道未成立）。
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
         channel: Channel<client::Msg>,
@@ -247,21 +251,26 @@ impl client::Handler for TofuHandler {
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
+        reply: client::ChannelOpenHandle,
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
         if self.fwd_inbox.has(connected_address, connected_port).await {
+            reply.accept().await;
             let stream = Box::new(channel.into_stream()) as DynStream;
             self.fwd_inbox
                 .route(connected_address, connected_port, stream)
                 .await;
         } else {
-            let _ = channel.close().await;
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
         }
         Ok(())
     }
 }
 
-/// 认证（密码 / 私钥路径）；0.46 返回 Result<bool>
+/// 认证（密码 / 私钥路径）；0.63 起两臂返回 `AuthResult`，RSA 键须先按
+/// 服务端 `server-sig-algs` 协商哈希（缺省退化为遗留 SHA-1，不合口径）
 async fn authenticate(handle: &mut Handle<TofuHandler>, user: &str, auth: &SshAuth) -> Result<()> {
     let ok = match auth {
         SshAuth::Password { password } => handle
@@ -286,13 +295,22 @@ async fn authenticate(handle: &mut Handle<TofuHandler>, user: &str, auth: &SshAu
             };
             use zeroize::Zeroize;
             buf.zeroize();
+            let hash_alg = if key.algorithm().is_rsa() {
+                handle
+                    .best_supported_rsa_hash()
+                    .await
+                    .map_err(|e| TermError::Auth(format!("server-sig-algs 协商失败: {e}")))?
+                    .flatten()
+            } else {
+                None
+            };
             handle
-                .authenticate_publickey(user, Arc::new(key))
+                .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg))
                 .await
                 .map_err(|e| TermError::Auth(format!("公钥认证失败: {e}")))?
         }
     };
-    if ok {
+    if matches!(ok, client::AuthResult::Success) {
         Ok(())
     } else {
         Err(TermError::Auth("服务器拒绝认证凭据".into()))
@@ -880,7 +898,7 @@ impl Tunnel for RusshTunnel {
     }
 
     async fn tcpip_forward(&self, addr: &str, port: u32) -> Result<u32> {
-        let mut h = self.handle.lock().await;
+        let h = self.handle.lock().await;
         h.tcpip_forward(addr.to_string(), port)
             .await
             .map_err(|e| TermError::Forward(format!("tcpip_forward 请求 {addr}:{port} 失败: {e}")))

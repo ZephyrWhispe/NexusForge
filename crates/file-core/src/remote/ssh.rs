@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use russh::client::{self, Handle};
 use russh::ChannelMsg;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -689,8 +688,8 @@ impl Drop for SftpDriver {
 }
 
 // ---------------------------------------------------------------------------
-// 真协议腿：russh 实现（0.46，与 term-core 同锁内版本；两份 SSH 栈的重复
-// 成本按承重⑫ 登记——为共享一份栈而跨 crate 抽层会牵 term 的会话面，属 §6.3）
+// 真协议腿：russh 实现（D-36 R-H2 起 0.63，与 term-core 同锁内版本；两份 SSH
+// 栈的重复成本按承重⑫ 登记——为共享一份栈而跨 crate 抽层会牵 term 的会话面，属 §6.3）
 // ---------------------------------------------------------------------------
 
 /// russh Handler：探测臂 `expect=None` 只捕获密钥并中止 KEX（凭据不出网）；
@@ -701,16 +700,18 @@ struct FileSshHandler {
     captured: Arc<parking_lot::Mutex<Option<(String, String)>>>,
 }
 
-#[async_trait]
+// D-36 R-H2：russh 0.63 的 Handler 为 RPITIT 原生 async trait；check_server_key
+// 入参改 PublicKeyOrCertificate（证书取内嵌公钥），Display 口径与 0.46 落盘逐字一致
 impl client::Handler for FileSshHandler {
     type Error = FileError;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        let algo = server_public_key.name().to_owned();
-        let fp = server_public_key.fingerprint();
+        let pk = server_public_key.public_key();
+        let algo = pk.algorithm().to_string();
+        let fp = pk.fingerprint(russh::keys::HashAlg::Sha256).to_string();
         *self.captured.lock() = Some((algo.clone(), fp.clone()));
         let desc = server_key_descriptor(&algo, &fp);
         Ok(self
@@ -793,10 +794,21 @@ async fn auth_russh(
                 }
             };
             buf.zeroize();
-            handle.authenticate_publickey(user, Arc::new(key)).await?
+            // D-36 R-H2：0.63 起认证返回 AuthResult；RSA 键先按 server-sig-algs 协商哈希
+            let hash_alg = if key.algorithm().is_rsa() {
+                handle.best_supported_rsa_hash().await?.flatten()
+            } else {
+                None
+            };
+            handle
+                .authenticate_publickey(
+                    user,
+                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
+                )
+                .await?
         }
     };
-    if ok {
+    if matches!(ok, client::AuthResult::Success) {
         Ok(())
     } else {
         Err(FileError::Remote {

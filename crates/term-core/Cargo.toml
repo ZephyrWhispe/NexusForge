@@ -19,6 +19,6 @@ hex = "0.4"
 zeroize = { workspace = true }
 
 # T3 SSH/SFTP（docs/impl/06 T3）：russh + russh-sftp（Handler 为 async_trait 风格）
-russh = "0.46"
+russh = { version = "0.63", default-features = false, features = ["flate2", "rsa", "ring"] } # D-36 R-H2: 0.46→0.63（修复位≥0.60.3）；ring 后端替 aws-lc-rs（本机无 NASM）
 russh-sftp = "2"
 async-trait = "0.1"
