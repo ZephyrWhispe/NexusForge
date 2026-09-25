@@ -13,7 +13,8 @@
 //! 后续会话（K3）以 paired.json 的指纹白名单为准入依据。
 
 use parking_lot::{Mutex, RwLock};
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,12 @@ use crate::locksync::sync_toward;
 pub const CODE_TTL: Duration = Duration::from_secs(120);
 /// 错误尝试上限（达到即作废当前码）
 pub const MAX_ATTEMPTS: u8 = 5;
+/// SEC-11（D-37 R-I1）：同一来源 IP 的连续失败上限。取 MAX_ATTEMPTS+1——
+/// 合法用户打错 5 次先触发码作废重签（既有语义），打不满这个限；连败烧穿
+/// 者只剩脚本试探一种画像，临时封禁对合法配对零感知。
+const MAX_IP_ATTEMPTS: u32 = 6;
+/// 超限后的临时封禁时长（过期自动清零，非永久拉黑）
+const IP_BLOCK: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // 一次性码
@@ -150,7 +157,7 @@ struct PairReplyPayload {
     device_name: String,
     pubkey_b64: String,
     fingerprint: String,
-    /// Reject 时的原因：code | fingerprint | self | busy
+    /// Reject 时的原因：code | fingerprint | self | busy | throttled（throttled＝SEC-11 IP 限速，旧发起端按未知原因原样展示，语义兼容）
     reason: Option<String>,
     /// 应答端锁键灯态（T-B7-9 首次配对时机；仅 PairAccept 携带，Reject 恒 None。
     /// 版本偏差登记（§7.3 冒烟清单）：旧对端无此键 ⇒ None=未知不静默对齐；
@@ -174,6 +181,14 @@ pub struct PairingService {
     store: Arc<PairStore>,
     /// T-B7-9 修饰键同步端口（init 后经 set_led 注入；None=无键盘灯态面，配对帧不携带 locks）
     led: RwLock<Option<Arc<dyn KeyboardLedPort>>>,
+    /// SEC-11（D-37 R-I1）：按 IP 的连续失败簿记（封禁随 IP_BLOCK 自动过期）
+    throttle: Mutex<HashMap<IpAddr, IpRecord>>,
+}
+
+#[derive(Default)]
+struct IpRecord {
+    failures: u32,
+    blocked_until: Option<Instant>,
 }
 
 /// 配对成功回调（服务端接受 / 客户端完成均触发）
@@ -213,6 +228,7 @@ impl PairingService {
             codes,
             store,
             led: RwLock::new(None),
+            throttle: Mutex::new(HashMap::new()),
         })
     }
 
@@ -224,6 +240,50 @@ impl PairingService {
     /// 本机锁键灯态（端口缺失 ⇒ None=未知，配对帧不携带、对端不静默对齐）
     fn led_states(&self) -> Option<LockStates> {
         self.led.read().as_ref().map(|p| p.read_lock_states())
+    }
+
+    /// SEC-11：该 IP 是否处于封禁期（顺带回收过期记录；未知来源不阻断）
+    fn ip_blocked(&self, ip: Option<IpAddr>) -> bool {
+        let Some(ip) = ip else { return false };
+        let mut map = self.throttle.lock();
+        let Some(rec) = map.get_mut(&ip) else {
+            return false;
+        };
+        let Some(until) = rec.blocked_until else {
+            // 有连败记录但未达封禁：诚实放行且**不清计数**（首版误在此
+            // remove，计数每轮被清零，封禁永不触发——DBG 取证坐实后修正）
+            return false;
+        };
+        if Instant::now() < until {
+            return true;
+        }
+        map.remove(&ip); // 封禁期满：整条回收，计数从零重启
+        false
+    }
+
+    /// SEC-11：记一次来自该 IP 的码校验失败；连败达上限即临时封禁
+    fn note_code_failure(&self, ip: Option<IpAddr>) {
+        let Some(ip) = ip else { return };
+        let mut map = self.throttle.lock();
+        let rec = map.entry(ip).or_default();
+        if rec
+            .blocked_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            *rec = IpRecord::default();
+        }
+        rec.failures += 1;
+        if rec.failures >= MAX_IP_ATTEMPTS {
+            rec.blocked_until = Some(Instant::now() + IP_BLOCK);
+            tracing::warn!(%ip, failures = rec.failures, "KVM 配对连败达上限，临时封禁该来源 IP");
+        }
+    }
+
+    /// 配对成功即清零该 IP 连败计数（合法用户的偶发打错不跨码累积）
+    fn clear_ip_failures(&self, ip: Option<IpAddr>) {
+        if let Some(ip) = ip {
+            self.throttle.lock().remove(&ip);
+        }
     }
 
     /// 配对请求接入循环（被配对端）：仅处理 PairRequest 帧
@@ -314,8 +374,16 @@ impl PairingService {
             if !verify_binding(&pubkey, &req.fingerprint) {
                 reject!("fingerprint");
             }
-            // ③ 一次性码校验
+            // ③ SEC-11（D-37 R-I1）：按 IP 封禁期直接拒绝——不消费码尝试预算
+            // （否则单攻击者可用自身失败烧穿共享槽位，把合法用户的 5 次额度用光）
+            let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
+            if self.ip_blocked(peer_ip) {
+                tracing::warn!(from = %req.device_id, ip = ?peer_ip, "KVM 配对请求被 IP 限速拒绝");
+                reject!("throttled");
+            }
+            // ④ 一次性码校验
             if let Err(e) = self.codes.validate(&req.code) {
+                self.note_code_failure(peer_ip);
                 let reason = match e {
                     CodeError::Mismatch => "code",
                     CodeError::Expired => "code",
@@ -324,7 +392,8 @@ impl PairingService {
                 tracing::warn!(from = %req.device_id, ?e, "KVM 配对码校验失败");
                 reject!(reason);
             }
-            // ④ 落盘 + 应答
+            self.clear_ip_failures(peer_ip);
+            // ⑤ 落盘 + 应答
             let peer = PairedPeer {
                 device_id: req.device_id.clone(),
                 device_name: req.device_name,
@@ -601,6 +670,106 @@ mod tests {
         );
         // 拒绝后不落盘
         assert!(store_a.all().is_empty());
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// SEC-11（D-37 R-I1）抢占负例：嗅探者抢先发同码 PairRequest——钉住
+    /// "先到者胜"现状语义：后到者必被协议层显式拒绝，且被拒方不落盘。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pair_concurrent_requests_first_wins() {
+        let dir_a = temp_dir("ca");
+        let dir_a2 = temp_dir("ca2");
+        let dir_b = temp_dir("cb");
+        let id_a = Arc::new(DeviceIdentity::generate("PC-A".into()));
+        let id_a2 = Arc::new(DeviceIdentity::generate("PC-A2".into()));
+        let id_b = Arc::new(DeviceIdentity::generate("PC-B".into()));
+        let codes_b = Arc::new(PairCodeManager::new());
+        let store_a = Arc::new(PairStore::load_or_default(&dir_a).unwrap());
+        let store_a2 = Arc::new(PairStore::load_or_default(&dir_a2).unwrap());
+        let store_b = Arc::new(PairStore::load_or_default(&dir_b).unwrap());
+        let svc_a = PairingService::new(id_a, Arc::new(PairCodeManager::new()), store_a);
+        let svc_a2 = PairingService::new(id_a2, Arc::new(PairCodeManager::new()), store_a2);
+        let svc_b = PairingService::new(id_b, codes_b.clone(), store_b.clone());
+
+        let (code, _) = codes_b.issue();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _handle = svc_b
+            .accept_loop(listener, Arc::new(Mutex::new(None)))
+            .await;
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+        let (r1, r2) = tokio::join!(svc_a.pair_with(addr, &code), svc_a2.pair_with(addr, &code));
+        let oks = [r1.is_ok(), r2.is_ok()].iter().filter(|b| **b).count();
+        assert_eq!(oks, 1, "单次使用码下恰有一方成功（先到者胜）");
+        // 失败方必收到显式 PairReject（不能退化为 EOF/超时——与 D-17 回归同判据）
+        let err = [r1, r2]
+            .into_iter()
+            .find_map(Result::err)
+            .expect("必有一方被拒");
+        assert!(
+            matches!(&err, AppError::Module { code, message, .. }
+                if code == "KVM_PAIR_005" && message.contains("code")),
+            "后到者应被 PairReject 拒绝，实际: {err:?}"
+        );
+        // 服务端至多一份落盘（无重复信任记录）
+        assert_eq!(store_b.all().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_a2);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// SEC-11（D-37 R-I1）限速负例：①成功清零连败计数（合法用户偶发打错
+    /// 不跨码累积）；②同 IP 连续失败达上限后，即使码正确也必被
+    /// `throttled` 显式拒绝，且不再消费新码的尝试预算。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pair_ip_throttle_after_consecutive_failures() {
+        let dir_a = temp_dir("ta");
+        let dir_b = temp_dir("tb");
+        let id_a = Arc::new(DeviceIdentity::generate("PC-A".into()));
+        let id_b = Arc::new(DeviceIdentity::generate("PC-B".into()));
+        let codes_b = Arc::new(PairCodeManager::new());
+        let store_a = Arc::new(PairStore::load_or_default(&dir_a).unwrap());
+        let store_b = Arc::new(PairStore::load_or_default(&dir_b).unwrap());
+        let svc_a = PairingService::new(id_a, Arc::new(PairCodeManager::new()), store_a);
+        let svc_b = PairingService::new(id_b, codes_b.clone(), store_b);
+
+        let (code, _) = codes_b.issue();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _handle = svc_b
+            .clone()
+            .accept_loop(listener, Arc::new(Mutex::new(None)))
+            .await;
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+        // ① 三次打错 + 一次打对 = 成功（3+1 均低于两侧上限），成功清零计数
+        for _ in 0..3 {
+            assert!(svc_a.pair_with(addr, "000000").await.is_err());
+        }
+        assert!(svc_a.pair_with(addr, &code).await.is_ok());
+
+        // ② 连败烧穿上限：码作废后继续空打至 MAX_IP_ATTEMPTS 触发封禁
+        let (_code2, _) = codes_b.issue();
+        for _ in 0..MAX_IP_ATTEMPTS {
+            assert!(svc_a.pair_with(addr, "999999").await.is_err());
+        }
+        // 封禁期内即使码正确也必拒，且 reason=throttled（非 code——
+        // 证明未消费新码的尝试预算，合法用户解封后额度完好）
+        let (code3, _) = codes_b.issue();
+        let err = svc_a
+            .pair_with(addr, &code3)
+            .await
+            .expect_err("封禁期内必须拒绝");
+        assert!(
+            matches!(&err, AppError::Module { code, message, .. }
+                if code == "KVM_PAIR_005" && message.contains("throttled")),
+            "应收到 reason=throttled 的 PairReject，实际: {err:?}"
+        );
+        // 码本体未被消费：封禁拒绝后正确码仍在（换个"IP"即本机无法模拟，
+        // 以 has_active 坐实未被作废即可）
+        assert!(codes_b.has_active(), "throttled 拒绝不得消费活跃码");
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
     }

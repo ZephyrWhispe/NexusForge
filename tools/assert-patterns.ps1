@@ -1,4 +1,4 @@
-# GOV/P-01..P-09 源码范式断言（docs/review-2026-09-25/07 §3 落地）。
+﻿# GOV/P-01..P-09 源码范式断言（docs/review-2026-09-25/07 §3 落地）。
 # 每条断言对应审查发现；命中即 exit 1 并列出行号。豁免必须写进本文件并附理由。
 $ErrorActionPreference = 'Stop'
 $fail = 0
@@ -11,7 +11,9 @@ function Invoke-Scan {
             Where-Object { $_.FullName -notmatch '\\tests\\' }
     }
     foreach ($f in $files) {
-        $lines = @(Get-Content $f.FullName)
+        # 显式 UTF-8：本仓 .rs 注释含中文，PS 5.1 默认 ANSI 读取会乱码
+        # 致豁免锚匹配失效（配合本脚本 UTF-8 BOM 保存，二者同根修）
+        $lines = @(Get-Content $f.FullName -Encoding UTF8)
         $inTest = $false
         for ($i = 0; $i -lt $lines.Count; $i++) {
             $ln = $lines[$i]

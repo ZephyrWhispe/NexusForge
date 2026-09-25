@@ -1,4 +1,4 @@
-# P-12 文档-代码一致性核对（docs/review-2026-09-25/07 §3 落地）。
+﻿# P-12 文档-代码一致性核对（docs/review-2026-09-25/07 §3 落地）。
 # 断言：①DESIGN §6.3 代码块 `fn` 命令名 ⊆ generate_handler! 注册表；
 #      ②docs/DECISIONS.md 详情条目 D-xx 全部出现在 §1 摘要表；
 #      ③README/文档引用的 `cargo test -p <crate>` 的 crate 真实存在。

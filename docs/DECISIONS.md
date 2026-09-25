@@ -45,7 +45,8 @@
 | D-33 | B8 裁决落地：放行 KVM 拖拽传文件（T-B8-1；附 B8 六题与 D-31/D-32 裁决留痕） | 补实现 | P2 | B8 | 已完成（e329a5c） |
 | D-34 | 全量审查 2026-09-25 整改战役（批次 A–F：SEC-01 P0 热修 + P1 安全/数据完整性 + 治理门禁；附挂账与驳回台账） | 补实现 | P1 | R-A..R-F | 实施中（代码/测试/文档面已落，终态见本条状态行） |
 | D-35 | GOV-02 门禁坐实（联网后 cargo-deny/npm audit/两枚 ps1 真实执行）＋实测揪出的接线缺口与 22 条 RUSTSEC 挂账 | 补实现 | P2 | R-G | 已完成（本条随批入册，见状态行） |
-| D-36 | D-35 挂账四题放行：wasmtime/russh/lopdf/前端工具链四枚升级立项开工 | 补实现 | P1 | R-H1..H4 | 四批已完成（wasmtime 36.0.16/russh 0.63.3/lopdf 0.45/vite 8+vitest 5+react 6）；剩 rsa/Marvin 换形挂账待用户 |
+| D-36 | D-35 挂账四题放行：wasmtime/russh/lopdf/前端工具链四枚升级立项开工 | 补实现 | P1 | R-H1..H4 | 已完成（四批入库＋rsa/Marvin 经用户裁决"保留 ignore 行不砍 RSA 能力"收口，见 D-37）；剩 SSH 真机冒烟待用户 |
+| D-37 | "不影响使用全部放行"：D-34 挂账可放行列＋D-36 余项裁决落地（SEC-11 缓解子集/GOV-09 参数契约/STD-05 颜色/PERF-03 半项） | 补实现 | P2 | R-I1..I4 | 实施中（R-I1 完成；R-I2..I4 接续） |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -411,12 +412,28 @@
 - **依据**：RUSTSEC 通告修复区间（deny 实跑日志逐条在册）；index.crates.io/registry.npmjs.org 现值亲验。
 - **代价**：russh 0.46→0.63 跨 17 个 minor（Handler/key API 漂移面最大）；vite 5→8 大版本两跳（manualChunks 配置面与 vitest 夹具面波及既有 91 files 测试配置）。
 - **验收**：每批删行后 `cargo deny check` 复绿（advisories 面对应条目消失）；R-H1..H3 终态 **ignore 台账仅剩零行或明确新挂账**；四门链（fmt/clippy/cargo test/tsc/eslint/vitest/build）逐批终态树回声全 0；wasmtime/russh 行为测试（P-04 三性质、SFTP 腿、TOFU 指纹面）不得裁减。
-- **状态**：R-H1..H4 四批全部完成（各批验收回声见实施记录）。**遗留待用户**：rsa/Marvin 换形挂账（deny.toml 唯一余行）裁决；SSH/SFTP 真机冒烟（握手/认证/forwarded-tcpip 三腿在 0.63 属真机面，本机不可测）。
+- **状态**：R-H1..H4 四批全部完成（各批验收回声见实施记录）。**遗留收口（2026-09-25 用户裁决，落地见 D-37）**：rsa/Marvin 换形题已裁——摘除＝砍 id_rsa 认证能力属"影响使用"，不摘，deny.toml 该 ignore 行转**常设保留**；SSH/SFTP 真机冒烟（握手/认证/forwarded-tcpip 三腿在 0.63 属真机面，本机不可测）仍待用户。
 - **实施记录**：
   - **R-H1 wasmtime 29→36.0.16 已完成（2026-09-25）**：唯一 API 漂移面＝Store 数据 `'static` 化（v36 起 `Store::new` 要求 `T: Send + Sync + 'static`，原 `HostCtx<'a { host: &'a dyn WasmHost }` 借用触发 E0521）。形制：`HostCtx` 持 `Arc<dyn WasmHost>`；`WasmRuntime::run` 签名改收 `Arc<dyn WasmHost>`；`HostActionHandler` 新增 `self_ref: RwLock<Option<Weak<dyn WasmHost>>>` + `attach_self`（init 接线弱自引用，弱引用防与属主 Arc 成环），`run_wasm` 升级失败即报"WASM 宿主自引用未接线"。行为测试零裁减：automation-core 31/31（含 fuel 死循环、内存炸弹、SEC-16 URL 白名单、COR-02 越界读全数在册）。deny.toml 删 18 行 wasmtime ignore；本机 advisory-db 快照实跑 `DENY_EXIT=0`（advisories ok: 0 errors）。门禁回声：FMT/CLIPPY/TEST 全 0，ASSERT/DOCS 脚本 0。
   - **R-H2 russh 0.46→0.63.3 已完成（2026-09-25）**：漂移面五处（term/file 两 crate 收敛于各自 ssh.rs）——① Handler 改 RPITIT 原生 async trait（去 `#[async_trait]`，file-core 的 async-trait 依赖随之摘除）；② `check_server_key` 入参 `keys::key::PublicKey`→`keys::PublicKeyOrCertificate`（证书取内嵌公钥；`Algorithm`/`Fingerprint` Display 口径与 0.46 落盘 `"{algo} {SHA256:base64无填充}"` 逐字一致，known_hosts 兼容）；③ `server_channel_open_forwarded_tcpip` 增 `reply: ChannelOpenHandle` 受理柄（有腿 accept 后交付、无腿显式 `reject(AdministrativelyProhibited)`，语义与旧"关通道"等价且不静默）；④ 认证返回 `bool`→`AuthResult`，`authenticate_publickey` 改收 `PrivateKeyWithHashAlg`，RSA 键先 `best_supported_rsa_hash()` 按 server-sig-algs 协商（消除遗留 SHA-1 退化）；⑤ `tcpip_forward` 收 `&self`。**偏差登记 A（选型②内）**：crypto 后端取 `ring` 非默认 `aws-lc-rs`——本机无 NASM，aws-lc-sys 构建失败（如实测记录），`default-features=false + ["flate2","rsa","ring"]`。**偏差登记 B（挂账换形）**：russh 0153/0154 两行删除坐实；RUSTSEC-2023-0071 在 db 现值指向 `rsa 0.10.0-rc.18`（Marvin 计时侧信道，patched=[] 无安全升级位），dalek 1.x 消解目标已达成（现 russh 直依 dalek 3.0.0 零命中）；rsa 换形为新挂账留册——摘除需砍 russh "rsa" feature＝砍用户 id_rsa 认证能力，属功能裁决**待用户**。测试：term-core 140 / file-core 41 全绿；`DENY_EXIT=0`。
   - **R-H3 lopdf 0.36→0.45 已完成（2026-09-25）**：选型③"取最新 0.45"直接命中——root 依赖行版本号翻正后 `default-features = false` 面**零 API 漂移**（check 一次全绿，无需回退 0.42 线）；editor-core 30+1 测试全绿；deny.toml 删 RUSTSEC-2026-0187 行，`DENY_EXIT=0`（advisories ok，ignore 台账仅剩 2023-0071 换形一行）。
   - **R-H4 前端工具链 vite ^8.3.1 + vitest ^5.0.2 + @vitejs/plugin-react ^6.1.1 已完成（2026-09-25）**：三枚按选型④字面翻正后**配置面零改动通过**——vite.config.ts 的 `rollupOptions.output.manualChunks` 经 rolldown-vite 兼容层原样生效（monaco/xterm/fluentui/vendor 分包形态逐块在册，PERF-03 面不回收）、vitest.config.ts 的 jsdom+virtualGlobal setupFiles 夹具不变。回声：tsc 0 / eslint 0（仅既有 1 warning）/ vitest **91 files 353 tests 全绿**（vitest 5 下零用例裁减）/ build 0。审计坐实：`npm audit`（含 dev）**0 漏洞**——D-35 挂账④的 vitest/esbuild×3 dev 通告随升级归零；`--omit=dev --audit-level=high`（CI 阻断面）0。Rust 面零触碰（grep 证无 package.json 消费者，随批不动三枚 Rust 门）。
+
+### D-37 "不影响使用全部放行"：D-34 挂账可放行列与 D-36 余项的裁决落地（承 D-22 规则 4 与 D-34 挂账条款"翻案须新决策编号"）
+
+- **背景**：2026-09-25 用户对 D-34 挂账四题+半项与 D-36 余项给出统一放行判据——"不影响使用全部放行，然后继续后续任务"。据此逐题二分：凡改动会移除/变更既有用户可感知能力或需真机证据者**不放行**，纯测试面、行为等价重构、只增防线不扰合法路径者放行。
+- **决策**：四枚独立批次 R-I1..I4，各自成提交、各过本域门禁——
+  - **R-I1（SEC-11 短期缓解子集）**：① 配对请求**按 IP 失败限速**（pairing.rs 现每码 5 次尝试上限＝全局槽位共享，攻击者可用一次请求烧尽合法用户的尝试预算；补 per-IP 连续失败计数，超限临时封禁该 IP，`peer_addr()` 在 `handle_pair_conn` 现场可取）；② **抢占负例测试**（平行第二 `PairRequest` 后到者必拒，钉住"先到者胜"现状语义）；③ **配对成功强提醒**——前端对既有 `kvm.paired` 事件（`host-core` topic 在册、`nf:event` 已转发）补 toast+通知级提醒，"立即撤销"复用既有 `kvm_unpair`。**明确不放行**：SPAKE2 协议重设计（双端升级协商面，破坏既有配对兼容＝影响使用）、窗口 120→60s（正常操作受影响）、指纹人工核对流程（改变配对 UX）。
+  - **R-I2（GOV-09 参数级契约）**：新增契约测试——前端 `src/ipc/client.ts` 每个 `invoke` 目标名 ∈ `generate_handler!` 注册表，且其内联 payload **顶层键集合 ⊆ 对应命令签名的参数名集合**（按 Tauri v2 默认 camelCase↔snake_case 换算；State 等注入参数除外）；命令签名用与 `security_config.rs::registered_commands` 同族的手写解析提取。纯测试面，零运行时触碰。
+  - **R-I3（STD-05 颜色收口）**：新建主题调色板常量文件（`src/theme/palette.ts`）吸收**必须具体色值**的 ≈30 处（canvas 绘制、xterm 主题、覆盖层半透明 scrim/toolbar、Mica 渐变、beautify 预设、JPEG 合成底色）；可 token 化的 ≈8 处换 Fluent token（`#fff`/`#c50f1f`→error token 等——主题跟随是本条 finding 的裁决目的，像素级微移属预期）。**magic px 552 处/内联 style 168 处维持"只减不增"渐进规**（07 §7 看板追踪），本批不整批改写。
+  - **R-I4（PERF-03 半项·可回退批）**：`src/monaco/setup.ts` 全量入口改 esm 按需装配——`editor.api` + `editor.all`（编辑器能力不减：查找/折叠等全保）+ 仅 `languageForPath` 实际服务的 24 个语言 ID 的 contribution + json/css/html/ts 四门语言服务；**setup.ts 导出面逐字不变**（9 枚测试夹具按约定只 mock setup，形制零感知）。验收硬判据：`vite build` 前后 dist 对比（monaco chunk 体积必须下降、其余 chunk 不膨胀）+ tsc/eslint/vitest 全绿；若 esm 装配后 worker/语言服务在本机无法给出行为对等证据，**回退全量入口并登记偏差**，不静默半改。
+  - **SEC-12 维持挂账**：D-34 禁则"显式防火墙/路由规则须真机验收、禁在无实机证据下写入网络栈副作用"不因放行令解除——规则写错恰会**影响使用**（本机断网/环路），且属宿主级副作用；待真机冒烟批次一并做。
+- **依据**：审查原文 02-security SEC-11/12、04-performance PERF-03、05-standards STD-05/GOV-09；本会话三面勘察实测（pairing.rs 防线与事件链、client.ts≈256 invoke 点与命令签名形状、颜色清单 7 文件 ≈40 生产点+4 测试文件）。
+- **代价**：per-IP 限速引入新状态（IP→连败计数/封禁至），体量一枚小 map；R-I2 手写解析器随命令面演进有维护成本（既有同族先例两处在册）；palette 文件新增一层命名。
+- **验收**：R-I1 抢占与限速负例测试必存（kvm-core 测试零裁减）；R-I2 契约测试首跑必须真绿（若抓到漂移，逐条裁决不得静默豁免）；R-I3 审查度量脚本颜色字面量计数下降且 tsc/eslint/vitest/build 全 0；R-I4 dist 体积对比入提交说明；四门链逐批终态树回声全 0；未推送（standing ruling）。
+- **状态**：实施中（R-I1 完成，R-I2..I4 接续）。
+- **实施记录**：
+  - **R-I1（SEC-11 短期缓解，2026-09-25 本批）**：① per-IP 限速落地 pairing.rs——`MAX_IP_ATTEMPTS=6`（刻意＝码尝试上限 5+1：合法用户单码至多烧 5 次，第 6 次必是跨码消耗，正常操作打不满）、`IP_BLOCK=60s` 自动解除；封禁检查置于 validate **之前**（reason=`throttled`，不消费新码尝试预算，解封后合法额度完好——负例测试以 `codes_b.has_active()` 钉住）；成功配对即 `clear_ip_failures`；`peer_ip` 于 `handle_pair_conn` 内 `stream.peer_addr()` 现场取，accept_loop 与 SessionManager 两条派发腿共用。② 抢占负例 `pair_concurrent_requests_first_wins`（tokio::join! 双请求同码，恰一枚 Ok、败者 KVM_PAIR_005+message 含 "code"、对端 store 仅 1 绑定）。③ 前端强提醒 `src/stores/kvmPairAlerts.ts`（`kvm.paired` && `payload.paired===true` → warn 级通知，"若非本人操作立即解除"指引复用既有 `kvm_unpair`；feed 形制同 desktopReminders，MainWorkbench 挂载点接线），负例测试钉非配对噪声不弹。**根因取证一枚**：首版 `ip_blocked` 在"有连败但未达封禁"分支误 `map.remove`，计数每轮被清零、封禁永不触发——DBG 探针实测 `failures` 冻结在 1 坐实后修正为诚实放行且不清计数；教训＝限速类状态机测试必须 dump 内部map而非只看外部行为。工具面随批：`tools/*.ps1` 补 UTF-8 BOM + `Get-Content -Encoding UTF8`（PS 5.1 无 BOM 按 GBK 解码，中文注释尾字节吞掉下一行 `$var`——豁免锚点匹配/变量赋值双失效，教训第四枚）。门禁终态树回声全 0：fmt/clippy(-D)/workspace 57 目标 **1036 passed / 0 failed**（--skip two_instances）/tsc/eslint/vitest 92 files 354 tests/build/assert/docs/deny（`advisories ok, bans ok, licenses ok, sources ok`）。
 
 ---
 
