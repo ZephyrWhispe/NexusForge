@@ -7,6 +7,7 @@
 //!
 //! wat feature 用于测试直接写 wat 样本（恶意样本验收：无限循环/内存炸弹被限额终止）。
 
+use std::sync::Arc;
 use wasmtime::{
     Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
 };
@@ -32,9 +33,11 @@ pub trait WasmHost: Send + Sync {
     fn notify(&self, title: &str, body: &str) -> Result<()>;
 }
 
-struct HostCtx<'a> {
+/// D-36 R-H1：wasmtime 36 起 Store 数据要求 `Send + Sync + 'static`，
+/// 宿主回调改持 `Arc<dyn WasmHost>`（原 `&'a dyn WasmHost` 借用触发 E0521）。
+struct HostCtx {
     limits: StoreLimits,
-    host: &'a dyn WasmHost,
+    host: Arc<dyn WasmHost>,
 }
 
 /// Store 数据是 HostCtx（limiter 闭包需要 &mut StoreLimits）；
@@ -53,7 +56,13 @@ impl WasmRuntime {
     }
 
     /// 执行 wasm 的导出函数（无参无返回）。fuel/内存超限或 guest trap → Err。
-    pub fn run(&self, wasm: &[u8], func: &str, caps: WasmCaps, host: &dyn WasmHost) -> Result<()> {
+    pub fn run(
+        &self,
+        wasm: &[u8],
+        func: &str,
+        caps: WasmCaps,
+        host: Arc<dyn WasmHost>,
+    ) -> Result<()> {
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| AutomationError::Action(format!("WASM 加载失败: {e}")))?;
         let mut store = Store::new(
@@ -78,7 +87,7 @@ impl WasmRuntime {
             .func_wrap(
                 "nf",
                 "log",
-                |mut caller: Caller<'_, HostCtx<'_>>, ptr: i32, len: i32| -> wasmtime::Result<()> {
+                |mut caller: Caller<'_, HostCtx>, ptr: i32, len: i32| -> wasmtime::Result<()> {
                     let msg = read_guest_str(&mut caller, ptr, len)?;
                     (caller.data().host).log(&msg);
                     Ok(())
@@ -91,10 +100,7 @@ impl WasmRuntime {
                 .func_wrap(
                     "nf",
                     "open_url",
-                    |mut caller: Caller<'_, HostCtx<'_>>,
-                     ptr: i32,
-                     len: i32|
-                     -> wasmtime::Result<()> {
+                    |mut caller: Caller<'_, HostCtx>, ptr: i32, len: i32| -> wasmtime::Result<()> {
                         let url = read_guest_str(&mut caller, ptr, len)?;
                         // SEC-16：ShellExecuteW("open") 对任意字符串都会尝试本地
                         // 程序/.lnk/自定义协议（ms-settings: 等）——插件授权
@@ -117,7 +123,7 @@ impl WasmRuntime {
                 .func_wrap(
                     "nf",
                     "notify",
-                    |mut caller: Caller<'_, HostCtx<'_>>,
+                    |mut caller: Caller<'_, HostCtx>,
                      t_ptr: i32,
                      t_len: i32,
                      b_ptr: i32,
@@ -158,7 +164,7 @@ impl WasmRuntime {
 /// 先 `vec![0; len]` 会触发宿主 ~2GB 分配（OOM/abort，绕过仅约束 guest 内存的
 /// StoreLimits），把插件缺陷放大成宿主崩溃。
 fn read_guest_str(
-    caller: &mut Caller<'_, HostCtx<'_>>,
+    caller: &mut Caller<'_, HostCtx>,
     ptr: i32,
     len: i32,
 ) -> wasmtime::Result<String> {
@@ -256,9 +262,9 @@ mod tests {
     #[test]
     fn runs_and_reads_guest_string() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         // wat feature：Module::new 接受 wat 文本（以 \0asm 开头才按二进制解析）
-        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), &host)
+        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), host.clone())
             .unwrap();
         assert_eq!(*host.logs.lock(), vec!["hello plugin".to_string()]);
     }
@@ -266,9 +272,14 @@ mod tests {
     #[test]
     fn unknown_function_rejected() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         let err = rt
-            .run(WAT_OK.as_bytes(), "no_such_fn", WasmCaps::default(), &host)
+            .run(
+                WAT_OK.as_bytes(),
+                "no_such_fn",
+                WasmCaps::default(),
+                host.clone(),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("不存在"));
     }
@@ -276,9 +287,14 @@ mod tests {
     #[test]
     fn infinite_loop_killed_by_fuel() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         let err = rt
-            .run(WAT_INFINITE.as_bytes(), "run", WasmCaps::default(), &host)
+            .run(
+                WAT_INFINITE.as_bytes(),
+                "run",
+                WasmCaps::default(),
+                host.clone(),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("fuel"), "实际错误: {err}");
     }
@@ -286,10 +302,15 @@ mod tests {
     #[test]
     fn memory_bomb_killed_by_limit() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         // 64MB = 1024 页，每次 grow 16 页：超限 grow 失败（返回 -1）循环继续 → fuel 兜底终止
         let err = rt
-            .run(WAT_MEMBOMB.as_bytes(), "run", WasmCaps::default(), &host)
+            .run(
+                WAT_MEMBOMB.as_bytes(),
+                "run",
+                WasmCaps::default(),
+                host.clone(),
+            )
             .unwrap_err();
         assert!(
             err.to_string().contains("fuel") || err.to_string().contains("失败"),
@@ -310,7 +331,7 @@ mod tests {
     fn capped_import_is_unresolved() {
         // allow_open=false 时插件 import nf.open_url → 链接失败（未注册），权限即沙箱边界
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         let wat = r#"
             (module
               (import "nf" "open_url" (func (param i32 i32)))
@@ -325,7 +346,7 @@ mod tests {
                     allow_open: false,
                     allow_notify: false,
                 },
-                &host,
+                host.clone(),
             )
             .unwrap_err();
         assert!(err.to_string().contains("实例化失败"));
@@ -339,7 +360,7 @@ mod tests {
                     allow_open: true,
                     allow_notify: false,
                 },
-                &host,
+                host.clone(),
             )
             .unwrap_err();
         assert!(err.to_string().contains("open 未授权"));
@@ -350,7 +371,7 @@ mod tests {
     fn host_via_arc_object_safe() {
         let rt = WasmRuntime::new().unwrap();
         let host: Arc<dyn WasmHost> = Arc::new(FakeHost::default());
-        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), host.as_ref())
+        rt.run(WAT_OK.as_bytes(), "run", WasmCaps::default(), host.clone())
             .unwrap();
     }
 
@@ -361,7 +382,7 @@ mod tests {
     #[test]
     fn oversized_guest_len_is_rejected_without_host_alloc() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         let wat = r#"
             (module
               (import "nf" "log" (func (param i32 i32)))
@@ -369,7 +390,7 @@ mod tests {
               (func (export "run") (call 0 (i32.const 0) (i32.const 0x7FFFFFFF))))
         "#;
         let err = rt
-            .run(wat.as_bytes(), "run", WasmCaps::default(), &host)
+            .run(wat.as_bytes(), "run", WasmCaps::default(), host.clone())
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -385,7 +406,7 @@ mod tests {
     #[test]
     fn open_url_rejects_local_path_and_custom_scheme() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         // "C:\Windows\System32\calc.exe" = 29 字节（wat 内 \ 转义）
         let wat_path = r#"
             (module
@@ -402,7 +423,7 @@ mod tests {
                     allow_open: true,
                     allow_notify: false,
                 },
-                &host,
+                host.clone(),
             )
             .unwrap_err();
         assert!(
@@ -425,7 +446,7 @@ mod tests {
                     allow_open: true,
                     allow_notify: false,
                 },
-                &host,
+                host.clone(),
             )
             .unwrap_err();
         assert!(err.to_string().contains("http/https"), "{err}");
@@ -435,7 +456,7 @@ mod tests {
     #[test]
     fn open_url_allows_http_https() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         // "https://example.com/x" = 21 字节
         let wat = r#"
             (module
@@ -452,7 +473,7 @@ mod tests {
                     allow_open: true,
                     allow_notify: false,
                 },
-                &host,
+                host.clone(),
             )
             .unwrap_err();
         // FakeHost.open_url 恒 Err("open 未授权于测试")——到达宿主即证明校验放行
@@ -473,7 +494,7 @@ mod tests {
     #[test]
     fn out_of_bounds_guest_read_is_rejected() {
         let rt = WasmRuntime::new().unwrap();
-        let host = FakeHost::default();
+        let host = Arc::new(FakeHost::default());
         let wat = r#"
             (module
               (import "nf" "log" (func (param i32 i32)))
@@ -481,7 +502,7 @@ mod tests {
               (func (export "run") (call 0 (i32.const 0xFFFF0000) (i32.const 64))))
         "#;
         let err = rt
-            .run(wat.as_bytes(), "run", WasmCaps::default(), &host)
+            .run(wat.as_bytes(), "run", WasmCaps::default(), host.clone())
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("越界") || msg.contains("失败"), "实际: {msg}");

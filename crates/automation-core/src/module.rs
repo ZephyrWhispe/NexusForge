@@ -10,7 +10,7 @@
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use host_core::error::ModuleError;
 use host_core::events::{Event, EventBus, TOPIC_REGISTRY};
@@ -45,6 +45,9 @@ pub struct HostActionHandler {
     runtime: RwLock<Option<Arc<WasmRuntime>>>,
     /// 插件库（A6；"plugin:{id}" 路径解析用）
     plugins: RwLock<Option<Arc<PluginStore>>>,
+    /// D-36 R-H1：wasmtime 36 Store 数据须 'static —— run_wasm 经此弱自引用取
+    /// Arc&lt;dyn WasmHost&gt;（弱引用防与 handler 属主 Arc 成环；init 时 attach_self 接线）
+    self_ref: RwLock<Option<Weak<dyn WasmHost>>>,
 }
 
 impl HostActionHandler {
@@ -54,6 +57,7 @@ impl HostActionHandler {
             bus,
             runtime: RwLock::new(None),
             plugins: RwLock::new(None),
+            self_ref: RwLock::new(None),
         }
     }
 
@@ -65,6 +69,12 @@ impl HostActionHandler {
     pub fn attach_wasm(&self, runtime: Arc<WasmRuntime>, plugins: Arc<PluginStore>) {
         *self.runtime.write() = Some(runtime);
         *self.plugins.write() = Some(plugins);
+    }
+
+    /// 接线宿主自引用（D-36 R-H1；init 拿到 Arc&lt;Self&gt; 后调用一次）
+    pub fn attach_self(&self, slf: Arc<Self>) {
+        let host: Arc<dyn WasmHost> = slf;
+        *self.self_ref.write() = Some(Arc::downgrade(&host));
     }
 
     /// RunScript path 解析："plugin:{id}" → 插件库加载（含 sha256 复验）；否则按文件路径直读
@@ -162,8 +172,14 @@ impl ActionHandler for HostActionHandler {
             .read()
             .clone()
             .ok_or_else(|| AutomationError::Action("WASM 运行时未初始化".into()))?;
+        let host = self
+            .self_ref
+            .read()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| AutomationError::Action("WASM 宿主自引用未接线".into()))?;
         let (wasm, func, caps) = self.resolve_wasm(path, func)?;
-        runtime.run(&wasm, &func, caps, self)
+        runtime.run(&wasm, &func, caps, host)
     }
 }
 
@@ -518,6 +534,7 @@ impl Module for AutomationModule {
         let runtime = Arc::new(WasmRuntime::new().map_err(|e| ModuleError::Init(e.to_string()))?);
         let plugins = Arc::new(PluginStore::new(&ctx.app_data_dir));
         handler.attach_wasm(runtime, plugins.clone());
+        handler.attach_self(handler.clone());
         *self.plugins.write() = Some(plugins);
         // A4：计划任务端口（未注册仅告警——应用内定时仍生效）
         *self.taskschd.write() = ctx.ports.get::<dyn TaskSchdPort>();

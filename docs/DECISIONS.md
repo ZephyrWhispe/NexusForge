@@ -45,6 +45,7 @@
 | D-33 | B8 裁决落地：放行 KVM 拖拽传文件（T-B8-1；附 B8 六题与 D-31/D-32 裁决留痕） | 补实现 | P2 | B8 | 已完成（e329a5c） |
 | D-34 | 全量审查 2026-09-25 整改战役（批次 A–F：SEC-01 P0 热修 + P1 安全/数据完整性 + 治理门禁；附挂账与驳回台账） | 补实现 | P1 | R-A..R-F | 实施中（代码/测试/文档面已落，终态见本条状态行） |
 | D-35 | GOV-02 门禁坐实（联网后 cargo-deny/npm audit/两枚 ps1 真实执行）＋实测揪出的接线缺口与 22 条 RUSTSEC 挂账 | 补实现 | P2 | R-G | 已完成（本条随批入册，见状态行） |
+| D-36 | D-35 挂账四题放行：wasmtime/russh/lopdf/前端工具链四枚升级立项开工 | 补实现 | P1 | R-H1..H4 | 实施中（R-H1 wasmtime 36.0.16 已完成；2026-09-25 用户放行"提交 D-35 升级立项"） |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -400,6 +401,19 @@
 - **代价**：advisories 本机跑依赖手工物化的 db 快照（github git 域被阻断），CI 侧仍走 `cargo-deny-action` 正常拉取——两口径以 CI 为准，本机快照仅为"真实执行过"的证据形；22 条 ignore 是显式债不是豁免完成。
 - **挂账（本批新增，翻案须新决策编号）**：① **wasmtime 29→24 LTS/≥36 升级立项**（automation-core 宿主面，18 条 RUSTSEC 消解口，含沙箱逃逸）；② **russh 0.46→≥0.60 升级立项**（term/file-core SSH 栈，连带消解 ed25519-dalek RUSTSEC-2023-0071）；③ **lopdf 0.36→≥0.42 升级立项**（editor-core）；④ **前端工具链 vitest@5/vite@8 迁移立项**（3 条 dev advisory）。落地即同步删 deny.toml/本条对应行。
 - **状态**：已完成（三件套本机真实执行过，缺口整改随批入库；挂账四题待用户放行，未推送）。
+
+---
+
+### D-36 D-35 挂账四题放行：四枚依赖/工具链升级立项（承 D-22 规则 4"翻案须新决策编号"）
+
+- **背景**：D-35 挂账四题（wasmtime×18 含沙箱逃逸、russh×2+ed25519-dalek×1、lopdf×1、前端 dev 面 vitest/esbuild×3）2026-09-25 经用户明示放行开工（"提交 D-35 升级立项"）。
+- **决策**：四枚独立批次 R-H1..H4，各自成提交、各自删对应 ignore 行；目标选型按 crates.io/npm 现值实测——① **wasmtime 29→"36"（=36.0.16，LTS 补丁轨）**，不追 46/47 大版本（本仓只用 Engine/Module/Store/Func 基础面，LTS 轨收益在补丁回流速度）；② **russh 0.46→"0.63"（=0.63.3，≥0.60.3 修复位）**，连带消解 ed25519-dalek RUSTSEC-2023-0071（1.x 传递源随升级消失，若仍传递则按新版 dalek 2.x 判定并登记）；③ **lopdf 0.36→"0.45"**（修复位 ≥0.42 取最新，API 漂移受阻即回退 0.42 线并登记偏差）；④ **vite ^8.3.1 + vitest ^5.0.2 + @vitejs/plugin-react ^6.1.1**（peer ^8 实测匹配）。
+- **依据**：RUSTSEC 通告修复区间（deny 实跑日志逐条在册）；index.crates.io/registry.npmjs.org 现值亲验。
+- **代价**：russh 0.46→0.63 跨 17 个 minor（Handler/key API 漂移面最大）；vite 5→8 大版本两跳（manualChunks 配置面与 vitest 夹具面波及既有 91 files 测试配置）。
+- **验收**：每批删行后 `cargo deny check` 复绿（advisories 面对应条目消失）；R-H1..H3 终态 **ignore 台账仅剩零行或明确新挂账**；四门链（fmt/clippy/cargo test/tsc/eslint/vitest/build）逐批终态树回声全 0；wasmtime/russh 行为测试（P-04 三性质、SFTP 腿、TOFU 指纹面）不得裁减。
+- **状态**：实施中（R-H2 开工）。
+- **实施记录**：
+  - **R-H1 wasmtime 29→36.0.16 已完成（2026-09-25）**：唯一 API 漂移面＝Store 数据 `'static` 化（v36 起 `Store::new` 要求 `T: Send + Sync + 'static`，原 `HostCtx<'a { host: &'a dyn WasmHost }` 借用触发 E0521）。形制：`HostCtx` 持 `Arc<dyn WasmHost>`；`WasmRuntime::run` 签名改收 `Arc<dyn WasmHost>`；`HostActionHandler` 新增 `self_ref: RwLock<Option<Weak<dyn WasmHost>>>` + `attach_self`（init 接线弱自引用，弱引用防与属主 Arc 成环），`run_wasm` 升级失败即报"WASM 宿主自引用未接线"。行为测试零裁减：automation-core 31/31（含 fuel 死循环、内存炸弹、SEC-16 URL 白名单、COR-02 越界读全数在册）。deny.toml 删 18 行 wasmtime ignore；本机 advisory-db 快照实跑 `DENY_EXIT=0`（advisories ok: 0 errors）。门禁回声：FMT/CLIPPY/TEST 全 0，ASSERT/DOCS 脚本 0。
 
 ---
 

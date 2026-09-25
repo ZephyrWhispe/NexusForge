@@ -68,7 +68,7 @@ chardetng = "0.1"
 lopdf = { version = "0.36", default-features = false }
 
 # automation-core（docs/impl/07 A5）：WASM 插件沙箱（fuel + 内存限额；wat feature 供测试直接写 wat 样本）
-wasmtime = { version = "29", default-features = false, features = ["cranelift", "runtime", "wat"] }
+wasmtime = { version = "36", default-features = false, features = ["cranelift", "runtime", "wat"] } # D-36 R-H1: 29→36 LTS（18 条 RUSTSEC 消解口）
 
 # D-27：性能基准（DESIGN §9.1/§9.2 阈值断言与 criterion 基准矩阵）
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

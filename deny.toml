@@ -48,30 +48,11 @@ unmaintained = "workspace"
 yanked = "deny"
 # GOV-02 实测首轮命中 22 条（2026-09-25，本机 advisory-db 快照 593df8c 实跑）。
 # 全部属"跨 API 依赖升级立项"，逐条挂账 DECISIONS D-35，禁止无理由 ignore：
-#   wasmtime 18 条 → automation-core 宿主面升级立项（29 线无补丁位，须迁 24 LTS 或 ≥36）
+#   wasmtime 18 条 → D-36 R-H1 已消解（29→36 LTS，ignore 行随批删除，deny 复绿为验收）
 #   russh 2 条 + ed25519-dalek 1 条 → term/file-core SSH 栈升级立项（0.46→≥0.60）
 #   lopdf 1 条 → editor-core 升级立项（0.36→≥0.42）
 # 立项落地即删对应行；期间新增漏洞仍会照常报红（只 ignore 已登记 ID）。
 ignore = [
-    # --- wasmtime（D-35 挂账 ①）---
-    { id = "RUSTSEC-2025-0046", reason = "D-35 挂账：wasmtime 29→24 LTS/≥36 升级立项" },
-    { id = "RUSTSEC-2025-0118", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0006", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0020", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0021", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0085", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0086", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0087", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0088", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0089", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0091", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0092", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0093", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0094", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0095", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0096", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0222", reason = "D-35 挂账：wasmtime 升级立项" },
-    { id = "RUSTSEC-2026-0269", reason = "D-35 挂账：wasmtime 升级立项（沙箱逃逸，插件宿主面重点）" },
     # --- SSH 栈（D-35 挂账 ②）---
     { id = "RUSTSEC-2026-0153", reason = "D-35 挂账：russh 0.46→≥0.60 升级立项" },
     { id = "RUSTSEC-2026-0154", reason = "D-35 挂账：russh 0.46→≥0.60 升级立项" },
