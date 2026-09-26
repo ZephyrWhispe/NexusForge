@@ -47,12 +47,20 @@ pub fn kvm_paired_peers(
     state.kvm.paired_peers().map_err(kvm_err)
 }
 
-/// 已发现邻居列表（心跳快照）
+/// 已发现邻居列表（心跳快照）。D-40：返回体带 `degraded`——离线笔记本
+/// 组播不可达时列表恒空，UI 须区分"降级"与"身边真没设备"两种空态。
+#[derive(serde::Serialize)]
+pub struct DiscoveredPeersDto {
+    pub peers: Vec<kvm_core::PeerInfo>,
+    pub degraded: Option<String>,
+}
+
 #[tauri::command]
-pub fn kvm_discovered_peers(
-    state: State<'_, HostState>,
-) -> Result<Vec<kvm_core::PeerInfo>, AppError> {
-    state.kvm.discovered_peers().map_err(kvm_err)
+pub fn kvm_discovered_peers(state: State<'_, HostState>) -> Result<DiscoveredPeersDto, AppError> {
+    Ok(DiscoveredPeersDto {
+        peers: state.kvm.discovered_peers().map_err(kvm_err)?,
+        degraded: state.kvm.discovery_degraded(),
+    })
 }
 
 /// 向已配对设备发起会话（客户端角色；阻塞握手 ≤10s → spawn_blocking）

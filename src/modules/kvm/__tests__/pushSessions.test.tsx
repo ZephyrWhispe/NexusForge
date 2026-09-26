@@ -97,7 +97,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
-  vi.mocked(kvmDiscoveredPeers).mockResolvedValue([]);
+  vi.mocked(kvmDiscoveredPeers).mockResolvedValue({ peers: [], degraded: null });
   vi.mocked(kvmPairedPeers).mockResolvedValue([peer("devA", "设备 A"), peer("devB", "设备 B")]);
   vi.mocked(kvmSessionList).mockResolvedValue([]);
   vi.mocked(kvmControlState).mockResolvedValue({ role: "idle" });
@@ -175,17 +175,20 @@ describe("KvmPanel 推送门禁 + 回落 + 会话表（T-B1-7）", () => {
       session("devB", "设备 B", "server"),
     ]);
     // devB 在线且只有 server 会话：连接互斥仍须生效（任意角色语义不因拆分而变）
-    vi.mocked(kvmDiscoveredPeers).mockResolvedValue([
-      {
-        device_id: "devB",
-        device_name: "设备 B",
-        pubkey_fingerprint: "fp-devB-0123456789",
-        tcp_port: 5900,
-        caps: [],
-        addr: "10.0.0.5:5900",
-        screen: { x: 0, y: 0, w: 1920, h: 1080 },
-      },
-    ]);
+    vi.mocked(kvmDiscoveredPeers).mockResolvedValue({
+      peers: [
+        {
+          device_id: "devB",
+          device_name: "设备 B",
+          pubkey_fingerprint: "fp-devB-0123456789",
+          tcp_port: 5900,
+          caps: [],
+          addr: "10.0.0.5:5900",
+          screen: { x: 0, y: 0, w: 1920, h: 1080 },
+        },
+      ],
+      degraded: null,
+    });
     await mount();
     expect(container.textContent).toContain("活跃会话");
     expect(container.textContent).toContain("client · 本端发起");

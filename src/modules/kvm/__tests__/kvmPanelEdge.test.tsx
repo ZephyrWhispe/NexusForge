@@ -59,7 +59,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  vi.mocked(kvmDiscoveredPeers).mockResolvedValue([]);
+  vi.mocked(kvmDiscoveredPeers).mockResolvedValue({ peers: [], degraded: null });
   vi.mocked(kvmPairedPeers).mockResolvedValue([peer("dev-b", "台式机B")]);
   vi.mocked(kvmSessionList).mockResolvedValue([]);
   vi.mocked(kvmControlState).mockResolvedValue({ role: "idle" } as never);

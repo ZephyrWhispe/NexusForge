@@ -30,7 +30,7 @@ vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
   return {
     ...actual,
-    kvmDiscoveredPeers: vi.fn(async () => []),
+    kvmDiscoveredPeers: vi.fn(async () => ({ peers: [], degraded: null })),
     kvmPairedPeers: vi.fn(async () => [
       {
         device_id: "dev-b",

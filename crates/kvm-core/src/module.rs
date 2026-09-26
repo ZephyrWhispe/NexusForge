@@ -226,6 +226,15 @@ impl KvmModule {
         Ok(discovery.peers_snapshot())
     }
 
+    /// D-40 IPC：组播发现降级原因（None＝发现正常或未初始化）。
+    /// 非 None 时邻居列表恒空是降级形态而非"身边没设备"，UI 必须说清。
+    pub fn discovery_degraded(&self) -> Option<String> {
+        self.discovery
+            .read()
+            .clone()
+            .and_then(|d| d.degraded_reason())
+    }
+
     /// IPC：向已配对设备发起客户端会话（connect_to）。返回对端 device_id。
     /// 会话句柄登记入 outbound 表（Closed 事件时自动移除）。
     pub fn connect_to(&self, addr: std::net::SocketAddr) -> Result<String, ModuleError> {

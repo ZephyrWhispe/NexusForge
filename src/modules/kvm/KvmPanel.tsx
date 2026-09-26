@@ -96,6 +96,9 @@ export default function KvmPanel() {
   const [pairCode, setPairCode] = useState<string>("");
   const [codeTtl, setCodeTtl] = useState<number>(0);
   const [discovered, setDiscovered] = useState<PeerInfoDto[]>([]);
+  // D-40：组播发现降级原因（null＝正常）。非空时"发现的设备"空列表是降级
+  // 形态而非身边没设备，必须把后端原话亮出来（含"直连能力不受影响"指引）
+  const [discoveryDegraded, setDiscoveryDegraded] = useState<string | null>(null);
   const [paired, setPaired] = useState<PairedPeerDto[]>([]);
   const [sessions, setSessions] = useState<SessionDto[]>([]);
   const [control, setControl] = useState<ControlStateDto>({ role: "idle" });
@@ -118,7 +121,7 @@ export default function KvmPanel() {
 
   const refresh = useCallback(async () => {
     try {
-      const [peers, pairs, sess, ctrl, edges] = await Promise.all([
+      const [disc, pairs, sess, ctrl, edges] = await Promise.all([
         kvmDiscoveredPeers(),
         kvmPairedPeers(),
         kvmSessionList(),
@@ -126,7 +129,8 @@ export default function KvmPanel() {
         kvmEdgeMap(),
       ]);
       if (!mounted.current) return;
-      setDiscovered(peers);
+      setDiscovered(disc.peers);
+      setDiscoveryDegraded(disc.degraded);
       setPaired(pairs);
       setSessions(sess);
       setControl(ctrl);
@@ -473,10 +477,17 @@ export default function KvmPanel() {
         }
       >
         {unpaired.length === 0 ? (
-          <EmptyState
-            text="局域网内暂未发现未配对设备（对端需运行 NexusForge 且键鼠共享已启动）"
-            loading={!loaded}
-          />
+          discoveryDegraded ? (
+            <EmptyState
+              text={`局域网自动发现已降级：${discoveryDegraded}。已配对设备的连接、剪贴板与文件传输不受影响；网络恢复后点「刷新」自愈。`}
+              loading={!loaded}
+            />
+          ) : (
+            <EmptyState
+              text="局域网内暂未发现未配对设备（对端需运行 NexusForge 且键鼠共享已启动）"
+              loading={!loaded}
+            />
+          )
         ) : (
           <Table size="small">
             <TableBody>

@@ -139,7 +139,14 @@ pub struct DiscoveryService {
     config: DiscoveryConfig,
     peers: Mutex<HashMap<String, PeerEntry>>,
     event_cb: EventCb,
+    /// D-40：组播不可达的降级原因（None＝发现正常在跑）。bind 失败或连续
+    /// SEND_FAIL_THRESHOLD 次心跳发送失败时置位，成功一次即清除（自愈可见）。
+    degraded: Mutex<Option<String>>,
+    send_failures: std::sync::atomic::AtomicU32,
 }
+
+/// D-40：连续心跳发送失败达到此数才判降级（单包瞬断不惊动 UI）
+const SEND_FAIL_THRESHOLD: u32 = 3;
 
 /// 运行句柄：Drop 或 [`shutdown`] 停止全部任务
 pub struct DiscoveryHandle {
@@ -172,7 +179,14 @@ impl DiscoveryService {
             config,
             peers: Mutex::new(HashMap::new()),
             event_cb: Arc::new(Mutex::new(None)),
+            degraded: Mutex::new(None),
+            send_failures: std::sync::atomic::AtomicU32::new(0),
         })
+    }
+
+    /// D-40：降级原因（Some＝局域网自动发现不可用，但模块其余能力在线）
+    pub fn degraded_reason(&self) -> Option<String> {
+        self.degraded.lock().clone()
     }
 
     /// 设置发现事件回调（在线/离线）；须在 run 之前调用
@@ -191,65 +205,104 @@ impl DiscoveryService {
         self.peers.lock().get(device_id).map(|e| e.info.clone())
     }
 
-    /// 启动心跳发送 / 接收 / 离线收割三任务
+    /// 启动心跳发送 / 接收 / 离线收割三任务。
+    ///
+    /// D-40：组播 socket 不可用（离线笔记本无 LAN 路由时 join/bind 报
+    /// WSAENETUNREACH 等）**不再让整个模块 start 失败**——配对/会话/剪贴板/
+    /// 文件全走 TCP 直连，与组播无关。降级为只跑离线收割任务＋degraded 置因，
+    /// UI 经 `degraded_reason` 明说"自动发现不可用，可用配对码直连"。
     pub async fn run(self: Arc<Self>) -> Result<DiscoveryHandle, AppError> {
-        let socket = bind_multicast(self.config.port)?;
-        let send_socket = bind_multicast(self.config.port)?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
         let mut tasks = Vec::new();
 
-        // ① 心跳发送
-        let sender_self = self.clone();
-        let mut sender_shutdown = shutdown_rx.clone();
-        tasks.push(tokio::spawn(async move {
-            let mut tick = interval(sender_self.config.heartbeat_interval);
-            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            let mut seq = unix_ms();
-            while !*sender_shutdown.borrow_and_update() {
-                let hb = Heartbeat {
-                    device_id: sender_self.own.device_id.clone(),
-                    device_name: sender_self.own.device_name.clone(),
-                    pubkey_fingerprint: sender_self.own.pubkey_fingerprint.clone(),
-                    tcp_port: sender_self.own.tcp_port,
-                    caps: sender_self.own.caps.clone(),
-                    seq: seq.wrapping_add(1),
-                    screen: sender_self.own.screen,
-                    sync_port: sender_self.own.sync_port,
-                };
-                seq = hb.seq;
-                let payload = serde_json::to_vec(&hb).unwrap_or_default();
-                let dst = SocketAddrV4::new(MULTICAST_V4, sender_self.config.port);
-                if let Err(e) = send_socket.send_to(&payload, dst).await {
-                    tracing::warn!(error = %e, "KVM 心跳发送失败");
-                }
-                tokio::select! {
-                    _ = tick.tick() => {}
-                    _ = sender_shutdown.changed() => {}
-                }
+        let bound = match (
+            bind_multicast(self.config.port),
+            bind_multicast(self.config.port),
+        ) {
+            (Ok(recv_s), Ok(send_s)) => Some((recv_s, send_s)),
+            (Err(e), _) | (_, Err(e)) => {
+                let reason = format!("组播发现不可用（socket 绑定失败：{e}）");
+                tracing::warn!(error = %e, "KVM 发现降级：组播 socket 不可用，模块继续以直连能力运行");
+                *self.degraded.lock() = Some(reason);
+                None
             }
-        }));
+        };
 
-        // ② 接收 + 表维护
-        let recv_self = self.clone();
-        let mut recv_shutdown = shutdown_rx.clone();
-        tasks.push(tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
-            loop {
-                tokio::select! {
-                    res = socket.recv_from(&mut buf) => {
-                        match res {
-                            Ok((n, src)) => recv_self.on_datagram(&buf[..n], src),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "KVM 心跳接收失败");
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some((socket, send_socket)) = bound {
+            // ① 心跳发送
+            let sender_self = self.clone();
+            let mut sender_shutdown = shutdown_rx.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut tick = interval(sender_self.config.heartbeat_interval);
+                tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                let mut seq = unix_ms();
+                while !*sender_shutdown.borrow_and_update() {
+                    let hb = Heartbeat {
+                        device_id: sender_self.own.device_id.clone(),
+                        device_name: sender_self.own.device_name.clone(),
+                        pubkey_fingerprint: sender_self.own.pubkey_fingerprint.clone(),
+                        tcp_port: sender_self.own.tcp_port,
+                        caps: sender_self.own.caps.clone(),
+                        seq: seq.wrapping_add(1),
+                        screen: sender_self.own.screen,
+                        sync_port: sender_self.own.sync_port,
+                    };
+                    seq = hb.seq;
+                    let payload = serde_json::to_vec(&hb).unwrap_or_default();
+                    let dst = SocketAddrV4::new(MULTICAST_V4, sender_self.config.port);
+                    match send_socket.send_to(&payload, dst).await {
+                        Ok(_) => {
+                            // D-40：发送恢复即清除降级（自愈可见；未达阈值的
+                            // 瞬断从未置位，这里置 None 也无副作用）
+                            if sender_self
+                                .send_failures
+                                .swap(0, std::sync::atomic::Ordering::Relaxed)
+                                >= SEND_FAIL_THRESHOLD
+                            {
+                                *sender_self.degraded.lock() = None;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "KVM 心跳发送失败");
+                            let n = sender_self
+                                .send_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            if n == SEND_FAIL_THRESHOLD {
+                                *sender_self.degraded.lock() = Some(format!(
+                                    "组播发送持续失败（连续 {n} 次：{e}），局域网自动发现暂不可用"
+                                ));
                             }
                         }
                     }
-                    _ = recv_shutdown.changed() => break,
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = sender_shutdown.changed() => {}
+                    }
                 }
-            }
-        }));
+            }));
+
+            // ② 接收 + 表维护
+            let recv_self = self.clone();
+            let mut recv_shutdown = shutdown_rx.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                loop {
+                    tokio::select! {
+                        res = socket.recv_from(&mut buf) => {
+                            match res {
+                                Ok((n, src)) => recv_self.on_datagram(&buf[..n], src),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "KVM 心跳接收失败");
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
+                            }
+                        }
+                        _ = recv_shutdown.changed() => break,
+                    }
+                }
+            }));
+        }
 
         // ③ 离线收割
         let reap_self = self.clone();
@@ -565,5 +618,75 @@ mod tests {
             peer("10.0.0.5:1", 49821).sync_addr(),
             peer("10.0.0.6:1", 49821).sync_addr()
         );
+    }
+
+    /// D-40①：组播 socket 绑不上**不得**让 run() 失败——降级原因必须与绑定
+    /// 实况严格对应。端口 1 是环境探针：Linux 非 root 必拒（Err 分支实测），
+    /// Windows 在线机可绑（None 分支实测），离线笔记本 join 报 10065（本机
+    /// 实测正是 Err 分支）——断言按同口径的 bind_multicast 实况自发对齐。
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(non_snake_case)]
+    async fn d40_bindFailure_degradesInsteadOfFailing() {
+        let port = 1u16;
+        // run() 内部绑两次且任一 Err 即降级——预言取同形口径
+        let bind_ok = bind_multicast(port).is_ok() && bind_multicast(port).is_ok();
+        let svc = DiscoveryService::new(own("device-d40"), test_config(port));
+        assert!(
+            svc.degraded_reason().is_none(),
+            "新建服务不得自带降级（初始态钉死）"
+        );
+        let h = svc
+            .clone()
+            .run()
+            .await
+            .expect("D-40：组播不可用不得使 run 失败");
+        assert_eq!(
+            svc.degraded_reason().is_some(),
+            !bind_ok,
+            "降级必须恰与绑定实况一致（绑不上⇒有原因，绑得上⇒无原因）"
+        );
+        if let Some(reason) = svc.degraded_reason() {
+            assert!(reason.contains("组播"), "降级原因须点名组播: {reason}");
+        }
+        h.shutdown().await;
+    }
+
+    /// D-40②：心跳发送恢复 → 降级原因自愈清除。预置降级＋失败计数达阈模拟
+    /// "带伤重启"；环境绑得上组播则发送任务（60ms 节拍）应在时限内清因，
+    /// 绑不上（或持续发送失败）则降级原因必须持续在场且点名"组播"——两臂
+    /// 都断言，测试在在线/离线机器上均确定通过且不放松不变量。
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(non_snake_case)]
+    async fn d40_sendSuccessClearsDegraded() {
+        let port = 49913u16;
+        let svc = DiscoveryService::new(own("device-d40-clear"), test_config(port));
+        let preset = "模拟绑定失败后的遗留降级";
+        *svc.degraded.lock() = Some(preset.to_string());
+        svc.send_failures
+            .store(SEND_FAIL_THRESHOLD, std::sync::atomic::Ordering::Relaxed);
+        let h = svc
+            .clone()
+            .run()
+            .await
+            .expect("D-40：run 不得因组播失败而失败");
+        if svc.degraded_reason().as_deref() == Some(preset) {
+            // 绑定成功且未被发送失败覆写 ⇒ 唯一合法去向是被成功发送清成 None
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if svc.degraded_reason().is_none() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "绑定成功后降级应在心跳节拍内自愈（未自愈即清因逻辑失修）"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } else {
+            // 环境不可组播（绑定失败或被发送失败覆写）⇒ 降级必须有因可见
+            let reason = svc.degraded_reason().expect("降级态必须有可见原因");
+            assert!(reason.contains("组播"), "降级原因须点名组播: {reason}");
+        }
+        h.shutdown().await;
     }
 }

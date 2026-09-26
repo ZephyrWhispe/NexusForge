@@ -750,8 +750,13 @@ export function kvmUnpair(deviceId: string): Promise<boolean> {
 export function kvmPairedPeers(): Promise<PairedPeerDto[]> {
   return invoke("kvm_paired_peers");
 }
-/** 已发现邻居列表 */
-export function kvmDiscoveredPeers(): Promise<PeerInfoDto[]> {
+/** 已发现邻居列表（D-40：返回体携 degraded——组播发现不可达时列表恒空，
+ * UI 须把这种"降级的空"与"身边真没设备"区分开） */
+export interface DiscoveredPeersDto {
+  peers: PeerInfoDto[];
+  degraded: string | null;
+}
+export function kvmDiscoveredPeers(): Promise<DiscoveredPeersDto> {
   return invoke("kvm_discovered_peers");
 }
 /** 向已配对设备发起会话（返回对端 device_id） */

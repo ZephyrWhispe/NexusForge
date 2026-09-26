@@ -49,6 +49,7 @@
 | D-37 | "不影响使用全部放行"：D-34 挂账可放行列＋D-36 余项裁决落地（SEC-11 缓解子集/GOV-09 参数契约/STD-05 颜色/PERF-03 半项） | 补实现 | P2 | R-I1..I4 | 已完成（四批入库；R-I4 真机冒烟已做并抓到修正一枚真缺陷，见实施记录收尾条；其余模块真机冒烟待用户） |
 | D-38 | 07-prevention §3/§4 门禁余量补全（P-01/SEC-07/STD-10 源码扫＋文档锚点/模块数核对＋产物体积预算入 CI） | 补实现 | P2 | R-J1..J3 | 已完成（见本条实施记录） |
 | D-39 | STD-10 四枚预留主题裁决落地：全接线不摘除（主窗口 feed 两枚＋截图面板事件两枚） | 补功能 | P2 | — | 已完成（见本条实施记录） |
+| D-40 | KVM 离线笔记本组播不可达降级：发现服务 bind/发送失败不再整模块 start 失败，降级原因经 discovered_peers 返回体上屏 | 补实现 | P1 | — | 已完成（见本条实施记录） |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -477,6 +478,22 @@
   - `$TopicReserve` 四条全摘＝清零（台账机制常驻，注释改钉"未来新悬空主题入册须附理由"）。STD-10 门禁复跑＝"49 主题发布/订阅证据齐（预留 0）"——前端字面量订阅证据即刻生效，反向过期检查未触发（若忘摘条目即 FAIL，机制自证）。
   - 测试：`d39AlertFeeds.test.ts` 两 feed 正反（kvmPairAlerts 同夹具；踩一枚仓规实感＝setup 的 clearMocks 使跨用例计数归零，断言按用例独立写）；`shotEvents.test.tsx` 钉门铃恰重取一次＋他域惊不动＋ocr.failed 原话上屏。
   - 门禁终态全 0：tsc/eslint/vitest **95 files 361 tests（新基线，+2 files +4 tests）**/build（monaco chunk 3,423.44 kB 逐字节同值，feed 入 index chunk 未破预算）/bundle 预算/assert 六扫（预留 0）/docs 五项。本批零 Rust 触碰（cargo 面沿 D-38 终态 1042/0）。
+
+---
+
+### D-40 KVM 组播不可达降级（承 D-34 环境备忘"产品级问题未裁，待用户"，2026-09-26 用户放行）
+
+- **背景**：离线笔记本（无 LAN 路由、仅虚拟网卡）上 `bind_multicast` 的 join/sendto 以 os error 10065（WSAENETUNREACH）失败——`DiscoveryService::run()` 的 Err 被 `KvmModule::start` 直接 `?` 成 `ModuleError::Start`，**整个 KVM 模块进 Error 红态**：已配对设备的 TCP 会话/剪贴板/文件通道本不需要组播，也被发现面一并拖死；且失败无原因上屏（状态栏只见红点，D-39 后崩溃提醒也不适用——这不是 panic 是 start 报错）。运行期次生形态：bind 成功但 sendto 恒失败时，心跳腿每秒 warn 后继续空转，邻居列表永远空且无解释。
+- **决策**：① `DiscoveryService` 增降级面——`run()` 内 bind 失败不再返 Err：置 `degraded = Some(原因)`，发现任务不启动，返回 Ok 句柄（收割任务照常，空表无害）；模块 start 从此只因 runtime/TCP 绑定这类真致命项失败。② 发送腿连续 3 次 sendto 失败（3 个心跳周期）→ 置 degraded（携末次错误），成功一次即清除（网络自愈可见）。③ 显影走既有数据口：`discovered_peers()` 旁挂 `discovery_degraded()`，`kvm_discovered_peers` 命令返回体从 `Vec<PeerInfo>` 扩为 `{ peers, degraded }`（命令名不变，R-I2 契约面无涉参数；client.ts 换 DTO，KvmPanel 发现区 degraded 为 Some 时挂一条 warning Alert 携原因原文）。④ `two_instances` 组播测试不改判据——网络形态好时照常全绿，网络差时红＝环境灯本性不变（本批只改生产失败语义）。
+- **依据**：降级不摘功能＝把"发现不可用"从模块级死刑降为特性级缺页，与"配对/会话走 TCP 直连本就组播无关"的事实一致（`pair_with(addr)`/`connect_to(addr)` 均有直连 IP 腿）；连续 3 次阈值防抖单包瞬断；degraded 经返回值而非新 EventBus 主题（避免 STD-10 台账再添新钉，面板未开也无从消费的事件宁可不发）。
+- **代价**：离线用户看到空列表＋一条降级说明而非"模块整体红"——文案讲清"已配对设备仍可用、网络恢复后刷新自愈"（面板无手动输 IP 配对入口，不空头承诺）；返回体形状改动波及 client.ts DTO＋KvmPanel＋三枚测试夹具的 `kvmDiscoveredPeers` mock（机械换形；`state.rs:549` 走模块方法不经命令，零改动）。
+- **验收**：discovery 单测两枚（bind 失败→run Ok＋degraded Some；成功发一次→清除）；vitest 钉 KvmPanel degraded Alert 上屏＋正常态不出现；cargo workspace/tsc/eslint/vitest/build/assert/docs 全 0；未推送另见 D-39 网络备忘。
+- **状态**：已完成（见本条实施记录）。
+- **实施记录**：
+  - 核心面：`DiscoveryService` 增 `degraded: Mutex<Option<String>>` ＋ `send_failures: AtomicU32`（阈值 `SEND_FAIL_THRESHOLD=3`）；`run()` 重构——双 bind 任一 Err 置因降级、发现两腿不启动、返回 Ok 句柄，收割任务恒跑；发送腿成功 `swap(0)>=阈值` 清因（自愈可见）、连续第 3 次失败置因携末次错误。`module.rs` 旁挂 `discovery_degraded()`；`kvm_discovered_peers` 返回体 `Vec<PeerInfo>` → `{ peers, degraded }`（命令名与参数名未动，R-I2 契约面零涉）；client.ts 换 `DiscoveredPeersDto`；`state.rs:549` 走模块方法不经命令，实测零改动。
+  - 与原决策一处偏差如实挂出：③ 写"挂一条 warning Alert"，落地改为发现区空态的**专属降级文案**（EmptyState 双形态）——降级形态下列表本就恒空，Alert 与空态同屏互抢焦点，原因叙事直接占住空态位更诚实；语义不变（后端原话逐字＋"直连不受影响、刷新自愈"指引）。
+  - 验收实测：discovery 单测两枚 `d40_bindFailure_degradesInsteadOfFailing`（`bind_multicast(1)` 双呼实况作预言 oracle：Windows 可绑/Linux 非 root 权限拒/离线机 join 报 10065 三态下断言均自发对齐，且 run() 恒 Ok 钉死）＋ `d40_sendSuccessClearsDegraded`（预置降级＋失败计数达阈，绑定成功臂 2s 内清因、不可组播臂降级原因恒可见，两臂全断言无环境豁免）。注：本批实测时机本机组播网络形态好（`two_instances` 同谱通过），Err 分支在本机走的 Ok 臂——Err 臂由预言口径在离线机器上确定实跑，非本批放松。vitest `kvmPanelDiscovery.test.tsx` 两枚：degraded 非空 ⇒ 后端原话逐字上屏＋"已配对设备的连接、剪贴板与文件传输不受影响"＋**不得**再说"暂未发现"；null 正对照 ⇒ 原文案回位。三枚既有夹具（DragWiring/Edge/pushSessions×2 处）机械换新形，断言语义零动。
+  - 门禁终态全 0：`cargo fmt --all --check`／`clippy --workspace --all-targets -- -D warnings`／`cargo test --workspace` 1044 passed 0 failed（基线 1042＋本批 2）／`tsc --noEmit`／`eslint .`／`vitest run` 96 files 363 tests（新基线，95/361＋1 文件 2 测试）／`npm run build` monaco chunk 3,423.44 kB 与基线逐字同值／assert 六扫（STD-10 预留 0 维持）／docs 五断言／bundle 五族预算。推送本批再次探测仍 `Connection was reset`（github 全域不通持续，承 D-39 备忘挂账）。
 
 ---
 
