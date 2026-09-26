@@ -21,7 +21,7 @@
 
 ## 2. 架构决策
 
-1. **新建 `crates/artifact-core`**（workspace 第 19 个 crate，host 直属、零业务模块依赖）：所有"从远端拉一个版本化构件装到本地并管好它"的共性收在这，代理/OCR/B2 新内核都只是注册表里的行。依赖：`reqwest`（workspace 已有 rustls 形态）、`sha2`、`zip`、`tokio`、`serde`、`thiserror`——全部现成，零新外部依赖（遵守 impl/01 §10 依赖纪律）。
+1. **新建 `crates/artifact-core`**（workspace 第 19 个 crate，host 直属、零业务模块依赖）：所有"从远端拉一个版本化构件装到本地并管好它"的共性收在这，代理/OCR/B2 新内核都只是注册表里的行。依赖：`reqwest`（workspace 已有 rustls 形态）、`sha2`、`zip`、`tokio`、`serde`、`thiserror`——全部现成，零新外部依赖（遵守 impl/01 头部依赖纪律表）。
 2. **不引入新数据库**：状态文件学 proxy 的 JSON+manifest 先例——`{appData}/artifacts/state/{artifact_id}.json`（每构件的安装态，含 TOFU pin 历史）+ `{appData}/artifacts/update_log.json`（500 条环形，kernel.rs LOG_CAP 同款）。构件安装态天然按目录隔离，sqlite 表是多余的迁移面。
 3. **检查与安装分离**：`Checker`（网络读：release 元数据/HEAD ETag）与 `Installer`（下载→staging→校验→健康→换装→回滚）两个结构体，auto 轨=Checker+（空闲窗口内）Installer；手动轨=UI 显式驱动。理由：检查永远轻量可高频，安装是有窗口期的重动作，二者节奏与失败面完全不同。
 4. **分流规则自动更新 = 双轨**（用户点名项拆两义）：

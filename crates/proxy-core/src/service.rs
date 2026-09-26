@@ -636,7 +636,7 @@ impl ProxyService {
         let node_count = nodes.len();
 
         // 持久化节点文件 + 更新元数据
-        std::fs::write(self.sub_nodes_path(id), serde_json::to_vec(&nodes)?)?;
+        host_core::util::write_atomic(&self.sub_nodes_path(id), &serde_json::to_vec(&nodes)?)?;
         let sub = {
             let mut inner = self.inner.write();
             inner.nodes.retain(|n| n.sub_id != id);
@@ -737,10 +737,13 @@ impl ProxyService {
                 target: "direct".to_string(),
                 enabled: true,
             }));
-        std::fs::write(self.proxy_dir.join(RULES_FILE), serde_json::to_vec(&seen)?)?;
-        std::fs::write(
-            self.proxy_dir.join(RULES_V2_FILE),
-            serde_json::to_vec(&inner.rules_v2)?,
+        host_core::util::write_atomic(
+            &self.proxy_dir.join(RULES_FILE),
+            &serde_json::to_vec(&seen)?,
+        )?;
+        host_core::util::write_atomic(
+            &self.proxy_dir.join(RULES_V2_FILE),
+            &serde_json::to_vec(&inner.rules_v2)?,
         )?;
         Ok(())
     }
@@ -759,10 +762,13 @@ impl ProxyService {
             .filter(|r| r.kind == "suffix" && r.target == "direct" && r.enabled)
             .map(|r| r.pattern.clone())
             .collect();
-        std::fs::write(self.proxy_dir.join(RULES_V2_FILE), serde_json::to_vec(&v2)?)?;
-        std::fs::write(
-            self.proxy_dir.join(RULES_FILE),
-            serde_json::to_vec(&legacy)?,
+        host_core::util::write_atomic(
+            &self.proxy_dir.join(RULES_V2_FILE),
+            &serde_json::to_vec(&v2)?,
+        )?;
+        host_core::util::write_atomic(
+            &self.proxy_dir.join(RULES_FILE),
+            &serde_json::to_vec(&legacy)?,
         )?;
         self.inner.write().rules_v2 = v2;
         Ok(())
@@ -793,9 +799,9 @@ impl ProxyService {
     /// 持久化状态文件唯一写点（整包写，杜绝 set_mixed_port 曾有的 kernel 覆盖；
     /// T-B2-11 起 selected_node 同包持久化）
     fn persist_state(&self, inner: &Inner) -> Result<()> {
-        std::fs::write(
-            self.proxy_dir.join(STATE_FILE),
-            serde_json::to_vec(&PersistState {
+        host_core::util::write_atomic(
+            &self.proxy_dir.join(STATE_FILE),
+            &serde_json::to_vec(&PersistState {
                 mixed_port: inner.mixed_port,
                 kernel: inner.kernel.clone(),
                 selected_node: inner.selected_node.clone(),
@@ -1166,7 +1172,7 @@ impl ProxyService {
         if let Some(parent) = cfg_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&cfg_path, rendered.as_bytes())?;
+        host_core::util::write_atomic(&cfg_path, rendered.as_bytes())?;
 
         let weak = Arc::downgrade(self);
         let on_exit: Arc<dyn Fn(i32) + Send + Sync> = Arc::new(move |code| {
@@ -1295,9 +1301,9 @@ impl ProxyService {
     }
 
     fn save_subs(&self, inner: &Inner) -> Result<()> {
-        std::fs::write(
-            self.proxy_dir.join(SUBS_FILE),
-            serde_json::to_vec(&inner.subs)?,
+        host_core::util::write_atomic(
+            &self.proxy_dir.join(SUBS_FILE),
+            &serde_json::to_vec(&inner.subs)?,
         )?;
         Ok(())
     }
