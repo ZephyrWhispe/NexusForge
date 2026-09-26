@@ -48,6 +48,7 @@
 | D-36 | D-35 挂账四题放行：wasmtime/russh/lopdf/前端工具链四枚升级立项开工 | 补实现 | P1 | R-H1..H4 | 已完成（四批入库＋rsa/Marvin 经用户裁决"保留 ignore 行不砍 RSA 能力"收口，见 D-37）；剩 SSH 真机冒烟待用户 |
 | D-37 | "不影响使用全部放行"：D-34 挂账可放行列＋D-36 余项裁决落地（SEC-11 缓解子集/GOV-09 参数契约/STD-05 颜色/PERF-03 半项） | 补实现 | P2 | R-I1..I4 | 已完成（四批入库；R-I4 真机冒烟已做并抓到修正一枚真缺陷，见实施记录收尾条；其余模块真机冒烟待用户） |
 | D-38 | 07-prevention §3/§4 门禁余量补全（P-01/SEC-07/STD-10 源码扫＋文档锚点/模块数核对＋产物体积预算入 CI） | 补实现 | P2 | R-J1..J3 | 已完成（见本条实施记录） |
+| D-39 | STD-10 四枚预留主题裁决落地：全接线不摘除（主窗口 feed 两枚＋截图面板事件两枚） | 补功能 | P2 | — | 已完成（见本条实施记录） |
 
 **批次含义**：0 = 止血（无设计风险）；1 = P0 正确性与安全红线；2 = 门禁与一致性重构；3 = 功能补齐与规范落地。详见 [REVIEW-2026-09-18.md](./REVIEW-2026-09-18.md) §7。
 
@@ -460,6 +461,22 @@
   - **R-J3**：`tools/check-bundle-size.mjs` 五族预算（monaco 3630/fluentui 685/xterm 308/vendor 148/index 146 十进制 kB，＝R-I4 基线实测＋~5% 防抖；KB=1000 对齐 vite 口径），monaco 实测 3423.44 kB 预算内，未预算 chunk top-3 显影（ts.worker 等）；ci.yml frontend job 增 `bundle size budget` 阻断步，rust job 步名同步更新为六断言实单。
   - **负例实测可红（D-38 验收面，全部 cp 备份→还原→回绿）**：SEC-07 临时探针 tsx → FAIL 行号报出；STD-10 删 `ocr.failed` 预留行 → "ocr.failed: 无订阅证据" 报红；docs ⑤ README 14→99 → "FAIL README 模块数 99 ≠ MODULES.length 14"；bundle index 预算 146→100 → "FAIL 体积超预算 index 136.15 kB / 100 kB"。四枚还原后各自门禁回 exit 0。**教训入册**：探针还原一度用 `git checkout --` 打在未暂存新脚本上致整文件回退 HEAD 旧版（全量重写恢复）——本仓规程钉死：负例探针一律 cp 备份还原，未提交工作永不 git checkout。
   - **门禁终态**（本机实跑，退出码逐一落日志非管道遮蔽）：fmt/clippy(-D warnings)/workspace test 58 目标 1042 passed / 0 failed（较基线 1039 多出的三枚＝two_instances 组播系本次真跑全 ok 而非历批 `--skip`，非本批新增测）/tsc/eslint/vitest 93 files 357 tests/build（monaco chunk 3,423.44 kB 与 R-I4 基线逐字同值）/assert 六扫/docs 五项/bundle 预算——全 0。未推送（standing ruling）。
+
+---
+
+### D-39 STD-10 四枚预留主题裁决落地（用户放行"逐枚裁决并落地"，承 D-38 `$TopicReserve` 台账）
+
+- **背景**：D-38 STD-10 门禁首跑抓出 4 枚"仅发布腿、订阅证据只在 `#[cfg(test)]` 区"主题入 `$TopicReserve` 显式债台账，删留待用户裁决。本批（2026-09-26）用户放行处理。逐枚查发布腿与前端消费面事实：① `automation.notify`——engine.rs `Action::Notify` 与 module.rs `notify()` 两处发布，前端零消费 ⇒ **规则里的"通知"动作现在是静默无操作**，真缺陷；② `host.module_crashed`——registry.rs 隔离 panic 时发布 `{module,message}`，前端只经 `host.module_state` 见状态红点、**崩溃原因不可见**；③ `screenshot.taken`——覆盖层/快捷键路径完成后面板不刷新（需手动重载才见新行）；④ `ocr.failed`——ocr-core 文档口径明言"截图 UI 与历史回填消费"，但联动 OCR 失败时历史行只是缺 `ocr_text`，静默。
+- **决策**：**四枚全接线、零摘除**（发布语义皆有真实用户价值，摘除＝丢功能面），逐枚形制：①②＝主窗口级 feed（`src/stores/automationNotifications.ts`/`moduleCrashAlerts.ts`，kvmPairAlerts 同谱幂等闩＋`nf:event` 过滤→`notify()` toast，面板未开也可见）；③＝ScreenshotPanel 既有 `nf:event` effect 扩 `screenshot.taken`→`reload()` **只作门铃不作数据源**（historyBell 同谱）；④＝同 effect 扩 `ocr.failed`→error toast（携 reason）。接线后 `$TopicReserve` 四条全摘（门禁反向过期检查本就强制：证据齐备的预留条目不删即 FAIL——台账机制常驻、清零）。
+- **依据**：三形制皆仓内先例（kvmPairAlerts 主窗口 feed／RulesPanel historyBell 门铃／ScreenshotPanel T-B4-9 事件 effect）；`notify`/`reportError` 全局口已就位；MainWorkbench `useEffect` 为既有 feed 挂载点。
+- **代价**：两枚新 feed 常驻主窗口订阅（与 kvmPairAlerts 同档，事件面轻量）；`screenshot.taken` 门铃在面板内每次触发一整页历史重载（列表小、可接受，若成热点再谈增量）。
+- **验收**：两 feed 各含正反回归 vitest（kvmPairAlerts.test.ts 同夹具：捕获回调→正例弹提醒→他域/解除噪声零提醒）；ScreenshotPanel 事件测试扩两主题用例；`$TopicReserve` 清零后 STD-10 门禁全绿；全门禁树终态 0＋随批提交（未推送另见 D-38 后网络备忘）。
+- **状态**：已完成。
+- **实施记录**：
+  - 四枚接线全部落地：`src/stores/automationNotifications.ts`（`startAutomationNotifyFeed`，无 title 的通知宁可不弹）与 `src/stores/moduleCrashAlerts.ts`（`startModuleCrashAlertFeed`，崩溃原因＋重启指引上屏）挂 MainWorkbench 既有 feed effect（与 desktopRemind/kvmPairAlerts 同列）；ScreenshotPanel 事件 effect 扩 `screenshot.taken`→`reload()` 门铃与 `ocr.failed`→error toast（deps 补 `reload`，其 `useCallback` 依赖为空、引用稳定）。
+  - `$TopicReserve` 四条全摘＝清零（台账机制常驻，注释改钉"未来新悬空主题入册须附理由"）。STD-10 门禁复跑＝"49 主题发布/订阅证据齐（预留 0）"——前端字面量订阅证据即刻生效，反向过期检查未触发（若忘摘条目即 FAIL，机制自证）。
+  - 测试：`d39AlertFeeds.test.ts` 两 feed 正反（kvmPairAlerts 同夹具；踩一枚仓规实感＝setup 的 clearMocks 使跨用例计数归零，断言按用例独立写）；`shotEvents.test.tsx` 钉门铃恰重取一次＋他域惊不动＋ocr.failed 原话上屏。
+  - 门禁终态全 0：tsc/eslint/vitest **95 files 361 tests（新基线，+2 files +4 tests）**/build（monaco chunk 3,423.44 kB 逐字节同值，feed 入 index chunk 未破预算）/bundle 预算/assert 六扫（预留 0）/docs 五项。本批零 Rust 触碰（cargo 面沿 D-38 终态 1042/0）。
 
 ---
 

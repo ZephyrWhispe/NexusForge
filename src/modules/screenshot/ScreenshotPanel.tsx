@@ -279,7 +279,10 @@ export default function ScreenshotPanel() {
 
   /**
    * 配置被模块拒收 / 链式上传失败，都只存在于事件总线上（写盘本身是成功的）。
-   * 不接这两个事件，用户看到的就只是"我点了保存，什么都没发生"。
+   * 不接这两个事件，用户看到的就只能是"我点了保存，什么都没发生"。
+   * D-39③④ 扩两主题：`screenshot.taken` 作门铃刷新历史（覆盖层/快捷键路径
+   * 完成后面板原先要手动重载才见新行——只作门铃不作数据源，historyBell 同谱）；
+   * `ocr.failed` 弹错——联动 OCR 失败时历史行只是缺 ocr_text，不接就是静默。
    */
   useEffect(() => {
     if (!IN_TAURI) return;
@@ -293,6 +296,12 @@ export default function ScreenshotPanel() {
             setCfgRejected(String(payload.error ?? ""));
           } else if (topic === "screenshot.upload_failed") {
             notify("error", "上传失败（截图本身已完成）", String(payload.message ?? ""));
+          } else if (topic === "screenshot.taken") {
+            void reload().catch((err) =>
+              reportError(err, { context: "截图历史刷新失败", dedupeKey: "shot-history" }),
+            );
+          } else if (topic === "ocr.failed") {
+            notify("error", "OCR 识别失败", String(payload.reason ?? "未知原因"));
           }
         }),
       )
@@ -304,7 +313,7 @@ export default function ScreenshotPanel() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [reload]);
 
   const applyPreset = useCallback(
     async (preset: { label: string; actions: string[] }) => {

@@ -83,14 +83,10 @@ Invoke-Scan 'SEC-07 dangerouslySetInnerHTML 游离于 MarkdownView 之外' 'dang
 # 含 src-tauri 命令腿）与订阅证据（Rust subscribe* 邻接，或前端字面量/模块前缀订阅——
 # KvmPanel 等按 startsWith("kvm.") 收流，nf:event 全主题转发，前缀即订阅证据）。
 # 无证据者须列入 $TopicReserve 并附理由（形同 deny.toml ignore 台账：显式债不静默）。
-# 预留四条＝STD-10 落地首跑抓出的"仅发布腿、无生产订阅方"主题（订阅证据只在
-# #[cfg(test)] 区）；摘除发布点属代码变更，待用户裁决（operation.conflict 摘除先例在册）。
-$TopicReserve = @{
-    'host.module_crashed' = '仅发布腿（registry 隔离通知）；UI 崩溃呈现走 host.module_state，本主题留待裁决'
-    'automation.notify'   = '仅发布腿（engine/module 两处）；前端 RulesPanel 只订 automation.rule_fired，本主题留待裁决'
-    'screenshot.taken'    = '仅发布腿（两处）；截图历史现走拉取刷新，本主题接入或删除留待裁决'
-    'ocr.failed'          = '仅发布腿（ocr-core 统一 fail 口）；前端 OCR 面板现走返回值通道，留待裁决'
-}
+# D-39：D-38 首跑抓出的四枚"仅发布腿"预留（host.module_crashed/automation.notify/
+# screenshot.taken/ocr.failed）已全部接线落地、台账清零——机制常驻，未来新悬空主题
+# 入此台账须附理由，接线或摘除后再删条目（反向过期检查会强制）。
+$TopicReserve = @{}
 
 $eventsRaw = Get-Content 'crates\host-core\src\events.rs' -Raw -Encoding UTF8
 $reg = [regex]::Match($eventsRaw, '(?s)TOPIC_REGISTRY[^=]*=\s*&\[(.*?)\];')

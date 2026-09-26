@@ -31,6 +31,8 @@ import { useSession } from "../stores/session";
 import { startModuleStatusFeed } from "../stores/modules";
 import { startDesktopRemindFeed } from "../stores/desktopReminders";
 import { startKvmPairAlertFeed } from "../stores/kvmPairAlerts";
+import { startAutomationNotifyFeed } from "../stores/automationNotifications";
+import { startModuleCrashAlertFeed } from "../stores/moduleCrashAlerts";
 
 /**
  * 主工作台（docs/DESIGN.md §3 像素级布局：40/44/1fr/28 四行 + 228/190 双列导航）。
@@ -122,6 +124,9 @@ export default function MainWorkbench() {
     startDesktopRemindFeed();
     // SEC-11（D-37 R-I1）：KVM 配对成功强提醒同样挂主窗口级
     startKvmPairAlertFeed();
+    // D-39①②：规则通知动作落点＋模块崩溃原因可见化（均主窗口级，面板未开也可见）
+    startAutomationNotifyFeed();
+    startModuleCrashAlertFeed();
   }, []);
 
   // U2-4/U3-5：全局快捷键 → OS → 事件 → 快速面板 / 截图覆盖层
