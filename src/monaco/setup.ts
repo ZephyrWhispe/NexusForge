@@ -9,12 +9,19 @@ import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker"
 import "monaco-editor/esm/vs/editor/editor.all";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 
-// 语言服务四门（ts 服务连带注册 typescript/javascript，css 服务连带 css/scss/less，
-// html/json 服务各自注册本语言）
+// 语言服务四门（真机冒烟坐实：服务贡献只挂 onLanguage 补全/校验钩子，
+// 语言 ID 与 monarch 着色器一律由 basic-languages 注册——见下方六门补登）
 import "monaco-editor/esm/vs/language/typescript/monaco.contribution";
 import "monaco-editor/esm/vs/language/json/monaco.contribution";
 import "monaco-editor/esm/vs/language/css/monaco.contribution";
 import "monaco-editor/esm/vs/language/html/monaco.contribution";
+// 语言服务四门的语言 ID 注册面（json 的 ID 由其服务贡献自带，故不在此列）
+import "monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution";
+import "monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution";
+import "monaco-editor/esm/vs/basic-languages/css/css.contribution";
+import "monaco-editor/esm/vs/basic-languages/scss/scss.contribution";
+import "monaco-editor/esm/vs/basic-languages/less/less.contribution";
+import "monaco-editor/esm/vs/basic-languages/html/html.contribution";
 // 其余 languageForPath 服务的语言（cpp 包连带注册 c/cpp；纯词法着色无语言服务）
 import "monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution";
 import "monaco-editor/esm/vs/basic-languages/python/python.contribution";
