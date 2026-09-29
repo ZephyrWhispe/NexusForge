@@ -32,7 +32,7 @@ uuid = { version = "1", features = ["v7"] }
 zeroize = "1"
 regex = "1"
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

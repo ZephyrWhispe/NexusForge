@@ -783,7 +783,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2 0.5.3",
- "base64 0.22.1",
+ "base64 0.23.1",
  "criterion",
  "host-core",
  "parking_lot",
@@ -1923,7 +1923,7 @@ dependencies = [
 name = "file-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "host-core",
  "image",
  "parking_lot",
@@ -2649,7 +2649,7 @@ dependencies = [
 name = "host-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chacha20poly1305",
  "chardetng",
  "encoding_rs 0.8.41",
@@ -3699,7 +3699,7 @@ name = "nexusforge"
 version = "0.1.0"
 dependencies = [
  "automation-core",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clipboard-core",
  "desktop-core",
  "editor-core",
@@ -4140,7 +4140,7 @@ dependencies = [
 name = "ocr-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "host-core",
  "image",
  "parking_lot",
@@ -4726,7 +4726,7 @@ dependencies = [
 name = "proxy-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "host-core",
  "parking_lot",
  "reqwest 0.12.28",
@@ -5491,7 +5491,7 @@ name = "screenshot-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "host-core",
  "image",
@@ -7277,7 +7277,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2 0.5.3",
- "base64 0.22.1",
+ "base64 0.23.1",
  "hmac 0.12.1",
  "host-core",
  "parking_lot",
