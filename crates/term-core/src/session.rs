@@ -36,8 +36,13 @@ fn batched_params() -> (std::time::Duration, usize) {
 const BACKPRESSURE_LIMIT: i64 = 4 * 1024 * 1024;
 
 /// 会话类别（docs/impl/06 T1/T3/T5）
+///
+/// 线形＝内部 `kind` 标签（D-41 D2）：`client.ts` 的 `TermKindDto` 与
+/// `ForwardSection.tsx`／`TerminalPanel.tsx` 的 `kind.kind` 判读都以此为唯一
+/// 事实源；`Local` 这类 unit 变体内部标签后为 `{"kind":"local"}`，裸串旧形
+/// 由 `termKind_wireShapeMatchesFrontend` 的负例臂拒收。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TermKind {
     Local,
     Wsl {
@@ -456,5 +461,40 @@ mod tests {
     async fn kill_all_on_empty_is_ok() {
         let s = TermSessions::new();
         s.kill_all();
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // D-41 D2：线形契约测试按任务书字面名形制
+    fn termKind_wireShapeMatchesFrontend() {
+        // unit 变体经内部标签后是对象而非裸串——ForwardSection.tsx:50 的
+        // s.kind.kind === "ssh" 与 TerminalPanel.tsx:418-424 的类型描述都以此为前提
+        let local = serde_json::to_value(TermKind::Local).unwrap();
+        assert_eq!(
+            local,
+            serde_json::json!({ "kind": "local" }),
+            "Local 必须显形为对象，裸串旧形会让前端 kind.kind 判读恒 undefined"
+        );
+        let ssh = serde_json::to_value(TermKind::Ssh {
+            host: "h".into(),
+            port: 22,
+            user: "u".into(),
+        })
+        .unwrap();
+        let mut keys: Vec<&String> = ssh.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["host", "kind", "port", "user"],
+            "ssh 臂键集须与 TermKindDto 逐字相等"
+        );
+        assert_eq!(ssh["kind"], "ssh");
+        // 读侧：wsl 臂按前端字面形可解析
+        let wsl: TermKind = serde_json::from_str(r#"{"kind":"wsl","distro":"Ubuntu"}"#).unwrap();
+        assert!(matches!(wsl, TermKind::Wsl { distro } if distro == "Ubuntu"));
+        // 单向门负例：裸串旧形拒收
+        assert!(
+            serde_json::from_str::<TermKind>(r#""local""#).is_err(),
+            "裸串旧形必须拒收，否则两形并存且 kind.kind 静默失效"
+        );
     }
 }

@@ -34,8 +34,13 @@ pub use host_core::ssh_trust::HostKeyDecision;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 认证方式（IPC 入参；密码现场输入，密钥走路径）
+///
+/// 线形＝内部 `kind` 标签（D-41 D1）：与 `src/ipc/client.ts` 的 `SshAuthDto`
+/// 以及仓内"上盘/上线枚举一律 `tag = "kind"`"的惯例（file-core profile.rs、
+/// automation rule.rs、sys-core winops.rs）对齐。外部标签旧形即刻不可解析，
+/// 由 `termSshAuth_wireShapeMatchesFrontend` 的负例臂钉死为单向门。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SshAuth {
     Password {
         password: String,
@@ -1391,10 +1396,11 @@ mod tests {
         let via = conn_err(connect_via_jumps(&closed_target(None), kh.clone()).await).to_string();
         assert_eq!(direct, via, "两臂错误措辞必须逐字相等");
         assert!(direct.contains("连接 127.0.0.1:1 失败"), "实得 {direct}");
-        // 旧 JSON 会话参数无 jump 键可读（serde default——加键兼容）
+        // 旧 JSON 会话参数无 jump 键可读（serde default——加键兼容）；
+        // auth 一律用现行线形（内部 kind 标签，见 D-41 D1）
         let legacy = serde_json::json!({
             "host": "h", "port": 22, "user": "u",
-            "auth": {"password": {"password": "p"}}
+            "auth": {"kind": "password", "password": "p"}
         });
         let t: SshTarget = serde_json::from_value(legacy).unwrap();
         assert!(t.jump.is_none());
@@ -1874,6 +1880,46 @@ mod tests {
         assert!(
             !term_src.contains(&format!("fn sftp_{chmod}")),
             "term 侧长出第二份 chmod＝越权（宿主桥红线）"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // D-41 D1：线形契约测试按任务书字面名形制
+    fn termSshAuth_wireShapeMatchesFrontend() {
+        // 写侧键集全等——src/ipc/client.ts 的 SshAuthDto 是唯一事实源
+        let pw = serde_json::to_value(SshAuth::Password {
+            password: "p".into(),
+        })
+        .unwrap();
+        let mut pw_keys: Vec<&String> = pw.as_object().unwrap().keys().collect();
+        pw_keys.sort();
+        assert_eq!(
+            pw_keys,
+            vec!["kind", "password"],
+            "password 臂键集须恰两枚，实得 {pw_keys:?}"
+        );
+        assert_eq!(pw["kind"], "password");
+        let key = serde_json::to_value(SshAuth::Key {
+            key_path: "/k".into(),
+            passphrase: None,
+        })
+        .unwrap();
+        let mut key_keys: Vec<&String> = key.as_object().unwrap().keys().collect();
+        key_keys.sort();
+        assert_eq!(
+            key_keys,
+            vec!["key_path", "kind", "passphrase"],
+            "key 臂三键齐（None 显式写 null 键，形状可机检而不是省键；下列为字典序）"
+        );
+        assert_eq!(key["kind"], "key");
+        // 读侧：前端发射形逐字可解析（TerminalPanel.tsx sshAuth()/jumpHop() 的字面形）
+        let from_front: SshAuth =
+            serde_json::from_str(r#"{"kind":"password","password":"x"}"#).unwrap();
+        assert!(matches!(&from_front, SshAuth::Password { password } if password == "x"));
+        // 单向门负例：外部标签旧形不得再被接受（双形并收＝再造第二事实源）
+        assert!(
+            serde_json::from_str::<SshAuth>(r#"{"password":{"password":"x"}}"#).is_err(),
+            "旧外标签形必须拒收，否则前后端两形并存无人能发现"
         );
     }
 }
