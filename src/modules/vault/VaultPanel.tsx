@@ -537,9 +537,9 @@ export default function VaultPanel({ search }: PanelProps) {
       } else {
         await vaultEntryAdd({
           title: editor.title.trim(),
-          folder_id: activeFolder === "all" ? null : activeFolder,
+          folderId: activeFolder === "all" ? null : activeFolder,
           favorite: editor.favorite,
-          totp_secret: totp,
+          totpSecret: totp,
           fields: editor.fields.filter((f) => f.key.trim() || f.value.trim()),
         });
       }

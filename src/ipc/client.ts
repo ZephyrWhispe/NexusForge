@@ -887,17 +887,19 @@ export function vaultEntryGet(id: string): Promise<VaultEntryDto | null> {
 }
 export function vaultEntryAdd(input: {
   title: string;
-  folder_id: string | null;
+  folderId: string | null;
   favorite: boolean;
   fields: EntryFieldDto[];
-  totp_secret: string | null;
+  totpSecret: string | null;
 }): Promise<VaultEntryDto> {
+  // 顶层键＝命令参数名（Tauri v2 默认 camel）；条目**内部**字段仍逐字镜像
+  // vault_core::Entry 的 snake serde（见本文件末尾形制注释）
   return invoke("vault_entry_add", {
     title: input.title,
-    folder_id: input.folder_id,
+    folderId: input.folderId,
     favorite: input.favorite,
     fields: input.fields,
-    totp_secret: input.totp_secret,
+    totpSecret: input.totpSecret,
   });
 }
 export function vaultEntryUpdate(entry: VaultEntryDto): Promise<VaultEntryDto> {
@@ -2198,7 +2200,9 @@ export type WinopsScanItemDto = [WinopsTweakDto, WinopsScanState];
 
 export interface WinopsApplyReportDto {
   tweak_id: string;
-  backup: { tweak_id: string; key: string; value_name: string; existed: boolean; old_value: unknown }[];
+  /** Rust `BackupItem`（sys-core winops.rs:130 内部 `kind` 标签＋逐臂异构）的前端零读取面，
+   *  形制钉在 `serde_shape_contract.rs` 账本——此处不重复声明，避免半截形状冒充全表 */
+  backup: unknown[];
   verified: boolean;
 }
 
