@@ -6,6 +6,7 @@ import ModuleNav from "../layout/ModuleNav";
 import SubNav from "../layout/SubNav";
 import StatusBar from "../layout/StatusBar";
 import MicaBackdrop from "../layout/MicaBackdrop";
+import PanelHeader from "../components/PanelHeader";
 // PERF3（docs/impl/07）：路由级代码分割在 panels 注册表内声明——首屏只加载宿主框架 +
 // 默认模块（ClipboardPanel），其余模块（含 Monaco/xterm 等重依赖）按需分 chunk；
 // 子窗口（launcher/notebar/overlay）本就动态 import
@@ -35,14 +36,15 @@ import { startAutomationNotifyFeed } from "../stores/automationNotifications";
 import { startModuleCrashAlertFeed } from "../stores/moduleCrashAlerts";
 
 /**
- * 主工作台（docs/DESIGN.md §3 像素级布局：40/44/1fr/28 四行 + 228/190 双列导航）。
+ * 主工作台（像素真源＝docs/panels/2026-09-19/15-host-shell.md:81，
+ * D-42 起网格 40/44/1fr/32 ＋ 228/190 双列导航，窄栏经 global.css 的 container query）。
  * 内容区为占位：剪切板真实列表在 U3 落地。
  */
 const useStyles = makeStyles({
   app: {
     height: "100vh",
     display: "grid",
-    gridTemplateRows: "40px 44px 1fr 28px",
+    gridTemplateRows: "40px 44px 1fr 32px",
     // U1-4：根背景透明，Mica（Tauri）或渐变回退（浏览器）由 MicaBackdrop 提供
     backgroundColor: "transparent",
     color: tokens.colorNeutralForeground1,
@@ -58,20 +60,12 @@ const useStyles = makeStyles({
     minWidth: "0",
   },
   content: {
-    flex: 1,
-    minWidth: 0,
     display: "flex",
     flexDirection: "column",
+    flex: 1,
+    minWidth: 0,
     overflow: "hidden",
   },
-  head: {
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    padding: "14px 20px 10px",
-  },
-  headTitle: { fontSize: tokens.fontSizeBase500, fontWeight: tokens.fontWeightSemibold },
-  meta: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   loading: {
     flex: 1,
     display: "grid",
@@ -213,7 +207,7 @@ export default function MainWorkbench() {
 
       <div className={styles.main}>
         <ModuleNav active={active} onChange={setActive} />
-        <div className={styles.work}>
+        <div className={styles.work} data-nf="work">
           {SUBNAV[moduleId].length > 0 && !isSettings && (
             <SubNav
               moduleId={moduleId}
@@ -228,13 +222,11 @@ export default function MainWorkbench() {
           <section className={styles.content} aria-label="内容区">
             {isSettings ? (
               <>
-                <div className={styles.head}>
-                  <span className={styles.headTitle}>
-                    设置中心 · {MODULES.find((m) => m.id === settingsModule)?.name ?? "NexusForge"}
-                  </span>
-                  <Badge appearance="outline">schema 驱动</Badge>
-                  <span className={styles.meta}>修改即校验即保存</span>
-                </div>
+                <PanelHeader
+                  title={`设置中心 · ${MODULES.find((m) => m.id === settingsModule)?.name ?? "NexusForge"}`}
+                  context="修改即校验即保存"
+                  actions={<Badge appearance="outline">schema 驱动</Badge>}
+                />
                 {/* key=模块 id：切换跟随目标时整体重建，杜绝上一模块表单值闪现 */}
                 <SchemaForm key={settingsModule} moduleId={settingsModule} />
                 {/* 宿主段（托盘等，T-B7-11）：不随模块切换，常驻设置中心底部 */}
@@ -242,11 +234,11 @@ export default function MainWorkbench() {
               </>
             ) : (
               <>
-                <div className={styles.head}>
-                  <span className={styles.headTitle}>{current?.name ?? "NexusForge"}</span>
-                  <Badge appearance="outline">{current?.phase ?? "P0"}</Badge>
-                  <span className={styles.meta}>{def.subtitle}</span>
-                </div>
+                <PanelHeader
+                  title={current?.name ?? "NexusForge"}
+                  context={def.subtitle}
+                  actions={<Badge appearance="outline">{current?.phase ?? "P0"}</Badge>}
+                />
                 <Suspense fallback={<ModuleLoading />}>
                   <ModulePanel search={search} group={group} onCounts={onCounts} />
                 </Suspense>

@@ -30,3 +30,53 @@ body {
     transform: none;
   }
 }
+
+/* D-42 壳层自适应（docs/panels/2026-09-19/00-ui-layout-spec.md 10-3/10-4/10-12/9-2 节）。
+   走全局 CSS 而非 griffel：makeStyles 的类名是哈希，container query 的选择器必须可命中；
+   data-nf 钩子同时是真机骨架走查的取数锚点。断点量的是 [data-nf="work"] 这段内容容器
+   （＝窗口宽 − 主导航 228），主窗 minWidth 940 时容器约 712，落在 Medium 档＝窄栏形态。
+   下发一律经 CSS 自定义属性：griffel 运行时注入的同特异度类次序在后，直接写 width/display
+   会被静默压掉（真机实测 206.8px 三档不变），而变量不参与那层竞争。 */
+[data-nf="work"] {
+  container-type: inline-size;
+}
+
+/* Medium（641–1007 容器宽）：二级导航收成 48px 图标窄栏，名称经条目 title 承载 */
+@container (max-width: 1007px) {
+  [data-nf="subnav"] {
+    --nf-subnav-w: 48px;
+    --nf-subnav-pad: 4px;
+    --nf-subnav-group-display: none;
+  }
+  /* 窄栏只留首字作图标替代（1em 裁切），全名走按钮 title 的 tooltip——
+     SUBNAV 条目无图标集，整体 display:none 会留下一条不可辨识的空栏。
+     此条不走变量：subnav-label 是无类名裸 span，griffel 对它零声明。 */
+  [data-nf="subnav-label"] {
+    display: inline-block;
+    overflow: hidden;
+    text-align: center;
+    white-space: nowrap;
+    width: 1em;
+  }
+}
+
+/* Small（≤640 容器宽）：二级导航整体收除（宽窗不足时不留残栏） */
+@container (max-width: 640px) {
+  [data-nf="subnav"] {
+    --nf-subnav-display: none;
+  }
+}
+
+/* 滚动条槽恒预留：杜绝"条目变少→滚动条消失→整页右移"（10-12） */
+.nf-scroll {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 设置/说明类单列上限 1040 居中（9-2），配 both-edges 保持中轴不偏 */
+.nf-measure {
+  margin: 0 auto;
+  max-width: 1040px;
+  padding: 0 20px;
+  scrollbar-gutter: stable both-edges;
+}

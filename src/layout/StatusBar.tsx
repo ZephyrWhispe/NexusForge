@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { hostModuleRestart, type ModuleState } from "../ipc/client";
+import { SHELL } from "../components/nfTiers";
 import { useModuleStatus } from "../stores/modules";
 import { notify, reportError, useNotifications } from "../stores/notifications";
 
@@ -12,15 +13,17 @@ import { notify, reportError, useNotifications } from "../stores/notifications";
  */
 const useStyles = makeStyles({
   root: {
-    display: "flex",
     alignItems: "center",
-    gap: "16px",
-    padding: "0 14px",
-    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
-    fontSize: tokens.fontSizeBase100,
-    color: tokens.colorNeutralForeground3,
-    userSelect: "none",
     backgroundColor: "transparent",
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+    boxSizing: "border-box",
+    color: tokens.colorNeutralForeground3,
+    display: "flex",
+    fontSize: tokens.fontSizeBase100,
+    gap: "16px",
+    height: SHELL.footer,
+    padding: "0 14px",
+    userSelect: "none",
   },
   st: { display: "flex", alignItems: "center", gap: "6px" },
   dot: {

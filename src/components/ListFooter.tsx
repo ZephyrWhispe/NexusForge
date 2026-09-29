@@ -12,6 +12,7 @@ const useStyles = makeStyles({
   root: {
     alignItems: "center",
     borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+    boxSizing: "border-box",
     color: tokens.colorNeutralForeground3,
     display: "flex",
     gap: SPACING.x12,

@@ -26,7 +26,13 @@ import { IN_TAURI } from "../ipc/env";
  */
 const DEBOUNCE_MS = 400;
 const useStyles = makeStyles({
-  root: { flex: 1, overflowY: "auto", padding: "8px 24px 30px", maxWidth: "760px" },
+  root: {
+    flex: 1,
+    maxWidth: "1040px",
+    overflowY: "auto",
+    padding: "8px 24px 30px",
+    scrollbarGutter: "stable",
+  },
   group: { marginBottom: "22px" },
   title: {
     fontSize: tokens.fontSizeBase300,

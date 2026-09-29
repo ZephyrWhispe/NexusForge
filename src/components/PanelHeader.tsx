@@ -6,12 +6,14 @@ import { ROW_H, SHELL, SPACING } from "./nfTiers";
 /**
  * 面板头部骨架（00 规范 1 节：标题(左)│上下文摘要│主操作区(右)，高 48、固定不滚动）。
  * `actions` 恒为行内最后一个子节点＝"主操作恒最右"（3 节）由此可机检。
+ * 48＝含底部分隔线的外盒（border-box），真机走查按 getBoundingClientRect 判定。
  */
 
 const useStyles = makeStyles({
   root: {
     alignItems: "center",
     borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    boxSizing: "border-box",
     display: "flex",
     gap: SPACING.x12,
     minHeight: ROW_H.base,
