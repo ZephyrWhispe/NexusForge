@@ -158,11 +158,24 @@ fn default_true() -> bool {
 }
 
 impl Rule {
-    /// 校验规则（topic 非空 / 动作非空 / Schedule 时间格式）
+    /// 校验规则（topic 非空且已登记 / 动作非空 / Schedule 时间格式）
     pub fn validate(&self) -> Result<()> {
         match &self.on {
-            Trigger::Event { topic } if topic.trim().is_empty() => {
-                return Err(AutomationError::BadRule("事件主题为空".into()))
+            Trigger::Event { topic } => {
+                if topic.trim().is_empty() {
+                    return Err(AutomationError::BadRule("事件主题为空".into()));
+                }
+                // 拼错的主题名＝规则永不自燃且零报错（打错字与写对同样"保存成功"），
+                // 故保存即按宿主事件总线登记表拒收；仅挂保存路径，启动加载不校验，
+                // 旧脏规则不会被本条砖化
+                if !host_core::events::TOPIC_REGISTRY
+                    .iter()
+                    .any(|(t, ..)| *t == topic)
+                {
+                    return Err(AutomationError::BadRule(format!(
+                        "未知事件主题 {topic}（须为宿主事件总线已登记主题，形如 clipboard.captured）"
+                    )));
+                }
             }
             Trigger::Schedule { time } => {
                 let parts: Vec<&str> = time.split(':').collect();
@@ -304,6 +317,70 @@ mod tests {
             ..r
         };
         assert!(bad.validate().is_err());
+    }
+
+    /// D-41 D6b：拼错的主题名在保存口即拒收（旧行为＝只判非空，打错字的规则"保存成功"
+    /// 却永不自燃、零报错）；空主题的旧判据同时不回退
+    #[test]
+    fn event_trigger_rejects_unregistered_topic() {
+        let base = Rule {
+            id: "r1".into(),
+            name: "示例".into(),
+            on: Trigger::Event {
+                topic: String::new(),
+            },
+            when: None,
+            then: vec![Action::Notify {
+                title: "t".into(),
+                body: "b".into(),
+            }],
+            cooldown_secs: 0,
+            enabled: true,
+        };
+        let err = base.validate().unwrap_err();
+        assert!(
+            matches!(&err, AutomationError::BadRule(msg) if msg.contains("为空")),
+            "空主题仍须拒收，得 {err:?}"
+        );
+
+        let typo = Rule {
+            on: Trigger::Event {
+                topic: "clipboard.captured2".into(),
+            },
+            ..base
+        };
+        match typo.validate().unwrap_err() {
+            AutomationError::BadRule(msg) => {
+                assert!(msg.contains("clipboard.captured2"), "须点名被拒主题：{msg}");
+                assert!(msg.contains("登记"), "须指路可选集出处：{msg}");
+            }
+            other => panic!("未登记主题须 BadRule（AUTO_RULE_002），得 {other:?}"),
+        }
+    }
+
+    /// 正对照（禁门自曝）：登记表内的真名照常放行
+    #[test]
+    fn event_trigger_accepts_registry_topic() {
+        let topic = host_core::events::TOPIC_REGISTRY
+            .iter()
+            .map(|(t, ..)| *t)
+            .find(|t| *t == "screenshot.taken")
+            .expect("正对照主题须在登记表内");
+        let r = Rule {
+            id: "r2".into(),
+            name: "示例".into(),
+            on: Trigger::Event {
+                topic: topic.into(),
+            },
+            when: None,
+            then: vec![Action::Notify {
+                title: "t".into(),
+                body: "b".into(),
+            }],
+            cooldown_secs: 0,
+            enabled: true,
+        };
+        r.validate().expect("已登记主题须放行");
     }
 
     #[test]
