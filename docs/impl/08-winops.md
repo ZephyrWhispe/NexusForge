@@ -567,6 +567,8 @@ win-integration 新增文件：`src/sys/mod.rs { registry.rs, service.rs, tasksc
 
 任务编排归位：用户提案的 YAML 编排（scan→apply→verify→notify + 条件分支）**不在 WinOps v1 内置**——由阶段四 automation-core 的 `Action::IpcCommand{module:"sys", cmd:"sys_apply", ...}`（07 文档 A3）编排；v1 的 profile 即"新机初始化"的串行实现（apply 顺序执行 + 完成事件 + reboot_required 汇总提示）。
 
+> **D-41 更正（2026-09-29 实测，原段保留供追溯）**：上段把跨模块编排押在 `Action::IpcCommand` 上，而该臂今日**恒 `Err("IpcCommand 暂未开放")`**（`crates/automation-core/src/module.rs:157-167`，规则跑三次重试后入死信信箱 `engine.rs:120-136`）——也就是说"scan→apply→verify→notify 交给 automation 编排"这条通路并不存在，v1 里 WinOps 序列化的唯一真源就是本档的 profile 串行执行本身。UI 侧的假入口已按 D-41 D6 诚实化（新规则不再列出该动作，存量规则可读可存不腐并挂延后徽标）。若将来 WinOps 真需要跨模块 IPC 通路，须另立决策把派发臂连同 ACL/能力面一并设计清楚，**不得顺手解开这枚恒 Err**（D-41 代价段第⑥条在册）。
+
 ---
 
 ## 7. src-tauri 集成
