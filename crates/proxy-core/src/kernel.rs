@@ -42,7 +42,9 @@ pub struct LogLine {
 }
 
 impl LogLine {
-    fn now(text: impl Into<String>) -> Self {
+    /// 快照环与 `proxy.log_line` 事件载荷的共用构造（时刻＝宿主接收instant，
+    /// 与行文本一样都是后端实测值，前端不做二次计时）
+    pub(crate) fn now(text: impl Into<String>) -> Self {
         Self {
             ts_ms: host_core::util::now_ms_u64(),
             text: text.into(),

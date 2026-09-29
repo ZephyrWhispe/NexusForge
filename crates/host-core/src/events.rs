@@ -58,7 +58,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)] = &[
     ("screenshot.taken", "截图任务完成。payload: {task_id, file?}", BackpressurePolicy::None),
     ("screenshot.ocr_requested", "截图模块请求 OCR。payload: {task_id, frame_ref}", BackpressurePolicy::None),
     ("screenshot.upload_failed", "链式上传失败（截图本身已完成）。payload: {source, code, message}", BackpressurePolicy::None),
-    ("ocr.completed", "OCR 完成。payload: {source_task_id?, result}", BackpressurePolicy::None),
+    ("ocr.completed", "OCR 完成。payload: 识别腿 {source_task_id?, text, engine}（平铺）；「复制全部」写回腿 {action: copied}（D-41 文案归真，零行为改动）", BackpressurePolicy::None),
     ("ocr.failed", "OCR 失败。payload: {reason}", BackpressurePolicy::None),
     // STD-10：operation.conflict 已摘除——全仓无发布方亦无订阅方（Ask 策略在
     // 入队口被拒，同名冲突走冲突面板数据面）；未来若做"逐文件中断式询问"需
@@ -80,7 +80,7 @@ pub const TOPIC_REGISTRY: &[(&str, &str, BackpressurePolicy)] = &[
     ("vault.entries_changed", "密码库条目/文件夹变更。payload: {action, id?}", BackpressurePolicy::None),
     ("vault.auto_lock_warning", "自动锁定预警（D-24 V5：锁定前 30s）。payload: {lock_in_secs}", BackpressurePolicy::None),
     ("proxy.state_changed", "代理模式/内核状态迁移。payload: {mode, kernel_running, kernel_id?, inbound_port?}", BackpressurePolicy::None),
-    ("proxy.log_line", "代理内核日志行。payload: {line}", BackpressurePolicy::None),
+    ("proxy.log_line", "代理内核日志行。payload: {ts_ms, text}（与 proxy_logs 快照行同形，D-41 D4）", BackpressurePolicy::None),
     ("proxy.nodes_changed", "订阅/节点列表变更。payload: {sub_id?, total}", BackpressurePolicy::None),
     ("desktop.launcher_toggled", "快速启动器呼出/隐藏请求（全局快捷键触发）。payload: {}", BackpressurePolicy::None),
     ("desktop.note_quick", "快速速记条呼出请求（全局快捷键触发）。payload: {}", BackpressurePolicy::None),

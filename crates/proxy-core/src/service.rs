@@ -1187,10 +1187,14 @@ impl ProxyService {
         handle.set_log_cb({
             let bus = self.bus.clone();
             Arc::new(move |line: &str| {
+                // 事件载荷＝环形快照行的同一形状（D-41 D4：实时腿与 proxy_logs
+                // 快照腿曾异形，前端按 {ts_ms,text} 读实时行只得 undefined）；
+                // ts_ms 取宿主接收时刻，与 LogLine::now 同一时钟真源
+                let row = LogLine::now(line);
                 bus.publish(Event::new(
                     "proxy.log_line",
                     "proxy",
-                    serde_json::json!({ "line": line }),
+                    log_line_payload(&row),
                 ))
                 .ok();
             })
@@ -1370,6 +1374,13 @@ async fn resolve_host(host: &str) -> Option<std::net::IpAddr> {
 }
 
 use host_core::util::now_ms_u64 as now_ms;
+
+/// `proxy.log_line` 事件载荷＝`proxy_logs` 快照行的同一形状（D-41 D4：两腿曾异形，
+/// 发布腿只有 `{line}`，前端按 `ts_ms`/`text` 读实时行只得 undefined）。两腿共用
+/// [`LogLine::now`] 构造，键名在此显影以便与 derive 形状互校。
+fn log_line_payload(row: &LogLine) -> serde_json::Value {
+    serde_json::json!({ "ts_ms": row.ts_ms, "text": row.text })
+}
 
 #[cfg(test)]
 #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
@@ -2389,5 +2400,38 @@ mod tests {
             other => panic!("关闭态自检必须 BadState，得 {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 任务书（09 §5.2）字面测试名优先于 rustc 命名惯例
+    fn proxyLogLine_eventPayloadCarriesRingRowShape() {
+        // D-41 D4：实时事件腿与 `proxy_logs` 快照腿同形——前端 LogsSection 按 `ts_ms`/`text`
+        // 过滤渲染，发布腿曾只带 `{line}` 致实时行整列空白、级别过滤失真
+        let row = LogLine::now("xray: listening 127.0.0.1:10808");
+        let event = log_line_payload(&row);
+        let snapshot = serde_json::to_value(&row).expect("LogLine 字段皆可序列化");
+        let mut event_keys: Vec<&str> = event
+            .as_object()
+            .expect("事件载荷应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut snapshot_keys: Vec<&str> = snapshot
+            .as_object()
+            .expect("快照行应为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        event_keys.sort_unstable();
+        snapshot_keys.sort_unstable();
+        assert_eq!(
+            event_keys, snapshot_keys,
+            "两腿键集必须全等（增删字段须同批改前端读点）"
+        );
+        assert_eq!(
+            event["ts_ms"], row.ts_ms,
+            "时刻＝宿主接收 instant，两腿同一时钟"
+        );
+        assert_eq!(event["text"], row.text);
     }
 }
