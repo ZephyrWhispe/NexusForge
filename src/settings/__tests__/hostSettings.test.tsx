@@ -18,6 +18,10 @@ vi.mock("../../ipc/client", async (importOriginal) => {
   };
 });
 vi.mock("../../ipc/env", () => ({ IN_TAURI: true }));
+// D-41 D5：表单新增 nf:event 监听（host.config_rejected 显影），jsdom 无 Tauri 内部口
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+// D-41 D5：表单新增 nf:event 监听（host.config_rejected 显影），jsdom 无 Tauri 内部口
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
 const TRAY_SCHEMA = {
   type: "object",

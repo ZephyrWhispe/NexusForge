@@ -103,6 +103,7 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
   const [schema, setSchema] = useState<Record<string, JsonSchemaProp> | null>(null);
   const [values, setValues] = useState<Values | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rejected, setRejected] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // PERF-02：待提交键集合 + 防抖计时器 + 值快照（flush 在锁外读最新值）
   const dirtyKeys = useRef<Set<string>>(new Set());
@@ -121,6 +122,8 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
     try {
       await hostConfigSet(moduleId, snapshot);
       setError(null);
+      // 写后被异步派发拒收的旧账不得与新一轮保存并存（拒收事件若仍在场会再显一次）
+      setRejected(null);
     } catch (e) {
       // 失败如实显错（顶部错误行）。不自动回滚输入值——校验类拒绝（如路径非法）
       // 下保留用户所打内容才能"改正即可重试"（T-B4-11 钉住的产品决策）
@@ -175,17 +178,49 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
     [flush, moduleId],
   );
 
+  /**
+   * D-41 D5：`host.config_rejected` 的契约（events.rs 登记："设置面板须原样显示"）此前
+   * 只有 screenshot 面板自取，其余模块被拒收时 UI 全静默——`host_config_set` 的 promise
+   * 不 reject（拒收发生在写后异步派发），故只能听事件。按 moduleId 过滤后原文上屏，
+   * 不翻译不截断；本组件随 tab 重挂载（MainWorkbench `key={settingsModule}`），故局部监听。
+   */
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<{ topic: string; payload: Record<string, unknown> }>("nf:event", (e) => {
+          const { topic, payload } = e.payload;
+          if (topic === "host.config_rejected" && payload.module === moduleId) {
+            setRejected(String(payload.error ?? ""));
+          }
+        }),
+      )
+      .then((u) => {
+        if (disposed) u();
+        else unlisten = u;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [moduleId]);
+
+  // 单一错误行：同步失败（promise reject）优先，其后是写后异步派发的拒收原文
+  const displayErr = error ?? rejected;
+
   if (!schema || !values) {
     return (
       <div className={styles.root}>
-        <Text>{error ?? "加载配置中…"}</Text>
+        <Text>{displayErr ?? "加载配置中…"}</Text>
       </div>
     );
   }
 
   return (
     <div className={styles.root}>
-      {error && <Text className={styles.err}>{error}</Text>}
+      {displayErr && <Text className={styles.err}>{displayErr}</Text>}
       {saving && <Text className={styles.desc}>保存中…</Text>}
       {visibleProps(schema).map(([key, prop]) => {
         const choices = enumChoices(prop);
