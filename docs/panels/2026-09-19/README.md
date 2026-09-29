@@ -39,6 +39,8 @@ SubNavSection = { id, name, icon?, kind: "view"|"filter"|"group", count?: 动态
 - `EmptyState/ErrorState`：沿用 D-18 基线，错误必附"重试/查看日志"；
 - 危险操作统一 ConfirmDialog（D-18），不可逆操作要求输入确认词。
 
+> **D-42 更正（2026-09-29）**：本节标题的"随 B0 落地"从未进 `docs/impl/09-blueprint-alignment.md` 的 B0 任务表（三处承诺、零排期，详见 DECISIONS D-42 背景段），组件族实际由 **D-42** 另批交付：`src/components/` 的 `nfTiers.ts`（尺寸唯一事实源）＋`PanelHeader`/`DataToolbar`/`SwitchSetting`(+`SettingsGroup`)/`PathPicker`/`ListFooter`，加既有 `DeferredBadge`/`EmptyState`/`ConfirmDialog`。族谱全貌与宿主侧状态行见 [15-host-shell.md](15-host-shell.md) 7.1 节的 D-42 实施状态块；"各面板档引用不得各自造替换品"目前由 `src/layout/__tests__/layoutCompliance.test.ts` 的棘轮台账机器兜底。
+
 ### 0.4 每档模板与验收惯例
 
 每份面板档含：§1 现状问题（带 file:line）→ §2 子面板信息架构 → §3 对标功能矩阵（全部功能逐条）→ §4 其他软件借鉴 → §5 拓展设计（冷门但高价值）→ §6 验收点 → **§7 排版方案与二审补充（2026-09-19 复审增）**：本模块各子面板的布局骨架与元素摆位（通用纪律引用 [00-ui-layout-spec.md](00-ui-layout-spec.md) 条款号，不重复），以及复审发现的**配套功能缺口**（"主功能↔配合件"链，如代理之分流规则）与锦上添花设置——§7 增补条目归口到 §2 对应子面板与 §3 矩阵，动工以合并后清单为准。

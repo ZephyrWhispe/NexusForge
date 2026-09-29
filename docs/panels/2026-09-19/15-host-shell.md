@@ -34,6 +34,7 @@ SUBNAV: Record<ModuleId, SubNavSection[]>
 - MainWorkbench 渲染收敛为 `PANELS[active]` 一查到底（删 14 层三元）；MODULES 里每个 id **必须**在 PANELS 有键（组件或显式 deferred），vitest 断言全覆盖——今后任何模块不可能再"注册了却无界面"。
 - 设置中心 SchemaForm 的 moduleId 跟随 active（修 :201）；各模块 config schema 由后端 settings_schema 通路供出（宿主/模块同一 schema 之家纪律，README §0.2）。
 - `DeferredBadge`/`DataToolbar`/`EmptyState` 通用组件随本批落地（README §0.3）。
+  > **D-42 实施状态（2026-09-29）**：本行原写"随本批落地"、实际从未进 09 的 B0 任务表（DECISIONS 全文 grep `DataToolbar|PanelHeader` 当时零命中），故组件族与 8 节可判定化清单的宿主侧另立 D-42 交付。现状＝`src/components/` 的 `nfTiers.ts`＋`PanelHeader`/`DataToolbar`/`SwitchSetting`(+`SettingsGroup`)/`PathPicker`/`ListFooter` 六件已落地并各配 vitest 基线；`DeferredBadge`/`EmptyState` 沿用既有件（后者随批加 `hint`/`action` 两可选 props）。**14 个面板本体尚未改用本族**（D-42 只做族＋壳），引用侧由 `src/layout/__tests__/layoutCompliance.test.ts` 的棘轮台账钉住不增长。
 
 ## 3. 对标功能矩阵
 
@@ -84,6 +85,13 @@ SUBNAV: Record<ModuleId, SubNavSection[]>
 - **通知中心**：抽屉/独立页复用同一列表组件；行 `[色点：错误/状态/事件][标题+摘要][来源模块芯片][时间][已读]`，芯片点击=深链三元组跳转（§5-④）。
 - **导航定制**：拖拽列表行 `[把手][图标+模块名][显隐 Switch]`，"恢复默认"在页 Footer 左端（非主按钮位）；被隐藏模块在 PANELS 仍注册，只是投影缺席（防"隐藏=卸载"误解）。
 - **通用组件供给**：DeferredBadge/DataToolbar/EmptyState/PanelHeader/SwitchSetting/PathPicker 由本档 B0 批落地并配 vitest 组件基线（00§8 可判定化清单的宿主侧），各面板档引用不得各自造替换品。
+
+> **D-42 壳批实施状态（2026-09-29，逐条对拍本小节的"应然"）**：
+> · **骨架已对齐**：`src/windows/MainWorkbench.tsx:48` 网格 = `40px 44px 1fr 32px`（标题栏 40／模块头 44 行内塞 PanelHeader 48 的 minHeight 由组件自带，状态栏 32 见 `src/layout/StatusBar.tsx:24` 的 `SHELL.footer`），两处手摆头部改 `<PanelHeader title context actions/>`（:228/:240），模块段 context 首次落 `def.subtitle`。**真机实得**（2026-09-29 CDP 直连真窗）：PanelHeader 高 **48**、状态栏高 **32**、网格计算样式逐字 `40px 44px 1fr 32px`。
+> · **单滚动容器一条判据实测未过（既有缺陷，非 D-42 引入，已挂账待裁决）**：`styles.work` 自骨架提交 `4045c31` 起只有 `minWidth:0` 而无 `minHeight:0`，grid item 的自动最小尺寸令 `work` 按内容高生长（桌面效率 1118px／系统管理 819px 对行高 684px），面板根的 `overflowY:"auto"` 因 `scrollHeight==clientHeight` 永不可滚，超出部分直接画在状态栏带上且三径（window/documentElement/面板 scrollTop）皆零位移＝不可达。候选治本＝`work` 补 `minHeight:"0"` 一枚（此后声明 `overflowY:auto` 的面板自动成为唯一滚动口；面板根 `overflowY:visible` 者需逐枚实启复验），详证与影响面见 DECISIONS D-42 实施记录。
+> · **窄栏已实现**：SubNav 190px 与 48px 图标档经 `global.css` 的 `[data-nf="work"]` container query 下发（裁决记录见 00-ui-layout-spec.md 10 节第 5 条的 D-42 追记），≤640px 整体收除。**真机三档实得**：窗口 1280/1000/940 ⇒ 容器 1052/772/712 ⇒ 二级导航 **190/48/48**、内容区 862/724/**664**（＝940−228−48 逐字兑现），700 档容器 561 时整栏收除，无第四形态。
+> · **组件族六件供给齐**（`src/components/`，各配 vitest 基线），但**"宿主设置中心每子面板一律 SwitchSetting 行制"与"各面板引用本族"两条例律本批未落实**——14 个面板与 SchemaForm 仍各自排版，替换品继续由 `src/layout/__tests__/layoutCompliance.test.ts` 的棘轮台账钉住不增长（新增原生控件/写死宽度/第二滚动容器/未登记空 SUBNAV 一律判红），收敛归后续各面板批。
+> · **本节其余未落地项维持原状**：状态栏四格、通知中心、快捷键总览表、导航定制、命令面板＝15 档宿主面的面板批工，D-42 未扩范围。
 
 ### 7.2 配套功能缺口（二审新增）
 
