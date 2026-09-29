@@ -1,8 +1,12 @@
 //! R-I2（D-37·GOV-09 参数级契约）：前端 `src/ipc/client.ts` 每个 invoke 的
 //! 命令名必须 ∈ `generate_handler!` 注册表，且内联 payload 的**顶层键集合**
-//! ⊆ 对应 Rust 命令签名的参数名集合（Tauri v2 默认 camelCase 收键，
-//! snake_case 原形一并放行）。零新依赖：两侧均为手写扫描，与
-//! `security_config.rs::registered_commands` 同族先例。
+//! ⊆ 对应 Rust 命令签名参数名的 **camel 形**（Tauri v2 默认按 camel 收键）。
+//! D-41 G1 起 snake 原形不再放行：旧放行臂 `p == k` 是本门最大的洞，
+//! `vault_entry_add` 的 folder_id / totp_secret 由此混过门，并在 Option 参数缺键处
+//! 静默落 None（命令仍报成功）——用户看见的是「文件夹归属与 TOTP 凭空消失」。
+//! camel-only 成立的前提与下方 `assert!(odd.is_empty())` 互锁：全仓 0 枚带
+//! rename_all 的异形命令；未来若引入 rename_all 命令，那条断言先炸，本臂口径随其重裁。
+//! 零新依赖：两侧均为手写扫描，与 `security_config.rs::registered_commands` 同族先例。
 //! 首跑必须真绿；若抓到漂移，逐条裁决，不得静默豁免。
 
 use std::collections::BTreeMap;
@@ -538,7 +542,9 @@ fn invoke_names_and_payload_keys_match_signatures() {
             errors.push(format!("invoke(\"{}\") 不在命令注册表", site.cmd));
             continue;
         };
-        let allowed = |k: &str| params.iter().any(|p| p == k || to_camel(p) == k);
+        // D-41 G1 收紧：顶层键只认 Rust 参数名的 camel 形（旧放行臂 p == k 曾让 snake 原形
+        // 混过门，vault_entry_add 的 folder_id/totp_secret 因此静默丢数据且命令仍报成功）
+        let allowed = |k: &str| params.iter().any(|p| to_camel(p) == k);
         for key in &site.keys {
             if !allowed(key) {
                 errors.push(format!(

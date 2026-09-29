@@ -2050,3 +2050,763 @@ fn file_domain_never_downloads_artifacts() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// G3（D-41 C7）：辅助窗授权 ⊆ 该窗真实调用闭包
+//
+// 动机：D-28 把 app 命令 ACL 按窗拆开之后，"某窗持有它根本不会调的命令"就是纯粹的溢价
+// 攻击面（该窗一旦失守，没在用的命令照样能 invoke）。既有的
+// aux_windows_never_reach_main_only_commands 只盯得住手列黑名单，本门把判据反过来：
+// 从窗口入口沿 import 图取闭包，闭包里没有的命令不许出现在该窗 capability 里。
+//
+// 闭包口径（保守＝容易假绿，所以取"精确且可解释"那一档）：
+//   ① 边＝静态 `import/export … from "…"`（default / named / namespace / 副作用式都算）
+//      加动态 `import("…")`；`./x` 依次试 .tsx/.ts/.jsx/.js 与 x/index.*；裸包名
+//      （@tauri-apps/*、react、zustand）不属 app 命令面，不跟。
+//   ② 命令名取自 `invoke("cmd"` 字面，且必须认 `invoke<T>("cmd", …)`——本仓 invoke 站点的
+//      主流形制带泛型，只认 `invoke(` 会让 quickpanel 的闭包缩成 host_log 一枚。
+//   ③ `src/ipc/client.ts` 是包装层：整文件扫＝把约 250 枚命令塞进每个窗口。它对闭包的
+//      贡献只按"该文件被引进来哪些导出名"计，动态命名空间形
+//      `import("../ipc/client").then((m) => m.ocrCopyText(…))` 靠尾随成员调用取名。
+//   ④ 每个 webview 先跑 `src/main.tsx`，它直接 `import { hostSystemAccent }`——该命令属
+//      引导腿，逐窗取闭包看不见它，故由 bootstrap_commands() 单列并计入每窗闭包。
+//      注意 main.tsx 静态 import App.tsx、而 App.tsx 静态 import 全部六个窗组件，
+//      沿 main.tsx 做 BFS 会把六窗命令并成一坨（实测 107 文件／全命令集），所以这里
+//      只取 main.tsx 自己的直接 client 导入，不展开。
+//   ⑤ overlay 与 main 共享 `src/windows/overlayController.ts`：按模块取闭包必然把 main 侧
+//      的 startOverlay/restorePins 一并算进来（over-approximation，不是缺陷），故该窗判
+//      ⊆（只判超授）；其余四枚小窗闭包精确，判等。
+//   ⑥ core:* 是 Tauri 插件权限、不是 app 命令，闭包覆盖不到；改逐枚"在用性"证据判定
+//      （CORE_GRANT_EVIDENCE），伞形权限走 CORE_UMBRELLA，两者都不在的新增即红。
+// ---------------------------------------------------------------------------
+
+/// 窗口 capability → 该窗真实入口文件（缺项即红＝新增辅助窗不许静默继承 main 的命令面）
+const AUX_WINDOW_ENTRIES: &[(&str, &str)] = &[
+    ("launcher", "src/windows/LauncherWindow.tsx"),
+    ("notebar", "src/windows/NoteBarWindow.tsx"),
+    ("overlay", "src/windows/OverlayShot.tsx"),
+    ("pin", "src/windows/PinWindow.tsx"),
+    ("quickpanel", "src/windows/QuickPanel.tsx"),
+];
+
+/// 逐枚 core 授权的在用证据（任一 token 出现在该窗闭包文件源码里即算在用）
+const CORE_GRANT_EVIDENCE: &[(&str, &[&str])] = &[
+    (
+        "core:webview:allow-create-webview-window",
+        &["new WebviewWindow"],
+    ),
+    ("core:window:allow-close", &[".close("]),
+    ("core:window:allow-current-monitor", &["currentMonitor"]),
+    ("core:window:allow-get-all-windows", &["getByLabel"]),
+    ("core:window:allow-hide", &[".hide("]),
+    ("core:window:allow-set-focus", &["setFocus"]),
+    ("core:window:allow-set-position", &["setPosition"]),
+    ("core:window:allow-set-size", &["setSize"]),
+    ("core:window:allow-show", &[".show("]),
+    (
+        "core:window:allow-start-dragging",
+        &["startDragging", "data-tauri-drag-region"],
+    ),
+];
+
+/// 伞形权限：本身不指向单一端点（新增须显式入册，不许顺手加 core:xxx:allow-*）
+const CORE_UMBRELLA: &[&str] = &["core:default"];
+
+const CLIENT_REL: &str = "src/ipc/client.ts";
+const TS_EXTS: &[&str] = &[".tsx", ".ts", ".jsx", ".js"];
+
+fn read_repo(rel: &str) -> String {
+    read(&format!("../{rel}"))
+}
+
+fn is_ident_ch(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
+fn skip_ws(src: &[char], mut j: usize) -> usize {
+    while j < src.len() && src[j].is_whitespace() {
+        j += 1;
+    }
+    j
+}
+
+fn word_at(src: &[char], p: usize, kw: &str) -> bool {
+    let n: Vec<char> = kw.chars().collect();
+    if p + n.len() > src.len() || src[p..p + n.len()] != n[..] {
+        return false;
+    }
+    let before_ok = p == 0 || !is_ident_ch(src[p - 1]);
+    let after = p + n.len();
+    let after_ok = after >= src.len() || !is_ident_ch(src[after]);
+    before_ok && after_ok
+}
+
+/// 从 from 起向后找第一个出现在关键字边界上的 kw（kw 需为 ascii 标识符）
+fn find_word(src: &[char], kw: &str, from: usize) -> Option<usize> {
+    let n: Vec<char> = kw.chars().collect();
+    let first = n[0];
+    let mut k = from;
+    while k < src.len() {
+        let p = k + src[k..].iter().position(|&c| c == first)?;
+        if word_at(src, p, kw) {
+            return Some(p);
+        }
+        k = p + 1;
+    }
+    None
+}
+
+fn find_word_any(src: &[char], kws: &[&str], from: usize) -> Option<usize> {
+    kws.iter().filter_map(|kw| find_word(src, kw, from)).min()
+}
+
+/// 去注释（保留字符串内容）：注释里出现的 `invoke("…")` 示例不能算调用站点
+fn strip_ts_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(q) => {
+                out.push(c);
+                if c == b'\\' && i + 1 < b.len() {
+                    out.push(b[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' || c == b'`' {
+                    quote = Some(c);
+                    out.push(c);
+                    i += 1;
+                } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                    i += 2;
+                    while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(b.len());
+                } else {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+    }
+    String::from_utf8(out).expect("注释剥离只删字节、不切断 UTF-8 序列")
+}
+
+/// `invoke("cmd"` 字面取命令名；认泛型形制 `invoke<T>("cmd", …)`（与 G1 同一取形口）
+fn ts_invoke_cmds(src: &str) -> Vec<String> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(p) = find_word(&chars, "invoke", i) {
+        i = p + 6;
+        let Some(head) = chars.get(i).copied() else {
+            break;
+        };
+        if head != '<' && head != '(' {
+            continue;
+        }
+        let mut j = i;
+        if chars[j] == '<' {
+            let mut depth = 0i32;
+            while j < chars.len() {
+                match chars[j] {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        j = skip_ws(&chars, j);
+        if chars.get(j) != Some(&'(') {
+            continue;
+        }
+        let Some((cmd, after)) = read_str_lit(&chars, j + 1) else {
+            continue;
+        };
+        out.push(cmd);
+        i = after;
+    }
+    out
+}
+
+/// 从 j 起（跳空白后必须是引号）读一个字面量，返回内容与收尾位置
+fn read_str_lit(src: &[char], j: usize) -> Option<(String, usize)> {
+    let k = skip_ws(src, j);
+    let q = *src.get(k)?;
+    if q != '"' && q != '\'' && q != '`' {
+        return None;
+    }
+    let end = (k + 1..src.len()).find(|&x| src[x] == q)?;
+    Some((src[k + 1..end].iter().collect(), end + 1))
+}
+
+#[derive(Debug)]
+struct TsEdge {
+    spec: String,
+    named: Vec<String>,
+    namespace: bool,
+    dynamic: bool,
+    /// 动态 import 字面量之后的尾随文本（用于 `m.xxx(` 与 `({ a, b })` 取名）
+    tail: String,
+}
+
+fn braced_names(clause: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = clause;
+    while let Some(l) = rest.find('{') {
+        let after = &rest[l + 1..];
+        let Some(r) = after.find('}') else { break };
+        for raw in after[..r].split(',') {
+            let t = raw.trim();
+            let t = t.strip_prefix("type ").unwrap_or(t).trim();
+            if t.is_empty() || t.starts_with("type ") {
+                continue;
+            }
+            let name = t.split(" as ").next().unwrap_or("").trim();
+            let mut ch = name.chars();
+            if let Some(c0) = ch.next() {
+                if (c0.is_alphabetic() || c0 == '_') && ch.all(|c| c.is_alphanumeric() || c == '_')
+                {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        rest = &after[r + 1..];
+    }
+    names
+}
+
+fn import_edges(src: &[char]) -> Vec<TsEdge> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(p) = find_word_any(src, &["import", "export"], i) {
+        let is_import = src[p] == 'i';
+        let j = skip_ws(src, p + 6);
+        if j >= src.len() {
+            break;
+        }
+        // 动态 import("…")
+        if is_import && src[j] == '(' {
+            if let Some((spec, after)) = read_str_lit(src, j + 1) {
+                let tail: String = src[after..(after + 400).min(src.len())].iter().collect();
+                out.push(TsEdge {
+                    spec,
+                    named: Vec::new(),
+                    namespace: false,
+                    dynamic: true,
+                    tail,
+                });
+                i = after;
+            } else {
+                i = j + 1;
+            }
+            continue;
+        }
+        // `export` 只有 `export { … } from` / `export * from` 才是再导出边
+        if !is_import && src[j] != '{' && src[j] != '*' {
+            i = p + 6;
+            continue;
+        }
+        let mut cursor = j;
+        let mut from_pos: Option<usize> = None;
+        let mut side_effect: Option<(String, usize)> = None;
+        while cursor < src.len() {
+            let c = src[cursor];
+            if c == ';' {
+                break;
+            }
+            if c == '"' || c == '\'' || c == '`' {
+                if from_pos.is_none() {
+                    side_effect = read_str_lit(src, cursor);
+                }
+                break;
+            }
+            if c == 'f' && word_at(src, cursor, "from") {
+                from_pos = Some(cursor);
+                cursor += 4;
+                continue;
+            }
+            cursor += 1;
+        }
+        if let Some(fp) = from_pos {
+            let clause: String = src[j..fp].iter().collect();
+            match read_str_lit(src, fp + 4) {
+                Some((spec, after)) => {
+                    let namespace = clause.contains("* as") || clause.trim_start().starts_with('*');
+                    let named = braced_names(&clause);
+                    out.push(TsEdge {
+                        spec,
+                        named,
+                        namespace,
+                        dynamic: false,
+                        tail: String::new(),
+                    });
+                    i = after;
+                }
+                None => i = fp + 4,
+            }
+            continue;
+        }
+        if let Some((spec, after)) = side_effect {
+            out.push(TsEdge {
+                spec,
+                named: Vec::new(),
+                namespace: false,
+                dynamic: false,
+                tail: String::new(),
+            });
+            i = after;
+            continue;
+        }
+        i = j;
+    }
+    out
+}
+
+/// 动态 import 尾随文本里取 `x.method(` 成员调用名与 `{ a, b }` 解构名
+fn harvested_names(tail: &str) -> Vec<String> {
+    let src: Vec<char> = tail.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < src.len() {
+        if src[i] == '.' {
+            let s = skip_ws(&src, i + 1);
+            let mut e = s;
+            while e < src.len() && (src[e].is_alphanumeric() || src[e] == '_') {
+                e += 1;
+            }
+            if e > s && src.get(skip_ws(&src, e)) == Some(&'(') {
+                out.push(src[s..e].iter().collect());
+            }
+            i = e.max(i + 1);
+            continue;
+        }
+        if src[i] == '{' {
+            let e = src[i + 1..]
+                .iter()
+                .position(|&c| c == '}')
+                .map(|x| x + i + 1)
+                .unwrap_or(src.len());
+            let inner: String = src[i + 1..e].iter().collect();
+            for raw in inner.split(',') {
+                let t = raw.trim();
+                let key = t.split(':').next().unwrap_or(t).trim();
+                if key
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+                {
+                    out.push(key.to_string());
+                }
+            }
+            i = e + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `./x` 形态的模块解析（依次试四扩展名，再试 x/index.*，最后认带合法扩展名的原文件）
+fn resolve_ts_module(from_rel: &str, spec: &str) -> Option<String> {
+    if !spec.starts_with('.') {
+        return None;
+    }
+    let base_dir = from_rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let mut parts: Vec<&str> = base_dir
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    for seg in spec.split('/') {
+        match seg {
+            "." | "" => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    let exists = |p: &str| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(p)
+            .is_file()
+    };
+    for ext in TS_EXTS {
+        let cand = format!("{joined}{ext}");
+        if exists(&cand) {
+            return Some(cand);
+        }
+    }
+    for ext in TS_EXTS {
+        let cand = format!("{joined}/index{ext}");
+        if exists(&cand) {
+            return Some(cand);
+        }
+    }
+    if TS_EXTS
+        .iter()
+        .any(|e| joined.ends_with(e) && exists(&joined))
+    {
+        return Some(joined);
+    }
+    None
+}
+
+/// client.ts：导出函数名 → 该函数体内的 invoke 命令集（包装层唯一的取形口）
+fn client_wrappers() -> std::collections::BTreeMap<String, BTreeSet<String>> {
+    let stripped = strip_ts_comments(&read_repo(CLIENT_REL));
+    let src: Vec<char> = stripped.chars().collect();
+    let mut map = std::collections::BTreeMap::new();
+    let mut i = 0usize;
+    while let Some(p) = find_word(&src, "function", i) {
+        i = p + 8;
+        let line_start = src[..p]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map(|x| x + 1)
+            .unwrap_or(0);
+        let head: String = src[line_start..p].iter().collect();
+        if !head.trim_start().starts_with("export") {
+            continue;
+        }
+        let mut j = skip_ws(&src, p + 8);
+        let name_start = j;
+        while j < src.len() && (src[j].is_alphanumeric() || src[j] == '_') {
+            j += 1;
+        }
+        let name: String = src[name_start..j].iter().collect();
+        let Some(o) = src[j..].iter().position(|&c| c == '{').map(|x| x + j) else {
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut end = src.len();
+        let mut k = o;
+        while k < src.len() {
+            match src[k] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = k + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        let body: String = src[o..end].iter().collect();
+        map.entry(name)
+            .or_insert_with(BTreeSet::new)
+            .extend(ts_invoke_cmds(&body));
+        i = end.max(i);
+    }
+    map
+}
+
+/// 每个 webview 引导期都会打的命令腿＝main.tsx 自己的直接 client 导入（不展开其图）
+fn bootstrap_commands() -> BTreeSet<String> {
+    let stripped = strip_ts_comments(&read_repo("src/main.tsx"));
+    let src: Vec<char> = stripped.chars().collect();
+    let wrappers = client_wrappers();
+    let mut out = BTreeSet::new();
+    for e in import_edges(&src) {
+        if e.dynamic || resolve_ts_module("src/main.tsx", &e.spec).as_deref() != Some(CLIENT_REL) {
+            continue;
+        }
+        for n in &e.named {
+            if let Some(c) = wrappers.get(n) {
+                out.extend(c.iter().cloned());
+            }
+        }
+    }
+    out
+}
+
+/// 窗口入口 → (该窗真实 invoke 命令集, 闭包文件集)
+fn invoke_closure(entry_rel: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+    let wrappers = client_wrappers();
+    let mut cmds = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    let mut queue = vec![entry_rel.to_string()];
+    while let Some(rel) = queue.pop() {
+        if !files.insert(rel.clone()) {
+            continue;
+        }
+        let stripped = strip_ts_comments(&read_repo(&rel));
+        let src: Vec<char> = stripped.chars().collect();
+        let edges = import_edges(&src);
+        if rel == CLIENT_REL {
+            // 包装层自身：命令贡献只按导入名计，整文件扫会把全命令集塞进每个窗口
+            for e in edges {
+                if let Some(t) = resolve_ts_module(&rel, &e.spec) {
+                    queue.push(t);
+                }
+            }
+            continue;
+        }
+        for c in ts_invoke_cmds(&stripped) {
+            cmds.insert(c);
+        }
+        for e in edges {
+            let Some(target) = resolve_ts_module(&rel, &e.spec) else {
+                continue;
+            };
+            if target == CLIENT_REL {
+                for n in &e.named {
+                    if let Some(c) = wrappers.get(n) {
+                        cmds.extend(c.iter().cloned());
+                    }
+                }
+                if e.namespace {
+                    for c in wrappers.values() {
+                        cmds.extend(c.iter().cloned());
+                    }
+                }
+                if e.dynamic {
+                    for name in harvested_names(&e.tail) {
+                        if let Some(c) = wrappers.get(&name) {
+                            cmds.extend(c.iter().cloned());
+                        }
+                    }
+                }
+            }
+            queue.push(target);
+        }
+    }
+    (cmds, files)
+}
+
+fn cap_permissions(name: &str) -> Vec<String> {
+    let caps = load_capabilities();
+    let (_, cap) = caps
+        .iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("capability {name}.json 应存在"));
+    cap["permissions"]
+        .as_array()
+        .expect("permissions 数组")
+        .iter()
+        .map(|v| v.as_str().expect("权限项应为字符串").to_string())
+        .collect()
+}
+
+#[test]
+fn aux_window_grants_are_exactly_their_invoke_closure() {
+    let caps = load_capabilities();
+    let registered: BTreeSet<String> = registered_commands().into_iter().collect();
+    let bootstrap = bootstrap_commands();
+    assert!(
+        bootstrap.contains("host_system_accent"),
+        "正对照：main.tsx 的直接 client 导入应至少解出 host_system_accent，实得 {bootstrap:?}（解不出来＝④ 口径失效）"
+    );
+
+    let mut windows_checked = 0usize;
+    for (name, cap) in &caps {
+        if name == "main" {
+            continue; // 承重窗：全命令面是其设计内职责，本门只管辅助窗
+        }
+        let &(_, entry) = AUX_WINDOW_ENTRIES
+            .iter()
+            .find(|(w, _)| *w == name)
+            .unwrap_or_else(|| panic!("capability {name} 未登记窗口入口文件（G3：新增辅助窗必须钉死它的调用闭包起点，不许静默继承 main 的命令面）"));
+        let (mut closure, files) = invoke_closure(entry);
+        closure.extend(bootstrap.iter().cloned());
+        assert!(
+            closure.len() >= 2,
+            "闭包过小＝扫描脱靶（{name} 期望 ≥2 枚命令，实得 {closure:?}）"
+        );
+
+        let perms = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<String>>();
+        let granted: BTreeSet<String> = perms
+            .iter()
+            .filter_map(|p| p.strip_prefix("allow-"))
+            .map(|p| p.replace('-', "_"))
+            .collect();
+        for g in &granted {
+            assert!(
+                registered.contains(g),
+                "capability {name} 的 allow-{} 不是 lib.rs 注册命令（权限命名与命令面失配）",
+                g.replace('_', "-")
+            );
+        }
+        let unused: Vec<&String> = granted.iter().filter(|g| !closure.contains(*g)).collect();
+        let ungranted: Vec<&String> = closure.iter().filter(|c| !granted.contains(*c)).collect();
+        if name == "overlay" {
+            assert!(
+                unused.is_empty(),
+                "overlay 持有其调用闭包内找不到的命令授权 {unused:?}（真超授；该窗与 main 共享 overlayController.ts，反向多余项按 ⊆ 放行）"
+            );
+        } else {
+            assert!(
+                unused.is_empty() && ungranted.is_empty(),
+                "capability {name} 的 app 命令授权集 ≠ 调用闭包：授权未用 {unused:?}／调了未授权 {ungranted:?}（闭包 {} 个文件）",
+                files.len()
+            );
+        }
+
+        let blob: String = files
+            .iter()
+            .map(|f| strip_ts_comments(&read_repo(f)))
+            .collect::<Vec<String>>()
+            .join("\n");
+        for p in perms.iter().filter(|p| p.starts_with("core:")) {
+            if CORE_UMBRELLA.contains(&p.as_str()) {
+                continue;
+            }
+            let Some((_, toks)) = CORE_GRANT_EVIDENCE.iter().find(|(id, _)| id == p) else {
+                panic!("capability {name} 出现未登记的 core 权限 {p}（闭包判据覆盖不到 core:*，新权限必须先到本门补在用证据 token）");
+            };
+            assert!(
+                toks.iter().any(|t| blob.contains(t)),
+                "capability {name} 持有 {p}，但其调用闭包源码里没有对应 Tauri API 调用（期望 token {toks:?}）——死授权就是溢价攻击面"
+            );
+        }
+        windows_checked += 1;
+    }
+    assert!(
+        windows_checked >= 5,
+        "正对照：至少应校到 5 枚辅助窗 capability，实得 {windows_checked}"
+    );
+    for (w, _) in AUX_WINDOW_ENTRIES {
+        assert!(
+            caps.iter().any(|(n, _)| n == w),
+            "映射表登记了窗口 {w}，但 capabilities/{w}.json 不在场（capability 被摘而映射留着＝门在空转）"
+        );
+    }
+}
+
+#[test]
+fn get_all_windows_grant_is_live_via_get_by_label() {
+    // core:window:allow-get-all-windows 管的是插件端点 plugin:window|get_all_windows，
+    // 不在 app 命令闭包内，故逐枚钉"在用性"。JS 侧 WebviewWindow.getByLabel 内部即这一发；
+    // CI 的 rust job 不装 node 依赖，所以证据取本仓调用点而非 @tauri-apps 库源码。
+    for rel in [
+        "src/windows/overlayController.ts",
+        "src/windows/launcherController.ts",
+        "src/windows/notebarController.ts",
+        "src/windows/quickPanelController.ts",
+    ] {
+        assert!(
+            read_repo(rel).contains("WebviewWindow.getByLabel"),
+            "{rel} 应以 WebviewWindow.getByLabel 复用既有窗口；这个前提变了就得同步重定 core 证据表"
+        );
+    }
+    let grants = |name: &str| -> BTreeSet<String> {
+        cap_permissions(name)
+            .into_iter()
+            .filter(|p| p.starts_with("core:"))
+            .collect()
+    };
+    // overlay 在运行时建贴图窗（openPinWindow → getByLabel(label)），授权必须在场
+    assert!(
+        grants("overlay").contains("core:window:allow-get-all-windows"),
+        "overlay 的贴图窗创建路径要用 getByLabel，缺这枚 core 授权会在运行时哑掉"
+    );
+    assert!(
+        grants("main").contains("core:window:allow-get-all-windows"),
+        "main 的 launcher/notebar/quickpanel/overlay 控制器都要用 getByLabel"
+    );
+    // 负对照：其余四窗用不到窗口枚举，就不该持有它
+    for name in ["launcher", "notebar", "pin", "quickpanel"] {
+        assert!(
+            !grants(name).contains("core:window:allow-get-all-windows"),
+            "{name} 不该持有 get-all-windows（其闭包只调 hide/dragging/pin 类端点）"
+        );
+    }
+}
+
+#[test]
+fn closure_scanner_recognises_repo_invoke_forms() {
+    // 本门的三条口径各自都可能"扫不到却仍绿"，故逐枚正负对照钉住扫描器本身。
+    let src = r#"
+import { clipboardSearch } from "../ipc/client";
+// 注释里的 invoke("ghost_cmd") 不算调用站点
+const p = await invoke<ClipPage>("clipboard_search", { size: 9 });
+void import("../ipc/client").then((m) => m.ocrCopyText(text));
+"#;
+    let stripped = strip_ts_comments(src);
+    assert!(
+        stripped.contains("clipboard_search") && !stripped.contains("ghost_cmd"),
+        "注释剥离失效（实得 {stripped}）"
+    );
+    let cmds = ts_invoke_cmds(&stripped);
+    assert_eq!(
+        cmds,
+        vec!["clipboard_search".to_string()],
+        "泛型形制 invoke<T>(\"cmd\") 必须取到命令名，这是本仓 invoke 站点的主流写法"
+    );
+    let chars: Vec<char> = stripped.chars().collect();
+    let edges = import_edges(&chars);
+    assert_eq!(
+        edges.len(),
+        2,
+        "静态与动态 import 应各成一枚边，实得 {edges:?}"
+    );
+    assert_eq!(
+        edges[0].named,
+        vec!["clipboardSearch".to_string()],
+        "命名导入必须解析出导出名以映射包装"
+    );
+    assert!(edges[1].dynamic, "动态 import 应标记为 dynamic");
+    assert!(
+        harvested_names(&edges[1].tail).contains(&"ocrCopyText".to_string()),
+        "动态命名空间形 .then((m) => m.xxx(…)) 须收割成员名，实得 {:?}",
+        harvested_names(&edges[1].tail)
+    );
+    // 解析与包装表正对照
+    assert_eq!(
+        resolve_ts_module("src/windows/QuickPanel.tsx", "../ipc/client").as_deref(),
+        Some(CLIENT_REL)
+    );
+    assert_eq!(
+        resolve_ts_module("src/main.tsx", "./styles/global.css"),
+        None,
+        "非 TS 资源不是模块边"
+    );
+    assert_eq!(
+        resolve_ts_module("src/modules/clipboard/DibThumb.tsx", "../../ipc/client").as_deref(),
+        Some(CLIENT_REL)
+    );
+    let wrappers = client_wrappers();
+    assert!(
+        wrappers
+            .get("clipboardGetImage")
+            .is_some_and(|c| c.contains("clipboard_get_image")),
+        "包装表应把 clipboardGetImage 解到 clipboard_get_image，实得 {:?}（包装命名口径变了）",
+        wrappers.get("clipboardGetImage")
+    );
+    assert!(
+        wrappers.len() > 150,
+        "正对照：client.ts 导出包装应成规模（本扫非空洞），实得 {}",
+        wrappers.len()
+    );
+}
