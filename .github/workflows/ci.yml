@@ -29,8 +29,9 @@ jobs:
       # D-27：基准矩阵必须随代码演进保持可编译（仅构建不执行，判定阈值在 tests/perf_thresholds.rs）
       - name: bench compile check
         run: cargo bench --workspace --no-run
-      # P-01/P-02/P-03/P-09/SEC-07/STD-10 源码范式断言 + P-12 文档一致性（GOV-02 批次落地；本机 2026-09-25 双零实测）
-      - name: pattern assertions (P-01/P-02/P-03/P-09/SEC-07/STD-10)
+      # P-01/P-02/P-03/P-09/SEC-07/STD-10 源码范式断言 + D-42 窄栏变量下发配对 + P-12 文档一致性
+      # （GOV-02 批次落地；本机 2026-09-26 七扫零实测）
+      - name: pattern assertions (P-01/P-02/P-03/P-09/SEC-07/STD-10/D-42)
         shell: pwsh
         run: ./tools/assert-patterns.ps1
       - name: docs consistency (P-12)

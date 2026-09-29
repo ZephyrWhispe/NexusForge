@@ -144,4 +144,31 @@ if (-not $reg.Success) {
     }
 }
 
+# D-42 壳层窄栏（风险④的机器面）：global.css 的变量下发与 SubNav.tsx 的变量读取必须成对在场。
+# 机理＝griffel 运行时注入的类规则次序在 global.css 之后且同特异度，容器查询里直接写
+# width/display 会被静默压掉（真机实测 206.8px 三档不变），唯一不依赖层叠次序的通路是
+# "global.css 设变量＋组件读变量并留字面量兜底"。任一侧单独被改回直接声明＝窄栏档位无声死掉，
+# 而 vitest 读不到 .css 原文（?raw/?inline/?raw&inline 三条 glob 实测全返回空串），故下发侧在此钉。
+$NfShellVars = @(
+    '--nf-subnav-w',
+    '--nf-subnav-pad',
+    '--nf-subnav-display',
+    '--nf-subnav-group-display'
+)
+$shellCss = Get-Content 'src\styles\global.css' -Raw -Encoding UTF8
+$shellOdd = @()
+if ($shellCss -notmatch 'container-type:\s*inline-size') { $shellOdd += '缺 container-type: inline-size（容器没立起来，@container 一律不生效）' }
+if ($shellCss -notmatch '@container\s*\(max-width:\s*1007px\)') { $shellOdd += '缺 Medium 档 @container (max-width: 1007px)' }
+if ($shellCss -notmatch '@container\s*\(max-width:\s*640px\)') { $shellOdd += '缺 Small 档 @container (max-width: 640px)' }
+foreach ($v in $NfShellVars) {
+    if ($shellCss -notmatch [regex]::Escape($v)) { $shellOdd += "global.css 缺变量下发 $v" }
+}
+if ($shellOdd.Count -gt 0) {
+    $fail = 1
+    Write-Host 'FAIL D-42 窄栏变量下发（global.css 侧）:' -ForegroundColor Red
+    $shellOdd | ForEach-Object { Write-Host "  $_" }
+} else {
+    Write-Host "ok   D-42 窄栏变量下发（global.css 四枚变量＋两档 @container 齐）"
+}
+
 exit $fail
