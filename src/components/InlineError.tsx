@@ -13,14 +13,17 @@ const useStyles = makeStyles({
 export default function InlineError({
   text,
   tone = "error",
+  id,
 }: {
   text?: string | null;
   tone?: "error" | "success";
+  id?: string;
 }) {
   const styles = useStyles();
   if (!text) return null;
   return (
     <Text
+      id={id}
       className={tone === "error" ? styles.error : styles.success}
       {...(tone === "error" ? { role: "alert", "aria-live": "assertive" } : {})}
     >

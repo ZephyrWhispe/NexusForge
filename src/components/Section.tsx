@@ -10,11 +10,11 @@ const useStyles = makeStyles({
   root: {
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusLarge,
-    padding: "12px 16px",
+    padding: "16px",
     backgroundColor: tokens.colorNeutralBackground1,
     display: "flex",
     flexDirection: "column",
-    gap: "10px",
+    gap: "12px",
   },
   head: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "0" },
