@@ -283,6 +283,8 @@ export default function ScreenshotPanel() {
    * D-39③④ 扩两主题：`screenshot.taken` 作门铃刷新历史（覆盖层/快捷键路径
    * 完成后面板原先要手动重载才见新行——只作门铃不作数据源，historyBell 同谱）；
    * `ocr.failed` 弹错——联动 OCR 失败时历史行只是缺 ocr_text，不接就是静默。
+   * D-42 再把 `ocr.completed`（回填腿）接成第二枚门铃：识别成功那条腿此前全仓
+   * 无 UI 订阅者，历史行的 ocr_text 只能靠手动重载显影。
    */
   useEffect(() => {
     if (!IN_TAURI) return;
@@ -302,6 +304,19 @@ export default function ScreenshotPanel() {
             );
           } else if (topic === "ocr.failed") {
             notify("error", "OCR 识别失败", String(payload.reason ?? "未知原因"));
+          } else if (
+            // D-42：联动 OCR 的识别结果**晚于** screenshot.taken 才回填历史行
+            // （ocr-core 异步发 ocr.completed，截图模块写回 ocr_text）——只接 taken
+            // 的话新行仍要手动重载才带得上文字。判据与后端 parse_ocr_backfill 同形
+            // （screenshot-core/module.rs:124）：source_task_id 与 text 齐备才算回填腿，
+            // 否则 ocr_copy_text 的 {action:"copied"} 也会把历史刷一遍。
+            topic === "ocr.completed" &&
+            typeof payload.source_task_id === "string" &&
+            typeof payload.text === "string"
+          ) {
+            void reload().catch((err) =>
+              reportError(err, { context: "截图历史刷新失败", dedupeKey: "shot-history" }),
+            );
           }
         }),
       )

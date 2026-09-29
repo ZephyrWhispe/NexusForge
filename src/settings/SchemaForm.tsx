@@ -11,6 +11,7 @@ import {
   Option,
 } from "@fluentui/react-components";
 import { hostConfigGet, hostConfigSchema, hostConfigSet } from "../ipc/client";
+import { reportError } from "../stores/notifications";
 import { IN_TAURI } from "../ipc/env";
 
 /**
@@ -189,6 +190,11 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
    * 只有 screenshot 面板自取，其余模块被拒收时 UI 全静默——`host_config_set` 的 promise
    * 不 reject（拒收发生在写后异步派发），故只能听事件。按 moduleId 过滤后原文上屏，
    * 不翻译不截断；本组件随 tab 重挂载（MainWorkbench `key={settingsModule}`），故局部监听。
+   *
+   * D-42 在同一订阅上并第二腿 `host.config_changed`（events.rs:47，ConfigStore 每次落盘后
+   * 发布，此前全仓零订阅）：别的写入方（另一窗口、托盘、自动化规则）改了本模块配置后，
+   * 表单继续显示旧值，读起来像"改了没生效"。事件只作门铃，事实源恒 host_config_get。
+   * 防抖里还有未落盘的键时跳过重取——整表覆写会把用户正在敲的其它键悄悄吞掉。
    */
   useEffect(() => {
     if (!IN_TAURI) return;
@@ -198,9 +204,24 @@ export default function SchemaForm({ moduleId }: { moduleId: string }) {
       .then(({ listen }) =>
         listen<{ topic: string; payload: Record<string, unknown> }>("nf:event", (e) => {
           const { topic, payload } = e.payload;
-          if (topic === "host.config_rejected" && payload.module === moduleId) {
+          if (payload.module !== moduleId) return;
+          if (topic === "host.config_rejected") {
             setRejected(String(payload.error ?? ""));
+            return;
           }
+          if (topic !== "host.config_changed" || dirtyKeys.current.size > 0) return;
+          void hostConfigGet<Values>(moduleId)
+            .then((v) => {
+              if (disposed) return;
+              setValues(mergeDefaults(schemaRef.current ?? {}, v));
+            })
+            .catch((err) =>
+              reportError(err, {
+                context: "配置外部变更重取失败",
+                dedupeKey: "host-config-refetch",
+                toast: false,
+              }),
+            );
         }),
       )
       .then((u) => {

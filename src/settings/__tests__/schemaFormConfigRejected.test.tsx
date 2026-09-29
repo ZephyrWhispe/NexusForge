@@ -130,6 +130,8 @@ describe("SchemaForm 拒收显影（D-41 D5）", () => {
 
   it("unmounted_formIgnoresEvent：卸载后取消订阅且事件不再触达（负例）", async () => {
     await mountForm();
+    // D-42 起本表单的两条腿（config_rejected 显影＋config_changed 重取）并挂同一次订阅上，
+    // 腿数增而订阅数不增
     expect(unlistenSpies).toHaveLength(1);
     await act(async () => {
       root.unmount();

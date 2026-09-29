@@ -46,6 +46,7 @@ import { confirmAction } from "../../stores/confirm";
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import { nfSlots } from "../../components/nfTiers";
 import DragDropSendDialog from "./DragDropSendDialog";
 import {
   aggregateSends,
@@ -53,15 +54,26 @@ import {
   type KvmClientDevice,
   type SendOutcome,
 } from "./dragDropFlow";
+import {
+  applyKvmTransferEvent,
+  transferDirectionLabel,
+  transferLabel,
+  transferProgressText,
+  transferStateLabel,
+  type TransferRow,
+} from "./transferFeed";
 
 /**
  * 键鼠共享面板（docs/impl/05 K8，M4 v1）：
  * ① 本端一次性码展示（对端输入用）② 发现设备配对 ③ 已配对管理 + 边缘映射
- * ④ 会话/控制状态。kvm.* 事件驱动刷新（host.module_state 转发契约）。
+ * ④ 会话/控制状态 ⑤ 传输动态（实时视图）⑥ 边缘切换说明。kvm.* 事件驱动刷新（host.module_state 转发契约）。
  * T-B1-7：推送剪贴板/推送文件仅对 role=client 的出站会话开放（核账⑤：
  * 后端 session_to 两种角色均可解析，客户端门禁是产品语义——server 会话是
  * 对端在控制本机，不是推送目标）；「活跃会话」卡按角色列出全部会话。
  * T-B8-1（D-33）：窗口级原生拖放 → 清单确认对话框 → 逐文件走既有 kvm_send_file。
+ * D-42：kvm.* 订阅改为逐主题分派——逐文件进度（200ms 合并流）只折进面板内
+ * 「传输动态」行、不再触发整卡重取；会话断开原因经 notify 上屏（此前粗门铃
+ * 把它们一概吞成 refresh()，进度看不到、原因也看不到）。
  */
 const useStyles = makeStyles({
   root: {
@@ -87,6 +99,8 @@ const useStyles = makeStyles({
   },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
+  num: { ...nfSlots.numCell },
+  nameCell: { ...nfSlots.textCell },
 });
 
 const fmtFp = (fp: string) => (fp.length > 16 ? `${fp.slice(0, 8)}…${fp.slice(-8)}` : fp);
@@ -117,6 +131,8 @@ export default function KvmPanel() {
   const [fileBusy, setFileBusy] = useState(false);
   // T-B8-1：drop 裁决为 ready 后按次挂载确认对话框（null＝未挂/已收）
   const [dropFiles, setDropFiles] = useState<string[] | null>(null);
+  // D-42：逐文件传输动态（仅事件流，无查询命令可回填 ⇒ 面板内累积，卸载即清）
+  const [transfers, setTransfers] = useState<TransferRow[]>([]);
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -143,6 +159,14 @@ export default function KvmPanel() {
     }
   }, []);
 
+  // 事件订阅只在挂载期建立一次（deps=[refresh]，refresh 恒稳），回调里要拿最新设备名
+  // 须经 ref 读（clientDevicesRef 同谱，见下方 deviceNames 处），否则断会话提醒只能说出一串 device_id
+  const deviceNamesRef = useRef<Map<string, string>>(new Map());
+  const deviceName = (id: unknown): string => {
+    const key = typeof id === "string" ? id : "";
+    return deviceNamesRef.current.get(key) || key || "未知设备";
+  };
+
   // 初次加载 + kvm.* 事件驱动刷新（peer 上线/离线、配对、会话、控制权）
   useEffect(() => {
     mounted.current = true;
@@ -160,13 +184,32 @@ export default function KvmPanel() {
     import("@tauri-apps/api/event")
       .then(({ listen }) =>
         listen("nf:event", (e) => {
-          const topic = (e.payload as { topic?: string }).topic ?? "";
-          if (topic.startsWith("kvm.")) {
-            void refresh();
-            if (topic === "kvm.control_state") {
-              void kvmControlState().then((c) => mounted.current && setControl(c));
-            }
+          const env = e.payload as { topic?: string; payload?: Record<string, unknown> };
+          const topic = env.topic ?? "";
+          if (!topic.startsWith("kvm.")) return;
+          const payload = env.payload ?? {};
+
+          // ① 逐文件进度腿：折进本地行即可。file_progress 是 200ms 合并流
+          // （host-core/events.rs:76），从这里再挂 refresh() 就是把五路 IPC 变成每秒五轮
+          if (topic === "kvm.file_progress" || topic === "kvm.file_incoming") {
+            setTransfers((prev) => applyKvmTransferEvent(prev, topic, payload));
+            return;
           }
+          setTransfers((prev) => applyKvmTransferEvent(prev, topic, payload));
+
+          // ② 断会话原因只存在于本主题（module.rs:631 的 closed 臂带 reason；
+          // host.module_state 只有红点，kvm.session_state 的 established 臂则没有该键）
+          if (topic === "kvm.session_state" && payload.state === "closed") {
+            notify(
+              "warn",
+              `与「${deviceName(payload.device_id)}」的键鼠会话已断开`,
+              String(payload.reason ?? "后端未给出原因"),
+            );
+          }
+          if (topic === "kvm.control_state") {
+            void kvmControlState().then((c) => mounted.current && setControl(c));
+          }
+          void refresh();
         }),
       )
       .then((u) => {
@@ -363,6 +406,13 @@ export default function KvmPanel() {
   };
 
   const onlineIds = new Set(discovered.map((p) => p.device_id));
+  // D-42 设备名一张表两处用：传输动态行的设备列（渲染期直取）与断会话提醒（事件腿经 ref 取最新值）
+  const deviceNames = new Map<string, string>();
+  for (const p of paired) deviceNames.set(p.device_id, p.device_name);
+  for (const d of discovered) deviceNames.set(d.device_id, d.device_name);
+  useEffect(() => {
+    deviceNamesRef.current = deviceNames;
+  });
   // sessionIds 保持任意角色语义（「会话中」徽标 + 连接互斥）；推送门禁只看 client 出站会话
   const sessionIds = new Set(sessions.map((s) => s.device_id));
   const clientSessionIds = new Set(
@@ -678,7 +728,63 @@ export default function KvmPanel() {
         )}
       </Section>
 
-      {/* ⑤ 边缘切换说明 */}
+      {/* ⑤ 传输动态（D-42）：逐文件进度后端只发事件、不落库也无查询命令，
+          面板不接这条腿就等于该能力从未存在；标题如实写明它是实时视图 */}
+      <Section
+        title="传输动态"
+        actions={<Badge appearance="outline">实时（非持久记录）</Badge>}
+      >
+        {transfers.length === 0 ? (
+          <span className={styles.muted}>
+            本次打开面板后还没有文件传输。发送/接收文件时这里逐文件显示进度（块数），
+            面板关闭后不保留记录。
+          </span>
+        ) : (
+          <Table size="small">
+            <TableHeader>
+              <TableRow>
+                <TableHeaderCell>文件</TableHeaderCell>
+                <TableHeaderCell>设备</TableHeaderCell>
+                <TableHeaderCell>方向</TableHeaderCell>
+                <TableHeaderCell>进度（块）</TableHeaderCell>
+                <TableHeaderCell>状态</TableHeaderCell>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {transfers.map((t) => (
+                <TableRow key={t.transferId}>
+                  <TableCell>
+                    <Text weight="semibold" className={styles.nameCell} title={t.note ?? ""}>
+                      {transferLabel(t)}
+                    </Text>
+                  </TableCell>
+                  <TableCell>{deviceNames.get(t.deviceId) ?? t.deviceId ?? "--"}</TableCell>
+                  <TableCell>{transferDirectionLabel[t.direction]}</TableCell>
+                  <TableCell>
+                    <span className={styles.num}>{transferProgressText(t)}</span>
+                  </TableCell>
+                  <TableCell>
+                    {t.state === "failed" ? (
+                      <Badge appearance="filled" color="danger" title={t.note ?? ""}>
+                        {transferStateLabel(t)}
+                      </Badge>
+                    ) : (
+                      <Badge
+                        appearance={t.state === "done" ? "filled" : "outline"}
+                        color={t.state === "done" ? "success" : "informative"}
+                      >
+                        {transferStateLabel(t)}
+                      </Badge>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </Section>
+
+      {/* ⑥ 边缘切换说明 */}
       <Section title="边缘切换工作方式">
         <Text size={200} className={styles.muted}>
           为设备设置"共享边缘"后（如 设备 B = 本机右缘），本机鼠标推到屏幕右缘即开始用键鼠控制
