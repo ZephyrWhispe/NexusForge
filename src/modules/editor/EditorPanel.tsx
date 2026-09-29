@@ -661,6 +661,9 @@ export default function EditorPanel() {
                   role="tab"
                   aria-selected={s.id === activeId}
                   className={styles.tabLabel}
+                  // D-42：opened_ms 是页签序的唯一依据（editor-core/session.rs:494 按其升序排），
+                  // 但序本身看不见理由——悬停说出"何时打开"，页签左右关系才有解释
+                  title={`打开于 ${new Date(s.opened_ms).toLocaleString()}`}
                   onClick={() => setActiveId(s.id)}
                 >
                   {s.dirty && <span className={styles.dirtyDot}>●</span>}

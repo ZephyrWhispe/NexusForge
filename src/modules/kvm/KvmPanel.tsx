@@ -281,6 +281,16 @@ export default function KvmPanel() {
     }
   };
 
+  /** D-42：复制完整公钥供与对端「本端信息」逐字比对（写不进剪贴板就如实说，不谎称已复制） */
+  const copyPubkey = async (pubkey: string, deviceName: string) => {
+    try {
+      await navigator.clipboard.writeText(pubkey);
+      notify("success", "公钥已复制", `与「${deviceName}」的完整公钥已写入本机剪贴板`);
+    } catch (e) {
+      notify("error", "公钥复制失败", String(e));
+    }
+  };
+
   // 解除配对（D-18）：删除双向凭据属破坏性操作，单击即改 → 全局确认框点名设备
   const doUnpair = async (device: PairedPeerDto) => {
     const inSession = sessions.some((s) => s.device_id === device.device_id);
@@ -605,6 +615,20 @@ export default function KvmPanel() {
                   </TableCell>
                   <TableCell>
                     <span className={styles.mono}>{fmtFp(d.fingerprint)}</span>
+                    {/* D-42：pubkey_b64 随 kvm_paired_peers 下发却从不显影——配对时逐字核对
+                        公钥是 TOFU 之外唯一的旁路验证手段，用户想核却无处可核。
+                        只给短码＋复制，整串 base64 铺在表里没人读得动 */}
+                    <div className={styles.muted}>
+                      <span className={styles.mono}>{fmtFp(d.pubkey_b64)}</span>
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        title="复制完整公钥（与对端「本端信息」逐字比对）"
+                        onClick={() => void copyPubkey(d.pubkey_b64, d.device_name)}
+                      >
+                        复制公钥
+                      </Button>
+                    </div>
                   </TableCell>
                   <TableCell>
                     {sessionIds.has(d.device_id) ? (

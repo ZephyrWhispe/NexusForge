@@ -94,6 +94,20 @@ export default function SubsSection({
           <span className={styles.mono}>
             {s.node_count} 节点 · {fmtTime(s.updated_ms)}
           </span>
+          {/* D-42：interval_min/etag 两枚字段随 proxy_subs 下发却不上屏——
+              前者是"我手动点更新算不算太勤"的唯一依据，后者解释了为什么有时更新后节点数没变
+              （服务端内容未变更走 304，不是拉取失败） */}
+          {(s.interval_min !== null || s.etag !== null) && (
+            <span className={styles.muted}>
+              {s.interval_min !== null && `建议 ${s.interval_min} 分钟刷新`}
+              {s.interval_min !== null && s.etag !== null && " · "}
+              {s.etag !== null && (
+                <span title={`条件请求指纹 ${s.etag}：订阅内容未变更时后端走 304，不重复拉取`}>
+                  已带条件请求指纹
+                </span>
+              )}
+            </span>
+          )}
           {s.traffic && (
             <span className={styles.muted}>
               已用 {fmtBytes(s.traffic.upload + s.traffic.download)} · 剩余{" "}

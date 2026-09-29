@@ -11,6 +11,7 @@ import type { PairedPeerDto, SyncStatusDto } from "../../ipc/client";
 import Section from "../../components/Section";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import { nfSlots } from "../../components/nfTiers";
 
 /**
  * 配对设备（09 §10.2 T-B5-7/T-B5-8）：一行一台已配对设备，地址由内核解析。
@@ -37,6 +38,8 @@ const useStyles = makeStyles({
   mono: { fontFamily: "Consolas, monospace", fontSize: tokens.fontSizeBase200 },
   /** 未出账提示（T-B5-4）：黄字而非红字——落后不是故障，谎报才是 */
   warn: { color: tokens.colorPaletteDarkOrangeForeground1, fontSize: tokens.fontSizeBase200 },
+  /** D-42：游标两枚按 00§9-3 用等宽数字右靠，读数在逐台扫视时才对得齐 */
+  num: { ...nfSlots.numCell, fontSize: tokens.fontSizeBase200 },
 });
 
 type Props = {
@@ -121,6 +124,19 @@ export default function DevicesSection({ peers, status, busy, loaded, onSync, on
                       ? ` · 上次同步 ${new Date(prog.last_sync_ms).toLocaleString()}`
                       : " · 从未同步")}
                 </Text>
+                {/* D-42：两枚游标后端一直随 status.peers 现读下发（sync-core/module.rs:396/:398），
+                    此前只显 pending 一个数——"追到哪一笔"这件事用户看不见，落后多少也无从判断 */}
+                {prog && (
+                  <div className={styles.row}>
+                    <Text className={styles.muted}>游标</Text>
+                    <span className={styles.num} title="对端推到我这边的账本序号">
+                      入 {prog.inbound_cursor}
+                    </span>
+                    <span className={styles.num} title="我把自产变更推到那台的账本序号">
+                      推 {prog.push_cursor}
+                    </span>
+                  </div>
+                )}
                 {!!prog && prog.pending_ops > 0 && (
                   <Text className={styles.warn}>未出账 {prog.pending_ops} 条</Text>
                 )}

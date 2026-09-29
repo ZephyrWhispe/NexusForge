@@ -661,6 +661,18 @@ export default function HistorySection({ search, group, onCounts }: Props) {
                     {e.source_app && (
                       <span className={styles.src}>{e.source_app}</span>
                     )}
+                    {/* D-42：usage_count/blob_path 两枚字段后端一直随列表下发，此前不上屏
+                        ——次数是"这条常用"的唯一证据，blob_path 是"全文在盘上"的唯一证据 */}
+                    {e.usage_count > 0 && (
+                      <span className={styles.src} title="本条被粘贴/复制的次数（内容去重命中即累加）">
+                        用 {e.usage_count} 次
+                      </span>
+                    )}
+                    {e.blob_path && (
+                      <span className={styles.chip} title={`正文另存于 ${e.blob_path}`}>
+                        附件
+                      </span>
+                    )}
                     <span className={styles.time}>{fmtTime(e.created_at)}</span>
                   </div>
                   <div className={`${styles.preview} ${isCode ? styles.mono : ""}`}>{e.preview}</div>
@@ -811,6 +823,8 @@ export default function HistorySection({ search, group, onCounts }: Props) {
                     {[
                       detail.entry.source_app || "未知来源",
                       fmtTime(detail.entry.created_at),
+                      detail.entry.usage_count > 0 ? `已用 ${detail.entry.usage_count} 次` : "",
+                      detail.entry.blob_path ? `正文另存 ${detail.entry.blob_path}` : "",
                       detail.entry.pinned ? "置顶" : "",
                       detail.entry.secret ? "已加密" : "",
                       detail.entry.origin === "remote" ? "远端" : "",

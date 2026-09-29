@@ -155,7 +155,11 @@ export default function RulesSection({
       title="分流规则"
       actions={
         <span className={styles.muted}>
-          命中即按目标走（直连/代理/拦截）；改完保存并重新切换模式后生效
+          {/* D-42：直连后缀生效数是后端 proxy_direct_rules 的同一口径（service.rs:704 就是
+              对本表 kind=suffix∧target=direct∧enabled 的投影，无独立事实源），就地汇总即可，
+              不必为一条派生数多开一路 IPC；表改未保存时这里的数跟着本地走 */}
+          直连后缀生效 {v2.rules.filter((r) => r.kind === "suffix" && r.target === "direct" && r.enabled).length} 条
+          · 命中即按目标走（直连/代理/拦截）；改完保存并重新切换模式后生效
         </span>
       }
     >

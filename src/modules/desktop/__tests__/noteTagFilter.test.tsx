@@ -130,4 +130,34 @@ describe("随记标签过滤（T-B7-17）", () => {
     await clickByText("✕");
     expect(vi.mocked(desktopNoteList).mock.lastCall).toEqual([false, undefined]);
   });
+
+  it("desktopPanel_remindTriState_showsFiredDoneOrPending", async () => {
+    // D-42：reminded 随列表下发却从未上屏——"到点了到底敲过我一次没有"只能猜。
+    // 三态各一臂并按行配对断言（只数命中数会漏掉"两行状态对调"这类错）。
+    vi.mocked(desktopNoteList).mockResolvedValue([
+      { ...note("r1", [], "交周报"), remind_at: 1_789_700_000_000, reminded: true },
+      { ...note("r2", [], "买牛奶"), remind_at: 1_789_700_000_000, done: true },
+      { ...note("r3", [], "打疫苗"), remind_at: 1_789_700_000_000 },
+      // 负对照：没有 remind_at 的行不该冒出任何提醒态后缀
+      note("r4", [], "无提醒"),
+    ]);
+    await mount();
+
+    // 提醒态尾巴挂在 remind span 上，其所在行的正文 = 该 span 祖先块的第一个 div
+    const stateOf = (content: string) =>
+      [...container.querySelectorAll("span")]
+        .filter((s) =>
+          /(?:已提醒|已完成不再提醒|待提醒)$/.test((s.textContent ?? "").trim()) &&
+          (s.parentElement?.parentElement?.firstElementChild?.textContent ?? "").startsWith(
+            content,
+          ),
+        )
+        .map((s) => (s.textContent ?? "").trim().replace(/^.*·\s*/, ""))
+        .join("|");
+
+    expect(stateOf("交周报")).toBe("已提醒");
+    expect(stateOf("买牛奶")).toBe("已完成不再提醒");
+    expect(stateOf("打疫苗")).toBe("待提醒");
+    expect(stateOf("无提醒")).toBe("");
+  });
 });

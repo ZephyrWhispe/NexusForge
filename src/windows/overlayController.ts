@@ -125,6 +125,16 @@ function pinLabel(id: string): string {
   return `pin-${id.replace(/-/g, "")}`;
 }
 
+/**
+ * 关闭某贴图的窗口（不删记录）：主面板删贴图记录后收尾用——
+ * `screenshot_pin_close` 只删盘上记录与 png 文件，窗口归前端关，否则留一枚显示已删图片的幽灵窗。
+ */
+export async function closePinWindow(id: string): Promise<void> {
+  if (!IN_TAURI) return;
+  const win = await WebviewWindow.getByLabel(pinLabel(id));
+  await win?.close();
+}
+
 /** 创建/聚焦贴图窗口（docs/impl/03 P6） */
 export async function openPinWindow(pin: {
   id: string;

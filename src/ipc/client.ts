@@ -1373,7 +1373,7 @@ export interface ProxySubDto {
   traffic: ProxyTrafficDto | null;
   /** 面板建议刷新间隔（profile-update-interval，分钟） */
   interval_min: number | null;
-  /** If-None-Match 条件请求指纹（后端透明消费，UI 仅展示"上次更新"） */
+  /** If-None-Match 条件请求指纹（后端透明消费；D-42 起订阅行显影"已带条件请求指纹"，值在 tooltip） */
   etag: string | null;
 }
 

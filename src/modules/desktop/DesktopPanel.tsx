@@ -12,7 +12,9 @@ import {
   TableRow,
 } from "@fluentui/react-components";
 import {
+  desktopLauncherLaunch,
   desktopLauncherReindex,
+  desktopLauncherSearch,
   desktopLauncherStatus,
   desktopNoteAdd,
   desktopNoteDone,
@@ -25,10 +27,12 @@ import {
   hostConfigGet,
   hostConfigSet,
   parseAppError,
+  type DesktopLauncherHitDto,
   type DesktopNoteDto,
   type DesktopTidyPlanDto,
 } from "../../ipc/client";
 import { IN_TAURI } from "../../ipc/env";
+import { nfSlots, TIER_W } from "../../components/nfTiers";
 import { useDesktopReminders } from "../../stores/desktopReminders";
 import { confirmAction } from "../../stores/confirm";
 import Section from "../../components/Section";
@@ -43,7 +47,8 @@ import EmptyState from "../../components/EmptyState";
  * ⑤ T-B7-17 随记 #标签点选过滤（设/撤同口；精确匹配在 store 层，前端只透传 tag 参）。
  * 提醒到期横幅读 `useDesktopReminders` 缓冲（订阅在 MainWorkbench 级，面板外事件不丢）；
  * 刻意不调 `desktop_notes_due`——该命令 take_due 是破坏性消费，会抢走后台轮询的事件。
- * 启动器（D1/D2）为全局 Alt+Q 独立窗口，不内嵌。
+ * 启动器（D1/D2）另有全局 Alt+Q 独立窗口；D-42 起本面板内嵌一枚搜索入口，
+ * 两者共用同一 `desktop_launcher_search`／`launch` 命令，不复制打分逻辑。
  */
 const useStyles = makeStyles({
   root: {
@@ -105,6 +110,11 @@ const useStyles = makeStyles({
   mapName: { width: "140px" },
   mapFolder: { flex: 1, minWidth: "220px" },
   mapExts: { flex: 1, minWidth: "180px" },
+  /** D-42 内嵌启动器结果行：名称省略号＋打分 tabular-nums（档位一律取自 nfTiers，不写死宽度） */
+  hitRow: { display: "flex", alignItems: "center", gap: "8px", padding: "4px 0" },
+  hitName: { ...nfSlots.textCell, fontWeight: tokens.fontWeightSemibold },
+  hitScore: { ...nfSlots.numCell, fontSize: tokens.fontSizeBase200 },
+  launcherInput: { width: TIER_W.m },
 });
 
 const fmtTime = (ms: number) => new Date(ms).toLocaleString();
@@ -169,6 +179,12 @@ export function validateTidyRows(rows: TidyMapRow[]): string | null {
   return null;
 }
 
+/** 内嵌启动器结果的类型徽标（与 LauncherWindow 同谱：同一枚举只有一套译名） */
+const KIND_LABEL: Record<DesktopLauncherHitDto["kind"], string> = {
+  app: "应用",
+  action: "动作",
+};
+
 export default function DesktopPanel() {
   const styles = useStyles();
   const [notes, setNotes] = useState<DesktopNoteDto[]>([]);
@@ -190,6 +206,10 @@ export default function DesktopPanel() {
   // 首轮 refresh 是否落定：未落定前随记列表渲染加载态而非"暂无随记"（D-18 假空态修正）
   const [loaded, setLoaded] = useState(false);
   const mounted = useRef(true);
+  // D-42：面板内嵌启动器搜索——与全局 Alt+Q 窗共用同一对命令，打分逻辑零复制
+  const [launcherQuery, setLauncherQuery] = useState("");
+  const [launcherHits, setLauncherHits] = useState<DesktopLauncherHitDto[]>([]);
+  const launcherSeq = useRef(0);
 
   // 过滤走 ref 而非 useCallback 依赖：切换标签只重取列表，不触发整面板 refresh
   // （refresh 依赖变化会连带重置整理映射编辑态——两 Section 互不牵连）
@@ -255,6 +275,27 @@ export default function DesktopPanel() {
     void refresh();
   }, [refresh]);
 
+  // 搜索 200ms 防抖 + seq 丢弃过期响应（形制同 LauncherWindow：慢查询后到不得覆盖新结果）
+  useEffect(() => {
+    const s = ++launcherSeq.current;
+    const q = launcherQuery.trim();
+    if (!q) {
+      setLauncherHits([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      desktopLauncherSearch(q)
+        .then((hits) => {
+          if (mounted.current && launcherSeq.current === s) setLauncherHits(hits);
+        })
+        .catch((e) => {
+          if (mounted.current && launcherSeq.current === s)
+            setError(parseAppError(e)?.data.message ?? String(e));
+        });
+    }, 200);
+    return () => clearTimeout(t);
+  }, [launcherQuery]);
+
   const run = useCallback(async (key: string, action: () => Promise<unknown>) => {
     setBusy(key);
     setMsg("");
@@ -267,6 +308,12 @@ export default function DesktopPanel() {
       if (mounted.current) setBusy("");
     }
   }, []);
+
+  const openHit = (hit: DesktopLauncherHitDto) =>
+    run("launcher-open", async () => {
+      await desktopLauncherLaunch(hit.id);
+      if (mounted.current) setMsg(`已打开「${hit.name}」`);
+    });
 
   const addNote = () =>
     run("note-add", async () => {
@@ -460,7 +507,15 @@ export default function DesktopPanel() {
                       #{t}
                     </button>
                   ))}
-                  {n.remind_at && <span className={styles.remind}>{fmtRemind(n.remind_at)}</span>}
+                  {n.remind_at && (
+                    <span className={styles.remind}>
+                      {fmtRemind(n.remind_at)}
+                      {/* D-42：reminded 随列表下发却不上屏——"到点了到底敲过我一次没有"只能猜。
+                          后端只在 take_due 时置 1 且 remind_at 无改写口（note.rs:157），
+                          故此态不回退；勾完成的行到期轮询会跳过（done=0 才取），如实另说 */}
+                      {n.reminded ? " · 已提醒" : n.done ? " · 已完成不再提醒" : " · 待提醒"}
+                    </span>
+                  )}
                   <span className={styles.muted}> · {fmtTime(n.created_ms)}</span>
                 </div>
               </div>
@@ -635,6 +690,48 @@ export default function DesktopPanel() {
           全局 Alt+Q 呼出；打分 = 前缀命中 0.5 + 子序列连续度 0.3 + 频次衰减 0.2。
           新装软件未出现在启动器时点「重建索引」重新扫描开始菜单与 PATH（内置快捷动作会自动恢复）。
         </span>
+
+        {/* D-42 二级窗独占能力入主窗：同一索引、同一打分，此处「打开」同样计频 */}
+        <div className={styles.row}>
+          <Input
+            className={styles.launcherInput}
+            value={launcherQuery}
+            onChange={(_, d) => setLauncherQuery(d.value)}
+            placeholder="在面板内搜索应用与快捷动作"
+          />
+          <span className={styles.muted}>搜索只读；「打开」与全局启动器一样计入使用频次。</span>
+        </div>
+        {launcherQuery.trim() === "" ? null : launcherHits.length === 0 ? (
+          <EmptyState
+            text="没有匹配项"
+            hint={
+              indexReady[0]
+                ? "换个关键词试试——索引含开始菜单程序与 PATH 可执行文件，新装软件需先「重建索引」。"
+                : "索引仍在构建中，构建完成后同一关键词才会有结果。"
+            }
+          />
+        ) : (
+          <Table size="small" aria-label="启动器搜索结果">
+            <TableBody>
+              {launcherHits.map((h) => (
+                <TableRow key={h.id}>
+                  <TableCell className={styles.hitName}>{h.name}</TableCell>
+                  <TableCell>
+                    <Badge appearance="outline">{KIND_LABEL[h.kind]}</Badge>
+                  </TableCell>
+                  <TableCell className={styles.hitScore} title="综合打分 (0,1]">
+                    {h.score.toFixed(2)}
+                  </TableCell>
+                  <TableCell>
+                    <Button size="small" disabled={busy !== ""} onClick={() => openHit(h)}>
+                      打开
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
       </Section>
 
       <InlineError text={msg} tone="success" />

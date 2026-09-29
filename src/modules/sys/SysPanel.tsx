@@ -395,8 +395,16 @@ export default function SysPanel() {
       setBusyTweak(id);
       setErr(null);
       try {
-        await winopsApply(id);
-        setMsg(`已应用（原值已备份，可回滚）`);
+        // D-42：报告里的 verified 是"回读校验通过"这一事实（sys-core winops.rs:635），
+        // 此前的文案只说"已应用"——用户无从知道这是校验过的还是没校验的。
+        // 注：后端在不通过时走 Err 分支并已补偿回滚，故 false 臂在当前实现下不可达，
+        // 留作系统边界的契约面（DTO 声明的是 bool，不是恒真常量）。
+        const report = await winopsApply(id);
+        setMsg(
+          report.verified
+            ? "已应用并通过回读校验（原值已备份，可回滚）"
+            : "已应用，但后端未报回读校验通过——请重新扫描确认当前值",
+        );
         await doTweakScan();
       } catch (e) {
         fail(e);

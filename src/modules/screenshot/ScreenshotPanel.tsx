@@ -22,6 +22,7 @@ import {
   screenshotHistoryDelete,
   screenshotHistoryGet,
   screenshotHistoryList,
+  screenshotPinClose,
   screenshotPinGet,
   screenshotPins,
   screenshotUpload,
@@ -141,6 +142,7 @@ const useStyles = makeStyles({
     padding: "6px 0 0",
   },
   pinRow: { display: "flex", gap: "10px", flexWrap: "wrap" },
+  pinCard: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "4px" },
   pinImg: {
     height: "72px",
     maxWidth: "160px",
@@ -486,6 +488,35 @@ export default function ScreenshotPanel() {
     [reload],
   );
 
+  /**
+   * 关闭一枚贴图（D-42 二级窗能力入主窗）：`screenshot_pin_close` 只删记录与 pins/{id}.png，
+   * 贴图窗口是前端窗、命令不碰它——这里补一次 closePinWindow，免留一枚显示已删图片的幽灵窗。
+   * 与 removeShot 同规：确认框取消臂零 invoke，成功后重取列表信宿主。
+   */
+  const closePin = useCallback(
+    async (p: PinDataDto) => {
+      if (
+        !(await confirmAction({
+          title: "关闭贴图",
+          impact: "删除贴图记录与其图片文件（不进回收站），并关掉对应的贴图窗口",
+          command: p.id,
+          confirmLabel: "关闭",
+          danger: true,
+        }))
+      )
+        return;
+      try {
+        await screenshotPinClose(p.id);
+        const { closePinWindow } = await import("../../windows/overlayController");
+        await closePinWindow(p.id);
+        await reload();
+      } catch (e) {
+        reportError(e, { context: "关闭贴图失败", dedupeKey: `shot-pin-close-${p.id}` });
+      }
+    },
+    [reload],
+  );
+
   const copyText = useCallback((text: string) => {
     void navigator.clipboard.writeText(text).catch((e) => reportError(e, { context: "复制文字失败" }));
   }, []);
@@ -690,12 +721,21 @@ export default function ScreenshotPanel() {
             <Text className={styles.sectionTitle}>当前贴图 · {pins.length}</Text>
             <div className={styles.pinRow}>
               {pins.map((p) => (
-                <img
-                  key={p.id}
-                  className={styles.pinImg}
-                  src={`data:image/png;base64,${p.png_b64}`}
-                  alt={`贴图 ${p.id}`}
-                />
+                <div key={p.id} className={styles.pinCard}>
+                  <img
+                    className={styles.pinImg}
+                    src={`data:image/png;base64,${p.png_b64}`}
+                    alt={`贴图 ${p.id}`}
+                  />
+                  {/* D-42：zoom/opacity 随列表下发却不上屏——贴图窗里改过的档位在主面板无从对拍 */}
+                  <span className={styles.hint}>
+                    {p.width}×{p.height} · 缩放 {Math.round(p.zoom * 100)}% · 不透明度{" "}
+                    {Math.round(p.opacity * 100)}%
+                  </span>
+                  <Button size="small" appearance="subtle" onClick={() => void closePin(p)}>
+                    关闭
+                  </Button>
+                </div>
               ))}
             </div>
           </>

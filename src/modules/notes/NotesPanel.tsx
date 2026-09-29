@@ -934,6 +934,9 @@ export default function NotesPanel() {
                           role="button"
                           tabIndex={0}
                           onKeyDown={keyActivate(() => void openNote(h.path))}
+                          // D-42：rank 是 FTS5 bm25 原值（notes-core/index.rs:403 按它升序排），
+                          // 组内次序就是它的显影；把负小数本体铺在行上只是伪精度，说清来路即可
+                          title={`FTS5 相关度 ${h.rank.toFixed(3)}（同组内按此序排列，越小越靠前）`}
                         >
                           <Text size={300} weight="semibold">
                             {h.title || h.path}
@@ -1134,7 +1137,9 @@ export default function NotesPanel() {
               <div key={c.id} className={`${styles.item} ${styles.row}`}>
                 <Text size={200}>{c.front}</Text>
                 <Text size={100} className={styles.muted}>
-                  间隔 {c.interval_days} 天 · EF {c.ef.toFixed(2)} ·{" "}
+                  {/* D-42：reps 与 ef/interval 同一条 SM-2 记录（notes-core/review.rs：q<3 归零），
+                      此前只显后两者——"这张卡答对过几回"正是间隔为何这么长的原因 */}
+                  间隔 {c.interval_days} 天 · EF {c.ef.toFixed(2)} · 已答对 {c.reps} 次 ·{" "}
                   {c.due_ms <= Date.now() ? "已到期" : new Date(c.due_ms).toLocaleDateString()}
                 </Text>
                 <div className={styles.grow} />
