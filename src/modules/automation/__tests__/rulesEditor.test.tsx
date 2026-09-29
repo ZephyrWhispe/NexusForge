@@ -153,7 +153,7 @@ describe("RulesPanel 多动作编辑器（T-B7-13）", () => {
     expect(titles).toEqual(["第二", "第一", "第三"]);
   });
 
-  it("rulesEditor_ipcCommand_roundTripsParams：ipc_command 参数回填往返 + 非法 JSON 就地红不提交；类型下拉五枚全", async () => {
+  it("rulesEditor_ipcCommand_roundTripsParams：ipc_command 参数回填往返 + 非法 JSON 就地红不提交；现值即它时五枚全（D-41 条件渲染）", async () => {
     await mountWith(
       baseRule({
         then: [
@@ -162,11 +162,11 @@ describe("RulesPanel 多动作编辑器（T-B7-13）", () => {
       }),
     );
     await click(buttonByText("编辑")!);
-    // 类型下拉五枚动作全（notify/open_url/publish/ipc_command/run_script）
+    // 类型下拉：被编辑规则现值＝ipc_command ⇒ 五枚全（旧规则可读可存、数据不腐）
     const kindSelect = [...document.querySelectorAll("select")].find((s) =>
       [...s.options].some((o) => o.value === "ipc_command"),
     );
-    expect(kindSelect, "动作类型下拉缺 ipc_command 项").toBeDefined();
+    expect(kindSelect, "现值为 ipc_command 时下拉须保留该项").toBeDefined();
     expect([...kindSelect!.options].map((o) => o.value)).toEqual([
       "notify",
       "open_url",
@@ -174,6 +174,8 @@ describe("RulesPanel 多动作编辑器（T-B7-13）", () => {
       "ipc_command",
       "run_script",
     ]);
+    // 诚实化配套：这一臂后端恒 Err，故以延后徽标显影而非静默可选
+    expect(document.body.textContent).toContain("IPC 命令动作 · 延后");
     // 回填：module/cmd/args 逐字带回
     expect(inputByPlaceholder("模块名")?.value).toBe("clipboard");
     expect(inputByPlaceholder("命令名")?.value).toBe("clipboard_get_entry");
@@ -191,6 +193,22 @@ describe("RulesPanel 多动作编辑器（T-B7-13）", () => {
     const action = vi.mocked(automationSaveRule).mock.calls[0][0].then[0];
     expect(action.kind).toBe("ipc_command");
     if (action.kind === "ipc_command") expect(action.args).toEqual({ y: 2 });
+  });
+
+  it("rulesEditor_ipcCommand_notOfferedForNewRows：新规则不给必然失败的入口（D-41 诚实化·上例的正面对立面）", async () => {
+    await mountWith(baseRule({ then: [{ kind: "notify", title: "A", body: "" }] }));
+    await click(buttonByText("新建规则")!);
+    const kindSelect = [...document.querySelectorAll("select")].find((s) =>
+      [...s.options].some((o) => o.value === "run_script"),
+    );
+    expect(kindSelect, "动作类型下拉未渲染").toBeDefined();
+    expect([...kindSelect!.options].map((o) => o.value)).toEqual([
+      "notify",
+      "open_url",
+      "publish",
+      "run_script",
+    ]);
+    expect(document.body.textContent).not.toContain("IPC 命令动作 · 延后");
   });
 
   it("rulesEditor_deepWhen_untouchedSurvivesVerbatim：深层 when 未触碰 → 保存逐字原样携带（正对照防编辑器必然展平）", async () => {

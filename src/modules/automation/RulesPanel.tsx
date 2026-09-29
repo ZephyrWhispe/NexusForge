@@ -37,6 +37,7 @@ import Section from "../../components/Section";
 import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import DeferredBadge from "../../components/DeferredBadge";
 import DryRunDialog, { type DryRunItem } from "../../components/DryRunDialog";
 
 /**
@@ -44,7 +45,8 @@ import DryRunDialog, { type DryRunItem } from "../../components/DryRunDialog";
  * + T-B7-15 干跑/死信清空）：
  * - 规则：事件/启动/每日定时触发 + 可选 when（一层 And/Or 组 UI；深层树逐字
  *   携带不回造，触碰降级须显式确认）+ **then 数组**（增删/上下移/五类动作全
- *   含 ipc_command）+ 冷却 + **干跑**（纯规划清单「仅展示/真执行风险」两标）
+ *   含 ipc_command；D-41 起 ipc_command 只对被编辑规则的现值可见＝后端该臂恒
+ *   Err，新规则不再提供必然失败的入口，另挂延后徽标）+ 冷却 + **干跑**（纯规划清单「仅展示/真执行风险」两标）
  * - 死信：动作重试耗尽的死信队列（可重放；重放仍失败以新 id 重新入队；
  *   dead_letters.json 落盘重启不丢；批量重放走 DryRunDialog 三步闸 +
  *   逐条结果汇总；一钮全清 = D-18 抹证据显式确认）
@@ -702,7 +704,7 @@ export default function RulesPanel() {
                 </div>
                 {form.trigger === "event" && (
                   <div className={styles.field}>
-                    <Text className={styles.label}>事件主题</Text>
+                    <Text className={styles.label}>事件主题（需在 TOPIC_REGISTRY 登记）</Text>
                     <Input size="small" value={form.topic} onChange={(_, d) => set({ topic: d.value })} placeholder="clipboard.captured" />
                   </div>
                 )}
@@ -845,9 +847,17 @@ export default function RulesPanel() {
                       <option value="notify">前端通知</option>
                       <option value="open_url">打开 URL/路径</option>
                       <option value="publish">发布事件</option>
-                      <option value="ipc_command">执行 IPC 命令</option>
+                      {row.kind === "ipc_command" && (
+                        // D-41 D6a 诚实化：后端这一臂恒 Err（automation-core/src/module.rs:157-167
+                        // "IpcCommand 暂未开放"），选它＝规则重试三次后进死信。新规则不再给这个
+                        // 必然失败的入口；被编辑规则现值即它时保留选项，旧规则可读可存、数据不腐。
+                        <option value="ipc_command">执行 IPC 命令</option>
+                      )}
                       <option value="run_script">执行 WASM 插件</option>
                     </select>
+                    {row.kind === "ipc_command" && (
+                      <DeferredBadge label="IPC 命令动作" decisionRef="D-41" />
+                    )}
                   </div>
                   {row.kind === "notify" && (
                     <>
