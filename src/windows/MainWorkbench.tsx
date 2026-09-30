@@ -111,6 +111,9 @@ export default function MainWorkbench() {
   // T-B6-10 立档（T-B7-27 扩七档）：文件档选择态再分一键（第四枚分键，理由同上）
   const fileSub = useSession((s) => s.fileSubPanel);
   const setFileSub = useSession((s) => s.setFileSubPanel);
+  // D-43 C5：终端互斥视图上移左轨后，选择态落第五枚分键 termTab（理由同上）
+  const termTab = useSession((s) => s.termTab);
+  const setTermTab = useSession((s) => s.setTermTab);
   const search = useSession((s) => s.clipSearch);
   const setSearch = useSession((s) => s.setClipSearch);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -186,13 +189,14 @@ export default function MainWorkbench() {
   const contentRef = useRef<HTMLElement>(null);
   // T-B3-1：选择态读写一律经 modules.ts 路由表（模块 × 维度 → session 键），
   // 取代原先按模块硬分叉的选择态三元
-  const subnavSelections = { clipView, clipGroup: group, proxySub, syncSub, fileSub };
+  const subnavSelections = { clipView, clipGroup: group, proxySub, syncSub, fileSub, termTab };
   const subnavSetters: Record<SubnavStateKey, (id: string) => void> = {
     clipView: setClipView,
     clipGroup: setGroup,
     proxySubPanel: setProxySub,
     syncSubPanel: setSyncSub,
     fileSubPanel: setFileSub,
+    termTab: setTermTab,
   };
   const selectSubnav = (scope: SubNavScope, id: string) => {
     // D-43 锚点形制：选择不落 session（滚动位置不配持久化），只把同屏区块滚进视界。

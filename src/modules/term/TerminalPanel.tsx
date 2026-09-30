@@ -64,11 +64,14 @@ import {
 } from "../../ipc/client";
 import { reportError } from "../../stores/notifications";
 import { confirmAction } from "../../stores/confirm";
+import { isTermTab, useSession } from "../../stores/session";
 import { keyActivate } from "../../a11y";
 import { sharedTab, sharedTabActive } from "../../components/tabStyles";
 import { TERMINAL_BG } from "../../theme/palette";
+import DataToolbar from "../../components/DataToolbar";
+import ListFooter from "../../components/ListFooter";
+import { ROW_H, SHELL, SPACING, TIER_W } from "../../components/nfTiers";
 import Section from "../../components/Section";
-import Tabs from "../../components/Tabs";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 import DeferredBadge from "../../components/DeferredBadge";
@@ -81,23 +84,39 @@ import ForwardSection from "./ForwardSection";
  * - T3 SSH 会话（密码/密钥，TOFU 指纹自动记录，变更报错）+ SFTP 列表/上传/下载
  *   （T-B1-8：「已知主机」Dialog 列表+删除，host 串一律原样回传保 [h]:port 形状）
  * - T6 Docker：容器列表（手动刷新）/ 启停 / 日志 tail
+ *
+ * D-43 C5 重排（docs/panels/2026-09-19/08-term.md §2/§7.1）：互斥视图上移左轨（termTab）、
+ * 会话切换与启动入口进吸顶工具条、三区块各立标题、清单内层视口收敛为主体单滚动＋"显示更多"。
  */
+/** SFTP 目录首屏行数档（4 的倍数）：撤掉内层 320px 视口后，长目录靠分页按钮而非二层滚动 */
+const SFTP_PAGE = 40;
+
 const useStyles = makeStyles({
+  // D-43 C5：主体单滚动容器（规范 1 节）——原清单内层 maxHeight 视口撤除，见 styles.list
   root: {
-    flex: 1,
-    minWidth: 0,
-    overflowY: "auto",
-    padding: "0 20px 20px",
     display: "flex",
     flexDirection: "column",
-    gap: "16px",
+    flex: 1,
+    gap: SPACING.x16,
+    minWidth: 0,
+    overflowY: "auto",
+    padding: `0 ${SHELL.contentPad} ${SHELL.contentPad}`,
   },
-  row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
+  row: { display: "flex", alignItems: "center", gap: SPACING.x8, flexWrap: "wrap" },
   grow: { flex: 1, minWidth: "120px" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   // STD-06：Tab 样式收敛（唯一出处 src/components/tabStyles.ts）
   tab: sharedTab,
   tabActive: sharedTabActive,
+  // 会话条：工具条 nowrap 纪律（§10-15）下的横向溢出走滚动，不换行也不挤掉主按钮
+  chips: {
+    display: "flex",
+    alignItems: "center",
+    gap: SPACING.x4,
+    minWidth: 0,
+    overflowX: "auto",
+    scrollbarWidth: "thin",
+  },
   termHost: {
     height: "420px",
     border: `1px solid ${tokens.colorNeutralStroke1}`,
@@ -108,16 +127,15 @@ const useStyles = makeStyles({
   list: {
     display: "flex",
     flexDirection: "column",
-    gap: "2px",
-    maxHeight: "320px",
-    overflowY: "auto",
+    gap: SPACING.x4,
   },
   item: {
+    alignItems: "center",
+    display: "flex",
+    gap: SPACING.x8,
+    minHeight: ROW_H.compact,
     padding: "6px 8px",
     borderRadius: tokens.borderRadiusMedium,
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
   },
   itemHover: { backgroundColor: tokens.colorNeutralBackground3Hover, cursor: "pointer" },
   logs: {
@@ -135,7 +153,10 @@ const useStyles = makeStyles({
 
 export default function TerminalPanel() {
   const styles = useStyles();
-  const [tab, setTab] = useState<"term" | "docker">("term");
+  // D-43 C5：互斥视图上移左轨（SUBNAV.term 两枚 view 项 → session 分键 termTab），
+  // 原面板内 `<Tabs>` 撤销；持久化快照可能被改成野值 ⇒ 就地收窄回落 sessions
+  const storedTab = useSession((s) => s.termTab);
+  const tab = isTermTab(storedTab) ? storedTab : "sessions";
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const fail = useCallback((e: unknown) => setErr(parseAppError(e)?.data.message ?? String(e)), []);
@@ -185,6 +206,8 @@ export default function TerminalPanel() {
   const [sftpMkDir, setSftpMkDir] = useState("");
   const [sftpRenaming, setSftpRenaming] = useState<{ from: string; to: string } | null>(null);
   const [sftpDeleteArm, setSftpDeleteArm] = useState<string | null>(null);
+  // D-43 C5：在场行数（"显示更多"逐档抬高；重新浏览即回落首屏档）
+  const [sftpShown, setSftpShown] = useState(SFTP_PAGE);
   // T-B7-25 权限弹窗：写回**不**走 term-core（那里零 chmod）——宿主桥=直调
   // file 域 fileRemoteChmod 唯一口，目标驱动取自 file-core 已连接 SFTP 站点。
   // 两域会话互不共享是既有事实源形状，故这里选的是"哪条已连接远端"而非本终端会话。
@@ -252,6 +275,8 @@ export default function TerminalPanel() {
   }, []);
 
   // 挂载激活会话的 xterm 到 DOM
+  // tab 入依赖：视图切走时宿主 div 随区块卸载，切回来的是新节点——不重跑本效应的话
+  // xterm 仍挂在已脱离文档的旧节点上，终端看起来"空白"而会话其实活着
   useEffect(() => {
     const host = hostRef.current;
     if (!active) return;
@@ -267,7 +292,7 @@ export default function TerminalPanel() {
     } catch {
       /* 隐藏时忽略 */
     }
-  }, [active, sessions, ensureTerm]);
+  }, [active, sessions, ensureTerm, tab]);
 
   // 初始 + 事件驱动
   useEffect(() => {
@@ -456,6 +481,7 @@ export default function TerminalPanel() {
 
   const loadSftp = useCallback(async () => {
     setSftpBusy(true);
+    setSftpShown(SFTP_PAGE); // 换目录＝回到首屏档，不把上一目录的行数带过来
     setErr(null);
     try {
       setSftpEntries(await termSftpList(...sftpTargetArgs(sftpTarget(), sftpPath)));
@@ -692,24 +718,101 @@ export default function TerminalPanel() {
     [cfgHosts],
   );
 
+  const activeSession = sessions.find((s) => s.id === active) ?? null;
+
+  // 会话条：无会话时提示落在左区直下（真窗实测：空态提示放进可收缩的滚动组里会被挤成
+  // 0 宽单字竖排，把 40 高的工具条撑到 71.6——规范 10-15 的 nowrap 纪律就是这么破的）
+  const sessionChips =
+    sessions.length === 0 ? (
+      <Text className={styles.muted}>暂无会话</Text>
+    ) : (
+      <div className={styles.chips} role="group" aria-label="在场会话">
+        {sessions.map((s) => (
+          // STD-03：<button> 内嵌 role=button 是非法 HTML（交互内容嵌套）——
+          // 外层降为 span[role=button]，内层 ✕ 与之成为兄弟可激活元素
+          <span
+            key={s.id}
+            className={`${styles.tab} ${active === s.id ? styles.tabActive : ""}`}
+            role="button"
+            tabIndex={0}
+            aria-pressed={active === s.id}
+            onKeyDown={keyActivate(() => setActive(s.id))}
+            onClick={() => setActive(s.id)}
+          >
+            {s.title}
+            {!s.alive && <Badge size="small" appearance="ghost">结束</Badge>}
+            <span
+              style={{ marginLeft: 4, color: tokens.colorNeutralForeground3 }}
+              onClick={(e) => {
+                e.stopPropagation();
+                void killSession(s);
+              }}
+              role="button"
+              aria-label={`关闭会话 ${s.title}`}
+              tabIndex={0}
+              onKeyDown={keyActivate(() => void killSession(s))}
+            >
+              ✕
+            </span>
+          </span>
+        ))}
+      </div>
+    );
+
+  // SSH 三枚对话框入口：动作对象都是 SSH 会话，故随「SSH 连接」区块头出场而非工具条
+  // （Docker 档里它们无处可用——工具条挤不下时按钮会折成两行，真窗实测 55.6 高）
+  const sshDialogActions = (
+    <>
+      <Button
+        size="small"
+        appearance="outline"
+        title="查看并管理 SSH 首次连接记录的 TOFU 主机指纹"
+        onClick={() => {
+          setKhOpen(true);
+          void loadKnownHosts();
+        }}
+      >
+        已知主机
+      </Button>
+      <Button
+        size="small"
+        appearance="outline"
+        title="一次性非交互远端命令（exec，无 PTY；结果三分区呈现，不进终端回显）"
+        onClick={() => {
+          setExecResult(null);
+          setExecOpen(true);
+        }}
+      >
+        一次性远端命令
+      </Button>
+      <Button
+        size="small"
+        appearance="outline"
+        title="端口转发 -L/-R/-D 管理表（转发挂 SSH 会话、会话关即全拆；端口占用显示被拒行而非静默）"
+        onClick={() => setFwdOpen(true)}
+      >
+        端口转发
+      </Button>
+    </>
+  );
+
   return (
     <div className={styles.root}>
-      <Tabs
-        ariaLabel="终端视图"
-        value={tab}
-        onChange={setTab}
-        items={[
-          { id: "term", label: `终端（${sessions.filter((s) => s.alive).length} 活跃）` },
-          { id: "docker", label: "Docker" },
-        ]}
-      />
-
-      <InlineError text={msg} tone="success" />
-      <InlineError text={err} />
-
-      {tab === "term" && (
-        <Section>
-          <div className={styles.row}>
+      <DataToolbar
+        // 规范 5 节左右分区：左＝在场会话（切哪条会话即看哪块终端），右＝启动入口，主按钮恒末位
+        filters={sessionChips}
+        bulk={
+          <Dropdown placeholder="WSL 分发" value="" selectedOptions={[]} onOptionSelect={(_, d) => void spawnWsl(String(d.optionValue ?? ""))}>
+            {wsl.map((d) => (
+              <Option key={d} value={d} text={d}>
+                {d}
+              </Option>
+            ))}
+            {wsl.length === 0 && <Option value="_none" text="（未检测到 WSL 分发）">（未检测到 WSL 分发）</Option>}
+          </Dropdown>
+        }
+        primary={
+          <>
             <Input
               className={styles.grow}
               placeholder="自定义命令行（空 = 默认 PowerShell），如 wsl.exe -d Ubuntu"
@@ -719,20 +822,30 @@ export default function TerminalPanel() {
             <Button appearance="primary" size="small" onClick={() => void spawnLocal()}>
               新建本地终端
             </Button>
-            <Dropdown placeholder="WSL 分发" value="" selectedOptions={[]} onOptionSelect={(_, d) => void spawnWsl(String(d.optionValue ?? ""))}>
-              {wsl.map((d) => (
-                <Option key={d} value={d} text={d}>
-                  {d}
-                </Option>
-              ))}
-              {wsl.length === 0 && <Option value="_none" text="（未检测到 WSL 分发）">（未检测到 WSL 分发）</Option>}
-            </Dropdown>
-          </div>
+          </>
+        }
+      />
 
+      <InlineError text={msg} tone="success" />
+      <InlineError text={err} />
+
+      {tab === "sessions" && (
+        <>
+        <Section
+          title="SSH 连接"
+          actions={
+            <>
+              {sshDialogActions}
+              /* T-B7-28（§7.3-a 明示不做）：term 是 per-tab 长会话、file 是 per-op 短连接，
+                 两域共用一条 SSH 会话需生命周期仲裁者，属 B8 待裁决——以徽标诚实登记。 */
+              <DeferredBadge label="SSH 连接池统一" decisionRef="09 §7.3-(a)" />
+            </>
+          }
+        >
           <div className={styles.row}>
             <Input className={styles.grow} placeholder="SSH 主机" value={sshHost} onChange={(_, d) => setSshHost(d.value)} />
-            <Input style={{ maxWidth: 80 }} placeholder="端口" value={sshPort} onChange={(_, d) => setSshPort(d.value)} />
-            <Input style={{ maxWidth: 120 }} placeholder="用户" value={sshUser} onChange={(_, d) => setSshUser(d.value)} />
+            <Input style={{ maxWidth: TIER_W.s }} placeholder="端口" value={sshPort} onChange={(_, d) => setSshPort(d.value)} />
+            <Input style={{ maxWidth: TIER_W.s }} placeholder="用户" value={sshUser} onChange={(_, d) => setSshUser(d.value)} />
             <Dropdown
               placeholder="从 ~/.ssh/config 导入"
               value=""
@@ -766,39 +879,6 @@ export default function TerminalPanel() {
             <Button size="small" appearance="primary" onClick={() => void spawnSsh()}>
               SSH 连接
             </Button>
-            <Button
-              size="small"
-              appearance="outline"
-              title="查看并管理 SSH 首次连接记录的 TOFU 主机指纹"
-              onClick={() => {
-                setKhOpen(true);
-                void loadKnownHosts();
-              }}
-            >
-              已知主机
-            </Button>
-            <Button
-              size="small"
-              appearance="outline"
-              title="一次性非交互远端命令（exec，无 PTY；结果三分区呈现，不进终端回显）"
-              onClick={() => {
-                setExecResult(null);
-                setExecOpen(true);
-              }}
-            >
-              一次性远端命令
-            </Button>
-            <Button
-              size="small"
-              appearance="outline"
-              title="端口转发 -L/-R/-D 管理表（转发挂 SSH 会话、会话关即全拆；端口占用显示被拒行而非静默）"
-              onClick={() => setFwdOpen(true)}
-            >
-              端口转发
-            </Button>
-            {/* T-B7-28（§7.3-a 明示不做）：term 是 per-tab 长会话、file 是 per-op 短连接，
-                两域共用一条 SSH 会话需生命周期仲裁者，属 B8 待裁决——以徽标诚实登记。 */}
-            <DeferredBadge label="SSH 连接池统一" decisionRef="09 §7.3-(a)" />
           </div>
 
           <div className={styles.row}>
@@ -821,13 +901,13 @@ export default function TerminalPanel() {
                   onChange={(_, d) => setJumpHost(d.value)}
                 />
                 <Input
-                  style={{ maxWidth: 80 }}
+                  style={{ maxWidth: TIER_W.s }}
                   placeholder="跳板端口"
                   value={jumpPort}
                   onChange={(_, d) => setJumpPort(d.value)}
                 />
                 <Input
-                  style={{ maxWidth: 120 }}
+                  style={{ maxWidth: TIER_W.s }}
                   placeholder="跳板用户"
                   value={jumpUser}
                   onChange={(_, d) => setJumpUser(d.value)}
@@ -843,215 +923,228 @@ export default function TerminalPanel() {
             ) : null}
           </div>
 
-          <div className={styles.row}>
-            {sessions.map((s) => (
-              // STD-03：<button> 内嵌 role=button 是非法 HTML（交互内容嵌套）——
-              // 外层降为 span[role=button]，内层 ✕ 与之成为兄弟可激活元素
-              <span
-                key={s.id}
-                className={`${styles.tab} ${active === s.id ? styles.tabActive : ""}`}
-                role="button"
-                tabIndex={0}
-                aria-pressed={active === s.id}
-                onKeyDown={keyActivate(() => setActive(s.id))}
-                onClick={() => setActive(s.id)}
-              >
-                {s.title}
-                {!s.alive && <Badge size="small" appearance="ghost">结束</Badge>}
-                <span
-                  style={{ marginLeft: 4, color: tokens.colorNeutralForeground3 }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void killSession(s);
-                  }}
-                  role="button"
-                  aria-label={`关闭会话 ${s.title}`}
-                  tabIndex={0}
-                  onKeyDown={keyActivate(() => void killSession(s))}
-                >
-                  ✕
-                </span>
-              </span>
-            ))}
-          </div>
+          </Section>
 
-          <div ref={hostRef} className={styles.termHost} style={{ display: active ? "block" : "none" }} />
-          {!active && <Text className={styles.muted}>新建或选择一个会话（本地 PowerShell / WSL / SSH）</Text>}
-
-          {active && (
-            <div className={styles.row}>
-              <Input className={styles.grow} placeholder="SFTP 远程路径" value={sftpPath} onChange={(_, d) => setSftpPath(d.value)} />
-              <Button size="small" onClick={() => void loadSftp()}>
-                SFTP 浏览
-              </Button>
-              {sftpBusy && <Spinner size="tiny" />}
-            </div>
-          )}
-          {active && (
-            <div className={styles.row}>
-              <Input
-                className={styles.grow}
-                placeholder="新目录名（当前路径下）"
-                value={sftpMkDir}
-                onChange={(_, d) => setSftpMkDir(d.value)}
+          <Section
+            title="终端"
+            actions={
+              activeSession ? (
+                <Text className={styles.muted}>当前会话 {activeSession.title}</Text>
+              ) : undefined
+            }
+          >
+            {/* 宿主 div 恒在场（display:none 时 xterm 不挂载），切换会话只换 attach 目标 */}
+            <div ref={hostRef} className={styles.termHost} style={{ display: active ? "block" : "none" }} />
+            {!active && (
+              <EmptyState
+                text="尚无活跃会话"
+                hint="工具条「新建本地终端」开一条，或在「SSH 连接」区连主机；输出只写在这里，不与 SFTP 清单互串。"
               />
-              <Button size="small" disabled={!sftpMkDir.trim() || sftpBusy} onClick={sftpMkdir}>
-                新建目录
-              </Button>
-            </div>
-          )}
-          {sftpEntries.length > 0 && (
-            <div className={styles.list}>
-              {sftpEntries.map((e) => (
-                <div
-                  key={e.name}
-                  className={`${styles.item} ${styles.itemHover}`}
-                  onClick={() => {
-                    const next = `${sftpPath.replace(/\/$/, "")}/${e.name}`;
-                    setSftpPath(next);
-                    if (e.is_dir) void loadSftp();
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={keyActivate(() => {
-                    const next = `${sftpPath.replace(/\/$/, "")}/${e.name}`;
-                    setSftpPath(next);
-                    if (e.is_dir) void loadSftp();
-                  })}
-                >
-                  {sftpRenaming?.from === e.name ? (
-                    <span
-                      style={{ display: "flex", gap: 4, alignItems: "center", width: "100%" }}
+            )}
+          </Section>
+
+          <Section title="远端文件（SFTP）">
+            {!active ? (
+              <EmptyState
+                text="未选择会话"
+                hint="SFTP 走当前 SSH 会话的目标主机——先建立或选中一条会话，再浏览远端目录。"
+              />
+            ) : (
+              <>
+                <div className={styles.row}>
+                  <Input className={styles.grow} placeholder="SFTP 远程路径" value={sftpPath} onChange={(_, d) => setSftpPath(d.value)} />
+                  <Button size="small" onClick={() => void loadSftp()}>
+                    SFTP 浏览
+                  </Button>
+                  {sftpBusy && <Spinner size="tiny" />}
+                </div>
+                <div className={styles.row}>
+                  <Input
+                    className={styles.grow}
+                    placeholder="新目录名（当前路径下）"
+                    value={sftpMkDir}
+                    onChange={(_, d) => setSftpMkDir(d.value)}
+                  />
+                  <Button size="small" disabled={!sftpMkDir.trim() || sftpBusy} onClick={sftpMkdir}>
+                    新建目录
+                  </Button>
+                </div>
+                {sftpEntries.length === 0 && !sftpBusy && (
+                  <EmptyState
+                    text="尚未读取远端目录"
+                    hint="填好远程路径后点「SFTP 浏览」；空目录与未浏览同形制，读取失败的原因显示在工作区上方而非静默。"
+                  />
+                )}
+                <div className={styles.list}>
+                  {sftpEntries.slice(0, sftpShown).map((e) => (
+                    <div
+                      key={e.name}
+                      data-sftp-entry={e.name}
+                      className={`${styles.item} ${styles.itemHover}`}
+                      onClick={() => {
+                        const next = `${sftpPath.replace(/\/$/, "")}/${e.name}`;
+                        setSftpPath(next);
+                        if (e.is_dir) void loadSftp();
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={keyActivate(() => {
+                        const next = `${sftpPath.replace(/\/$/, "")}/${e.name}`;
+                        setSftpPath(next);
+                        if (e.is_dir) void loadSftp();
+                      })}
                     >
-                      <Input
-                        className={styles.grow}
-                        placeholder="新名（目标存在则拒，不覆盖）"
-                        value={sftpRenaming.to}
-                        onClick={(ev) => ev.stopPropagation()}
-                        onChange={(_, d) => setSftpRenaming({ from: e.name, to: d.value })}
-                      />
-                      <Button
-                        size="small"
-                        disabled={!sftpRenaming.to.trim() || sftpBusy}
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          sftpRename();
-                        }}
-                      >
-                        确认
-                      </Button>
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          setSftpRenaming(null);
-                        }}
-                      >
-                        取消
-                      </Button>
-                    </span>
-                  ) : (
-                    <>
-                      <Text size={200}>{e.is_dir ? "📁" : "📄"} {e.name}</Text>
-                      {!e.is_dir && (
-                        <Text size={100} className={styles.muted}>
-                          {(e.size / 1024).toFixed(1)} KB
-                        </Text>
-                      )}
-                      <span style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
-                        <Button
-                          size="small"
-                          appearance="subtle"
-                          disabled={sftpBusy}
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            setSftpRenaming({ from: e.name, to: e.name });
-                          }}
+                      {sftpRenaming?.from === e.name ? (
+                        <span
+                          style={{ display: "flex", gap: 4, alignItems: "center", width: "100%" }}
                         >
-                          重命名
-                        </Button>
-                        {sftpDeleteArm === e.name ? (
-                          <>
+                          <Input
+                            className={styles.grow}
+                            placeholder="新名（目标存在则拒，不覆盖）"
+                            value={sftpRenaming.to}
+                            onClick={(ev) => ev.stopPropagation()}
+                            onChange={(_, d) => setSftpRenaming({ from: e.name, to: d.value })}
+                          />
+                          <Button
+                            size="small"
+                            disabled={!sftpRenaming.to.trim() || sftpBusy}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              sftpRename();
+                            }}
+                          >
+                            确认
+                          </Button>
+                          <Button
+                            size="small"
+                            appearance="subtle"
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setSftpRenaming(null);
+                            }}
+                          >
+                            取消
+                          </Button>
+                        </span>
+                      ) : (
+                        <>
+                          <Text size={200}>{e.is_dir ? "📁" : "📄"} {e.name}</Text>
+                          {!e.is_dir && (
+                            <Text size={200} className={styles.muted}>
+                              {(e.size / 1024).toFixed(1)} KB
+                            </Text>
+                          )}
+                          <span style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
                             <Button
                               size="small"
-                              appearance="outline"
+                              appearance="subtle"
                               disabled={sftpBusy}
                               onClick={(ev) => {
                                 ev.stopPropagation();
-                                sftpRemove(e.name);
+                                setSftpRenaming({ from: e.name, to: e.name });
                               }}
                             >
-                              确认删除
+                              重命名
                             </Button>
+                            {sftpDeleteArm === e.name ? (
+                              <>
+                                <Button
+                                  size="small"
+                                  appearance="outline"
+                                  disabled={sftpBusy}
+                                  onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    sftpRemove(e.name);
+                                  }}
+                                >
+                                  确认删除
+                                </Button>
+                                <Button
+                                  size="small"
+                                  appearance="subtle"
+                                  onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    setSftpDeleteArm(null);
+                                  }}
+                                >
+                                  取消
+                                </Button>
+                              </>
+                            ) : (
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                disabled={sftpBusy}
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  setSftpDeleteArm(e.name);
+                                }}
+                              >
+                                删除
+                              </Button>
+                            )}
                             <Button
                               size="small"
                               appearance="subtle"
                               onClick={(ev) => {
                                 ev.stopPropagation();
-                                setSftpDeleteArm(null);
+                                void openPerm(e.name);
                               }}
                             >
-                              取消
+                              权限
                             </Button>
-                          </>
-                        ) : (
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {sftpEntries.length > 0 && (
+                  <ListFooter
+                    left={
+                      <>
+                        共 {sftpEntries.length} 项 · 在场 {Math.min(sftpShown, sftpEntries.length)} 项
+                        {sftpEntries.length > sftpShown && (
                           <Button
                             size="small"
                             appearance="subtle"
-                            disabled={sftpBusy}
-                            onClick={(ev) => {
-                              ev.stopPropagation();
-                              setSftpDeleteArm(e.name);
-                            }}
+                            onClick={() => setSftpShown((n) => n + SFTP_PAGE)}
                           >
-                            删除
+                            显示更多
                           </Button>
                         )}
-                        <Button
-                          size="small"
-                          appearance="subtle"
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            void openPerm(e.name);
-                          }}
-                        >
-                          权限
-                        </Button>
-                      </span>
-                    </>
-                  )}
+                      </>
+                    }
+                    right="删除需两次点击确认 · 权限位写回经文件域已连接站点"
+                  />
+                )}
+                <div className={styles.row}>
+                  <Input className={styles.grow} placeholder="远程文件路径（上传/下载目标）" value={sftpRemote} onChange={(_, d) => setSftpRemote(d.value)} />
+                  <Input className={styles.grow} placeholder="本地文件路径" value={sftpLocal} onChange={(_, d) => setSftpLocal(d.value)} />
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      void termSftpDownload(...sftpDlArgs(sftpTarget(), sftpRemote, sftpLocal))
+                        .then((n) => setMsg(`已下载 ${n} 字节`))
+                        .catch(fail)
+                    }
+                  >
+                    下载
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      void termSftpUpload(...sftpUlArgs(sftpTarget(), sftpLocal, sftpRemote))
+                        .then((n) => setMsg(`已上传 ${n} 字节`))
+                        .catch(fail)
+                    }
+                  >
+                    上传
+                  </Button>
                 </div>
-              ))}
-            </div>
-          )}
-          {active && sftpRemote !== null && (
-            <div className={styles.row}>
-              <Input className={styles.grow} placeholder="远程文件路径（上传/下载目标）" value={sftpRemote} onChange={(_, d) => setSftpRemote(d.value)} />
-              <Input className={styles.grow} placeholder="本地文件路径" value={sftpLocal} onChange={(_, d) => setSftpLocal(d.value)} />
-              <Button
-                size="small"
-                onClick={() =>
-                  void termSftpDownload(...sftpDlArgs(sftpTarget(), sftpRemote, sftpLocal))
-                    .then((n) => setMsg(`已下载 ${n} 字节`))
-                    .catch(fail)
-                }
-              >
-                下载
-              </Button>
-              <Button
-                size="small"
-                onClick={() =>
-                  void termSftpUpload(...sftpUlArgs(sftpTarget(), sftpLocal, sftpRemote))
-                    .then((n) => setMsg(`已上传 ${n} 字节`))
-                    .catch(fail)
-                }
-              >
-                上传
-              </Button>
-            </div>
-          )}
-          {permFor && (
+              </>
+            )}
+            {permFor && (
             <Dialog open onOpenChange={(_, d) => !d.open && setPermFor(null)}>
               <DialogSurface>
                 <DialogBody>
@@ -1103,6 +1196,7 @@ export default function TerminalPanel() {
             </Dialog>
           )}
         </Section>
+        </>
       )}
 
       {tab === "docker" && (
@@ -1115,6 +1209,12 @@ export default function TerminalPanel() {
           }
         >
           {dockerLoading && <Spinner size="tiny" />}
+          {containers === null && !dockerLoading && (
+            <EmptyState
+              text="尚未拉取容器列表"
+              hint="点右上「刷新」经本机 Docker Engine 读取；启停与日志都只作用于列表里的容器。"
+            />
+          )}
           {containers && containers.length === 0 && !dockerLoading && (
             <EmptyState text="无容器（或 Docker Engine 不可达）" />
           )}
@@ -1127,7 +1227,7 @@ export default function TerminalPanel() {
                 <Text size={200} weight="semibold">
                   {c.name}
                 </Text>
-                <Text size={100} className={styles.muted}>
+                <Text size={200} className={styles.muted}>
                   {c.image} · {c.status}
                 </Text>
                 <div className={styles.grow} />
@@ -1146,6 +1246,12 @@ export default function TerminalPanel() {
               </div>
             ))}
           </div>
+          {containers !== null && (
+            <ListFooter
+              left={`共 ${containers.length} 个容器`}
+              right="日志取 tail 末 200 行 · Engine 不可达时列表为空而非缓存"
+            />
+          )}
           {logsFor && (
             <div>
               <div className={styles.row}>
@@ -1157,6 +1263,8 @@ export default function TerminalPanel() {
                   关闭
                 </Button>
               </div>
+              {/* 输出面自留视口是有意例外（面板档 §7.1）：日志随 tail 增长，
+                  不给它自己的滚动窗就会把整页撑长、容器列表被推走——主体滚动仍唯一 */}
               <div className={styles.logs}>{logsText || "（无输出）"}</div>
             </div>
           )}

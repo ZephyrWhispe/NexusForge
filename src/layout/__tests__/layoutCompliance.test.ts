@@ -26,7 +26,10 @@ type Dim = "nativeControls" | "inlineWidths" | "scrollY";
 
 /** 台账起点＝D-42 壳批落地后实测（面板 45 个 tsx：原生控件 14／写死宽度 22／≥2 滚动容器 10 文件）。
  *  D-43 C4 摘除 VaultPanel 整行（原生控件 1＝生成器 number 微调钮换 SpinButton、写死宽度 4＝
- *  全走 TIER_W/FORM_CARD_W、主体单滚动容器 scrollY 1 枚不构成违规）；余下欠债逐行随 C5–C8 下调。 */
+ *  全走 TIER_W/FORM_CARD_W、主体单滚动容器 scrollY 1 枚不构成违规）；
+ *  C5 摘除 ForwardSection 整行（两枚原生 checkbox → Fluent Checkbox）、TerminalPanel scrollY 3→2
+ *  （会话列表/SSH 表单的 maxHeight 内层视口撤除，余下第二枚是 Docker 日志输出面——
+ *  面板档 08-term §7.1 的有意例外，日志随 tail 增长，无自留视口会把整页撑长）；余下欠债逐行随 C6–C8 下调。 */
 const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/automation/RulesPanel.tsx", counts: { nativeControls: 4, inlineWidths: 0, scrollY: 2 } },
   { file: "src/modules/clipboard/panels/HistorySection.tsx", counts: { nativeControls: 0, inlineWidths: 1, scrollY: 2 } },
@@ -44,13 +47,12 @@ const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/screenshot/ScreenshotPanel.tsx", counts: { nativeControls: 0, inlineWidths: 3, scrollY: 0 } },
   { file: "src/modules/sync/ConflictsSection.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 2 } },
   { file: "src/modules/sys/SysPanel.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 3 } },
-  { file: "src/modules/term/ForwardSection.tsx", counts: { nativeControls: 2, inlineWidths: 0, scrollY: 0 } },
-  { file: "src/modules/term/TerminalPanel.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 3 } },
+  { file: "src/modules/term/TerminalPanel.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 2 } },
   { file: "src/settings/SchemaForm.tsx", counts: { nativeControls: 0, inlineWidths: 2, scrollY: 0 } },
 ];
 
 /**
- * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 9 枚；00 规范 1 节：面板必须有二级导航槽位，
+ * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 8 枚；00 规范 1 节：面板必须有二级导航槽位，
  * 否则一屏塞满纵向滚动＝"元素排列粗暴"的形态学根因）。until 指向各面板档，
  * 该面板批落地子导航注册后必须删掉对应条目，否则 subnav_registration_or_ledger 判红。
  */
@@ -61,7 +63,6 @@ const PENDING_SUBNAV: { id: ModuleId; until: string }[] = [
   { id: "kvm", until: "面板批·docs/panels/2026-09-19/06-kvm.md" },
   { id: "editor", until: "面板批·docs/panels/2026-09-19/11-editor.md" },
   { id: "notes", until: "面板批·docs/panels/2026-09-19/12-notes.md" },
-  { id: "term", until: "面板批·docs/panels/2026-09-19/08-term.md" },
   { id: "sys", until: "面板批·docs/panels/2026-09-19/07-sys.md" },
   { id: "automation", until: "面板批·docs/panels/2026-09-19/13-automation.md" },
 ];

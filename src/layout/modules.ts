@@ -156,7 +156,17 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
   kvm: [],
   editor: [],
   notes: [],
-  term: [],
+  // D-43 C5：终端两视图是互斥档（`termTab === …` 条件渲染，未挂载视图不在 DOM 里），
+  // 故走 view 形制上左轨、原面板内 `<Tabs>` 撤销；选择态落第五枚分键 termTab。
+  term: [
+    {
+      group: "视图",
+      items: [
+        { id: "sessions", label: "终端会话", scope: "view" },
+        { id: "docker", label: "Docker", scope: "view" },
+      ],
+    },
+  ],
   sys: [],
   automation: [],
   // T-B5-8（09 §10.2）：同步五子面板入口，id 与 session store syncSubPanel 一一对应
@@ -181,7 +191,8 @@ export type SubnavStateKey =
   | "clipGroup"
   | "proxySubPanel"
   | "syncSubPanel"
-  | "fileSubPanel";
+  | "fileSubPanel"
+  | "termTab";
 
 /** 模块 × 维度 → session 键（09 §8.1-⑩ 红线：分组筛选与子面板切换两种语义不得互污，故分键） */
 const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavStateKey>>>> = {
@@ -189,6 +200,7 @@ const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavSt
   proxy: { filter: "proxySubPanel" },
   sync: { filter: "syncSubPanel" },
   file: { view: "fileSubPanel" },
+  term: { view: "termTab" },
 };
 
 /** 读选择态所需的最小会话快照（不依赖 store 类型，便于纯函数直测） */
@@ -198,6 +210,7 @@ export interface SubnavSelections {
   proxySub: string;
   syncSub: string;
   fileSub: string;
+  termTab: string;
 }
 
 /** 该模块该维度当前高亮项 id；模块未在该维度注册选择态则 undefined */
@@ -212,6 +225,7 @@ export function subnavActive(
   if (key === "proxySubPanel") return st.proxySub;
   if (key === "syncSubPanel") return st.syncSub;
   if (key === "fileSubPanel") return st.fileSub;
+  if (key === "termTab") return st.termTab;
   return undefined;
 }
 

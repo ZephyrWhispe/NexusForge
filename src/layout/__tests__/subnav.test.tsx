@@ -15,6 +15,7 @@ const ST: SubnavSelections = {
   proxySub: "nodes",
   syncSub: "conflicts",
   fileSub: "connections",
+  termTab: "sessions",
 };
 
 let container: HTMLDivElement;
@@ -164,6 +165,25 @@ describe("SubNav 双维度（T-B3-1）", () => {
     expect(subnavSelect("file", "view", "nope")).toBeUndefined();
     // 文件只有一维：filter 无落键；剪切板/同步的视图态也不得错投给文件
     expect(subnavSelect("clipboard", "view", "browse")).toBeUndefined();
+    // D-43 C5：终端两视图是互斥档（原面板内 <Tabs> 撤销）——view 维度落第五枚分键 termTab
+    expect(subnavActive("term", "view", ST)).toBe("sessions");
+    expect(subnavActive("term", "filter", ST)).toBeUndefined();
+    expect(subnavSelect("term", "view", "docker")).toEqual({ key: "termTab", value: "docker" });
+    // 终端只有一维：filter 无落键；未注册 id 照样拒
+    expect(subnavSelect("term", "filter", "sessions")).toBeUndefined();
+    expect(subnavSelect("term", "view", "nope")).toBeUndefined();
+  });
+
+  it("subnav_termViews_renderOnRail_highlightFollowsTermTab", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<SubNav moduleId="term" active={{ view: "docker" }} onSelect={() => {}} counts={{}} />);
+    });
+    const items = SUBNAV.term.flatMap((s) => s.items);
+    expect(items.map((i) => i.label)).toEqual(["终端会话", "Docker"]);
+    for (const item of items)
+      expect(buttonByLabel(item.label), `缺导航项 ${item.label}`).toBeInstanceOf(HTMLButtonElement);
+    expect(cls("Docker")).not.toBe(cls("终端会话"));
   });
 
   it("subnav_syncFiveItems_highlightIsolated", async () => {

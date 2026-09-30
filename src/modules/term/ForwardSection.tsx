@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Button, Dropdown, Input, Option, Text, tokens } from "@fluentui/react-components";
+import { Badge, Button, Checkbox, Dropdown, Input, Option, Text, tokens } from "@fluentui/react-components";
 import {
   termForwardClose,
   termForwardList,
@@ -171,25 +171,21 @@ export default function ForwardSection({
 
       {kind === "remote" ? (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <input
-              type="checkbox"
-              checked={nonLoopback}
-              onChange={(e) => setNonLoopback(e.target.checked)}
-            />
-            <Text size={200}>非回环绑定（默认仅 127.0.0.1）</Text>
-          </label>
+          {/* D-43 C5：浏览器原生 checkbox 换 Fluent Checkbox（规范 0 节），
+              确认位仍是 bind_gate 的 UI 镜像——勾选才解禁「新增转发」 */}
+          <Checkbox
+            checked={nonLoopback}
+            onChange={(_, d) => setNonLoopback(d.checked === true)}
+            label="非回环绑定（默认仅 127.0.0.1）"
+          />
           {nonLoopback ? (
             <>
               <Input style={{ maxWidth: 160 }} placeholder="绑定地址（IP 字面量）" value={bindAddr} onChange={(_, d) => setBindAddr(d.value)} />
-              <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <input
-                  type="checkbox"
-                  checked={acknowledged}
-                  onChange={(e) => setAcknowledged(e.target.checked)}
-                />
-                <Text size={200}>我确认把该端口暴露到非回环地址</Text>
-              </label>
+              <Checkbox
+                checked={acknowledged}
+                onChange={(_, d) => setAcknowledged(d.checked === true)}
+                label="我确认把该端口暴露到非回环地址"
+              />
             </>
           ) : null}
         </div>
@@ -217,7 +213,7 @@ export default function ForwardSection({
                   {kindLabel(r.kind)}
                 </Text>
                 {reason ? (
-                  <Text size={100} style={{ color: tokens.colorPaletteRedForeground1 }}>
+                  <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>
                     {reason}
                   </Text>
                 ) : null}

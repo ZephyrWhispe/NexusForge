@@ -86,6 +86,17 @@ export function isClipView(v: string): v is ClipView {
   return CLIP_VIEW_IDS.includes(v);
 }
 
+/** 终端视图 id（D-43 C5，08-term §2）：与 SUBNAV[term]「视图」两项一一对应。
+ *  原 `<Tabs>` 的 `tab === "…"` 本地态升为持久选择态——互斥视图该由左轨目录承载，
+ *  切走再回来不该丢（与剪切板/文件同一形制，第五枚分键）。 */
+export type TermTab = "sessions" | "docker";
+
+const TERM_TAB_IDS: readonly string[] = ["sessions", "docker"];
+
+export function isTermTab(v: string): v is TermTab {
+  return TERM_TAB_IDS.includes(v);
+}
+
 interface SessionState {
   themeMode: ThemeMode;
   activeModule: string;
@@ -103,6 +114,8 @@ interface SessionState {
   syncSubPanel: SyncSubPanel;
   /** 文件子面板选择态（T-B6-10）：第四枚分键，旧快照缺键回退 browse */
   fileSubPanel: FileSubPanel;
+  /** 终端视图选择态（D-43 C5）：第五枚分键，旧快照缺键回退 sessions */
+  termTab: TermTab;
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
@@ -112,6 +125,7 @@ interface SessionState {
   setClipView: (id: string) => void;
   setSyncSubPanel: (id: string) => void;
   setFileSubPanel: (id: string) => void;
+  setTermTab: (id: string) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -127,6 +141,7 @@ export const useSession = create<SessionState>()(
       clipView: "history",
       syncSubPanel: "overview",
       fileSubPanel: "browse",
+      termTab: "sessions",
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
@@ -141,6 +156,8 @@ export const useSession = create<SessionState>()(
       setSyncSubPanel: (id) => set(isSyncSubPanel(id) ? { syncSubPanel: id } : {}),
       // 同上（T-B6-10 立档，T-B7-27 扩七档）：第四枚分键——文件七档与其余模块选择态互不覆写
       setFileSubPanel: (id) => set(isFileSubPanel(id) ? { fileSubPanel: id } : {}),
+      // 同上（D-43 C5）：第五枚分键——终端两视图与其余模块选择态互不覆写
+      setTermTab: (id) => set(isTermTab(id) ? { termTab: id } : {}),
     }),
     {
       name: "nf-session",
