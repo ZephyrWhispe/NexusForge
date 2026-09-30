@@ -62,12 +62,15 @@ export interface SubNavItem {
   label: string;
   icon?: string;
   badgeKey?: string;
-  /** 选择语义（T-B3-1）：view=切换子面板，filter=筛选同一清单；缺省 filter（proxy 六项零 churn） */
+  /** 选择语义（T-B3-1）：view=切换子面板，filter=筛选同一清单，anchor=滚到同屏区块（D-43）；缺省 filter（proxy 六项零 churn） */
   scope?: SubNavScope;
 }
 
-/** 同一栏的两种选择维度（09 §8.1-⑩：clipboard 要同时有「视图 + 筛选」，不能再按模块硬分叉） */
-export type SubNavScope = "view" | "filter";
+/** 同一栏的两种选择维度（09 §8.1-⑩：clipboard 要同时有「视图 + 筛选」，不能再按模块硬分叉）
+ *  ＋ D-43 第三形制 anchor＝同屏滚动锚点（选择不落 session，滚动位置不配持久化）。
+ *  判据来自实测：term/sys/notes 的首层是 `tab === "…"` 条件渲染，未挂载的视图不在 DOM 里，
+ *  锚点对它们无处可去（撒谎按钮），故这三枚的互斥维度上移为 view 选择态而非 anchor。 */
+export type SubNavScope = "view" | "filter" | "anchor";
 
 export interface SubNavSection {
   group: string;

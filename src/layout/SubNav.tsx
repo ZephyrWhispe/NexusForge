@@ -1,9 +1,14 @@
 import { makeStyles, tokens } from "@fluentui/react-components";
+import { useState } from "react";
+
 import { SUBNAV, type ModuleId, type SubNavScope } from "./modules";
 
 /** 二级导航（docs/DESIGN.md §3.4 + D-29 B0/T-B0-6 + T-B3-1 双维度）：
- *  分组来自全模块 SUBNAV 注册表；每个条目按自身 scope（view=子面板 / filter=筛选）
- *  与对应维度的当前选择比对高亮，两维度同屏互不覆写（session 分键，见 modules.ts 路由表）
+ *  分组来自全模块 SUBNAV 注册表；每个条目按自身 scope（view=子面板 / filter=筛选
+ *  / anchor=同屏滚动锚点，D-43）与对应维度的当前选择比对高亮，两维度同屏互不覆写（session 分键，见 modules.ts 路由表）
+ *
+ *  anchor 的高亮只在组件内记（滚动位置不配持久化，且 modules.ts 路由表对 anchor 恒不返回
+ *  session 键）——因此主工作台必须给本组件挂 key={moduleId}，否则"当前锚点"会漏进无关面板。
  *
  *  D-42 窄栏形态经 CSS 自定义属性下发（global.css 的 @container 只在容器上改三个变量）：
  *  griffel 运行时注入的类与 global.css 同特异度且次序在后，直接写 width/display 会静默失效
@@ -63,6 +68,7 @@ export default function SubNav({
 }) {
   const styles = useStyles();
   const sections = SUBNAV[moduleId];
+  const [anchorId, setAnchorId] = useState<string | undefined>(undefined);
   return (
     <aside className={styles.root} data-nf="subnav" aria-label={`${moduleId} 二级导航`}>
       {sections.map((section) => (
@@ -73,12 +79,17 @@ export default function SubNav({
           {section.items.map((item) => {
             const scope = item.scope ?? "filter";
             const n = item.badgeKey ? (counts?.[item.badgeKey] ?? 0) : null;
+            const on = scope === "anchor" ? anchorId === item.id : active[scope] === item.id;
             return (
               <button
                 key={`${scope}:${item.id}`}
-                className={`${styles.filter} ${active[scope] === item.id ? styles.filterOn : ""}`}
+                className={`${styles.filter} ${on ? styles.filterOn : ""}`}
+                aria-current={on ? "true" : undefined}
                 title={item.label}
-                onClick={() => onSelect(scope, item.id)}
+                onClick={() => {
+                  if (scope === "anchor") setAnchorId(item.id);
+                  onSelect(scope, item.id);
+                }}
               >
                 <span data-nf="subnav-label">{item.label}</span>
                 {n !== null && <span className={styles.count}>{n}</span>}

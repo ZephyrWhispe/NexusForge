@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, Suspense } from "react";
+import { useCallback, useEffect, useRef, useState, Suspense } from "react";
 import { makeStyles, tokens, Badge, Spinner } from "@fluentui/react-components";
 import TitleBar from "../layout/TitleBar";
 import Toolbar from "../layout/Toolbar";
@@ -182,6 +182,8 @@ export default function MainWorkbench() {
 
   // 持久化的会话值可能是历史/损坏 id：收窄失败确定性回落剪切板（首屏默认模块）
   const moduleId = isModuleId(active) ? active : "clipboard";
+  // 锚点式二级导航的查找根（内容区自己，不含左轨与壳层）
+  const contentRef = useRef<HTMLElement>(null);
   // T-B3-1：选择态读写一律经 modules.ts 路由表（模块 × 维度 → session 键），
   // 取代原先按模块硬分叉的选择态三元
   const subnavSelections = { clipView, clipGroup: group, proxySub, syncSub, fileSub };
@@ -193,6 +195,15 @@ export default function MainWorkbench() {
     fileSubPanel: setFileSub,
   };
   const selectSubnav = (scope: SubNavScope, id: string) => {
+    // D-43 锚点形制：选择不落 session（滚动位置不配持久化），只把同屏区块滚进视界。
+    // 属性值走 getAttribute 比对而非拼选择器，注册表将来含特殊字符也不会破。
+    if (scope === "anchor") {
+      const target = [...(contentRef.current?.querySelectorAll("[data-nf-sec]") ?? [])].find(
+        (el) => el.getAttribute("data-nf-sec") === id,
+      );
+      target?.scrollIntoView({ block: "start", behavior: "smooth" });
+      return;
+    }
     const sel = subnavSelect(moduleId, scope, id);
     if (sel) subnavSetters[sel.key](sel.value);
   };
@@ -218,6 +229,7 @@ export default function MainWorkbench() {
         <div className={styles.work} data-nf="work">
           {SUBNAV[moduleId].length > 0 && !isSettings && (
             <SubNav
+              key={moduleId}
               moduleId={moduleId}
               active={{
                 view: subnavActive(moduleId, "view", subnavSelections),
@@ -227,7 +239,7 @@ export default function MainWorkbench() {
               counts={counts}
             />
           )}
-          <section className={styles.content} aria-label="内容区">
+          <section className={styles.content} aria-label="内容区" ref={contentRef}>
             {isSettings ? (
               <>
                 <PanelHeader

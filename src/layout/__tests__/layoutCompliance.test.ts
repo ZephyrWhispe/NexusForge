@@ -125,6 +125,21 @@ const measure = (src: string, dim: Dim): number => {
 /** 各维度的"违规"判据：scrollY 只有第 2 枚起才算双层滚动，其余两维一命中即欠债 */
 const violates = (dim: Dim, n: number) => (dim === "scrollY" ? n >= 2 : n > 0);
 
+/** 具名探针：正对照地板的两条腿——四枚本批在排的面板＋settings glob 的代表（两枚 glob 任一脱靶即红） */
+const NAMED_PROBES = [
+  "src/modules/term/TerminalPanel.tsx",
+  "src/modules/sys/SysPanel.tsx",
+  "src/modules/vault/VaultPanel.tsx",
+  "src/modules/notes/NotesPanel.tsx",
+  "src/settings/SchemaForm.tsx",
+];
+
+/** 台账合计只累加"构成违规"的条目，与 ratchet 的口径一致（scrollY=1 的主体滚窗不计入欠债） */
+const bookedTotal = (dim: Dim) =>
+  LEDGER.reduce((acc, e) => acc + (violates(dim, e.counts[dim]) ? e.counts[dim] : 0), 0);
+
+const bookedMultiScrollFiles = LEDGER.filter((e) => violates("scrollY", e.counts.scrollY)).length;
+
 function ratchet(dim: Dim): { problems: string[]; total: number } {
   const byFile = new Map(LEDGER.map((e) => [e.file, e.counts[dim]]));
   const known = new Set(LEDGER.map((e) => e.file));
@@ -156,23 +171,30 @@ function ratchet(dim: Dim): { problems: string[]; total: number } {
 const dims: Dim[] = ["nativeControls", "inlineWidths", "scrollY"];
 
 describe("D-42 layout compliance ratchet", () => {
-  it("positive_control_floors", () => {
-    // 正对照地板：glob 脱靶（一条判据都没扫到）必须自曝，不许静默全绿
+  it("positive_control_floors_are_ledger_derived", () => {
+    // 正对照地板（D-43 ③改台账派生）：原口径钉的是 14/22/10/20/10 五枚绝对数，
+    // 那是"当前欠债"的快照——面板批把欠债真降下来时反而会判红（本批做成即红），
+    // 故下限一律改为"实测 ≥ 台账合计"：RHS 手工记账、LHS 实测，非恒等式，
+    // glob 脱靶时 LHS 归零即红；具名探针文件在场是同时归零盲区的唯一兜底，不可摘。
     expect(sources.length, "扫描面文件数").toBeGreaterThanOrEqual(40);
-    expect(sources.some(([f]) => f === "src/modules/term/TerminalPanel.tsx"), "扫描面缺 term 面板").toBe(
-      true,
-    );
+    for (const f of NAMED_PROBES)
+      expect(sources.some(([p]) => p === f), `扫描面缺具名探针 ${f}`).toBe(true);
+
     const totals = Object.fromEntries(
       dims.map((d) => [d, sources.reduce((acc, [, src]) => acc + measure(src, d), 0)]),
     ) as Record<Dim, number>;
-    expect(totals.nativeControls, "原生控件命中总数").toBeGreaterThanOrEqual(14);
-    expect(totals.inlineWidths, "写死宽度命中总数").toBeGreaterThanOrEqual(22);
+    for (const d of dims) {
+      expect(totals[d], `${d} 实测低于台账合计（扫描面脱靶或台账漂移）`).toBeGreaterThanOrEqual(
+        bookedTotal(d),
+      );
+    }
     expect(
       sources.filter(([, src]) => violates("scrollY", measure(src, "scrollY"))).length,
-      "≥2 滚动容器的文件数",
-    ).toBeGreaterThanOrEqual(10);
-    expect(LEDGER.length, "台账条目数").toBeGreaterThanOrEqual(20);
-    expect(PENDING_SUBNAV.length, "空 SUBNAV 待拆台账数").toBeGreaterThanOrEqual(10);
+      "≥2 滚动容器的文件数低于台账",
+    ).toBeGreaterThanOrEqual(bookedMultiScrollFiles);
+
+    // SUBNAV 注册面的地板：防"把已注册子导航连同 PENDING 条目一起删掉"的双绿盲区
+    expect(MODULES.filter((m) => SUBNAV[m.id].length > 0).length, "已注册 SUBNAV 的模块数").toBeGreaterThanOrEqual(4);
   });
 
   it("no_new_native_controls", () => {
