@@ -7,6 +7,8 @@ import SubNav from "../layout/SubNav";
 import StatusBar from "../layout/StatusBar";
 import MicaBackdrop from "../layout/MicaBackdrop";
 import PanelHeader from "../components/PanelHeader";
+import CapabilityCard from "../components/CapabilityCard";
+import { capabilitiesFor } from "../layout/capabilities";
 // PERF3（docs/impl/07）：路由级代码分割在 panels 注册表内声明——首屏只加载宿主框架 +
 // 默认模块（ClipboardPanel），其余模块（含 Monaco/xterm 等重依赖）按需分 chunk；
 // 子窗口（launcher/notebar/overlay）本就动态 import
@@ -242,9 +244,10 @@ export default function MainWorkbench() {
               <>
                 <PanelHeader
                   title={current?.name ?? "NexusForge"}
-                  context={def.subtitle}
                   actions={<Badge appearance="outline">{current?.phase ?? "P0"}</Badge>}
                 />
+                {/* D-43 ③：能力句由壳层单点能力卡承载（context 槽的 nowrap+ellipsis 会把它裁成半句） */}
+                <CapabilityCard capabilities={capabilitiesFor(moduleId)} />
                 <Suspense fallback={<ModuleLoading />}>
                   <ModulePanel search={search} group={group} onCounts={onCounts} />
                 </Suspense>
