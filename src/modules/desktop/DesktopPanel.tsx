@@ -426,7 +426,7 @@ export default function DesktopPanel() {
   return (
     <div className={styles.root}>
       {due.length > 0 && (
-        <Section>
+        <Section title="到期提醒">
           <div className={styles.row}>
             <Badge appearance="filled" color="warning">提醒</Badge>
             <span className={styles.remind}>{due[0].content}</span>
@@ -440,7 +440,7 @@ export default function DesktopPanel() {
       )}
 
       {/* 随记（D4） */}
-      <Section title="待办与随记">
+      <Section title="待办与随记" anchor="desktop.notes">
         <span className={styles.muted}>
           全局 Ctrl+Alt+N 呼出速记条；支持 #标签、“明天/周几 X点”提醒
         </span>
@@ -530,6 +530,7 @@ export default function DesktopPanel() {
       {/* 桌面整理（D3） */}
       <Section
         title="桌面整理"
+        anchor="desktop.tidy"
         actions={
           <>
             {hasManifest && <Badge appearance="outline" color="warning">有可还原记录</Badge>}
@@ -673,6 +674,7 @@ export default function DesktopPanel() {
       {/* 启动器（D1/D2 状态说明 + 索引重建入口） */}
       <Section
         title="快速启动器"
+        anchor="desktop.launcher"
         actions={
           <>
             <Button size="small" disabled={busy !== ""} onClick={doReindex}>

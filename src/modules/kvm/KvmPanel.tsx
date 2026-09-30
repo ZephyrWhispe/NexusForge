@@ -486,9 +486,11 @@ export default function KvmPanel() {
 
   return (
     <div className={styles.root}>
+      {/* D-43 C8：六枚区块全部常驻（空态只是区块内的分支），左轨因此走 anchor 而非 view */}
       {/* ① 控制状态 + 本端配对码 */}
       <Section
         title="控制状态"
+        anchor="kvm.control"
         actions={
           <>
             {control.role === "controlling" && (
@@ -527,6 +529,7 @@ export default function KvmPanel() {
       {/* ② 发现的未配对设备 */}
       <Section
         title="发现的设备"
+        anchor="kvm.discovery"
         actions={
           <>
             <Badge appearance="outline">{unpaired.length}</Badge>
@@ -589,6 +592,7 @@ export default function KvmPanel() {
       {/* ③ 已配对设备：连接 / 边缘映射 / 解除 */}
       <Section
         title="已配对设备"
+        anchor="kvm.paired"
         actions={<Badge appearance="outline">{paired.length}</Badge>}
       >
         {paired.length === 0 ? (
@@ -713,6 +717,7 @@ export default function KvmPanel() {
       {/* ④ 活跃会话（T-B1-7）：按角色列出，client=本端发起（可推送），server=对端接入 */}
       <Section
         title="活跃会话"
+        anchor="kvm.sessions"
         actions={<Badge appearance="outline">{sessions.length}</Badge>}
       >
         {sessions.length === 0 ? (
@@ -756,6 +761,7 @@ export default function KvmPanel() {
           面板不接这条腿就等于该能力从未存在；标题如实写明它是实时视图 */}
       <Section
         title="传输动态"
+        anchor="kvm.transfers"
         actions={<Badge appearance="outline">实时（非持久记录）</Badge>}
       >
         {transfers.length === 0 ? (
@@ -809,7 +815,7 @@ export default function KvmPanel() {
       </Section>
 
       {/* ⑥ 边缘切换说明 */}
-      <Section title="边缘切换工作方式">
+      <Section title="边缘切换工作方式" anchor="kvm.edges">
         <Text size={200} className={styles.muted}>
           为设备设置"共享边缘"后（如 设备 B = 本机右缘），本机鼠标推到屏幕右缘即开始用键鼠控制
           B（本机输入被转发，B 端注入执行）；B 的鼠标移到它的左缘（回移）即切回本机，或随时按

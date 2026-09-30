@@ -34,7 +34,11 @@ type Dim = "nativeControls" | "inlineWidths" | "scrollY";
  *  C7 摘除 NotesPanel 整行（原生 textarea→Fluent Textarea、内联宽度归零走 TIER_W、
  *  四枚内层视口收敛为主体单滚动＋分页页脚，scrollY 4→1；Monaco 编辑器与画布的自留视口
  *  是 00 规范的在册例外，形同 xterm，不属 overflowY 命中面）。
- *  余下欠债逐行随 C8 下调。 */
+ *  C8 不动台账数值（那一枚只把剪贴板行内操作由 opacity:0 悬停显影改常驻＋占位宽，
+ *  并给 kvm/desktop 补锚点登记）；kvm 的 `<Select>`＋裸 `<option>`、HistorySection 的
+ *  opBtn 30px 命中区（规范 10-16 要 ≥40）是 C8 如实挂账的两笔——前者不命中大小写敏感的
+ *  NATIVE_PATTERNS，后者不命中 WIDTH_PATTERN 之外的判据面，两笔都留给面板批。
+ *  余下欠债逐行随后续面板批下调。 */
 const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/automation/RulesPanel.tsx", counts: { nativeControls: 4, inlineWidths: 0, scrollY: 2 } },
   { file: "src/modules/clipboard/panels/HistorySection.tsx", counts: { nativeControls: 0, inlineWidths: 1, scrollY: 2 } },
@@ -55,15 +59,13 @@ const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
 ];
 
 /**
- * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 6 枚；00 规范 1 节：面板必须有二级导航槽位，
+ * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 4 枚；00 规范 1 节：面板必须有二级导航槽位，
  * 否则一屏塞满纵向滚动＝"元素排列粗暴"的形态学根因）。until 指向各面板档，
  * 该面板批落地子导航注册后必须删掉对应条目，否则 subnav_registration_or_ledger 判红。
  */
 const PENDING_SUBNAV: { id: ModuleId; until: string }[] = [
   { id: "screenshot", until: "面板批·docs/panels/2026-09-19/09-screenshot.md" },
   { id: "ocr", until: "面板批·docs/panels/2026-09-19/10-ocr.md" },
-  { id: "desktop", until: "面板批·docs/panels/2026-09-19/05-desktop.md" },
-  { id: "kvm", until: "面板批·docs/panels/2026-09-19/06-kvm.md" },
   { id: "editor", until: "面板批·docs/panels/2026-09-19/11-editor.md" },
   { id: "automation", until: "面板批·docs/panels/2026-09-19/13-automation.md" },
 ];
@@ -223,6 +225,46 @@ describe("D-42 layout compliance ratchet", () => {
       (id, i, arr) => arr.indexOf(id) !== i,
     );
     expect(dupes, "待拆台账重复登记").toEqual([]);
+  });
+
+  it("anchor_entries_and_markers_match_both_ways", () => {
+    // D-43 C8：锚点是"点了要能落到东西上"的承诺，两头都要对合——
+    // 注册表有条目而面板无 data-nf-sec 落点＝撒谎按钮；面板标了 anchor 而注册表无条目＝无门铃的落点。
+    // （vault 那两枚另有 DOM 级判据见 vaultLayout.test.tsx；这里扫全仓，C8 新登记的 kvm/desktop 也进网）
+    const registered = MODULES.flatMap((m) =>
+      SUBNAV[m.id]
+        .flatMap((s) => s.items)
+        .filter((i) => i.scope === "anchor")
+        .map((i) => ({ module: m.id, id: i.id })),
+    );
+    for (const { module, id } of registered) {
+      const landed = sources.some(
+        ([file, src]) => file.startsWith(`src/modules/${module}/`) && src.includes(`anchor="${id}"`),
+      );
+      expect(landed, `${module} 的锚点条目 ${id} 在该模块面板里无 anchor 落点`).toBe(true);
+    }
+    const markers = sources.flatMap(([, src]) =>
+      [...src.matchAll(/anchor="([^"]+)"/g)].map((m) => m[1]!),
+    );
+    const ids = registered.map((r) => r.id);
+    expect(
+      markers.filter((mk) => !ids.includes(mk)),
+      "面板标了 anchor 却没进 SUBNAV 注册表",
+    ).toEqual([]);
+    expect(
+      ids.filter((id, i) => ids.indexOf(id) !== i),
+      "锚点 id 重复登记（两个模块抢同一落点）",
+    ).toEqual([]);
+  });
+
+  it("row_actions_are_persistent_not_hover_only", () => {
+    // 00 规范 3 节：行内操作常驻可见——悬停才显形等于把能力藏起来（D-43 病因"不知道能做什么"）。
+    // 零容忍扫描面板/设置源码里的 `opacity: 0` 组块（含 transitionProperty: "opacity" 的显影对）；
+    // 贴图的 opacity 数值面（screenshot 的 p.opacity 档位）不形如 `opacity: 0,`，不误伤。
+    const hidden = sources
+      .filter(([, src]) => /opacity:\s*0\b/.test(src))
+      .map(([file]) => file);
+    expect(hidden, "行内操作用 opacity: 0 隐藏（改常驻＋静态占位宽，见 nfTiers.TIER_W）").toEqual([]);
   });
 
   it("shell_skeleton_is_the_spec_not_a_handroll", () => {

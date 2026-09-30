@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -257,6 +257,41 @@ describe("SubNav 双维度（T-B3-1）", () => {
     const highlighted = items.filter((i) => cls(i.label) !== offOverview);
     expect(highlighted.map((i) => i.label)).toEqual(["数据集"]);
     expect(cls("活动")).toBe(offActivity);
+  });
+
+  it("subnav_anchorRails_forKvmAndDesktop_renderLabelsWithoutSelection", async () => {
+    // D-43 C8：kvm/desktop 的左轨是纯锚点目录——首帧无高亮（选择不落 session），
+    // 点一项只回传 anchor 维度（滚动由 MainWorkbench 负责，jsdom 无布局引擎不在此证）。
+    const onSelect = vi.fn();
+    for (const [moduleId, labels] of [
+      ["kvm", ["控制状态", "发现的设备", "已配对设备", "活跃会话", "传输动态", "边缘切换说明"]],
+      ["desktop", ["待办与随记", "桌面整理", "快速启动器"]],
+    ] as const) {
+      await act(async () => {
+        root = createRoot(container);
+        root.render(<SubNav moduleId={moduleId} active={{}} onSelect={onSelect} counts={{}} />);
+      });
+      const items = SUBNAV[moduleId].flatMap((s) => s.items);
+      expect(items.map((i) => i.label)).toEqual([...labels]);
+      expect(items.every((i) => i.scope === "anchor"), `${moduleId} 应全为 anchor 形制`).toBe(true);
+      for (const item of items)
+        expect(buttonByLabel(item.label), `缺导航项 ${item.label}`).toBeInstanceOf(HTMLButtonElement);
+      // 首帧六/三项同类＝一枚都没预选（锚点无持久选择态，进面板时谁都别亮）
+      const classes = new Set(items.map((i) => cls(i.label)));
+      expect(classes.size, "锚点 rail 首帧出现高亮").toBe(1);
+      await act(async () => {
+        buttonByLabel(labels[1]!).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onSelect).toHaveBeenLastCalledWith("anchor", items[1]!.id);
+      // 点击后本地高亮恰一枚（同 anchorNav 的 vault 判据，这里按模块各验一遍）
+      const lit = items.filter((i) => cls(i.label) !== [...classes][0]).map((i) => i.label);
+      expect(lit).toEqual([labels[1]]);
+      await act(async () => root.unmount());
+      root = undefined!;
+      container.remove();
+      container = document.createElement("div");
+      document.body.append(container);
+    }
   });
 
   it("deferredGates_sevenSubnavLabelsStable：文件七档 label 与 panels/04 §2 字面恰等且逐项渲染", async () => {

@@ -9,6 +9,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import KvmPanel from "../KvmPanel";
+import { SUBNAV } from "../../../layout/modules";
 import {
   kvmControlState,
   kvmDiscoveredPeers,
@@ -95,5 +96,15 @@ describe("KvmPanel 发现降级（D-40）", () => {
     const text = bodyText();
     expect(text).toContain("暂未发现未配对设备");
     expect(text).not.toContain("局域网自动发现已降级");
+  });
+
+  it("kvmPanel_anchorMarksMatchRailRegistry_inOrder", async () => {
+    // D-43 C8：左轨 anchor 条目的落点判据取真挂载 DOM（layoutCompliance 的源码扫只证字面在场，
+    // 不证区块当下真在页上、更不证次序）。次序同判——锚点与左轨行错位＝目录指错页。
+    await mountWith(null);
+    const marks = [...container.querySelectorAll("[data-nf-sec]")].map(
+      (el) => el.getAttribute("data-nf-sec")!,
+    );
+    expect(marks).toEqual(SUBNAV.kvm.flatMap((s) => s.items).map((i) => i.id));
   });
 });

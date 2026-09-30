@@ -38,6 +38,7 @@ import { confirmAction } from "../../../stores/confirm";
 import EmptyState from "../../../components/EmptyState";
 import Tabs from "../../../components/Tabs";
 import DeferredBadge from "../../../components/DeferredBadge";
+import { SPACING, TIER_W } from "../../../components/nfTiers";
 import DibThumb from "../DibThumb";
 import { keyActivate } from "../../../a11y";
 import { GROUP_LABEL, fmtTime } from "../display";
@@ -165,13 +166,14 @@ const useStyles = makeStyles({
     textOverflow: "ellipsis",
   },
   mono: { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
+  // 00 规范 3 节：行内操作常驻可见＋静态占位宽防抖——悬停才显形等于能力不上屏，
+  // 且「带格式」钮按 has_html 逐行有无，不占位会让行与行的正文宽度跳变。
   ops: {
     display: "flex",
-    gap: "2px",
-    opacity: 0,
-    transitionProperty: "opacity",
-    transitionDuration: "120ms",
-    ":hover": { opacity: 1 },
+    gap: SPACING.x4,
+    flexShrink: 0,
+    minWidth: TIER_W.s,
+    justifyContent: "flex-end",
   },
   opBtn: {
     width: "30px",

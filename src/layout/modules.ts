@@ -152,8 +152,34 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
       ],
     },
   ],
-  desktop: [],
-  kvm: [],
+  // D-43 C8：桌面效率四枚区块常驻（到期提醒那条随 due 有无出现，故不登记锚点——
+  // 锚点不得指向可能缺席的 DOM），三枚常驻区块走 anchor 形制，选择态不落 session。
+  desktop: [
+    {
+      group: "桌面",
+      items: [
+        { id: "desktop.notes", label: "待办与随记", scope: "anchor" },
+        { id: "desktop.tidy", label: "桌面整理", scope: "anchor" },
+        { id: "desktop.launcher", label: "快速启动器", scope: "anchor" },
+      ],
+    },
+  ],
+  // D-43 C8：键鼠共享六枚区块全部常驻（空态只是区块内的分支），走 anchor 形制。
+  // 这里不登记 view——面板没有互斥视图；pairCode/会话/传输的实时计数仍留在各区块标题行，
+  // 左轨只当目录用（同 C7 口径）。
+  kvm: [
+    {
+      group: "键鼠共享",
+      items: [
+        { id: "kvm.control", label: "控制状态", scope: "anchor" },
+        { id: "kvm.discovery", label: "发现的设备", scope: "anchor" },
+        { id: "kvm.paired", label: "已配对设备", scope: "anchor" },
+        { id: "kvm.sessions", label: "活跃会话", scope: "anchor" },
+        { id: "kvm.transfers", label: "传输动态", scope: "anchor" },
+        { id: "kvm.edges", label: "边缘切换说明", scope: "anchor" },
+      ],
+    },
+  ],
   editor: [],
   // D-43 C7：笔记三视图互斥（`notesTab === "…"` 条件渲染，未挂载视图不在 DOM 里），
   // 原面板内 `<Tabs>`（标签自带计数，切走即丢）撤销、上左轨，选择态落第七枚分键 notesTab。
