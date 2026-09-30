@@ -139,15 +139,18 @@ describe("VaultPanel 改密/夹改名/搜索（T-B1-3）", () => {
     await mount();
     await click(buttonByText("修改主密码")!);
     // Fluent Dialog 渲染在 body 门户：以 document 范围查询。
-    // 三字段必须全部 password 型（永不回显旧密/新密），且都有真实 aria-label
-    const pwInputs = [...document.querySelectorAll<HTMLInputElement>('input[type="password"]')];
-    expect(pwInputs).toHaveLength(3);
-    for (const label of ["当前主密码", "新主密码", "确认新主密码"]) {
-      expect(document.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
-    }
-    await setInput(pwInputs[0], "oldpw");
-    await setInput(pwInputs[1], "new-password-9");
-    await setInput(pwInputs[2], "new-password-9");
+    // 三字段按 aria-label 定位（不靠 DOM 序），且必须全部 password 型（永不回显旧密/新密）
+    const byLabel = (label: string) => {
+      const el = document.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
+      expect(el, `缺「${label}」输入框`).not.toBeNull();
+      return el!;
+    };
+    expect(document.querySelectorAll('input[type="password"]')).toHaveLength(3);
+    for (const label of ["当前主密码", "新主密码", "确认新主密码"])
+      expect(byLabel(label).type).toBe("password");
+    await setInput(byLabel("当前主密码"), "oldpw");
+    await setInput(byLabel("新主密码"), "new-password-9");
+    await setInput(byLabel("确认新主密码"), "new-password-9");
     await click(buttonByText("确认修改")!);
     expect(vaultChangeMasterPassword).toHaveBeenCalledWith("oldpw", "new-password-9");
     expect(document.body.textContent).toContain("VAULT_UNLOCK_001: 解密失败：密码错误或数据被篡改");

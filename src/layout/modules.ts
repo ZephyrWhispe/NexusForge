@@ -124,7 +124,17 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
       ],
     },
   ],
-  vault: [],
+  // D-43 C4：保险库首层两区块同屏常驻（三态同构骨架——未初始化/锁定/已解锁都渲染这两枚
+  // Section，锚点永不指向缺席的 DOM），故用 anchor 形制而非 view 互斥档。
+  vault: [
+    {
+      group: "保险库",
+      items: [
+        { id: "vault.security", label: "安全参数", scope: "anchor" },
+        { id: "vault.entries", label: "条目清单", scope: "anchor" },
+      ],
+    },
+  ],
   // T-B6-10 立三档，T-B7-27（09 §6.3 档 j）扩七档：id 与 session store fileSubPanel 一一对应
   // （view 维度单分键不变；档名以 panels/04 §2 字面为准；远程设置并入 connections 档内表单，
   // 网盘/设置档现为 DeferredBadge 诚实面——§6.3 归徽标不假实现）

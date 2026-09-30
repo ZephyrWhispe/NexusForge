@@ -13,8 +13,14 @@ import {
   DialogSurface,
   DialogTitle,
   Divider,
+  Drawer,
+  DrawerBody,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerHeaderTitle,
   Input,
   Select,
+  SpinButton,
   Spinner,
 } from "@fluentui/react-components";
 import {
@@ -64,26 +70,35 @@ import { confirmAction } from "../../stores/confirm";
 import { keyActivate } from "../../a11y";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
+import DataToolbar from "../../components/DataToolbar";
+import ListFooter from "../../components/ListFooter";
+import Section from "../../components/Section";
+import { FORM_CARD_W, SHELL, SPACING, TIER_W } from "../../components/nfTiers";
 
 /**
  * 密码库面板（docs/impl/05 V7，M5 v1）三态渲染：
  * ① uninitialized 建库（Argon2 64MiB，秒级）② locked 解锁（5 次错误 300s 冷却）
  * ③ unlocked 条目管理（文件夹 + 条目 + TOTP + 生成器）。vault.* 事件驱动刷新。
+ *
+ * D-43 C4 重排：三态共用同一副区块骨架（「保险库」＋「条目清单」两枚带标题的 Section，
+ * 各挂锚点），区块次序不随状态塌陷——锚点式二级导航因此在锁定态也指得到真落点，
+ * 而不是造一枚点了没反应的撒谎按钮。通栏带（DataToolbar/ListFooter）自留白、
+ * 卡片进 stack 内缩 20px（00 规范 1 节：工具条随主体吸顶、页脚通栏）。
  */
 const useStyles = makeStyles({
   root: {
     flex: 1,
     minWidth: 0,
     overflowY: "auto",
-    padding: "0 20px 20px",
     display: "flex",
     flexDirection: "column",
-    gap: "16px",
+    paddingBottom: SPACING.x24,
   },
-  center: {
-    flex: 1,
-    display: "grid",
-    placeItems: "center",
+  stack: {
+    display: "flex",
+    flexDirection: "column",
+    gap: SPACING.x16,
+    padding: `0 ${SHELL.contentPad}`,
   },
   card: {
     border: `1px solid ${tokens.colorNeutralStroke1}`,
@@ -93,9 +108,17 @@ const useStyles = makeStyles({
     display: "flex",
     flexDirection: "column",
     gap: "12px",
-    width: "420px",
+    width: FORM_CARD_W,
   },
   row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
+  // 抽屉/表单列：字段间 12（00 规范 2 节分组内），Divider 由组间承担分隔
+  formStack: { display: "flex", flexDirection: "column", gap: SPACING.x12 },
+  kv: {
+    display: "grid",
+    gridTemplateColumns: `${TIER_W.s} 1fr`,
+    gap: "8px",
+    alignItems: "center",
+  },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
   columns: {
     display: "grid",
@@ -320,6 +343,9 @@ const KIND_LABELS: Record<EntryFieldDto["kind"], string> = {
   otp: "动态码密钥",
   text: "文本",
 };
+
+/** 生成器长度档：下界 4 来自后端"长度不得小于所选字符类数"（全开＝4 类），上界为界面档、后端无上限 */
+const GEN_LEN = { min: 4, max: 128 } as const;
 
 function editorFromEntry(entry: VaultEntryDto): EditorState {
   const base = {
@@ -693,265 +719,352 @@ export default function VaultPanel({ search }: PanelProps) {
     );
   }
 
-  if (status.state === "uninitialized") {
-    return (
-      <div className={styles.root}>
-        <div className={styles.center}>
-          <div className={styles.card}>
-            <Text size={400} weight="semibold">创建保险库</Text>
-            <Text className={styles.muted}>
-              主密码经 Argon2id（64MiB 内存参数）派生密钥，用于加密全部条目。创建约需数秒。
-            </Text>
-            <Input
-              type="password"
-              placeholder="主密码（≥8 位）"
-              value={pw}
-              onChange={(_, d) => setPw(d.value)}
-            />
-            <Input
-              type="password"
-              placeholder="确认主密码"
-              value={pwConfirm}
-              onChange={(_, d) => setPwConfirm(d.value)}
-            />
-            <InlineError text={formErr} />
-            <Button appearance="primary" disabled={busy} onClick={() => void doCreate()}>
-              {busy ? "正在创建…" : "创建保险库"}
-            </Button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // 建库/解锁两态的表单进「保险库」区块（D-43 C4：三态共用同一副区块骨架，
+  // 锚点式二级导航因此在任何状态下都指得到真落点，不造点了没反应的撒谎按钮）
+  const initForm = (
+    <div className={styles.card}>
+      <Text className={styles.muted}>
+        主密码经 Argon2id（64MiB 内存参数）派生密钥，用于加密全部条目。创建约需数秒。
+      </Text>
+      <Input
+        type="password"
+        aria-label="主密码"
+        placeholder="主密码（≥8 位）"
+        value={pw}
+        onChange={(_, d) => setPw(d.value)}
+      />
+      <Input
+        type="password"
+        aria-label="确认主密码"
+        placeholder="确认主密码"
+        value={pwConfirm}
+        onChange={(_, d) => setPwConfirm(d.value)}
+      />
+      <InlineError text={formErr} />
+      <Button appearance="primary" disabled={busy} onClick={() => void doCreate()}>
+        {busy ? "正在创建…" : "创建保险库"}
+      </Button>
+    </div>
+  );
 
-  if (status.state === "locked") {
-    return (
-      <div className={styles.root}>
-        <div className={styles.center}>
-          <div className={styles.card}>
-            <Text size={400} weight="semibold">
-              <LockClosedRegular /> 密码库已锁定
-            </Text>
-            <Text className={styles.muted}>
-              输入主密码解锁。连续错误 5 次将进入 300 秒冷却。
-            </Text>
-            <Input
-              type="password"
-              placeholder="主密码"
-              value={pw}
-              onChange={(_, d) => setPw(d.value)}
-              onKeyDown={(e) => e.key === "Enter" && lockoutLeft === 0 && !busy && void doUnlock()}
-            />
-            {lockoutLeft > 0 && (
-              <Badge appearance="filled" color="danger">
-                尝试次数过多，{lockoutLeft}s 后可重试
-              </Badge>
-            )}
-            <InlineError text={formErr} />
-            <Button
-              appearance="primary"
-              disabled={busy || lockoutLeft > 0}
-              onClick={() => void doUnlock()}
-            >
-              {busy ? "正在解锁…" : "解锁"}
-            </Button>
-            {status.hello_available && status.hello_enabled && !status.hello_forced && (
-              <Button
-                icon={<PasswordRegular />}
-                disabled={busy || lockoutLeft > 0}
-                onClick={() => void doHelloUnlock()}
-              >
-                使用 Windows Hello 解锁
-              </Button>
-            )}
-            {status.hello_forced && (
-              <Text className={styles.muted}>
-                免密校验连续失败过多，本次仅允许主密码解锁（主密码解锁成功后自动恢复）。
-              </Text>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const lockForm = (
+    <div className={styles.card}>
+      <Text className={styles.muted}>输入主密码解锁。连续错误 5 次将进入 300 秒冷却。</Text>
+      <Input
+        type="password"
+        aria-label="主密码"
+        placeholder="主密码"
+        value={pw}
+        onChange={(_, d) => setPw(d.value)}
+        onKeyDown={(e) => e.key === "Enter" && lockoutLeft === 0 && !busy && void doUnlock()}
+      />
+      {lockoutLeft > 0 && (
+        <Badge appearance="filled" color="danger">
+          尝试次数过多，{lockoutLeft}s 后可重试
+        </Badge>
+      )}
+      <InlineError text={formErr} />
+      <Button
+        appearance="primary"
+        disabled={busy || lockoutLeft > 0}
+        onClick={() => void doUnlock()}
+      >
+        {busy ? "正在解锁…" : "解锁"}
+      </Button>
+      {status.hello_available && status.hello_enabled && !status.hello_forced && (
+        <Button
+          icon={<PasswordRegular />}
+          disabled={busy || lockoutLeft > 0}
+          onClick={() => void doHelloUnlock()}
+        >
+          使用 Windows Hello 解锁
+        </Button>
+      )}
+      {status.hello_forced && (
+        <Text className={styles.muted}>
+          免密校验连续失败过多，本次仅允许主密码解锁（主密码解锁成功后自动恢复）。
+        </Text>
+      )}
+    </div>
+  );
 
-  // ---- unlocked：条目管理 ----
+  // ---- 三态同构骨架（D-43 C4）----
+  const unlocked = status.state === "unlocked";
+  const header = status.kdf;
+  const folderName = folders.find((f) => f.id === activeFolder)?.name ?? "已选文件夹";
+
   return (
     <div className={styles.root}>
-      <div className={styles.row}>
-        <Button
-          appearance="primary"
-          icon={<AddRegular />}
-          onClick={() => setEditor(emptyEditor())}
-        >
-          新建条目
-        </Button>
-        <Button icon={<LockClosedRegular />} onClick={() => void doLock()}>
-          立即锁定
-        </Button>
-        <Button icon={<PasswordRegular />} onClick={() => { setMpErr(null); setMpOpen(true); }}>
-          修改主密码
-        </Button>
-        {status.hello_available && (
-          <Button
-            icon={<PasswordRegular />}
-            disabled={busy}
-            onClick={() => void doHelloToggle()}
-            title={
-              status.hello_enabled
-                ? "关闭后仅可用主密码解锁"
-                : "启用后可用 Windows Hello 免密解锁（本机账户域绑定）"
-            }
-          >
-            {status.hello_enabled ? "关闭免密解锁" : "启用免密解锁"}
-          </Button>
-        )}
-        <Text className={styles.muted}>共 {entries.length} 条 · 字段已 AES-256-GCM 加密</Text>
-      </div>
-
-      <div className={styles.columns}>
-        <div className={styles.side}>
-          <div
-            className={`${styles.folderItem} ${activeFolder === "all" ? styles.folderActive : ""}`}
-            onClick={() => setActiveFolder("all")}
-            role="button"
-            tabIndex={0}
-            onKeyDown={keyActivate(() => setActiveFolder("all"))}
-          >
-            <Text>全部条目</Text>
-          </div>
-          {folders.map((f) => (
-            <div
-              key={f.id}
-              className={`${styles.folderItem} ${activeFolder === f.id ? styles.folderActive : ""}`}
-              onClick={() => setActiveFolder(f.id)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={keyActivate(() => setActiveFolder(f.id))}
-            >
-              {renaming?.id === f.id ? (
-                // 行内改名（沿用新文件夹行的 Input+按钮形态，00-spec 控件档内）
-                <>
-                  <Input
-                    ref={focusRename}
-                    size="small"
-                    value={renaming.name}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(_, d) => setRenaming({ id: f.id, name: d.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void doRenameFolder(f);
-                      if (e.key === "Escape") setRenaming(null);
-                    }}
-                    style={{ minWidth: 0, flex: 1 }}
-                  />
-                  <Button
-                    appearance="subtle"
-                    size="small"
-                    icon={<CheckmarkRegular />}
-                    title="确认重命名"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void doRenameFolder(f);
-                    }}
-                  />
-                </>
-              ) : (
-                <>
-                  <Text truncate>{f.name}</Text>
-                  <Button
-                    appearance="subtle"
-                    size="small"
-                    icon={<EditRegular />}
-                    title="重命名文件夹"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRenaming({ id: f.id, name: f.name });
-                    }}
-                  />
-                  <Button
-                    appearance="subtle"
-                    size="small"
-                    icon={<DeleteRegular />}
-                    title="删除文件夹"
-                    aria-label={`删除文件夹 ${f.name ?? ""}`.trim()}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void doDeleteFolder(f);
-                    }}
-                  />
-                </>
-              )}
-            </div>
-          ))}
-          <Divider />
-          <div className={styles.row}>
-            <Input
-              size="small"
-              placeholder="新文件夹"
-              value={newFolderName}
-              onChange={(_, d) => setNewFolderName(d.value)}
-              onKeyDown={(e) => e.key === "Enter" && void doAddFolder()}
-            />
-            <Button
-            size="small"
-            icon={<AddRegular />}
-            aria-label="新建文件夹"
-            onClick={() => void doAddFolder()}
-          />
-          </div>
-        </div>
-
-        <div className={styles.entryList}>
-          {loaded && entries.length === 0 && (
-            // D-18/00§4-4：后端已过滤，搜索无果 ≠ 空库两态如实分开
-            search.trim() ? (
-              <EmptyState text={`没有标题匹配「${search.trim()}」的条目（搜索仅按标题，由后端执行）。`} />
-            ) : (
-              <EmptyState text="暂无条目，点击「新建条目」添加。" />
+      {unlocked && (
+        // 00 规范 5 节：通栏工具条随主体吸顶，主按钮恒末位（「新建条目」是本页唯一造物的动作）
+        <DataToolbar
+          filters={
+            activeFolder === "all" ? undefined : (
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={<DismissRegular />}
+                title="清除文件夹筛选"
+                onClick={() => setActiveFolder("all")}
+              >
+                {`文件夹：${folderName}`}
+              </Button>
             )
-          )}
-          {entries.map((entry) => (
-            <div key={entry.id} className={styles.entry}>
-              <div className={styles.fieldRow}>
-                {entry.favorite && <Badge appearance="filled" color="brand">★</Badge>}
-                <Text weight="semibold" size={300}>
-                  {entry.title}
-                </Text>
-                <span style={{ flex: 1 }} />
-                <Button
-                  appearance="subtle"
-                  size="small"
-                  onClick={() => setEditor(editorFromEntry(entry))}
-                >
-                  编辑
+          }
+          primary={
+            <Button appearance="primary" icon={<AddRegular />} onClick={() => setEditor(emptyEditor())}>
+              新建条目
+            </Button>
+          }
+        />
+      )}
+
+      <div className={styles.stack}>
+        <Section
+          title={
+            status.state === "uninitialized"
+              ? "创建保险库"
+              : unlocked
+                ? "保险库与加密参数"
+                : "解锁保险库"
+          }
+          anchor="vault.security"
+          actions={
+            unlocked ? (
+              <>
+                <Button icon={<LockClosedRegular />} onClick={() => void doLock()}>
+                  立即锁定
                 </Button>
                 <Button
-                  appearance="subtle"
-                  size="small"
-                  icon={<DeleteRegular />}
-                  aria-label={`删除条目 ${entry.title}`}
-                  onClick={() => void doDeleteEntry(entry)}
-                />
+                  icon={<PasswordRegular />}
+                  onClick={() => {
+                    setMpErr(null);
+                    setMpOpen(true);
+                  }}
+                >
+                  修改主密码
+                </Button>
+                {status.hello_available && (
+                  <Button
+                    icon={<PasswordRegular />}
+                    disabled={busy}
+                    onClick={() => void doHelloToggle()}
+                    title={
+                      status.hello_enabled
+                        ? "关闭后仅可用主密码解锁"
+                        : "启用后可用 Windows Hello 免密解锁（本机账户域绑定）"
+                    }
+                  >
+                    {status.hello_enabled ? "关闭免密解锁" : "启用免密解锁"}
+                  </Button>
+                )}
+              </>
+            ) : undefined
+          }
+        >
+          {status.state === "uninitialized" && initForm}
+          {status.state === "locked" && lockForm}
+          {unlocked && (
+            <div className={styles.kv}>
+              <Text className={styles.muted}>库状态</Text>
+              <div className={styles.row}>
+                <Badge appearance="filled" color="informative">已解锁</Badge>
+                {status.hello_forced && (
+                  <Badge appearance="filled" color="warning">免密校验熔断中，本次仅主密码</Badge>
+                )}
               </div>
-              {entry.fields.map((f) => (
-                // COR-18：业务键（条目 id + 字段名）替代位置索引——entries_changed/
-                // 解锁刷新后组件实例不跨数据复用，shown 明文态不得残留
-                <FieldValue key={`${entry.id}:${f.key}`} field={f} entryId={entry.id} />
-              ))}
-              {entry.totp_secret && <TotpBadge secret={entry.totp_secret} />}
+              <Text className={styles.muted}>密钥派生</Text>
+              {header ? (
+                <span className={styles.mono}>
+                  {`${header.kdf.algo} · 内存 ${header.kdf.m_cost_kib / 1024} MiB · 迭代 ${header.kdf.t_cost} · 并行 ${header.kdf.p_cost}`}
+                </span>
+              ) : (
+                <Text className={styles.muted}>本次会话未取到库头部快照</Text>
+              )}
+              <Text className={styles.muted}>免密解锁</Text>
+              <Text>
+                {!status.hello_available
+                  ? "本机 Windows Hello 不可用，仅主密码解锁"
+                  : status.hello_enabled
+                    ? "已启用（与本机账户域绑定，连续失败 5 次自动熔断）"
+                    : "未启用"}
+              </Text>
+              <Text className={styles.muted}>条目加密</Text>
+              <Text>字段级 AES-256-GCM；主密码不落盘，仅派生密钥</Text>
             </div>
-          ))}
-        </div>
+          )}
+        </Section>
+
+        <Section title="条目清单" anchor="vault.entries">
+          {unlocked ? (
+            <div className={styles.columns}>
+              <div className={styles.side}>
+                <div
+                  className={`${styles.folderItem} ${activeFolder === "all" ? styles.folderActive : ""}`}
+                  onClick={() => setActiveFolder("all")}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={keyActivate(() => setActiveFolder("all"))}
+                >
+                  <Text>全部条目</Text>
+                </div>
+                {folders.map((f) => (
+                  <div
+                    key={f.id}
+                    className={`${styles.folderItem} ${activeFolder === f.id ? styles.folderActive : ""}`}
+                    onClick={() => setActiveFolder(f.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={keyActivate(() => setActiveFolder(f.id))}
+                  >
+                    {renaming?.id === f.id ? (
+                      // 行内改名（沿用新文件夹行的 Input+按钮形态，00-spec 控件档内）
+                      <>
+                        <Input
+                          ref={focusRename}
+                          size="small"
+                          value={renaming.name}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(_, d) => setRenaming({ id: f.id, name: d.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void doRenameFolder(f);
+                            if (e.key === "Escape") setRenaming(null);
+                          }}
+                          style={{ minWidth: 0, flex: 1 }}
+                        />
+                        <Button
+                          appearance="subtle"
+                          size="small"
+                          icon={<CheckmarkRegular />}
+                          title="确认重命名"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void doRenameFolder(f);
+                          }}
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <Text truncate>{f.name}</Text>
+                        <Button
+                          appearance="subtle"
+                          size="small"
+                          icon={<EditRegular />}
+                          title="重命名文件夹"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenaming({ id: f.id, name: f.name });
+                          }}
+                        />
+                        <Button
+                          appearance="subtle"
+                          size="small"
+                          icon={<DeleteRegular />}
+                          title="删除文件夹"
+                          aria-label={`删除文件夹 ${f.name ?? ""}`.trim()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void doDeleteFolder(f);
+                          }}
+                        />
+                      </>
+                    )}
+                  </div>
+                ))}
+                <Divider />
+                <div className={styles.row}>
+                  <Input
+                    size="small"
+                    placeholder="新文件夹"
+                    value={newFolderName}
+                    onChange={(_, d) => setNewFolderName(d.value)}
+                    onKeyDown={(e) => e.key === "Enter" && void doAddFolder()}
+                  />
+                  <Button
+                  size="small"
+                  icon={<AddRegular />}
+                  aria-label="新建文件夹"
+                  onClick={() => void doAddFolder()}
+                />
+                </div>
+              </div>
+
+              <div className={styles.entryList}>
+                {loaded && entries.length === 0 && (
+                  // D-18/00§4-4：后端已过滤，搜索无果 ≠ 空库两态如实分开
+                  search.trim() ? (
+                    <EmptyState text={`没有标题匹配「${search.trim()}」的条目（搜索仅按标题，由后端执行）。`} />
+                  ) : (
+                    <EmptyState text="暂无条目，点击「新建条目」添加。" />
+                  )
+                )}
+                {entries.map((entry) => (
+                  <div key={entry.id} className={styles.entry}>
+                    <div className={styles.fieldRow}>
+                      {entry.favorite && <Badge appearance="filled" color="brand">★</Badge>}
+                      <Text weight="semibold" size={300}>
+                        {entry.title}
+                      </Text>
+                      <span style={{ flex: 1 }} />
+                      <Button
+                        appearance="subtle"
+                        size="small"
+                        onClick={() => setEditor(editorFromEntry(entry))}
+                      >
+                        编辑
+                      </Button>
+                      <Button
+                        appearance="subtle"
+                        size="small"
+                        icon={<DeleteRegular />}
+                        aria-label={`删除条目 ${entry.title}`}
+                        onClick={() => void doDeleteEntry(entry)}
+                      />
+                    </div>
+                    {entry.fields.map((f) => (
+                      // COR-18：业务键（条目 id + 字段名）替代位置索引——entries_changed/
+                      // 解锁刷新后组件实例不跨数据复用，shown 明文态不得残留
+                      <FieldValue key={`${entry.id}:${f.key}`} field={f} entryId={entry.id} />
+                    ))}
+                    {entry.totp_secret && <TotpBadge secret={entry.totp_secret} />}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <Text className={styles.muted}>
+              {status.state === "uninitialized"
+                ? "建库并解锁后，这里列出全部凭据条目。"
+                : "解锁后这里列出全部凭据条目。"}
+            </Text>
+          )}
+        </Section>
       </div>
 
+      {unlocked && (
+        <ListFooter
+          left={`共 ${entries.length} 条`}
+          right="字段以 AES-256-GCM 加密 · 搜索仅按标题，由后端过滤"
+        />
+      )}
+
       {editor && (
-        // 条目编辑对话框（D-18）：Fluent Dialog 自带焦点陷阱/Esc/遮罩关闭；
-        // 所有关闭路径统一走 closeEditor()，未保存修改先经 ConfirmDialog 确认
-        <Dialog open onOpenChange={() => void closeEditor()}>
-          <DialogSurface>
-            <DialogBody>
-              <DialogTitle>{editor.entry ? "编辑条目" : "新建条目"}</DialogTitle>
-              <DialogContent>
+        // 条目编辑详情抽屉（D-43 C4 行为变更：由 480px Dialog 改右侧覆盖抽屉，面板档 03 §1
+        // 把"全字段一滚到底的对话框"列为现状问题、§7.1 指定详情抽屉）。
+        // OverlayDrawer 与 Dialog 同为焦点陷阱＋Esc＋遮罩关闭，所有关闭路径统一走
+        // closeEditor()，未保存修改先经 ConfirmDialog 确认（D-18 判据不动）。
+        // size 只有 320/592/940/full 四档，取 medium=592（档的 520 无对应档，不为它手写宽度）。
+        <Drawer
+          type="overlay"
+          position="end"
+          size="medium"
+          open
+          onOpenChange={() => void closeEditor()}
+        >
+          <DrawerHeader>
+            <DrawerHeaderTitle>{editor.entry ? "编辑条目" : "新建条目"}</DrawerHeaderTitle>
+          </DrawerHeader>
+          <DrawerBody className={styles.formStack}>
             <Input
               placeholder="标题（如 GitHub）"
               value={editor.title}
@@ -969,7 +1082,7 @@ export default function VaultPanel({ search }: PanelProps) {
               <div key={i} className={styles.row}>
                 <Input
                   size="small"
-                  style={{ width: "110px" }}
+                  style={{ width: TIER_W.s }}
                   placeholder="字段名"
                   value={f.key}
                   onChange={(_, d) =>
@@ -981,7 +1094,7 @@ export default function VaultPanel({ search }: PanelProps) {
                 />
                 <Select
                   size="small"
-                  style={{ width: "110px" }}
+                  style={{ width: TIER_W.s }}
                   value={f.kind}
                   onChange={(_, d) =>
                     setEditor({
@@ -1037,14 +1150,24 @@ export default function VaultPanel({ search }: PanelProps) {
             <Text className={styles.muted}>密码生成器</Text>
             <div className={styles.row}>
               <span className={styles.muted}>长度</span>
-              <Input
+              <SpinButton
+                aria-label="密码长度"
                 size="small"
-                type="number"
-                style={{ width: "70px" }}
-                value={String(editor.genLength)}
-                onChange={(_, d) =>
-                  setEditor({ ...editor, genLength: Math.max(4, Number(d.value) || 16) })
-                }
+                min={GEN_LEN.min}
+                max={GEN_LEN.max}
+                step={1}
+                style={{ width: TIER_W.s }}
+                value={editor.genLength}
+                onChange={(_, d) => {
+                  // SpinButton 输入非法文本时给 NaN，夹之前先验（生成器策略是后端入参边界）
+                  const len = d.value ?? Number.NaN;
+                  setEditor({
+                    ...editor,
+                    genLength: Number.isFinite(len)
+                      ? Math.min(GEN_LEN.max, Math.max(GEN_LEN.min, len))
+                      : 16,
+                  });
+                }}
               />
               <Checkbox
                 label="大写"
@@ -1087,16 +1210,14 @@ export default function VaultPanel({ search }: PanelProps) {
               onChange={(_, d) => setEditor({ ...editor, totpSecret: d.value })}
             />
             <InlineError text={formErr} />
-              </DialogContent>
-              <DialogActions>
-                <Button onClick={() => void closeEditor()}>取消</Button>
-                <Button appearance="primary" disabled={busy} onClick={() => void doSaveEntry()}>
-                  {busy ? "保存中…" : "保存"}
-                </Button>
-              </DialogActions>
-            </DialogBody>
-          </DialogSurface>
-        </Dialog>
+          </DrawerBody>
+          <DrawerFooter>
+            <Button onClick={() => void closeEditor()}>取消</Button>
+            <Button appearance="primary" disabled={busy} onClick={() => void doSaveEntry()}>
+              {busy ? "保存中…" : "保存"}
+            </Button>
+          </DrawerFooter>
+        </Drawer>
       )}
 
       {/* T-B1-3 改主密码：三字段皆 password（永不回显），错误内联不蒸发 */}

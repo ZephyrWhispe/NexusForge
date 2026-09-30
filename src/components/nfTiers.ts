@@ -32,6 +32,9 @@ export const SHELL = {
 /** 交互命中区下限（规范 10-16：紧凑态仍 ≥40×40 逻辑 px） */
 export const HIT_MIN = "40px";
 
+/** 单列表单卡宽度档（建库/解锁这类"一次只填一件事"的表单容器；420＝现值且 %4==0） */
+export const FORM_CARD_W = "420px";
+
 /** 数字/日期列缺值占位（规范 2 节：延迟 `--` 占位防抖宽） */
 export const NF_MISSING = "--";
 

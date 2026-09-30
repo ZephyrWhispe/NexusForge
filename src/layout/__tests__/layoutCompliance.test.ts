@@ -24,7 +24,9 @@ import { MODULES, SUBNAV, type ModuleId } from "../modules";
 
 type Dim = "nativeControls" | "inlineWidths" | "scrollY";
 
-/** 台账起点＝D-42 壳批落地后实测（面板 45 个 tsx：原生控件 14／写死宽度 22／≥2 滚动容器 10 文件） */
+/** 台账起点＝D-42 壳批落地后实测（面板 45 个 tsx：原生控件 14／写死宽度 22／≥2 滚动容器 10 文件）。
+ *  D-43 C4 摘除 VaultPanel 整行（原生控件 1＝生成器 number 微调钮换 SpinButton、写死宽度 4＝
+ *  全走 TIER_W/FORM_CARD_W、主体单滚动容器 scrollY 1 枚不构成违规）；余下欠债逐行随 C5–C8 下调。 */
 const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/automation/RulesPanel.tsx", counts: { nativeControls: 4, inlineWidths: 0, scrollY: 2 } },
   { file: "src/modules/clipboard/panels/HistorySection.tsx", counts: { nativeControls: 0, inlineWidths: 1, scrollY: 2 } },
@@ -44,19 +46,17 @@ const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/sys/SysPanel.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 3 } },
   { file: "src/modules/term/ForwardSection.tsx", counts: { nativeControls: 2, inlineWidths: 0, scrollY: 0 } },
   { file: "src/modules/term/TerminalPanel.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 3 } },
-  { file: "src/modules/vault/VaultPanel.tsx", counts: { nativeControls: 1, inlineWidths: 4, scrollY: 0 } },
   { file: "src/settings/SchemaForm.tsx", counts: { nativeControls: 0, inlineWidths: 2, scrollY: 0 } },
 ];
 
 /**
- * 10 枚空 SUBNAV 的待拆台账（00 规范 1 节：面板必须有二级导航槽位，
+ * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 9 枚；00 规范 1 节：面板必须有二级导航槽位，
  * 否则一屏塞满纵向滚动＝"元素排列粗暴"的形态学根因）。until 指向各面板档，
  * 该面板批落地子导航注册后必须删掉对应条目，否则 subnav_registration_or_ledger 判红。
  */
 const PENDING_SUBNAV: { id: ModuleId; until: string }[] = [
   { id: "screenshot", until: "面板批·docs/panels/2026-09-19/09-screenshot.md" },
   { id: "ocr", until: "面板批·docs/panels/2026-09-19/10-ocr.md" },
-  { id: "vault", until: "面板批·docs/panels/2026-09-19/03-vault.md" },
   { id: "desktop", until: "面板批·docs/panels/2026-09-19/05-desktop.md" },
   { id: "kvm", until: "面板批·docs/panels/2026-09-19/06-kvm.md" },
   { id: "editor", until: "面板批·docs/panels/2026-09-19/11-editor.md" },

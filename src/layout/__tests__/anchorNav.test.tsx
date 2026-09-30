@@ -87,35 +87,29 @@ describe("锚点式二级导航（D-43 C3）", () => {
   });
 
   it("subNav_anchorItemsHighlightLocallyAndReportAnchorScope", async () => {
-    // SUBNAV 是唯一节源（C4 才把真锚点登记进 vault），这里按注册表形状临时注入一枚两栏锚点
-    const booked = SUBNAV.vault;
-    SUBNAV.vault = [
-      {
-        group: "区块",
-        items: [
-          { id: "vault.entries", label: "条目", scope: "anchor" },
-          { id: "vault.health", label: "健康检查", scope: "anchor" },
-        ],
-      },
-    ];
+    // 用注册表真值（C4 起 vault 两枚锚点在册，不再临时注入——注入档会让"导航指向不存在区块"
+    // 这类真缺陷在本档 invisible）
+    const items = SUBNAV.vault.flatMap((s) => s.items);
+    expect(items.map((i) => i.scope), "vault 导航应全为 anchor 形制").toEqual([
+      "anchor",
+      "anchor",
+    ]);
     const onSelect = vi.fn();
-    try {
-      await mount(
-        <SubNav moduleId="vault" active={{ view: undefined, filter: undefined }} onSelect={onSelect} />,
-      );
-      const buttons = [...container.querySelectorAll("button")];
-      expect(buttons.map((b) => b.textContent?.trim())).toEqual(["条目", "健康检查"]);
-      expect(buttons[0]!.getAttribute("aria-current"), "首帧不得有高亮锚点（无持久化选择态）").toBeNull();
+    await mount(
+      <SubNav moduleId="vault" active={{ view: undefined, filter: undefined }} onSelect={onSelect} />,
+    );
+    const buttons = [...container.querySelectorAll("button")];
+    expect(buttons.map((b) => b.textContent?.trim())).toEqual(
+      items.map((i) => i.label),
+    );
+    expect(buttons[0]!.getAttribute("aria-current"), "首帧不得有高亮锚点（无持久化选择态）").toBeNull();
 
-      await act(async () => {
-        buttons[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      });
-      expect(onSelect).toHaveBeenCalledWith("anchor", "vault.health");
-      expect(buttons[1]!.getAttribute("aria-current")).toBe("true");
-      expect(buttons[0]!.getAttribute("aria-current"), "锚点高亮单选，不得两枚同亮").toBeNull();
-    } finally {
-      SUBNAV.vault = booked;
-    }
+    await act(async () => {
+      buttons[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onSelect).toHaveBeenCalledWith("anchor", items[1]!.id);
+    expect(buttons[1]!.getAttribute("aria-current")).toBe("true");
+    expect(buttons[0]!.getAttribute("aria-current"), "锚点高亮单选，不得两枚同亮").toBeNull();
   });
 
   it("mainWorkbench_anchorBranchIsTheScrollOwnerAndKeysTheRailPerModule", () => {

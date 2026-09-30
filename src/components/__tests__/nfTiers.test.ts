@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { HIT_MIN, NF_MISSING, ROW_H, SHELL, SPACING, TIER_W, nfNum } from "../nfTiers";
+import { FORM_CARD_W, HIT_MIN, NF_MISSING, ROW_H, SHELL, SPACING, TIER_W, nfNum } from "../nfTiers";
 
 // D-42 尺寸真源回归（00-ui-layout-spec 2/3/9-3/10-2 节）。
 // 承重断言是"四的倍数"这条平台纪律本身：Windows 100–400% 缩放下 4 是唯一全乘得整的基元，
@@ -19,6 +19,7 @@ describe("nfTiers（D-42 尺寸真源）", () => {
       ...ROW_H,
       ...TIER_W,
       HIT_MIN,
+      FORM_CARD_W,
       // SHELL 逐枚入表：壳层骨架高是走查判据（48/40/32），漂移即红
       ...SHELL,
     } as Record<string, string | undefined>;
