@@ -67,6 +67,18 @@ body {
   }
 }
 
+/* 笔记工作台三列的列宽档（清单／编辑／大纲）。中间列必须有底：
+   真机 940 档实测 minmax(0, 1fr) 把编辑核塌成 16.8px、正文竖排成 693px 高列。
+   Medium 档收两栏，大纲由网格自动换行到下一行首列——三列并排在 664px 容器里放不下。 */
+[data-nf="notes-split"] {
+  --nf-split-cols: minmax(220px, 300px) minmax(240px, 1fr) minmax(180px, 260px);
+}
+@container (max-width: 1007px) {
+  [data-nf="notes-split"] {
+    --nf-split-cols: minmax(220px, 300px) minmax(240px, 1fr);
+  }
+}
+
 /* 滚动条槽恒预留：杜绝"条目变少→滚动条消失→整页右移"（10-12） */
 .nf-scroll {
   overflow-y: auto;

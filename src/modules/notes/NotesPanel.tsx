@@ -92,12 +92,13 @@ const useStyles = makeStyles({
   nameField: { width: TIER_W.m },
   cardField: { width: TIER_W.m },
   dirField: { width: TIER_W.s },
-  // 笔记工作台三列：清单／编辑／大纲。minmax 让窄栏下编辑核仍占大头（规范 3 节列组成对拍样张 s9）
+  // 笔记工作台三列：清单／编辑／大纲。列宽档经 --nf-split-cols 由全局 container query 下发——
+  // 中间编辑核必须有底（真机 940 档实测零底下限把 1fr 列塌成 16.8px、正文竖排成 693px 高列）。
   split: {
+    alignItems: "start",
     display: "grid",
     gap: SPACING.x16,
-    gridTemplateColumns: "minmax(220px, 300px) minmax(0, 1fr) minmax(180px, 260px)",
-    alignItems: "start",
+    gridTemplateColumns: "var(--nf-split-cols)",
   },
   column: { display: "flex", flexDirection: "column", gap: SPACING.x8, minWidth: 0 },
   list: { display: "flex", flexDirection: "column", gap: SPACING.x4 },
@@ -909,7 +910,7 @@ export default function NotesPanel() {
           />
           {alerts}
 
-          <div className={styles.split}>
+          <div className={styles.split} data-nf="notes-split">
             <Section title={`笔记清单（${searching ? hitList.length + tagExtra.length : baseList.length}）`}>
               {allTags.length > 0 && (
                 <div className={styles.row}>

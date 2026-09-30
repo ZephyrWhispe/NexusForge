@@ -153,7 +153,8 @@ $NfShellVars = @(
     '--nf-subnav-w',
     '--nf-subnav-pad',
     '--nf-subnav-display',
-    '--nf-subnav-group-display'
+    '--nf-subnav-group-display',
+    '--nf-split-cols'
 )
 $shellCss = Get-Content 'src\styles\global.css' -Raw -Encoding UTF8
 $shellOdd = @()
@@ -163,12 +164,16 @@ if ($shellCss -notmatch '@container\s*\(max-width:\s*640px\)') { $shellOdd += '�
 foreach ($v in $NfShellVars) {
     if ($shellCss -notmatch [regex]::Escape($v)) { $shellOdd += "global.css 缺变量下发 $v" }
 }
+# D-43 C9：notes 三列的列宽档必须两档齐（宽档默认＋Medium 覆写）。只查变量名在场会放过
+# "覆写被摘、宽档独留"的半死形态——真机 940/1000 档实测把编辑核塌成 16.8px 的正是缺这一档。
+$splitHits = ([regex]::Matches($shellCss, '--nf-split-cols\s*:')).Count
+if ($splitHits -lt 2) { $shellOdd += "--nf-split-cols 下发只有 $splitHits 档（需宽档＋Medium 覆写两档）" }
 if ($shellOdd.Count -gt 0) {
     $fail = 1
     Write-Host 'FAIL D-42 窄栏变量下发（global.css 侧）:' -ForegroundColor Red
     $shellOdd | ForEach-Object { Write-Host "  $_" }
 } else {
-    Write-Host "ok   D-42 窄栏变量下发（global.css 四枚变量＋两档 @container 齐）"
+    Write-Host "ok   D-42 窄栏变量下发（global.css 五枚变量＋两档 @container 齐）"
 }
 
 exit $fail

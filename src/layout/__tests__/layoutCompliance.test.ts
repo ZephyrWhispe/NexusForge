@@ -267,6 +267,24 @@ describe("D-42 layout compliance ratchet", () => {
     expect(hidden, "行内操作用 opacity: 0 隐藏（改常驻＋静态占位宽，见 nfTiers.TIER_W）").toEqual([]);
   });
 
+  it("grid_tracks_have_a_floor_not_minmax_zero", () => {
+    // D-43 C9 走查抓出的真缺陷：minmax(0, 1fr) 在窄容器里可以把主内容列压到 16.8px（正文竖排成一根高细条）。
+    // 1fr 的下限必须是可读宽度，档位由 nfTiers.TIER_W 或具名 px 给出。
+    const floorless = sources
+      .filter(([, src]) => /minmax\(\s*0\s*,/.test(src))
+      .map(([file]) => file);
+    expect(floorless, "网格列写 minmax(0, 1fr)＝窄栏塌陷（改 minmax(240px, 1fr) 一类有底档）").toEqual([]);
+  });
+
+  it("notes_split_columns_come_from_the_container_tier", () => {
+    // 三列工作台的列宽走 global.css 下发（与 subnav 同谱：griffel 类压过同特异度的 @container 规则，
+    // 只有自定义属性能赢）。面板侧读变量＋钩子在场，CSS 侧由 assert-patterns 钉下发。
+    const split = sources.find(([file]) => file.includes("NotesPanel"))?.[1] ?? "";
+    expect(split, "glob 未读到 NotesPanel 源码").toBeTruthy();
+    expect(split).toContain('data-nf="notes-split"');
+    expect(split).toContain("var(--nf-split-cols)");
+  });
+
   it("shell_skeleton_is_the_spec_not_a_handroll", () => {
     const shell = shellRaw["/src/windows/MainWorkbench.tsx"];
     expect(shell, "glob 未读到主工作台源码").toBeTruthy();
