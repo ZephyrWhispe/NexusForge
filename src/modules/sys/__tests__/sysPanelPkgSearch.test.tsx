@@ -17,6 +17,7 @@ import {
   type PkgSourceDto,
 } from "../../../ipc/client";
 import { confirmAction } from "../../../stores/confirm";
+import { useSession } from "../../../stores/session";
 
 // D-29 B7/T-B7-12 回归：包管理在线搜索——搜索结果表渲染 + 安装钮复用确切命令行
 // 确认对话框（cmd_preview→confirmAction→sys_pkg_action 链）；已装表每行「升级」钮
@@ -125,7 +126,10 @@ async function mountPkgTab() {
     root.render(<SysPanel />);
   });
   await settle();
-  await click(buttonByText("包管理")!);
+  // D-43 C6：互斥视图上移左轨，面板不再自带「包管理」钮——走左轨派发的那条腿（setSysTab）
+  await act(async () => {
+    useSession.getState().setSysTab("pkg");
+  });
   await act(async () => {});
   // 包 Tab 清单为手动装载（既有形制）：先「刷新清单」
   await click(buttonByText("刷新清单")!);

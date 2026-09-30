@@ -16,10 +16,13 @@ import {
   DialogActions,
 } from "@fluentui/react-components";
 import Section from "../../components/Section";
-import Tabs from "../../components/Tabs";
+import DataToolbar from "../../components/DataToolbar";
+import ListFooter from "../../components/ListFooter";
+import EmptyState from "../../components/EmptyState";
 import InlineError from "../../components/InlineError";
+import { SHELL, SPACING, TIER_W } from "../../components/nfTiers";
 import { confirmAction } from "../../stores/confirm";
-import { useSession } from "../../stores/session";
+import { isSysTab, useSession } from "../../stores/session";
 import {
   parseAppError,
   sysCleanExecute,
@@ -65,6 +68,13 @@ import { reportError } from "../../stores/notifications";
  * - T-B7-12 包管理在线搜索：搜索源面走 sys_pkg_search（argv 纯函数零 shell 拼接），
  *   结果表安装钮复用 doPkgAction 的确切命令行确认对话框（cmd_preview）；
  *   已装表每行「升级」钮走单包 upgrade 动作。
+ *
+ * D-43 C6 重排（docs/panels/2026-09-19/07-sys.md §2/§7.1）：四枚互斥视图由面板内 `<Tabs>`
+ * 上移到左轨（选择态＝第六枚分键 sysTab，切走再回来不丢）；每视图一枚吸顶 DataToolbar
+ * 承载搜索/过滤/排序与主按钮（00 §5 左右分区）；首层区块全部立标题；清单内层视口收敛为
+ * 主体单滚动＋「显示更多」；三处静默截断（已装 200／搜索 100／输出末 30 行）全部页脚显影。
+ * 面板档 §2 的「启动与恢复」「设置」两档需新 Rust 命令，本批零新命令红线内不上轨（欠债记
+ * capabilities.notYet，不放撒谎按钮）。
  */
 
 /** 动作 type → 生效方式中文说明（前端纯函数；type 对照 winops.rs:52-105 serde tag） */
@@ -87,50 +97,62 @@ export function winopsEffectHint(actions: WinopsActionDto[]): string {
 }
 
 const useStyles = makeStyles({
+  // D-43 C6：主体单滚动容器（规范 1 节）。原 styles.list 的 340px 与 styles.log 的 180px
+  // 两枚内层视口撤除——清单改由 ListFooter「显示更多」分页、输出日志钉末 30 行并显影行数。
+  // 目录浏览 Dialog 不再自带视口：Fluent DialogContent 实测自带 overflow-y:auto
+  //（node_modules/@fluentui/react-dialog/lib/components/DialogContent/useDialogContentStyles.styles.js:13）。
   root: {
+    display: "flex",
+    flexDirection: "column",
     flex: 1,
+    gap: SPACING.x16,
     minWidth: 0,
     overflowY: "auto",
-    padding: "0 20px 20px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "16px",
+    padding: `0 ${SHELL.contentPad} ${SHELL.contentPad}`,
   },
-  row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
-  grow: { flex: 1, minWidth: "120px" },
+  row: { display: "flex", alignItems: "center", gap: SPACING.x8, flexWrap: "wrap" },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  chart: {
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorNeutralBackground2,
-  },
-  list: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "2px",
-    maxHeight: "340px",
-    overflowY: "auto",
-  },
+  // 工具条字段宽度走 TIER_W 档（规范 3 节：M=240 名称类），不写死字面量
+  field: { width: TIER_W.m },
+  // 曲线网格：三枚等宽分栏，窄容器换行而不是横向溢出（规范 5 节工具条禁换行不适用于主体）
+  charts: { display: "flex", gap: SPACING.x16, flexWrap: "wrap" },
+  chartCell: { flex: 1, minWidth: "240px" },
+  list: { display: "flex", flexDirection: "column", gap: SPACING.x4 },
   item: {
-    padding: "6px 8px",
+    padding: `${SPACING.x4} ${SPACING.x8}`,
     borderRadius: tokens.borderRadiusMedium,
     display: "flex",
     alignItems: "center",
-    gap: "8px",
+    gap: SPACING.x8,
   },
+  // 数字列用等宽数位防抖动（规范 2 节），字号下限 12（§9-1，原 fontSizeBase100 违规）
   log: {
     fontFamily: "Consolas, monospace",
-    fontSize: tokens.fontSizeBase100,
+    fontSize: tokens.fontSizeBase200,
+    fontVariantNumeric: "tabular-nums",
     whiteSpace: "pre-wrap",
-    maxHeight: "180px",
-    overflowY: "auto",
     backgroundColor: tokens.colorNeutralBackground2,
     borderRadius: tokens.borderRadiusMedium,
-    padding: "8px 12px",
+    padding: SPACING.x8,
   },
+  // 回归检测黄条（W4）：原为内联 6px/10px 手调值，现走 §2 间距白名单
+  banner: {
+    alignItems: "center",
+    backgroundColor: tokens.colorPaletteYellowBackground1,
+    borderRadius: tokens.borderRadiusMedium,
+    display: "flex",
+    gap: SPACING.x8,
+    padding: `${SPACING.x4} ${SPACING.x8}`,
+  },
+  // 复述名输入闸那一行：原为内联 "0 8px 6px"（6 不在 §2 白名单），收敛为类
+  killRow: { paddingBottom: SPACING.x4, paddingLeft: SPACING.x8, paddingRight: SPACING.x8 },
 });
 
-type TabId = "monitor" | "clean" | "pkg" | "tweaks";
+/** 清单首屏行数档（4 的倍数；沿用原 slice 上限 200/100，只是把静默截断改成可续的分页） */
+const PKG_PAGE = 200;
+const SEARCH_PAGE = 100;
+/** 包管理输出缓冲：后端 200 行、前端渲染末 30 行（两处数字都在页脚显影，不再静默） */
+const LOG_TAIL = 30;
 
 /** SVG 折线（0-100 量程或自动） */
 function Spark({ values, color, label, fmt }: { values: number[]; color: string; label: string; fmt?: (v: number) => string }) {
@@ -155,7 +177,10 @@ function Spark({ values, color, label, fmt }: { values: number[]; color: string;
 
 export default function SysPanel() {
   const styles = useStyles();
-  const [tab, setTab] = useState<TabId>("monitor");
+  // D-43 C6：互斥视图选择态由面板内 useState 升为 session 持久键（左轨读写同一键）；
+  // 快照可能被手改成野值 ⇒ 收窄失败确定性回落监控视图（与 term/file 同款兜底）。
+  const storedTab = useSession((s) => s.sysTab);
+  const tab = isSysTab(storedTab) ? storedTab : "monitor";
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const fail = useCallback((e: unknown) => setErr(parseAppError(e)?.data.message ?? String(e)), []);
@@ -188,6 +213,9 @@ export default function SysPanel() {
   const [pkgs, setPkgs] = useState<PkgEntryDto[]>([]);
   const [pkgFilter, setPkgFilter] = useState("");
   const [pkgsLoading, setPkgsLoading] = useState(false);
+  // 首屏行数档（内层视口撤除后靠分页而不是二层滚动）
+  const [pkgShown, setPkgShown] = useState(PKG_PAGE);
+  const [searchShown, setSearchShown] = useState(SEARCH_PAGE);
   const [output, setOutput] = useState<string[]>([]);
   // T-B7-12 在线搜索：null=未搜索过（区分空结果态）
   const [onlineQuery, setOnlineQuery] = useState("");
@@ -258,6 +286,8 @@ export default function SysPanel() {
   const loadPkgs = useCallback(async () => {
     setPkgsLoading(true);
     setErr(null);
+    // 重装清单＝重新计数，首屏档复位（否则换了过滤词仍停在旧的分页深度）
+    setPkgShown(PKG_PAGE);
     try {
       setSources(await sysPkgSources());
       setPkgs(await sysPkgList());
@@ -356,6 +386,8 @@ export default function SysPanel() {
     }
     setErr(null);
     setOnlineBusy(true);
+    // 新搜索＝新结果集，分页档复位到首屏（与 loadPkgs 同纪律）
+    setSearchShown(SEARCH_PAGE);
     try {
       setOnlineResults(await sysPkgSearch(src.id, q));
     } catch (e) {
@@ -515,7 +547,7 @@ export default function SysPanel() {
     } catch (e) {
       fail(e);
     }
-  }, [killTarget, killTypedOk, procSort, procQuery, loadProcs, fail]);
+  }, [killTarget, killTyped, killTypedOk, procSort, procQuery, loadProcs, fail]);
 
   const cpuSeries = history.map((p) => p.cpu);
   const memSeries = history.map((p) => (p.mem_total ? (p.mem_used / p.mem_total) * 100 : 0));
@@ -537,27 +569,69 @@ export default function SysPanel() {
     const q = pkgFilter.trim().toLowerCase();
     return !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q);
   });
+  const shownPkgRows = shownPkgs.slice(0, pkgShown);
+  const onlineRows = (onlineResults ?? []).slice(0, searchShown);
+  const appliedCount = tweaks.filter(([, state]) => state === "applied").length;
+  // 每视图各渲一次（工具条在视图分支内，故提示也必须随分支走，吸顶层序才是 00 §1 的形状）
+  const alerts = (
+    <>
+      <InlineError text={msg} tone="success" />
+      <InlineError text={err} />
+    </>
+  );
+  const sortKeys: [typeof procSort, string][] = [
+    ["name", "名称"],
+    ["cpu", "CPU%"],
+    ["mem", "内存"],
+    ["disk", "磁盘"],
+  ];
 
   return (
     <div className={styles.root}>
-      <Tabs
-        ariaLabel="系统管理视图"
-        value={tab}
-        onChange={setTab}
-        items={[
-          { id: "monitor", label: "资源监控" },
-          { id: "clean", label: "系统清理" },
-          { id: "pkg", label: "包管理" },
-          { id: "tweaks", label: "系统调整" },
-        ]}
-      />
-
-      <InlineError text={msg} tone="success" />
-      <InlineError text={err} />
-
       {tab === "monitor" && (
         <>
-          <Section>
+          {/* 00 §5 左右分区：左＝搜索→排序，右＝主按钮（刷新进程表是本视图唯一造作动件） */}
+          <DataToolbar
+            search={
+              <Input
+                className={styles.field}
+                placeholder="搜索进程名"
+                value={procQuery}
+                onChange={(_, d) => setProcQuery(d.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void loadProcs(procSort, procQuery);
+                }}
+              />
+            }
+            sort={
+              <>
+                {sortKeys.map(([key, label]) => (
+                  <Button
+                    key={key}
+                    size="small"
+                    appearance={procSort === key ? "primary" : "subtle"}
+                    onClick={() => {
+                      setProcSort(key);
+                      void loadProcs(key, procQuery);
+                    }}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </>
+            }
+            primary={
+              <>
+                {procBusy && <Spinner size="tiny" />}
+                <Button size="small" appearance="primary" onClick={() => void loadProcs(procSort, procQuery)}>
+                  刷新
+                </Button>
+              </>
+            }
+          />
+          {alerts}
+
+          <Section title="资源监控">
             {!latest && <Spinner size="tiny" />}
             {latest && (
               <Text className={styles.muted}>
@@ -565,64 +639,22 @@ export default function SysPanel() {
                 {latest.disks.map((d) => `${d.mount} ${fmtBytes(d.total - d.used)} 可用`).join(" · ")}
               </Text>
             )}
-            <div className={styles.row}>
-              <div style={{ flex: 1, minWidth: 240 }}>
+            <div className={styles.charts}>
+              <div className={styles.chartCell}>
                 <Spark values={cpuSeries} color={tokens.colorBrandForeground1} label="CPU" fmt={(v) => `${v.toFixed(1)}%`} />
               </div>
-              <div style={{ flex: 1, minWidth: 240 }}>
+              <div className={styles.chartCell}>
                 <Spark values={memSeries} color={tokens.colorPaletteGreenForeground1} label="内存占用" fmt={(v) => `${v.toFixed(1)}%`} />
               </div>
-              <div style={{ flex: 1, minWidth: 240 }}>
+              <div className={styles.chartCell}>
                 <Spark values={netSeries} color={tokens.colorPaletteMarigoldForeground1} label="网络吞吐" fmt={(v) => `${v.toFixed(1)} KB/s`} />
               </div>
             </div>
             <Text className={styles.muted}>1s PDH 采样 · 保留最近 300 点 · 无数据时确认模块已启动</Text>
           </Section>
 
-          {/* 进程页（T-B7-10 红线）：两拍差值 Top-N + 排序头/搜索 + 结束钮复述名输入确认词 */}
-          <Section
-            title={`进程（${procs.length}）`}
-            actions={
-              <>
-                <Input
-                  style={{ maxWidth: 180 }}
-                  placeholder="搜索进程名"
-                  value={procQuery}
-                  onChange={(_, d) => setProcQuery(d.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void loadProcs(procSort, procQuery);
-                  }}
-                />
-                <Button size="small" onClick={() => void loadProcs(procSort, procQuery)}>
-                  刷新
-                </Button>
-                {procBusy && <Spinner size="tiny" />}
-              </>
-            }
-          >
-            <div className={styles.row}>
-              <Text className={styles.muted}>排序：</Text>
-              {(
-                [
-                  ["name", "名称"],
-                  ["cpu", "CPU%"],
-                  ["mem", "内存"],
-                  ["disk", "磁盘"],
-                ] as const
-              ).map(([key, label]) => (
-                <Button
-                  key={key}
-                  size="small"
-                  appearance={procSort === key ? "primary" : "subtle"}
-                  onClick={() => {
-                    setProcSort(key);
-                    void loadProcs(key, procQuery);
-                  }}
-                >
-                  {label}
-                </Button>
-              ))}
-            </div>
+          {/* 进程页（T-B7-10 红线）：搜索与排序已上吸顶工具条（00 §5），此处只留清单本体 */}
+          <Section title={`进程（${procs.length}）`}>
             <div className={styles.list}>
               {procs.map((r) => (
                 <div key={r.pid} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -631,7 +663,7 @@ export default function SysPanel() {
                       <Text size={200} weight="semibold">
                         {r.name}
                       </Text>
-                      <Text size={100} className={styles.muted}>
+                      <Text size={200} className={styles.muted}>
                         pid {r.pid} · CPU {r.cpu_pct.toFixed(1)}% · 内存 {fmtBytes(r.mem_bytes)} · 磁盘{" "}
                         {r.disk_bps === null ? "—" : `${fmtBytes(r.disk_bps)}/s`}
                       </Text>
@@ -649,7 +681,7 @@ export default function SysPanel() {
                     </Button>
                   </div>
                   {killTarget?.pid === r.pid && (
-                    <div className={styles.row} style={{ padding: "0 8px 6px" }}>
+                    <div className={`${styles.row} ${styles.killRow}`}>
                       <Input
                         className="kill-confirm-input"
                         style={{ flex: 1, minWidth: 200 }}
@@ -680,354 +712,466 @@ export default function SysPanel() {
                 </div>
               ))}
               {!procBusy && procs.length === 0 && (
-                <Text className={styles.muted}>
-                  进程列表为空（首轮为差值基线拍，稍候点「刷新」取两拍结果；非 Windows 端口缺省亦空表）
-                </Text>
+                <EmptyState
+                  text="进程列表为空"
+                  hint="首轮为差值基线拍，稍候点「刷新」取两拍结果；非 Windows 端口缺省亦空表"
+                  action={
+                    <Button size="small" appearance="subtle" onClick={() => void loadProcs(procSort, procQuery)}>
+                      刷新进程
+                    </Button>
+                  }
+                />
               )}
             </div>
-            <Text className={styles.muted}>
-              CPU/磁盘为两拍差值（首拍无基线记 0/—）· 结束进程须逐字复述进程名并经确认对话框 · 系统关键进程（pid 0/4 与保护名单）拒绝结束 · 成功与被拒均落审计
-            </Text>
           </Section>
+
+          <ListFooter
+            left={`进程 ${procs.length} 行 · 采样 ${history.length} / 300 点`}
+            right="CPU/磁盘为两拍差值（首拍无基线记 0/—）· 结束进程须逐字复述进程名并经确认对话框 · 系统关键进程（pid 0/4 与保护名单）拒绝结束 · 成功与被拒均落审计"
+          />
         </>
       )}
 
       {tab === "clean" && (
-        <Section>
-          <div className={styles.row}>
-            <Button appearance="primary" size="small" onClick={() => void doScan()}>
-              {scanning ? "扫描中…" : "扫描"}
-            </Button>
-            {scanning && <Spinner size="tiny" />}
-            <Checkbox
-              label="移入回收站（可恢复）"
-              checked={useRecycle}
-              onChange={(_, d) => setUseRecycle(!!d.checked)}
-            />
-            <div className={styles.grow} />
-            <Button
-              size="small"
-              appearance="primary"
-              disabled={scan.length === 0 || selected.size === 0}
-              title={scan.length === 0 ? "未扫描仅见清单，扫描后方可执行" : undefined}
-              onClick={() => void doExecute()}
-            >
-              执行清理（{selected.size} 项）
-            </Button>
-          </div>
-          {scan.length === 0 && (
-            <Text className={styles.muted}>
-              未扫描仅见清单：勾选是持久偏好（「推荐」= safe_default 角标，不自动勾选），扫描后方可执行；24h 内修改的文件自动跳过
-            </Text>
-          )}
-          <div className={styles.list}>
-            {scan.length === 0
-              ? targets.map((t) => (
-                  <div key={t.id} className={styles.item}>
-                    <Checkbox
-                      checked={selected.has(t.id)}
-                      onChange={(_, d) => toggleTarget(t.id, !!d.checked)}
-                    />
-                    <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-                      <Text size={200} weight="semibold">
-                        {t.label}
-                        {t.safe_default && (
-                          <Badge size="small" appearance="filled" color="brand" style={{ marginLeft: 6 }}>
-                            推荐
-                          </Badge>
-                        )}
-                        {t.need_admin && (
-                          <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
-                            需管理员
-                          </Badge>
-                        )}
-                        {t.optional && (
-                          <Badge size="small" appearance="outline" color="subtle" style={{ marginLeft: 6 }}>
-                            缺失自动跳过
-                          </Badge>
-                        )}
-                      </Text>
-                      <Text size={100} className={styles.muted}>
-                        目录 {t.dir} · 范围 {t.exts.length ? `仅 .${t.exts.join("/.")}` : "全部文件"}
-                      </Text>
-                    </div>
-                  </div>
-                ))
-              : scan.map((s) => {
-                  const t = targetById.get(s.target_id);
-                  return (
-                    <div key={s.target_id} className={styles.item}>
+        <>
+          {/* 00 §5：左＝偏好开关（回收站是可恢复性的唯一开关），右＝扫描→执行清理（主按钮恒末位） */}
+          <DataToolbar
+            filters={
+              <Checkbox
+                label="移入回收站（可恢复）"
+                checked={useRecycle}
+                onChange={(_, d) => setUseRecycle(!!d.checked)}
+              />
+            }
+            bulk={
+              <>
+                {scanning && <Spinner size="tiny" />}
+                <Button size="small" onClick={() => void doScan()}>
+                  {scanning ? "扫描中…" : "扫描"}
+                </Button>
+              </>
+            }
+            primary={
+              <Button
+                size="small"
+                appearance="primary"
+                disabled={scan.length === 0 || selected.size === 0}
+                title={scan.length === 0 ? "未扫描仅见清单，扫描后方可执行" : undefined}
+                onClick={() => void doExecute()}
+              >
+                执行清理（{selected.size} 项）
+              </Button>
+            }
+          />
+          {alerts}
+          <Section title={`清理目标（${scan.length === 0 ? targets.length : scan.length}）`}>
+            {scan.length === 0 && (
+              <Text className={styles.muted}>
+                未扫描仅见清单：勾选是持久偏好（「推荐」= safe_default 角标，不自动勾选），扫描后方可执行；24h 内修改的文件自动跳过
+              </Text>
+            )}
+            <div className={styles.list}>
+              {scan.length === 0
+                ? targets.map((t) => (
+                    <div key={t.id} className={styles.item}>
                       <Checkbox
-                        checked={selected.has(s.target_id)}
-                        disabled={s.missing || s.files === 0}
-                        onChange={(_, d) => toggleTarget(s.target_id, !!d.checked)}
+                        checked={selected.has(t.id)}
+                        onChange={(_, d) => toggleTarget(t.id, !!d.checked)}
                       />
                       <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
                         <Text size={200} weight="semibold">
-                          {s.label}
-                          {s.safe_default && (
+                          {t.label}
+                          {t.safe_default && (
                             <Badge size="small" appearance="filled" color="brand" style={{ marginLeft: 6 }}>
                               推荐
                             </Badge>
                           )}
-                          {s.need_admin && (
+                          {t.need_admin && (
                             <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
-                              管理员
+                              需管理员
+                            </Badge>
+                          )}
+                          {t.optional && (
+                            <Badge size="small" appearance="outline" color="subtle" style={{ marginLeft: 6 }}>
+                              缺失自动跳过
                             </Badge>
                           )}
                         </Text>
-                        <Text size={100} className={styles.muted}>
-                          {s.missing ? (
-                            "目录不存在"
-                          ) : (
-                            <>
-                              可清理 {s.files} 文件 / {fmtBytes(s.reclaim_bytes)}
-                              {s.skipped_recent > 0 && ` · 白名单跳过 ${s.skipped_recent}（24h 内修改）`}
-                            </>
-                          )}
-                          {t && ` —— 目录 ${t.dir} · 范围 ${t.exts.length ? `仅 .${t.exts.join("/.")}` : "全部文件"}`}
+                        <Text size={200} className={styles.muted}>
+                          目录 {t.dir} · 范围 {t.exts.length ? `仅 .${t.exts.join("/.")}` : "全部文件"}
                         </Text>
                       </div>
                     </div>
-                  );
-                })}
-            {scan.length === 0 && targets.length === 0 && (
-              <Text className={styles.muted}>清理目标清单加载中（内置 4 项）</Text>
-            )}
-          </div>
-        </Section>
+                  ))
+                : scan.map((s) => {
+                    const t = targetById.get(s.target_id);
+                    return (
+                      <div key={s.target_id} className={styles.item}>
+                        <Checkbox
+                          checked={selected.has(s.target_id)}
+                          disabled={s.missing || s.files === 0}
+                          onChange={(_, d) => toggleTarget(s.target_id, !!d.checked)}
+                        />
+                        <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                          <Text size={200} weight="semibold">
+                            {s.label}
+                            {s.safe_default && (
+                              <Badge size="small" appearance="filled" color="brand" style={{ marginLeft: 6 }}>
+                                推荐
+                              </Badge>
+                            )}
+                            {s.need_admin && (
+                              <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
+                                管理员
+                              </Badge>
+                            )}
+                          </Text>
+                          <Text size={200} className={styles.muted}>
+                            {s.missing ? (
+                              "目录不存在"
+                            ) : (
+                              <>
+                                可清理 {s.files} 文件 / {fmtBytes(s.reclaim_bytes)}
+                                {s.skipped_recent > 0 && ` · 白名单跳过 ${s.skipped_recent}（24h 内修改）`}
+                              </>
+                            )}
+                            {t && ` —— 目录 ${t.dir} · 范围 ${t.exts.length ? `仅 .${t.exts.join("/.")}` : "全部文件"}`}
+                          </Text>
+                        </div>
+                      </div>
+                    );
+                  })}
+              {scan.length === 0 && targets.length === 0 && (
+                <EmptyState text="清理目标清单加载中（内置 4 项）" loading />
+              )}
+            </div>
+          </Section>
+
+          <ListFooter
+            left={`目标 ${targets.length} 项 · 已选 ${selected.size} 项${
+              scan.length > 0 ? ` · 扫描结果 ${scan.length} 项` : " · 未扫描"
+            }`}
+            right="24h 内修改的文件自动跳过 · 关闭回收站后删除不可恢复"
+          />
+        </>
       )}
 
       {tab === "pkg" && (
-        <Section>
-          <div className={styles.row}>
-            <Text size={200} weight="semibold">
-              源：
-            </Text>
-            {sources.map((s) => (
-              <Badge key={s.id} appearance={s.available ? "filled" : "outline"} color={s.available ? "success" : "subtle"}>
-                {s.id}
-              </Badge>
-            ))}
-            <div className={styles.grow} />
-            <Input
-              style={{ maxWidth: 220 }}
-              placeholder="搜索已装"
-              value={pkgFilter}
-              onChange={(_, d) => setPkgFilter(d.value)}
-            />
-            <Button size="small" appearance="primary" onClick={() => void loadPkgs()}>
-              刷新清单
-            </Button>
-            <Button
-              size="small"
-              onClick={() => {
-                const src = sources.find((s) => s.available);
-                if (src) void doPkgAction(src.id, "upgrade_all", "");
-                else setErr("无可用包管理器");
-              }}
-            >
-              全部升级
-            </Button>
-            {pkgsLoading && <Spinner size="tiny" />}
-          </div>
-          <Text className={styles.muted}>
-            已装 {shownPkgs.length} 项（多源去重，winget 优先）· 升级可用标绿色
-          </Text>
-          <div className={styles.list}>
-            {shownPkgs.slice(0, 200).map((p) => (
-              <div key={`${p.source}:${p.id}`} className={styles.item}>
-                <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
-                  <Text size={200} weight="semibold">
-                    {p.name}
-                    {p.available && (
-                      <Badge size="small" appearance="filled" color="success" style={{ marginLeft: 6 }}>
-                        {p.version} → {p.available}
-                      </Badge>
-                    )}
-                  </Text>
-                  <Text size={100} className={styles.muted}>
-                    {p.id} · {p.version} · {p.source}
-                  </Text>
-                </div>
-                <Button
-                  size="small"
-                  appearance="subtle"
-                  onClick={() => void doPkgAction(p.source, "install", p.id)}
-                >
-                  安装
+        <>
+          {/* 00 §5：左＝已装过滤（本地即时筛选），右＝刷新清单→全部升级（主按钮恒末位） */}
+          <DataToolbar
+            search={
+              <Input
+                className={styles.field}
+                placeholder="搜索已装"
+                value={pkgFilter}
+                onChange={(_, d) => setPkgFilter(d.value)}
+              />
+            }
+            bulk={
+              <>
+                {pkgsLoading && <Spinner size="tiny" />}
+                <Button size="small" onClick={() => void loadPkgs()}>
+                  刷新清单
                 </Button>
-                <Button
-                  size="small"
-                  appearance="subtle"
-                  title={`单包升级（${p.source} upgrade ${p.id}）`}
-                  onClick={() => void doPkgAction(p.source, "upgrade", p.id)}
-                >
-                  升级
-                </Button>
-                <Button
-                  size="small"
-                  appearance="subtle"
-                  onClick={() => void doPkgAction(p.source, "uninstall", p.id)}
-                >
-                  卸载
-                </Button>
-              </div>
-            ))}
-            {!pkgsLoading && shownPkgs.length === 0 && (
-              <Text className={styles.muted}>点击「刷新清单」获取已装软件（需要 winget/scoop/choco 至少一个可用）</Text>
-            )}
-          </div>
-          {/* T-B7-12 在线搜索：结果表安装钮复用确切命令行确认对话框（在线安装对话框） */}
-          <div className={styles.row}>
-            <Text size={200} weight="semibold">
-              在线搜索：
-            </Text>
-            <Input
-              style={{ maxWidth: 220 }}
-              placeholder="包名关键词（可含空格引号，换行拒）"
-              value={onlineQuery}
-              onChange={(_, d) => setOnlineQuery(d.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void doOnlineSearch();
-              }}
-            />
-            <Button size="small" appearance="primary" disabled={onlineBusy} onClick={() => void doOnlineSearch()}>
-              搜索
-            </Button>
-            {onlineBusy && <Spinner size="tiny" />}
-          </div>
-          {onlineResults !== null && (
-            <div className={styles.list} data-testid="pkg-search-results">
-              <Text className={styles.muted}>
-                搜索结果 {onlineResults.length} 项 · 安装走确切命令行确认（预览与执行同源）
-              </Text>
-              {onlineResults.slice(0, 100).map((r) => (
-                <div key={`${r.source}:${r.id}`} className={styles.item}>
+              </>
+            }
+            primary={
+              <Button
+                size="small"
+                appearance="primary"
+                onClick={() => {
+                  const src = sources.find((s) => s.available);
+                  if (src) void doPkgAction(src.id, "upgrade_all", "");
+                  else setErr("无可用包管理器");
+                }}
+              >
+                全部升级
+              </Button>
+            }
+          />
+          {alerts}
+
+          <Section
+            title={`已装软件（${shownPkgs.length}）`}
+            actions={
+              <>
+                <Text size={200} className={styles.muted}>
+                  源：
+                </Text>
+                {sources.map((s) => (
+                  <Badge key={s.id} appearance={s.available ? "filled" : "outline"} color={s.available ? "success" : "subtle"}>
+                    {s.id}
+                  </Badge>
+                ))}
+              </>
+            }
+          >
+            <div className={styles.list}>
+              {shownPkgRows.map((p) => (
+                <div key={`${p.source}:${p.id}`} className={styles.item}>
                   <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
                     <Text size={200} weight="semibold">
-                      {r.name}
+                      {p.name}
+                      {p.available && (
+                        <Badge size="small" appearance="filled" color="success" style={{ marginLeft: 6 }}>
+                          {p.version} → {p.available}
+                        </Badge>
+                      )}
                     </Text>
-                    <Text size={100} className={styles.muted}>
-                      {r.id} · {r.version} · {r.source}
+                    <Text size={200} className={styles.muted}>
+                      {p.id} · {p.version} · {p.source}
                     </Text>
                   </div>
-                  <Button size="small" onClick={() => void doPkgAction(r.source, "install", r.id)}>
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    onClick={() => void doPkgAction(p.source, "install", p.id)}
+                  >
                     安装
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    title={`单包升级（${p.source} upgrade ${p.id}）`}
+                    onClick={() => void doPkgAction(p.source, "upgrade", p.id)}
+                  >
+                    升级
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    onClick={() => void doPkgAction(p.source, "uninstall", p.id)}
+                  >
+                    卸载
                   </Button>
                 </div>
               ))}
-              {onlineResults.length === 0 && (
-                <Text className={styles.muted}>无搜索结果（核对关键词；winget 无匹配时亦空表）</Text>
+              {!pkgsLoading && shownPkgs.length === 0 && (
+                <EmptyState
+                  text={pkgFilter.trim() ? `已装清单里没有匹配「${pkgFilter.trim()}」的软件` : "已装清单尚未装载"}
+                  hint={
+                    pkgFilter.trim()
+                      ? "本地过滤按名称与包 id，清空搜索框即回到全清单"
+                      : "需要 winget/scoop/choco 至少一个可用；点「刷新清单」装载"
+                  }
+                  action={
+                    pkgFilter.trim() ? undefined : (
+                      <Button size="small" appearance="subtle" onClick={() => void loadPkgs()}>
+                        刷新清单
+                      </Button>
+                    )
+                  }
+                />
               )}
             </div>
-          )}
+            {shownPkgs.length > 0 && (
+              <ListFooter
+                left={
+                  <>
+                    已装 {shownPkgs.length} 项 · 在场 {shownPkgRows.length} 项
+                    {shownPkgs.length > shownPkgRows.length && (
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        onClick={() => setPkgShown((n) => n + PKG_PAGE)}
+                      >
+                        显示更多
+                      </Button>
+                    )}
+                  </>
+                }
+                right="多源去重，winget 优先 · 升级可用标绿色 · 变更一律先给确切命令行预览"
+              />
+            )}
+          </Section>
+
+          {/* T-B7-12 在线搜索：搜索面与结果表同区常驻；结果表安装钮复用确切命令行确认对话框 */}
+          <Section
+            title="在线搜索"
+            actions={
+              <>
+                <Input
+                  className={styles.field}
+                  placeholder="包名关键词（可含空格引号，换行拒）"
+                  value={onlineQuery}
+                  onChange={(_, d) => setOnlineQuery(d.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void doOnlineSearch();
+                  }}
+                />
+                <Button size="small" appearance="primary" disabled={onlineBusy} onClick={() => void doOnlineSearch()}>
+                  搜索
+                </Button>
+                {onlineBusy && <Spinner size="tiny" />}
+              </>
+            }
+          >
+            {onlineResults === null ? (
+              <Text className={styles.muted}>
+                尚未搜索（搜索源取首个可用的包管理器；结果里的「安装」先预览命令行再执行）。
+              </Text>
+            ) : (
+              <div className={styles.list} data-testid="pkg-search-results">
+                {onlineRows.map((r) => (
+                  <div key={`${r.source}:${r.id}`} className={styles.item}>
+                    <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                      <Text size={200} weight="semibold">
+                        {r.name}
+                      </Text>
+                      <Text size={200} className={styles.muted}>
+                        {r.id} · {r.version} · {r.source}
+                      </Text>
+                    </div>
+                    <Button size="small" onClick={() => void doPkgAction(r.source, "install", r.id)}>
+                      安装
+                    </Button>
+                  </div>
+                ))}
+                {onlineResults.length === 0 && (
+                  <EmptyState text="无搜索结果" hint="核对关键词；winget 无匹配时同样是空表，不代表源不可用" />
+                )}
+              </div>
+            )}
+            {onlineResults !== null && onlineResults.length > 0 && (
+              <ListFooter
+                left={
+                  <>
+                    命中 {onlineResults.length} 项 · 在场 {onlineRows.length} 项
+                    {onlineResults.length > onlineRows.length && (
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        onClick={() => setSearchShown((n) => n + SEARCH_PAGE)}
+                      >
+                        显示更多
+                      </Button>
+                    )}
+                  </>
+                }
+                right="安装走确切命令行确认（预览与执行同源）"
+              />
+            )}
+          </Section>
+
+          {/* 输出面：后端 200 行缓冲，前端只渲染末 LOG_TAIL 行——原为静默截断，现随标题显影 */}
           {output.length > 0 && (
-            <div className={styles.log}>{output.slice(-30).join("\n")}</div>
+            <Section title={`包管理输出（末 ${Math.min(output.length, LOG_TAIL)} / 缓冲 ${output.length} 行）`}>
+              <div className={styles.log}>{output.slice(-LOG_TAIL).join("\n")}</div>
+            </Section>
           )}
-        </Section>
+        </>
       )}
 
       {tab === "tweaks" && (
-        <Section>
+        <>
+          {/* 00 §5：右＝批量读面（导出审计、浏览目录）→ 主按钮（扫描，本视图一切状态的来源） */}
+          <DataToolbar
+            bulk={
+              <>
+                {tweaksLoading && <Spinner size="tiny" />}
+                <Button size="small" appearance="subtle" onClick={() => void doAuditExport()}>
+                  导出审计
+                </Button>
+                <Button
+                  size="small"
+                  appearance="outline"
+                  title="不经扫描通读全目录：按分类列出说明、提权要求与维护型标记"
+                  onClick={openCatalog}
+                >
+                  浏览目录
+                </Button>
+              </>
+            }
+            primary={
+              <Button size="small" appearance="primary" onClick={() => void doTweakScan()}>
+                {tweaksLoading ? "扫描中…" : "扫描"}
+              </Button>
+            }
+          />
+          {alerts}
+
           {regressed.length > 0 && (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "6px 10px",
-                marginBottom: 8,
-                borderRadius: 4,
-                background: tokens.colorPaletteYellowBackground1,
-              }}
-            >
-              <Text size={200}>
-                系统已将 {regressed.length} 项设置恢复为默认（自愈），可重新应用。
-              </Text>
+            <div className={styles.banner}>
+              <Text size={200}>系统已将 {regressed.length} 项设置恢复为默认（自愈），可重新应用。</Text>
               <Button size="small" appearance="subtle" onClick={() => void doTweakScan()}>
                 重新扫描
               </Button>
             </div>
           )}
-          <div className={styles.row}>
-            <Button appearance="primary" size="small" onClick={() => void doTweakScan()}>
-              {tweaksLoading ? "扫描中…" : "扫描"}
-            </Button>
-            {tweaksLoading && <Spinner size="tiny" />}
-            <Button size="small" appearance="subtle" onClick={() => void doAuditExport()}>
-              导出审计
-            </Button>
-            <Button
-              size="small"
-              appearance="outline"
-              title="不经扫描通读全目录：按分类列出说明、提权要求与维护型标记"
-              onClick={openCatalog}
-            >
-              浏览目录
-            </Button>
-            <Text className={styles.muted}>
-              BAVR 语义：应用前自动备份原值 · 校验失败自动回滚 · 回滚恢复最近一次应用前的状态
-            </Text>
-          </div>
-          <div className={styles.list}>
-            {tweaks.map(([t, state]) => (
-              <div key={t.id} className={styles.item}>
-                <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
-                  <Text size={200} weight="semibold">
-                    {t.name}
-                    <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
-                      {t.category}
-                    </Badge>
-                    {state === "applied" && (
-                      <Badge size="small" appearance="filled" color="success" style={{ marginLeft: 6 }}>
-                        已应用
-                      </Badge>
-                    )}
-                    {state === "not_applied" && (
+
+          <Section title={`系统调整（${tweaks.length}）`}>
+            <div className={styles.list}>
+              {tweaks.map(([t, state]) => (
+                <div key={t.id} className={styles.item}>
+                  <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                    <Text size={200} weight="semibold">
+                      {t.name}
                       <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
-                        未应用
+                        {t.category}
                       </Badge>
-                    )}
-                    {state === "needs_admin" && (
-                      <Badge size="small" appearance="filled" color="warning" style={{ marginLeft: 6 }}>
-                        需管理员
-                      </Badge>
-                    )}
-                  </Text>
-                  {t.description && (
-                    <Text size={100} className={styles.muted}>
-                      {t.description}
+                      {state === "applied" && (
+                        <Badge size="small" appearance="filled" color="success" style={{ marginLeft: 6 }}>
+                          已应用
+                        </Badge>
+                      )}
+                      {state === "not_applied" && (
+                        <Badge size="small" appearance="outline" style={{ marginLeft: 6 }}>
+                          未应用
+                        </Badge>
+                      )}
+                      {state === "needs_admin" && (
+                        <Badge size="small" appearance="filled" color="warning" style={{ marginLeft: 6 }}>
+                          需管理员
+                        </Badge>
+                      )}
                     </Text>
+                    {t.description && (
+                      <Text size={200} className={styles.muted}>
+                        {t.description}
+                      </Text>
+                    )}
+                  </div>
+                  {state === "not_applied" && (
+                    <Button
+                      size="small"
+                      appearance="primary"
+                      disabled={busyTweak !== null}
+                      onClick={() => void doTweakApply(t.id)}
+                    >
+                      {busyTweak === t.id ? "应用中…" : "应用"}
+                    </Button>
+                  )}
+                  {state !== "not_applied" && (
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      disabled={busyTweak !== null}
+                      onClick={() => void doTweakRollback(t.id)}
+                    >
+                      {busyTweak === t.id ? "处理中…" : "回滚"}
+                    </Button>
                   )}
                 </div>
-                {state === "not_applied" && (
-                  <Button
-                    size="small"
-                    appearance="primary"
-                    disabled={busyTweak !== null}
-                    onClick={() => void doTweakApply(t.id)}
-                  >
-                    {busyTweak === t.id ? "应用中…" : "应用"}
-                  </Button>
-                )}
-                {state !== "not_applied" && (
-                  <Button
-                    size="small"
-                    appearance="subtle"
-                    disabled={busyTweak !== null}
-                    onClick={() => void doTweakRollback(t.id)}
-                  >
-                    {busyTweak === t.id ? "处理中…" : "回滚"}
-                  </Button>
-                )}
-              </div>
-            ))}
-            {!tweaksLoading && tweaks.length === 0 && (
-              <Text className={styles.muted}>点击「扫描」检查各调整项的当前状态（目录支持外置扩展：{`{appData}/winops/catalog/*.json`}）</Text>
-            )}
-          </div>
-        </Section>
+              ))}
+              {!tweaksLoading && tweaks.length === 0 && (
+                <EmptyState
+                  text="尚未扫描，调整项的当前状态未知"
+                  hint={`扫描后才区分「已应用／未应用／需管理员」；目录支持外置扩展：{appData}/winops/catalog/*.json`}
+                  action={
+                    <Button size="small" appearance="subtle" onClick={() => void doTweakScan()}>
+                      扫描
+                    </Button>
+                  }
+                />
+              )}
+            </div>
+            <ListFooter
+              left={`调整项 ${tweaks.length} 个 · 已应用 ${appliedCount} 个`}
+              right="BAVR 语义：应用前自动备份原值 · 校验失败自动回滚 · 回滚恢复最近一次应用前的状态"
+            />
+          </Section>
+        </>
       )}
 
       {/* 浏览目录 Dialog（T-B1-9）：category 分组 + 提权/维护徽标 + 生效方式映射 */}
@@ -1066,11 +1210,11 @@ export default function SysPanel() {
                             )}
                           </Text>
                           {tw.description && (
-                            <Text size={100} className={styles.muted}>
+                            <Text size={200} className={styles.muted}>
                               {tw.description}
                             </Text>
                           )}
-                          <Text size={100} className={styles.muted}>
+                          <Text size={200} className={styles.muted}>
                             {winopsEffectHint(tw.actions)}
                           </Text>
                         </div>

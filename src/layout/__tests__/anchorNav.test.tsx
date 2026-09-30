@@ -43,6 +43,7 @@ const selections: SubnavSelections = {
   syncSub: "overview",
   fileSub: "browse",
   termTab: "sessions",
+  sysTab: "monitor",
 };
 
 /** 区块根以 data-nf="sec" 自证（同壳层 data-nf="work" 惯例，实窗 CDP 也按它枚举区块） */

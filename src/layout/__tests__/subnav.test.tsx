@@ -16,6 +16,7 @@ const ST: SubnavSelections = {
   syncSub: "conflicts",
   fileSub: "connections",
   termTab: "sessions",
+  sysTab: "clean",
 };
 
 let container: HTMLDivElement;
@@ -172,6 +173,27 @@ describe("SubNav 双维度（T-B3-1）", () => {
     // 终端只有一维：filter 无落键；未注册 id 照样拒
     expect(subnavSelect("term", "filter", "sessions")).toBeUndefined();
     expect(subnavSelect("term", "view", "nope")).toBeUndefined();
+    // D-43 C6：系统管理四视图同形制（面板内 <Tabs> 撤销）——view 维度落第六枚分键 sysTab
+    expect(subnavActive("sys", "view", ST)).toBe("clean");
+    expect(subnavActive("sys", "filter", ST)).toBeUndefined();
+    expect(subnavSelect("sys", "view", "tweaks")).toEqual({ key: "sysTab", value: "tweaks" });
+    expect(subnavSelect("sys", "filter", "pkg")).toBeUndefined();
+    expect(subnavSelect("sys", "view", "nope")).toBeUndefined();
+    // 跨模块 id 不串门：sessions 不是 SysTab、monitor 不是 TermTab（否则两模块选择态重新互污）
+    expect(subnavSelect("sys", "view", "sessions")).toBeUndefined();
+    expect(subnavSelect("term", "view", "monitor")).toBeUndefined();
+  });
+
+  it("subnav_sysViews_renderOnRail_highlightFollowsSysTab", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<SubNav moduleId="sys" active={{ view: "pkg" }} onSelect={() => {}} counts={{}} />);
+    });
+    const items = SUBNAV.sys.flatMap((s) => s.items);
+    expect(items.map((i) => i.label)).toEqual(["资源监控", "系统清理", "包管理", "系统调整"]);
+    for (const item of items)
+      expect(buttonByLabel(item.label), `缺导航项 ${item.label}`).toBeInstanceOf(HTMLButtonElement);
+    expect(cls("包管理")).not.toBe(cls("资源监控"));
   });
 
   it("subnav_termViews_renderOnRail_highlightFollowsTermTab", async () => {

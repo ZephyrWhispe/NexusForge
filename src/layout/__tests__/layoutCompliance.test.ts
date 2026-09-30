@@ -29,7 +29,9 @@ type Dim = "nativeControls" | "inlineWidths" | "scrollY";
  *  全走 TIER_W/FORM_CARD_W、主体单滚动容器 scrollY 1 枚不构成违规）；
  *  C5 摘除 ForwardSection 整行（两枚原生 checkbox → Fluent Checkbox）、TerminalPanel scrollY 3→2
  *  （会话列表/SSH 表单的 maxHeight 内层视口撤除，余下第二枚是 Docker 日志输出面——
- *  面板档 08-term §7.1 的有意例外，日志随 tail 增长，无自留视口会把整页撑长）；余下欠债逐行随 C6–C8 下调。 */
+ *  面板档 08-term §7.1 的有意例外，日志随 tail 增长，无自留视口会把整页撑长）；
+ *  C6 摘除 SysPanel 整行（三枚内层视口收敛为主体单滚动＋分页页脚，scrollY 3→1 不再构成违规）。
+ *  余下欠债逐行随 C7–C8 下调。 */
 const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/automation/RulesPanel.tsx", counts: { nativeControls: 4, inlineWidths: 0, scrollY: 2 } },
   { file: "src/modules/clipboard/panels/HistorySection.tsx", counts: { nativeControls: 0, inlineWidths: 1, scrollY: 2 } },
@@ -46,13 +48,12 @@ const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/screenshot/BeautifyPopover.tsx", counts: { nativeControls: 0, inlineWidths: 4, scrollY: 0 } },
   { file: "src/modules/screenshot/ScreenshotPanel.tsx", counts: { nativeControls: 0, inlineWidths: 3, scrollY: 0 } },
   { file: "src/modules/sync/ConflictsSection.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 2 } },
-  { file: "src/modules/sys/SysPanel.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 3 } },
   { file: "src/modules/term/TerminalPanel.tsx", counts: { nativeControls: 0, inlineWidths: 0, scrollY: 2 } },
   { file: "src/settings/SchemaForm.tsx", counts: { nativeControls: 0, inlineWidths: 2, scrollY: 0 } },
 ];
 
 /**
- * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 8 枚；00 规范 1 节：面板必须有二级导航槽位，
+ * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 7 枚；00 规范 1 节：面板必须有二级导航槽位，
  * 否则一屏塞满纵向滚动＝"元素排列粗暴"的形态学根因）。until 指向各面板档，
  * 该面板批落地子导航注册后必须删掉对应条目，否则 subnav_registration_or_ledger 判红。
  */
@@ -63,7 +64,6 @@ const PENDING_SUBNAV: { id: ModuleId; until: string }[] = [
   { id: "kvm", until: "面板批·docs/panels/2026-09-19/06-kvm.md" },
   { id: "editor", until: "面板批·docs/panels/2026-09-19/11-editor.md" },
   { id: "notes", until: "面板批·docs/panels/2026-09-19/12-notes.md" },
-  { id: "sys", until: "面板批·docs/panels/2026-09-19/07-sys.md" },
   { id: "automation", until: "面板批·docs/panels/2026-09-19/13-automation.md" },
 ];
 

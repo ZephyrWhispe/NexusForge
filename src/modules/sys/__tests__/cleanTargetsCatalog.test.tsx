@@ -140,6 +140,15 @@ async function mount() {
   await act(async () => {});
 }
 
+/** D-43 C6：互斥视图上移左轨后，面板本体不再自带 Tabs。测试走左轨派发的那条腿——
+ *  setSysTab（view 选择态在 session 分键里，面板读同一键），判据强度不变。 */
+async function switchTab(id: string) {
+  await act(async () => {
+    useSession.getState().setSysTab(id);
+  });
+  await act(async () => {});
+}
+
 /** 清理页复选框：index 0 为工具栏「移入回收站」，其后按清单顺序 */
 function targetCheckbox(idx: number): HTMLInputElement {
   const boxes = container.querySelectorAll('input[type="checkbox"]');
@@ -163,6 +172,8 @@ beforeEach(() => {
   vi.mocked(winopsScan).mockResolvedValue([]);
   vi.mocked(winopsCatalog).mockResolvedValue([]);
   useSession.getState().setSysCleanSelected([]);
+  // 视图选择态是 session 持久键，用例之间会互相留下 ⇒ 每例显式复位到默认监控档
+  useSession.getState().setSysTab("monitor");
 });
 
 afterEach(() => {
@@ -180,7 +191,7 @@ afterEach(() => {
 describe("SysPanel 清理静态清单 + 目录浏览（T-B1-9）", () => {
   it("sysCleanTargets_listBeforeScan：未扫描即渲染 4 目标含 dir，扫描后仍不自动勾选", async () => {
     await mount();
-    await click(buttonByText("系统清理")!);
+    await switchTab("clean");
     expect(sysCleanTargets).toHaveBeenCalledTimes(1);
     // 三字段补全首次可见：dir / exts / optional（行内判据，互不串扰）
     expect(rowOf(targetCheckbox(0)).textContent).toContain(
@@ -220,7 +231,7 @@ describe("SysPanel 清理静态清单 + 目录浏览（T-B1-9）", () => {
       }),
     ]);
     await mount();
-    await click(buttonByText("系统调整")!);
+    await switchTab("tweaks");
     // 懒加载：未点「浏览目录」不得 invoke，且绝不借道 winops_scan
     expect(winopsCatalog).not.toHaveBeenCalled();
     await click(buttonByText("浏览目录")!);

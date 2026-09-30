@@ -167,7 +167,20 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
       ],
     },
   ],
-  sys: [],
+  // D-43 C6：系统管理四视图同为互斥档（`sysTab === "…"` 条件渲染），原面板内 `<Tabs>` 撤销、
+  // 上左轨，选择态落第六枚分键 sysTab。面板档 07-sys §2 的七档里，「启动与恢复」与「设置」
+  // 需新 Rust 命令（启动项/服务枚举、采样阈值），零新命令红线内不登记——左轨不放撒谎条目。
+  sys: [
+    {
+      group: "视图",
+      items: [
+        { id: "monitor", label: "资源监控", scope: "view" },
+        { id: "clean", label: "系统清理", scope: "view" },
+        { id: "pkg", label: "包管理", scope: "view" },
+        { id: "tweaks", label: "系统调整", scope: "view" },
+      ],
+    },
+  ],
   automation: [],
   // T-B5-8（09 §10.2）：同步五子面板入口，id 与 session store syncSubPanel 一一对应
   // （14-sync §2 五档；设置档不占子面板——它走设置中心，这里写文案指路）
@@ -192,7 +205,8 @@ export type SubnavStateKey =
   | "proxySubPanel"
   | "syncSubPanel"
   | "fileSubPanel"
-  | "termTab";
+  | "termTab"
+  | "sysTab";
 
 /** 模块 × 维度 → session 键（09 §8.1-⑩ 红线：分组筛选与子面板切换两种语义不得互污，故分键） */
 const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavStateKey>>>> = {
@@ -201,6 +215,7 @@ const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavSt
   sync: { filter: "syncSubPanel" },
   file: { view: "fileSubPanel" },
   term: { view: "termTab" },
+  sys: { view: "sysTab" },
 };
 
 /** 读选择态所需的最小会话快照（不依赖 store 类型，便于纯函数直测） */
@@ -211,6 +226,7 @@ export interface SubnavSelections {
   syncSub: string;
   fileSub: string;
   termTab: string;
+  sysTab: string;
 }
 
 /** 该模块该维度当前高亮项 id；模块未在该维度注册选择态则 undefined */
@@ -226,6 +242,7 @@ export function subnavActive(
   if (key === "syncSubPanel") return st.syncSub;
   if (key === "fileSubPanel") return st.fileSub;
   if (key === "termTab") return st.termTab;
+  if (key === "sysTab") return st.sysTab;
   return undefined;
 }
 

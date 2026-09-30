@@ -97,6 +97,17 @@ export function isTermTab(v: string): v is TermTab {
   return TERM_TAB_IDS.includes(v);
 }
 
+/** 系统管理视图 id（D-43 C6，07-sys §2）：与 SUBNAV[sys]「视图」四项一一对应。
+ *  面板档 §2 的「启动与恢复」「设置」两档需新 Rust 命令（启动项/服务枚举、采样阈值），
+ *  本批零新命令红线内不注册⇒左轨不放撒谎条目，欠债记 capabilities 的 notYet。 */
+export type SysTab = "monitor" | "clean" | "pkg" | "tweaks";
+
+const SYS_TAB_IDS: readonly string[] = ["monitor", "clean", "pkg", "tweaks"];
+
+export function isSysTab(v: string): v is SysTab {
+  return SYS_TAB_IDS.includes(v);
+}
+
 interface SessionState {
   themeMode: ThemeMode;
   activeModule: string;
@@ -116,6 +127,8 @@ interface SessionState {
   fileSubPanel: FileSubPanel;
   /** 终端视图选择态（D-43 C5）：第五枚分键，旧快照缺键回退 sessions */
   termTab: TermTab;
+  /** 系统管理视图选择态（D-43 C6）：第六枚分键，旧快照缺键回退 monitor */
+  sysTab: SysTab;
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
@@ -126,6 +139,7 @@ interface SessionState {
   setSyncSubPanel: (id: string) => void;
   setFileSubPanel: (id: string) => void;
   setTermTab: (id: string) => void;
+  setSysTab: (id: string) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -142,6 +156,7 @@ export const useSession = create<SessionState>()(
       syncSubPanel: "overview",
       fileSubPanel: "browse",
       termTab: "sessions",
+      sysTab: "monitor",
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
@@ -158,6 +173,8 @@ export const useSession = create<SessionState>()(
       setFileSubPanel: (id) => set(isFileSubPanel(id) ? { fileSubPanel: id } : {}),
       // 同上（D-43 C5）：第五枚分键——终端两视图与其余模块选择态互不覆写
       setTermTab: (id) => set(isTermTab(id) ? { termTab: id } : {}),
+      // 同上（D-43 C6）：第六枚分键——系统管理四视图与其余模块选择态互不覆写
+      setSysTab: (id) => set(isSysTab(id) ? { sysTab: id } : {}),
     }),
     {
       name: "nf-session",
@@ -171,6 +188,10 @@ export const useSession = create<SessionState>()(
         clipView: s.clipView,
         syncSubPanel: s.syncSubPanel,
         fileSubPanel: s.fileSubPanel,
+        // D-43 C6 补录：termTab 在 C5 声称入 partialize 但文件里从未落（实测＝本键缺席），
+        // 与 sysTab 一并收录——视图选择态"切走再回来不丢"的承诺只对真在快照里的键成立。
+        termTab: s.termTab,
+        sysTab: s.sysTab,
       }),
     },
   ),
