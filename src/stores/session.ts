@@ -108,6 +108,17 @@ export function isSysTab(v: string): v is SysTab {
   return SYS_TAB_IDS.includes(v);
 }
 
+/** 笔记视图 id（D-43 C7，12-notes §2）：与 SUBNAV[notes]「视图」三项一一对应。
+ *  面板内 `<Tabs>` 的 `tab === "…"` 本地态升为持久选择态——三视图互斥（未挂载视图不在
+ *  DOM 里），左轨承载目录才不撒谎；复习进度与画布文档各自有后端真相源，这里只存"在看哪一档"。 */
+export type NotesTab = "notes" | "review" | "canvas";
+
+const NOTES_TAB_IDS: readonly string[] = ["notes", "review", "canvas"];
+
+export function isNotesTab(v: string): v is NotesTab {
+  return NOTES_TAB_IDS.includes(v);
+}
+
 interface SessionState {
   themeMode: ThemeMode;
   activeModule: string;
@@ -129,6 +140,8 @@ interface SessionState {
   termTab: TermTab;
   /** 系统管理视图选择态（D-43 C6）：第六枚分键，旧快照缺键回退 monitor */
   sysTab: SysTab;
+  /** 笔记视图选择态（D-43 C7）：第七枚分键，旧快照缺键回退 notes */
+  notesTab: NotesTab;
   setThemeMode: (mode: ThemeMode) => void;
   setActiveModule: (id: string) => void;
   setClipGroup: (group: string) => void;
@@ -140,6 +153,7 @@ interface SessionState {
   setFileSubPanel: (id: string) => void;
   setTermTab: (id: string) => void;
   setSysTab: (id: string) => void;
+  setNotesTab: (id: string) => void;
 }
 
 export const useSession = create<SessionState>()(
@@ -157,6 +171,7 @@ export const useSession = create<SessionState>()(
       fileSubPanel: "browse",
       termTab: "sessions",
       sysTab: "monitor",
+      notesTab: "notes",
       setThemeMode: (themeMode) => set({ themeMode }),
       setActiveModule: (id) =>
         set(isModuleId(id) ? { activeModule: id, lastModule: id } : { activeModule: id }),
@@ -175,6 +190,8 @@ export const useSession = create<SessionState>()(
       setTermTab: (id) => set(isTermTab(id) ? { termTab: id } : {}),
       // 同上（D-43 C6）：第六枚分键——系统管理四视图与其余模块选择态互不覆写
       setSysTab: (id) => set(isSysTab(id) ? { sysTab: id } : {}),
+      // 同上（D-43 C7）：第七枚分键——笔记三视图与其余模块选择态互不覆写
+      setNotesTab: (id) => set(isNotesTab(id) ? { notesTab: id } : {}),
     }),
     {
       name: "nf-session",
@@ -192,6 +209,7 @@ export const useSession = create<SessionState>()(
         // 与 sysTab 一并收录——视图选择态"切走再回来不丢"的承诺只对真在快照里的键成立。
         termTab: s.termTab,
         sysTab: s.sysTab,
+        notesTab: s.notesTab,
       }),
     },
   ),

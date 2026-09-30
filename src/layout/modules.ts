@@ -155,7 +155,19 @@ export const SUBNAV: Record<ModuleId, SubNavSection[]> = {
   desktop: [],
   kvm: [],
   editor: [],
-  notes: [],
+  // D-43 C7：笔记三视图互斥（`notesTab === "…"` 条件渲染，未挂载视图不在 DOM 里），
+  // 原面板内 `<Tabs>`（标签自带计数，切走即丢）撤销、上左轨，选择态落第七枚分键 notesTab。
+  // 计数不再进标签文字——挪进各视图的区块标题与页脚（左轨是目录，不是状态灯）。
+  notes: [
+    {
+      group: "视图",
+      items: [
+        { id: "notes", label: "笔记库", scope: "view" },
+        { id: "review", label: "复习", scope: "view" },
+        { id: "canvas", label: "画布", scope: "view" },
+      ],
+    },
+  ],
   // D-43 C5：终端两视图是互斥档（`termTab === …` 条件渲染，未挂载视图不在 DOM 里），
   // 故走 view 形制上左轨、原面板内 `<Tabs>` 撤销；选择态落第五枚分键 termTab。
   term: [
@@ -206,7 +218,8 @@ export type SubnavStateKey =
   | "syncSubPanel"
   | "fileSubPanel"
   | "termTab"
-  | "sysTab";
+  | "sysTab"
+  | "notesTab";
 
 /** 模块 × 维度 → session 键（09 §8.1-⑩ 红线：分组筛选与子面板切换两种语义不得互污，故分键） */
 const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavStateKey>>>> = {
@@ -216,6 +229,7 @@ const SUBNAV_KEYS: Partial<Record<ModuleId, Partial<Record<SubNavScope, SubnavSt
   file: { view: "fileSubPanel" },
   term: { view: "termTab" },
   sys: { view: "sysTab" },
+  notes: { view: "notesTab" },
 };
 
 /** 读选择态所需的最小会话快照（不依赖 store 类型，便于纯函数直测） */
@@ -227,6 +241,7 @@ export interface SubnavSelections {
   fileSub: string;
   termTab: string;
   sysTab: string;
+  notesTab: string;
 }
 
 /** 该模块该维度当前高亮项 id；模块未在该维度注册选择态则 undefined */
@@ -243,6 +258,7 @@ export function subnavActive(
   if (key === "fileSubPanel") return st.fileSub;
   if (key === "termTab") return st.termTab;
   if (key === "sysTab") return st.sysTab;
+  if (key === "notesTab") return st.notesTab;
   return undefined;
 }
 

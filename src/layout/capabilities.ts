@@ -103,6 +103,7 @@ const DETAIL: Partial<Record<ModuleId, CapabilityDetail>> = {
     limits: [
       "搜索结果上限 200 条",
       "每行标签最多 3 枚",
+      "清单与卡片首屏各 100 条（页脚「显示更多」续）",
       "画布引用下拉前 50 条",
       "评分档固定 4 档",
       "搜索防抖 200 毫秒",

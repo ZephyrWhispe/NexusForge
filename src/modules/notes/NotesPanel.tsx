@@ -8,6 +8,7 @@ import {
   Input,
   Dropdown,
   Option,
+  Textarea,
 } from "@fluentui/react-components";
 import MarkdownView from "../../components/MarkdownView";
 import {
@@ -51,7 +52,10 @@ import { keyActivate } from "../../a11y";
 import { languageForPath, monaco } from "../../monaco/setup";
 import { registerWikiCompletion, setWikiTitles } from "./wikiCompletion";
 import Section from "../../components/Section";
-import Tabs from "../../components/Tabs";
+import DataToolbar from "../../components/DataToolbar";
+import ListFooter from "../../components/ListFooter";
+import { SHELL, SPACING, TIER_W } from "../../components/nfTiers";
+import { useSession } from "../../stores/session";
 import InlineError from "../../components/InlineError";
 import EmptyState from "../../components/EmptyState";
 
@@ -63,54 +67,64 @@ import EmptyState from "../../components/EmptyState";
  * - N4 复习：SM-2 简化版四档评分（忘记1/困难3/良好4/简单5），到期队列
  * - sync：外部编辑器改动增量收敛（进入面板与 notes.changed 事件触发）；
  *   「手动同步」按钮与自动 effect 共用同一在途 promise 去重（T-B1-10）
+ * - D-43 C7：三视图（笔记库／复习／画布）由面板内 `<Tabs>` 上移到左轨目录，选择态落
+ *   session 分键 notesTab；每视图恰一枚吸顶 DataToolbar，区块各有标题，
+ *   清单/卡片首屏分页＋页脚"共 n · 在场 k"，两处静默截断（标签 3 枚、引用 50 条）显影
  */
 const useStyles = makeStyles({
+  // D-43 C7：主体单滚动容器（规范 1 节）。笔记清单的 480px、大纲的 480px、预览的 380px
+  // 三枚内层视口撤除——清单改由 ListFooter「显示更多」分页，大纲与预览随主体自然展开。
+  // 编辑器（Monaco）与画布自留视口是 00 规范的在册例外（同 xterm），故 editorHost/canvasWrap 高度保留。
   root: {
+    display: "flex",
+    flexDirection: "column",
     flex: 1,
+    gap: SPACING.x16,
     minWidth: 0,
     overflowY: "auto",
-    padding: "0 20px 20px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "16px",
+    padding: `0 ${SHELL.contentPad} ${SHELL.contentPad}`,
   },
-  row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
-  grow: { flex: 1, minWidth: "160px" },
+  row: { display: "flex", alignItems: "center", gap: SPACING.x8, flexWrap: "wrap" },
+  grow: { flex: 1, minWidth: 0 },
   muted: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  split: { display: "grid", gridTemplateColumns: "280px 1fr 170px", gap: "12px", alignItems: "start" },
-  list: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "2px",
-    maxHeight: "480px",
-    overflowY: "auto",
+  // 工具条字段宽度走 TIER_W 档（规范 3 节），不写死字面量
+  searchField: { width: TIER_W.l },
+  nameField: { width: TIER_W.m },
+  cardField: { width: TIER_W.m },
+  dirField: { width: TIER_W.s },
+  // 笔记工作台三列：清单／编辑／大纲。minmax 让窄栏下编辑核仍占大头（规范 3 节列组成对拍样张 s9）
+  split: {
+    display: "grid",
+    gap: SPACING.x16,
+    gridTemplateColumns: "minmax(220px, 300px) minmax(0, 1fr) minmax(180px, 260px)",
+    alignItems: "start",
   },
+  column: { display: "flex", flexDirection: "column", gap: SPACING.x8, minWidth: 0 },
+  list: { display: "flex", flexDirection: "column", gap: SPACING.x4 },
   item: {
-    padding: "6px 8px",
+    padding: `${SPACING.x4} ${SPACING.x8}`,
     borderRadius: tokens.borderRadiusMedium,
     cursor: "pointer",
     display: "flex",
     flexDirection: "column",
-    gap: "2px",
+    gap: SPACING.x4,
   },
   itemActive: { backgroundColor: tokens.colorNeutralBackground3Hover },
+  // 标题行：题面与标签芯片同排，芯片留常驻位（规范 3 节防抖宽）
+  itemHead: { display: "flex", alignItems: "center", gap: SPACING.x4, flexWrap: "wrap" },
   outline: {
     display: "flex",
     flexDirection: "column",
-    gap: "2px",
-    maxHeight: "480px",
-    overflowY: "auto",
-    borderLeft: `1px solid ${tokens.colorNeutralStroke1}`,
-    paddingLeft: "8px",
+    gap: SPACING.x4,
     minWidth: 0,
   },
   outlineItem: {
     cursor: "pointer",
-    padding: "2px 4px",
+    padding: `${SPACING.x4} ${SPACING.x8}`,
     borderRadius: tokens.borderRadiusSmall,
-    whiteSpace: "nowrap",
-    textOverflow: "ellipsis",
     overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   editorHost: {
     height: "420px",
@@ -119,11 +133,9 @@ const useStyles = makeStyles({
     overflow: "hidden",
   },
   preview: {
-    minHeight: "380px",
-    overflowY: "auto",
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusMedium,
-    padding: "12px 16px",
+    padding: `${SPACING.x12} ${SHELL.contentPad}`,
     backgroundColor: tokens.colorNeutralBackground2,
   },
   canvasWrap: {
@@ -134,9 +146,11 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
     overflow: "hidden",
   },
+  // 空画布叠字：绝对定位落在视口左上，留白走 §2 白名单（原内联 left/top 16）
+  canvasEmpty: { position: "absolute", left: SPACING.x16, top: SPACING.x16 },
   node: {
     position: "absolute",
-    padding: "8px 10px",
+    padding: `${SPACING.x8} ${SPACING.x12}`,
     borderRadius: tokens.borderRadiusMedium,
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     backgroundColor: tokens.colorNeutralBackground1,
@@ -146,25 +160,40 @@ const useStyles = makeStyles({
   },
   nodeSelected: { border: `2px solid ${tokens.colorBrandForeground1}` },
   nodeSticky: { backgroundColor: tokens.colorPaletteMarigoldBackground1 },
+  // 节点就地改文浮层：绝对定位覆在原节点位，尺寸档由内联 left/top 跟随节点
+  nodeEditor: {
+    background: tokens.colorNeutralBackground1,
+    border: `1px solid ${tokens.colorBrandStroke1}`,
+    borderRadius: tokens.borderRadiusMedium,
+    display: "flex",
+    flexDirection: "column",
+    gap: SPACING.x8,
+    padding: SPACING.x8,
+    position: "absolute",
+    zIndex: 10,
+  },
   card: {
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusMedium,
-    padding: "12px 16px",
+    padding: `${SPACING.x12} ${SHELL.contentPad}`,
     display: "flex",
     flexDirection: "column",
-    gap: "8px",
+    gap: SPACING.x8,
     minHeight: "160px",
   },
-  gradeRow: { display: "flex", gap: "8px", flexWrap: "wrap" },
+  gradeRow: { display: "flex", gap: SPACING.x8, flexWrap: "wrap" },
 });
-
-type TabId = "notes" | "review" | "canvas";
 const GRADES: { q: number; label: string }[] = [
   { q: 1, label: "忘记" },
   { q: 3, label: "困难" },
   { q: 4, label: "良好" },
   { q: 5, label: "简单" },
 ];
+/** 清单首屏行数档（4 的倍数）：内层 480px 视口撤除后的替代形制——截断必须给出口 */
+const NOTE_PAGE = 100;
+const CARD_PAGE = 100;
+/** 画布"引用笔记"下拉的候选上限（后端 notes_list 全量在前端截断，故显影于页脚） */
+const CANVAS_REF_MAX = 50;
 
 /** 大纲条目（T-B7-22 前端纯函数产物；line 为 1 基） */
 export type NoteHeading = { level: number; text: string; line: number };
@@ -215,11 +244,15 @@ export function extractHeadings(md: string): NoteHeading[] {
 
 export default function NotesPanel() {
   const styles = useStyles();
-  const [tab, setTab] = useState<TabId>("notes");
+  // D-43 C7：视图档由左轨二级导航写入 session 分键（原面板内 `<Tabs>` 的本地 useState 撤销）
+  const tab = useSession((s) => s.notesTab);
 
   // ---- 笔记列表 ----
   const [all, setAll] = useState<NoteMetaDto[]>([]);
   const [filter, setFilter] = useState("");
+  // 首屏分页游标（内层视口撤除后，"看得见多少"由页脚显影并可续）
+  const [noteShown, setNoteShown] = useState(NOTE_PAGE);
+  const [cardShown, setCardShown] = useState(CARD_PAGE);
   // T-B7-21：搜索走后端 FTS5（null=未在搜索态）
   const [hits, setHits] = useState<NoteSearchHitDto[] | null>(null);
   // T-B7-22：标签过滤走后端精确查询（tagList=null 即未过滤）
@@ -283,6 +316,7 @@ export default function NotesPanel() {
   // T-B7-21：搜索词防抖后走后端全文索引（200ms；空串退出搜索态）
   useEffect(() => {
     const q = filter.trim();
+    setNoteShown(NOTE_PAGE); // 换查询即回首屏档（分页游标跟着数据面走，不带着旧偏移量看新结果）
     if (!q) {
       setHits(null);
       return;
@@ -306,6 +340,7 @@ export default function NotesPanel() {
   // T-B7-22：标签芯片点选=后端精确查询；再点同一芯片退出
   const toggleTag = useCallback(
     (t: string) => {
+      setNoteShown(NOTE_PAGE); // 同搜索：换数据面即回首屏档
       if (activeTag === t) {
         setActiveTag(null);
         setTagList(null);
@@ -797,7 +832,11 @@ export default function NotesPanel() {
     [all],
   );
   const baseList = tagList ?? all;
-  // T-B7-22：大纲（当前笔记正文的纯函数投影）
+  // D-43 C7：首屏分页切片（原先是 480px 内层视口里的全量 DOM——滚动条藏在列里）
+  const visibleNotes = baseList.slice(0, noteShown);
+  const cardRows = allCards.slice(0, cardShown);
+  const refCandidates = all.slice(0, CANVAS_REF_MAX);
+  // 大纲（当前笔记正文的纯函数投影）
   const headings = useMemo(() => (active ? extractHeadings(content) : []), [active, content]);
   const jumpToLine = (line: number) => {
     if (preview) {
@@ -811,151 +850,94 @@ export default function NotesPanel() {
     ed.focus();
   };
 
-  return (
-    <div className={styles.root}>
-      <div className={styles.row}>
-        <Tabs
-          ariaLabel="笔记视图"
-          value={tab}
-          onChange={setTab}
-          items={[
-            { id: "notes", label: `笔记（${all.length}）` },
-            { id: "review", label: `复习（${queue.length} 到期）` },
-            { id: "canvas", label: "画布" },
-          ]}
-        />
-        <div className={styles.grow} />
-        <Button
-          size="small"
-          onClick={() =>
-            void notesReindex()
-              .then((r) => {
-                setMsg(`索引重建：${r.total} 篇`);
-                return refreshList();
-              })
-              .catch(fail)
-          }
-        >
-          重建索引
-        </Button>
-      </div>
-
+  // 三视图共用的成败回声：随各分支下移，保证吸顶工具条是首元素（00 §1）
+  const alerts = (
+    <>
       <InlineError text={msg} tone="success" />
       <InlineError text={err} />
+    </>
+  );
 
+  const reindex = () =>
+    void notesReindex()
+      .then((r) => {
+        setMsg(`索引重建：${r.total} 篇`);
+        return refreshList();
+      })
+      .catch(fail);
+
+  return (
+    <div className={styles.root}>
       {tab === "notes" && (
-        <Section>
-          <div className={styles.row}>
-            <Input
-              className={styles.grow}
-              placeholder="搜索标题/路径/标签/正文（后端全文索引）"
-              value={filter}
-              onChange={(_, d) => setFilter(d.value)}
-            />
-            <Input
-              placeholder="新笔记名或 sub/名称.md"
-              value={newName}
-              onChange={(_, d) => setNewName(d.value)}
-            />
-            <Button appearance="primary" size="small" onClick={() => void createNote()}>
-              新建
-            </Button>
-            {active && (
+        <>
+          {/* 00 §5：左＝搜索，右＝重建索引/手动同步（批量）→ 名称输入＋新建（主按钮恒末位） */}
+          <DataToolbar
+            search={
+              <Input
+                className={styles.searchField}
+                placeholder="搜索标题/路径/标签/正文（后端全文索引）"
+                value={filter}
+                onChange={(_, d) => setFilter(d.value)}
+              />
+            }
+            bulk={
               <>
-                <Button size="small" onClick={() => void renameNote()}>
-                  重命名为输入值
+                <Button size="small" onClick={reindex}>
+                  重建索引
                 </Button>
-                <Button size="small" appearance="subtle" onClick={() => void deleteNote()}>
-                  删除
+                <Button size="small" disabled={syncBusy} onClick={() => void doManualSync()}>
+                  {syncBusy ? "同步中…" : "手动同步"}
                 </Button>
               </>
-            )}
-            <Button size="small" disabled={syncBusy} onClick={() => void doManualSync()}>
-              {syncBusy ? "同步中…" : "手动同步"}
-            </Button>
-          </div>
-          {allTags.length > 0 && (
-            <div className={styles.row} style={{ marginTop: 8 }}>
-              {allTags.map((t) => (
-                <Button
-                  key={t}
-                  size="small"
-                  appearance={activeTag === t ? "primary" : "subtle"}
-                  aria-pressed={activeTag === t}
-                  onClick={() => toggleTag(t)}
-                >
-                  #{t}
+            }
+            primary={
+              <>
+                <Input
+                  className={styles.nameField}
+                  placeholder="新笔记名或 sub/名称.md"
+                  value={newName}
+                  onChange={(_, d) => setNewName(d.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void createNote();
+                  }}
+                />
+                <Button appearance="primary" size="small" onClick={() => void createNote()}>
+                  新建
                 </Button>
-              ))}
-              {activeTag && (
-                <Text size={100} className={styles.muted}>
-                  标签「{activeTag}」{tagList ? `：${tagList.length} 篇（后端精确查询）` : "：查询中…"}
-                </Text>
-              )}
-            </div>
-          )}
+              </>
+            }
+          />
+          {alerts}
+
           <div className={styles.split}>
-            <div className={styles.list}>
-              {!searching &&
-                baseList.map((n) => (
-                  <div
-                    key={n.path}
-                    className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
-                    onClick={() => void openNote(n.path)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={keyActivate(() => void openNote(n.path))}
-                  >
-                    <Text size={300} weight="semibold">
-                      {n.title}
-                      {n.tags.slice(0, 3).map((t) => (
-                        <Badge key={t} size="small" appearance="outline" style={{ marginLeft: 6 }}>
-                          {t}
-                        </Badge>
-                      ))}
-                    </Text>
-                    <Text size={100} className={styles.muted}>
-                      {n.path} · {new Date(n.mtime_ms).toLocaleString()}
-                    </Text>
-                  </div>
-                ))}
-              {searching &&
-                groups.map(({ g, rows }) =>
-                  rows.length === 0 ? null : (
-                    <div key={g}>
-                      <Text size={100} className={styles.muted}>
-                        {g}命中（{rows.length}）
-                      </Text>
-                      {rows.map((h) => (
-                        <div
-                          key={h.path}
-                          className={`${styles.item} ${active === h.path ? styles.itemActive : ""}`}
-                          onClick={() => void openNote(h.path)}
-                          role="button"
-                          tabIndex={0}
-                          onKeyDown={keyActivate(() => void openNote(h.path))}
-                          // D-42：rank 是 FTS5 bm25 原值（notes-core/index.rs:403 按它升序排），
-                          // 组内次序就是它的显影；把负小数本体铺在行上只是伪精度，说清来路即可
-                          title={`FTS5 相关度 ${h.rank.toFixed(3)}（同组内按此序排列，越小越靠前）`}
-                        >
-                          <Text size={300} weight="semibold">
-                            {h.title || h.path}
-                          </Text>
-                          <Text size={100} className={styles.muted}>
-                            {h.path}
-                            {g === "正文" ? ` · ${h.snippet}` : ""}
-                          </Text>
-                        </div>
-                      ))}
-                    </div>
-                  ),
-                )}
-              {searching && tagExtra.length > 0 && (
-                <div>
-                  <Text size={100} className={styles.muted}>
-                    标签命中（{tagExtra.length}）
+            <Section title={`笔记清单（${searching ? hitList.length + tagExtra.length : baseList.length}）`}>
+              {allTags.length > 0 && (
+                <div className={styles.row}>
+                  <Text size={200} className={styles.muted}>
+                    标签筛选
                   </Text>
-                  {tagExtra.map((n) => (
+                  {allTags.map((t) => (
+                    <Button
+                      key={t}
+                      size="small"
+                      appearance={activeTag === t ? "primary" : "subtle"}
+                      aria-pressed={activeTag === t}
+                      onClick={() => toggleTag(t)}
+                    >
+                      #{t}
+                    </Button>
+                  ))}
+                  {activeTag && (
+                    <Text size={200} className={styles.muted}>
+                      标签「{activeTag}」{tagList ? `：${tagList.length} 篇（后端精确查询）` : "：查询中…"}
+                    </Text>
+                  )}
+                </div>
+              )}
+
+              <div className={styles.list}>
+                {!searching &&
+                  visibleNotes.map((n) => (
                     <div
                       key={n.path}
                       className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
@@ -964,47 +946,153 @@ export default function NotesPanel() {
                       tabIndex={0}
                       onKeyDown={keyActivate(() => void openNote(n.path))}
                     >
-                      <Text size={300} weight="semibold">
-                        {n.title}
-                      </Text>
-                      <Text size={100} className={styles.muted}>
-                        {n.path}
+                      <div className={styles.itemHead}>
+                        <Text size={300} weight="semibold">
+                          {n.title}
+                        </Text>
+                        {n.tags.slice(0, 3).map((t) => (
+                          <Badge key={t} size="tiny" appearance="outline">
+                            {t}
+                          </Badge>
+                        ))}
+                        {/* 行内标签只显示前 3 枚：原先是静默截断，现把余下的枚数与名单挂在角标上 */}
+                        {n.tags.length > 3 && (
+                          <Badge
+                            size="tiny"
+                            appearance="outline"
+                            title={`另有 ${n.tags.length - 3} 枚标签：${n.tags.slice(3).join("、")}`}
+                          >
+                            +{n.tags.length - 3}
+                          </Badge>
+                        )}
+                      </div>
+                      <Text size={200} className={styles.muted}>
+                        {n.path} · {new Date(n.mtime_ms).toLocaleString()}
                       </Text>
                     </div>
                   ))}
-                </div>
-              )}
-              {(loading ||
-                (!searching && baseList.length === 0) ||
-                (searching && hitList.length === 0 && tagExtra.length === 0)) && (
-                <EmptyState
-                  text={
-                    searching
-                      ? "无匹配：搜索已走后端全文索引（标题/路径/正文/标签）"
-                      : activeTag
-                        ? `标签「${activeTag}」下暂无笔记`
-                        : "暂无笔记：在上方输入名称新建，或点「重建索引」扫描磁盘 .md"
-                  }
-                  loading={loading}
-                />
-              )}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
-              {active ? (
-                <>
-                  <div className={styles.row}>
-                    <Text size={300} weight="semibold">
-                      {active}
+                {searching &&
+                  groups.map(({ g, rows }) =>
+                    rows.length === 0 ? null : (
+                      <div key={g}>
+                        <Text size={200} className={styles.muted}>
+                          {g}命中（{rows.length}）
+                        </Text>
+                        {rows.map((h) => (
+                          <div
+                            key={h.path}
+                            className={`${styles.item} ${active === h.path ? styles.itemActive : ""}`}
+                            onClick={() => void openNote(h.path)}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={keyActivate(() => void openNote(h.path))}
+                            // D-42：rank 是 FTS5 bm25 原值（notes-core/index.rs:403 按它升序排），
+                            // 组内次序就是它的显影；把负小数本体铺在行上只是伪精度，说清来路即可
+                            title={`FTS5 相关度 ${h.rank.toFixed(3)}（同组内按此序排列，越小越靠前）`}
+                          >
+                            <Text size={300} weight="semibold">
+                              {h.title || h.path}
+                            </Text>
+                            <Text size={200} className={styles.muted}>
+                              {h.path}
+                              {g === "正文" ? ` · ${h.snippet}` : ""}
+                            </Text>
+                          </div>
+                        ))}
+                      </div>
+                    ),
+                  )}
+                {searching && tagExtra.length > 0 && (
+                  <div>
+                    <Text size={200} className={styles.muted}>
+                      标签命中（{tagExtra.length}）
                     </Text>
+                    {tagExtra.map((n) => (
+                      <div
+                        key={n.path}
+                        className={`${styles.item} ${active === n.path ? styles.itemActive : ""}`}
+                        onClick={() => void openNote(n.path)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={keyActivate(() => void openNote(n.path))}
+                      >
+                        <Text size={300} weight="semibold">
+                          {n.title}
+                        </Text>
+                        <Text size={200} className={styles.muted}>
+                          {n.path}
+                        </Text>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {(loading ||
+                  (!searching && baseList.length === 0) ||
+                  (searching && hitList.length === 0 && tagExtra.length === 0)) && (
+                  <EmptyState
+                    text={
+                      searching
+                        ? "无匹配：搜索已走后端全文索引（标题/路径/正文/标签）"
+                        : activeTag
+                          ? `标签「${activeTag}」下暂无笔记`
+                          : "暂无笔记：在上方输入名称新建，或点「重建索引」扫描磁盘 .md"
+                    }
+                    loading={loading}
+                  />
+                )}
+              </div>
+
+              <ListFooter
+                left={
+                  searching ? (
+                    `命中 ${hitList.length} 条 · 标签补搜 ${tagExtra.length} 条（后端全文索引上限 200 条）`
+                  ) : (
+                    <>
+                      共 {baseList.length} 篇 · 在场 {visibleNotes.length} 篇
+                      {baseList.length > visibleNotes.length && (
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          onClick={() => setNoteShown((n) => n + NOTE_PAGE)}
+                        >
+                          显示更多
+                        </Button>
+                      )}
+                    </>
+                  )
+                }
+                right={
+                  activeTag
+                    ? "标签过滤走后端精确查询，再点同一芯片退出"
+                    : "磁盘 .md 为真相源 · 保存后索引即时更新"
+                }
+              />
+            </Section>
+
+            <Section
+              title={active ? `当前笔记：${active}` : "当前笔记"}
+              actions={
+                active && (
+                  <>
                     {dirty && <Badge appearance="filled" color="warning">未保存</Badge>}
-                    <div className={styles.grow} />
+                    <Button size="small" onClick={() => void renameNote()}>
+                      重命名为输入值
+                    </Button>
+                    <Button size="small" appearance="subtle" onClick={() => void deleteNote()}>
+                      删除
+                    </Button>
                     <Button size="small" onClick={() => setPreview((p) => !p)}>
                       {preview ? "编辑" : "预览"}
                     </Button>
                     <Button size="small" appearance="primary" onClick={() => void saveNote()}>
                       保存（Ctrl+S）
                     </Button>
-                  </div>
+                  </>
+                )
+              }
+            >
+              {active ? (
+                <>
                   {preview && <MarkdownView source={content} className={styles.preview} />}
                   {/* 编辑器常驻不卸载（预览仅隐藏）——重建会丢撤销栈且违 B1 建一次纪律 */}
                   <div
@@ -1012,6 +1100,7 @@ export default function NotesPanel() {
                     className={styles.editorHost}
                     style={preview ? { display: "none" } : undefined}
                   />
+                  {/* 双链两行：计数进标题位，芯片仍可点跳转（未解析目标标注在芯片上） */}
                   <div className={styles.row}>
                     <Text size={200} weight="semibold">
                       出链：{links.length}
@@ -1046,301 +1135,381 @@ export default function NotesPanel() {
                   </div>
                 </>
               ) : (
-                <Text className={styles.muted}>选择左侧笔记，或新建一篇（[[双链]] 语法可在任意笔记中引用其他笔记）</Text>
-              )}
-            </div>
-            <div className={styles.outline}>
-              <Text size={200} weight="semibold">
-                大纲
-              </Text>
-              {headings.map((h) => (
-                <div
-                  key={`${h.line}-${h.text}`}
-                  role="button"
-                  tabIndex={0}
-                  className={styles.outlineItem}
-                  style={{ paddingLeft: 8 + (h.level - 1) * 10 }}
-                  title={h.text}
-                  onClick={() => jumpToLine(h.line)}
-                  onKeyDown={keyActivate(() => jumpToLine(h.line))}
-                >
-                  <Text size={200}>
-                    {h.text}
-                  </Text>
-                </div>
-              ))}
-              {active && headings.length === 0 && (
-                <Text size={100} className={styles.muted}>
-                  无标题
+                <Text className={styles.muted}>
+                  选择左侧笔记，或新建一篇（[[双链]] 语法可在任意笔记中引用其他笔记）
                 </Text>
               )}
-            </div>
+            </Section>
+
+            <Section title={`大纲（${headings.length}）`}>
+              <div className={styles.outline}>
+                {headings.map((h) => (
+                  <div
+                    key={`${h.line}-${h.text}`}
+                    role="button"
+                    tabIndex={0}
+                    className={styles.outlineItem}
+                    style={{ paddingLeft: 8 + (h.level - 1) * 8 }}
+                    title={h.text}
+                    onClick={() => jumpToLine(h.line)}
+                    onKeyDown={keyActivate(() => jumpToLine(h.line))}
+                  >
+                    <Text size={200}>{h.text}</Text>
+                  </div>
+                ))}
+                {active && headings.length === 0 && (
+                  <Text size={200} className={styles.muted}>
+                    无标题
+                  </Text>
+                )}
+                {!active && (
+                  <Text size={200} className={styles.muted}>
+                    未选笔记
+                  </Text>
+                )}
+              </div>
+            </Section>
           </div>
-        </Section>
+        </>
       )}
 
       {tab === "review" && (
-        <Section>
-          <div className={styles.row}>
-            <Input className={styles.grow} placeholder="卡片正面" value={cardFront} onChange={(_, d) => setCardFront(d.value)} />
-            <Input className={styles.grow} placeholder="卡片背面（可空）" value={cardBack} onChange={(_, d) => setCardBack(d.value)} />
-            <Button appearance="primary" size="small" onClick={() => void addCard()}>
-              新建卡片{active ? `（关联 ${active}）` : ""}
-            </Button>
-          </div>
-          {stats && (
-            <div className={styles.row} data-stats-card>
-              <Text size={200} weight="semibold">
-                总 {stats.total} 张 · 今日到期 {stats.due_today} · 连续 {stats.streak_days} 天
-              </Text>
-              <Badge appearance="outline">新卡 {stats.by_bucket[0]}</Badge>
-              <Badge appearance="outline">年幼 {stats.by_bucket[1]}</Badge>
-              <Badge appearance="outline">中年 {stats.by_bucket[2]}</Badge>
-              <Badge appearance="outline">成熟 {stats.by_bucket[3]}</Badge>
-            </div>
-          )}
-          {queue.length > 0 ? (
-            <div className={styles.card}>
-              <Text size={400} weight="semibold">
-                {queue[0].front}
-              </Text>
-              {revealed ? (
-                <>
-                  <Text size={300}>{queue[0].back || "（无背面内容）"}</Text>
-                  <div className={styles.gradeRow}>
-                    {GRADES.map((g) => (
-                      <Button key={g.q} size="small" onClick={() => void grade(g.q)}>
-                        {g.label}
-                      </Button>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <Button size="small" onClick={() => setRevealed(true)}>
-                  显示答案
+        <>
+          {/* 00 §5：右＝刷新队列（批量）→ 正面/背面输入＋新建卡片（主按钮恒末位） */}
+          <DataToolbar
+            bulk={
+              <Button size="small" onClick={() => void refreshReview()}>
+                刷新队列
+              </Button>
+            }
+            primary={
+              <>
+                <Input
+                  className={styles.cardField}
+                  placeholder="卡片正面"
+                  value={cardFront}
+                  onChange={(_, d) => setCardFront(d.value)}
+                />
+                <Input
+                  className={styles.cardField}
+                  placeholder="卡片背面（可空）"
+                  value={cardBack}
+                  onChange={(_, d) => setCardBack(d.value)}
+                />
+                <Button appearance="primary" size="small" onClick={() => void addCard()}>
+                  新建卡片{active ? `（关联 ${active}）` : ""}
                 </Button>
-              )}
-              <Text className={styles.muted}>
-                队列 {queue.length} 张 · SM-2 间隔重复（忘记→1 天后重来）
-              </Text>
-            </div>
-          ) : (
-            <Text className={styles.muted}>今天没有到期卡片</Text>
-          )}
-          <div className={styles.row}>
-            <Text size={200} weight="semibold">
-              全部卡片（{allCards.length}）
-            </Text>
-          </div>
-          <div className={styles.list}>
-            {allCards.map((c) => (
-              <div key={c.id} className={`${styles.item} ${styles.row}`}>
-                <Text size={200}>{c.front}</Text>
-                <Text size={100} className={styles.muted}>
-                  {/* D-42：reps 与 ef/interval 同一条 SM-2 记录（notes-core/review.rs：q<3 归零），
-                      此前只显后两者——"这张卡答对过几回"正是间隔为何这么长的原因 */}
-                  间隔 {c.interval_days} 天 · EF {c.ef.toFixed(2)} · 已答对 {c.reps} 次 ·{" "}
-                  {c.due_ms <= Date.now() ? "已到期" : new Date(c.due_ms).toLocaleDateString()}
+              </>
+            }
+          />
+          {alerts}
+
+          <Section title="复习统计">
+            {stats && (
+              <div className={styles.row} data-stats-card>
+                <Text size={200} weight="semibold">
+                  总 {stats.total} 张 · 今日到期 {stats.due_today} · 连续 {stats.streak_days} 天
                 </Text>
-                <div className={styles.grow} />
-                <Button size="small" appearance="subtle" onClick={() => void deleteCard(c)}>
-                  删除
-                </Button>
+                <Badge appearance="outline">新卡 {stats.by_bucket[0]}</Badge>
+                <Badge appearance="outline">年幼 {stats.by_bucket[1]}</Badge>
+                <Badge appearance="outline">中年 {stats.by_bucket[2]}</Badge>
+                <Badge appearance="outline">成熟 {stats.by_bucket[3]}</Badge>
               </div>
-            ))}
-          </div>
-        </Section>
+            )}
+            {!stats && (
+              <Text className={styles.muted}>
+                统计读腿未取得（notes_review_stats 失败不连坐下方队列与卡片库）
+              </Text>
+            )}
+          </Section>
+
+          <Section title={`今日队列（${queue.length} 到期）`}>
+            {queue.length > 0 ? (
+              <div className={styles.card}>
+                <Text size={400} weight="semibold">
+                  {queue[0].front}
+                </Text>
+                {revealed ? (
+                  <>
+                    <Text size={300}>{queue[0].back || "（无背面内容）"}</Text>
+                    <div className={styles.gradeRow}>
+                      {GRADES.map((g) => (
+                        <Button key={g.q} size="small" onClick={() => void grade(g.q)}>
+                          {g.label}
+                        </Button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <Button size="small" onClick={() => setRevealed(true)}>
+                    显示答案
+                  </Button>
+                )}
+                <Text className={styles.muted}>
+                  队列 {queue.length} 张 · SM-2 间隔重复（忘记→1 天后重来）
+                </Text>
+              </div>
+            ) : (
+              <EmptyState
+                text="今天没有到期卡片"
+                hint="到期由 SM-2 间隔决定；新加的卡片在下一拍进队"
+              />
+            )}
+          </Section>
+
+          <Section title={`全部卡片（${allCards.length}）`}>
+            <div className={styles.list}>
+              {cardRows.map((c) => (
+                <div key={c.id} className={`${styles.item} ${styles.row}`}>
+                  <Text size={200}>{c.front}</Text>
+                  <Text size={200} className={styles.muted}>
+                    {/* D-42：reps 与 ef/interval 同一条 SM-2 记录（notes-core/review.rs：q<3 归零），
+                        此前只显后两者——"这张卡答对过几回"正是间隔为何这么长的原因 */}
+                    间隔 {c.interval_days} 天 · EF {c.ef.toFixed(2)} · 已答对 {c.reps} 次 ·{" "}
+                    {c.due_ms <= Date.now() ? "已到期" : new Date(c.due_ms).toLocaleDateString()}
+                  </Text>
+                  <div className={styles.grow} />
+                  <Button size="small" appearance="subtle" onClick={() => void deleteCard(c)}>
+                    删除
+                  </Button>
+                </div>
+              ))}
+              {allCards.length === 0 && (
+                <EmptyState
+                  text="卡片库为空"
+                  hint="在上方输入正反面新建，或从当前笔记出题"
+                />
+              )}
+            </div>
+            <ListFooter
+              left={
+                <>
+                  共 {allCards.length} 张 · 在场 {cardRows.length} 张
+                  {allCards.length > cardRows.length && (
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      onClick={() => setCardShown((n) => n + CARD_PAGE)}
+                    >
+                      显示更多
+                    </Button>
+                  )}
+                </>
+              }
+              right="评分四档（忘记/困难/良好/简单）· q<3 时连续与间隔归零"
+            />
+          </Section>
+        </>
       )}
 
       {tab === "canvas" && (
-        <Section>
-          <div className={styles.row}>
-            <Dropdown
-              className={styles.grow}
-              value={canvasDir === "" ? "（库根）" : canvasDir}
-              selectedOptions={[canvasDir]}
-              onOptionSelect={(_, d) => void loadCanvas(String(d.optionValue ?? ""))}
-            >
-              {dirs.map((d) => (
-                <Option key={d} value={d} text={d === "" ? "（库根）" : d}>
-                  {d === "" ? "（库根）" : d}
-                </Option>
-              ))}
-            </Dropdown>
-            <Button size="small" onClick={addSticky}>
-              添加便签
-            </Button>
-            <Dropdown
-              placeholder="引用笔记…"
-              value={refPath ?? "引用笔记…"}
-              selectedOptions={refPath ? [refPath] : []}
-              onOptionSelect={(_, d) => setRefPath(String(d.optionValue ?? ""))}
-            >
-              {all.slice(0, 50).map((n) => (
-                <Option key={n.path} value={n.path} text={n.path}>
-                  {n.path}
-                </Option>
-              ))}
-            </Dropdown>
-            <Button size="small" onClick={addRef}>
-              添加引用
-            </Button>
-            <Button
-              size="small"
-              onClick={() => {
-                linkMode.current = selNode;
-                setMsg(selNode ? "连线模式：点击目标节点" : "先选中起点节点再连线");
+        <>
+          {/* 00 §5：左＝目录选择（过滤哪份画布），右＝节点动作（批量）→ 保存画布（主按钮恒末位） */}
+          <DataToolbar
+            filters={
+              <Dropdown
+                className={styles.dirField}
+                value={canvasDir === "" ? "（库根）" : canvasDir}
+                selectedOptions={[canvasDir]}
+                onOptionSelect={(_, d) => void loadCanvas(String(d.optionValue ?? ""))}
+              >
+                {dirs.map((d) => (
+                  <Option key={d} value={d} text={d === "" ? "（库根）" : d}>
+                    {d === "" ? "（库根）" : d}
+                  </Option>
+                ))}
+              </Dropdown>
+            }
+            bulk={
+              <>
+                <Button size="small" onClick={addSticky}>
+                  添加便签
+                </Button>
+                <Dropdown
+                  className={styles.dirField}
+                  placeholder="引用笔记…"
+                  value={refPath ?? "引用笔记…"}
+                  selectedOptions={refPath ? [refPath] : []}
+                  onOptionSelect={(_, d) => setRefPath(String(d.optionValue ?? ""))}
+                >
+                  {refCandidates.map((n) => (
+                    <Option key={n.path} value={n.path} text={n.path}>
+                      {n.path}
+                    </Option>
+                  ))}
+                </Dropdown>
+                <Button size="small" onClick={addRef}>
+                  添加引用
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => {
+                    linkMode.current = selNode;
+                    setMsg(selNode ? "连线模式：点击目标节点" : "先选中起点节点再连线");
+                  }}
+                >
+                  从选中节点连线
+                </Button>
+              </>
+            }
+            primary={
+              <Button size="small" appearance="primary" onClick={() => void saveCanvas(doc)}>
+                保存画布
+              </Button>
+            }
+          />
+          {alerts}
+
+          <Section
+            title={`画布（${doc.nodes.length} 节点 / ${doc.edges.length} 连线）`}
+            actions={
+              <>
+                <Button size="small" appearance="subtle" onClick={() => void removeSelected()}>
+                  删除选中
+                </Button>
+                <Button
+                  size="small"
+                  appearance="subtle"
+                  disabled={!selEdge}
+                  onClick={removeSelectedEdge}
+                >
+                  仅删选中边
+                </Button>
+              </>
+            }
+          >
+            {/* 画布=自定义交互面（application 语义）：Delete 键删边是任务书字面承诺，
+                jsx-a11y 不认自定义角色交互（同 Tabs.tsx 字面 ARIA 纪律处例外登记） */}
+            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+            <div
+              ref={wrapRef}
+              className={styles.canvasWrap}
+              role="application"
+              aria-label="画布：点选边后 Delete 或右键删除，双击节点改文"
+              // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Delete" && selEdge) removeSelectedEdge();
+              }}
+              onPointerMove={onWrapPointerMove}
+              onPointerUp={onWrapPointerUp}
+              onPointerDown={() => {
+                setSelNode(null);
+                setSelEdge(null);
               }}
             >
-              从选中节点连线
-            </Button>
-            <Button size="small" appearance="subtle" onClick={() => void removeSelected()}>
-              删除选中
-            </Button>
-            <Button
-              size="small"
-              appearance="subtle"
-              disabled={!selEdge}
-              onClick={removeSelectedEdge}
-            >
-              仅删选中边
-            </Button>
-            <Button size="small" appearance="primary" onClick={() => void saveCanvas(doc)}>
-              保存画布
-            </Button>
-          </div>
-          {/* 画布=自定义交互面（application 语义）：Delete 键删边是任务书字面承诺，
-              jsx-a11y 不认自定义角色交互（同 Tabs.tsx 字面 ARIA 纪律处例外登记） */}
-          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
-          <div
-            ref={wrapRef}
-            className={styles.canvasWrap}
-            role="application"
-            aria-label="画布：点选边后 Delete 或右键删除，双击节点改文"
-            // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === "Delete" && selEdge) removeSelectedEdge();
-            }}
-            onPointerMove={onWrapPointerMove}
-            onPointerUp={onWrapPointerUp}
-            onPointerDown={() => {
-              setSelNode(null);
-              setSelEdge(null);
-            }}
-          >
-            <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-              {doc.edges.map((e) => {
-                const a = doc.nodes.find((n) => n.id === e.from);
-                const b = doc.nodes.find((n) => n.id === e.to);
-                if (!a || !b) return null;
-                const selected = selEdge === e.id;
-                const common = {
-                  x1: a.x + a.w / 2,
-                  y1: a.y + a.h / 2,
-                  x2: b.x + b.w / 2,
-                  y2: b.y + b.h / 2,
-                };
-                return (
-                  <g key={e.id}>
-                    <line
-                      {...common}
-                      stroke={selected ? tokens.colorPaletteYellowForeground1 : tokens.colorBrandForeground1}
-                      strokeWidth={selected ? 3 : 1.5}
-                      markerEnd=""
-                    />
-                    {/* 透明加宽命中腿：细线不可点的问题结构性收口（命中区纪律同 00-spec） */}
-                    <line
-                      {...common}
-                      stroke="transparent"
-                      strokeWidth={14}
-                      style={{ pointerEvents: "stroke", cursor: "pointer" }}
-                      onPointerDown={(ev) => {
-                        ev.stopPropagation();
-                        setSelEdge(e.id);
-                      }}
-                      onContextMenu={(ev) => {
-                        // 右键删边：立即仅删此边（节点原样）
-                        ev.preventDefault();
-                        void saveCanvas(deleteEdge(doc, e.id));
-                        setSelEdge(null);
-                      }}
-                    />
-                  </g>
-                );
-              })}
-            </svg>
-            {doc.nodes.map((n) => (
-              <div
-                key={n.id}
-                className={`${styles.node} ${selNode === n.id ? styles.nodeSelected : ""} ${n.kind === "sticky" ? styles.nodeSticky : ""}`}
-                style={{ left: n.x, top: n.y, width: n.w, height: n.h }}
-                onPointerDown={(e) => onNodePointerDown(e, n)}
-                onDoubleClick={() => {
-                  setEditingNode(n.id);
-                  setEditDraft(n.text ?? "");
-                }}
-              >
-                {n.kind === "note" ? (
-                  <Text size={200} weight="semibold">
-                    📄 {n.ref}
-                  </Text>
-                ) : n.kind === "image" ? (
-                  <img
-                    src={canvasImgSrc(n.src ?? "", convertFileSrc)}
-                    alt={n.label ?? "画布图片"}
-                    draggable={false}
-                    style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                  />
-                ) : (
-                  <Text size={200}>{n.text}</Text>
-                )}
-              </div>
-            ))}
-            {editingNode &&
-              (() => {
-                const n = doc.nodes.find((x) => x.id === editingNode);
-                if (!n) return null;
-                return (
-                  <div
-                    style={{
-                      position: "absolute",
-                      left: n.x,
-                      top: n.y,
-                      width: Math.max(n.w, 240),
-                      zIndex: 10,
-                      background: tokens.colorNeutralBackground1,
-                      border: `1px solid ${tokens.colorBrandStroke1}`,
-                      padding: 6,
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 6,
-                    }}
-                  >
-                    <textarea
-                      data-node-text-editor
-                      rows={4}
-                      value={editDraft}
-                      onChange={(e) => setEditDraft(e.target.value)}
-                    />
-                    <div className={styles.row}>
-                      <Button size="small" appearance="primary" onClick={commitTextEdit}>
-                        保存文本
-                      </Button>
-                      <Button size="small" onClick={() => setEditingNode(null)}>
-                        取消
-                      </Button>
+              <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+                {doc.edges.map((e) => {
+                  const a = doc.nodes.find((n) => n.id === e.from);
+                  const b = doc.nodes.find((n) => n.id === e.to);
+                  if (!a || !b) return null;
+                  const selected = selEdge === e.id;
+                  const common = {
+                    x1: a.x + a.w / 2,
+                    y1: a.y + a.h / 2,
+                    x2: b.x + b.w / 2,
+                    y2: b.y + b.h / 2,
+                  };
+                  return (
+                    <g key={e.id}>
+                      <line
+                        {...common}
+                        stroke={selected ? tokens.colorPaletteYellowForeground1 : tokens.colorBrandForeground1}
+                        strokeWidth={selected ? 3 : 1.5}
+                        markerEnd=""
+                      />
+                      {/* 透明加宽命中腿：细线不可点的问题结构性收口（命中区纪律同 00-spec） */}
+                      <line
+                        {...common}
+                        stroke="transparent"
+                        strokeWidth={14}
+                        style={{ pointerEvents: "stroke", cursor: "pointer" }}
+                        onPointerDown={(ev) => {
+                          ev.stopPropagation();
+                          setSelEdge(e.id);
+                        }}
+                        onContextMenu={(ev) => {
+                          // 右键删边：立即仅删此边（节点原样）
+                          ev.preventDefault();
+                          void saveCanvas(deleteEdge(doc, e.id));
+                          setSelEdge(null);
+                        }}
+                      />
+                    </g>
+                  );
+                })}
+              </svg>
+              {doc.nodes.map((n) => (
+                <div
+                  key={n.id}
+                  className={`${styles.node} ${selNode === n.id ? styles.nodeSelected : ""} ${n.kind === "sticky" ? styles.nodeSticky : ""}`}
+                  style={{ left: n.x, top: n.y, width: n.w, height: n.h }}
+                  onPointerDown={(e) => onNodePointerDown(e, n)}
+                  onDoubleClick={() => {
+                    setEditingNode(n.id);
+                    setEditDraft(n.text ?? "");
+                  }}
+                >
+                  {n.kind === "note" ? (
+                    <div className={styles.itemHead}>
+                      {/* 引用节点与便签节点的唯一区别标记（便签另有芥黄底），原为 📄 一枚 */}
+                      <Badge size="tiny" appearance="outline">
+                        笔记
+                      </Badge>
+                      <Text size={200} weight="semibold">
+                        {n.ref}
+                      </Text>
                     </div>
-                  </div>
-                );
-              })()}
-            {doc.nodes.length === 0 && (
-              <Text className={styles.muted} style={{ position: "absolute", left: 16, top: 16 }}>
-                空画布——添加便签或笔记引用节点，拖动布局，保存为目录内 .nforge-canvas.json
-              </Text>
-            )}
-          </div>
-        </Section>
+                  ) : n.kind === "image" ? (
+                    <img
+                      src={canvasImgSrc(n.src ?? "", convertFileSrc)}
+                      alt={n.label ?? "画布图片"}
+                      draggable={false}
+                      style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                    />
+                  ) : (
+                    <Text size={200}>{n.text}</Text>
+                  )}
+                </div>
+              ))}
+              {editingNode &&
+                (() => {
+                  const n = doc.nodes.find((x) => x.id === editingNode);
+                  if (!n) return null;
+                  return (
+                    <div
+                      className={styles.nodeEditor}
+                      style={{ left: n.x, top: n.y, width: Math.max(n.w, 240) }}
+                    >
+                      <Textarea
+                        data-node-text-editor
+                        rows={4}
+                        value={editDraft}
+                        onChange={(_, d) => setEditDraft(d.value)}
+                      />
+                      <div className={styles.row}>
+                        <Button size="small" appearance="primary" onClick={commitTextEdit}>
+                          保存文本
+                        </Button>
+                        <Button size="small" onClick={() => setEditingNode(null)}>
+                          取消
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              {doc.nodes.length === 0 && (
+                <Text className={`${styles.muted} ${styles.canvasEmpty}`}>
+                  空画布——添加便签或笔记引用节点，拖动布局，保存为目录内 .nforge-canvas.json
+                </Text>
+              )}
+            </div>
+            <ListFooter
+              left={`当前画布 ${canvasDir === "" ? "（库根）" : canvasDir} · 引用候选前 ${refCandidates.length} / ${all.length} 篇`}
+              right="双击节点改文 · 点边后 Delete 或右键只删该边 · 拖动即时写盘"
+            />
+          </Section>
+        </>
       )}
     </div>
   );

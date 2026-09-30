@@ -117,6 +117,9 @@ export default function MainWorkbench() {
   // D-43 C6：系统管理四视图同理落第六枚分键 sysTab（理由同上）
   const sysTab = useSession((s) => s.sysTab);
   const setSysTab = useSession((s) => s.setSysTab);
+  // D-43 C7：笔记三视图同理落第七枚分键 notesTab（理由同上）
+  const notesTab = useSession((s) => s.notesTab);
+  const setNotesTab = useSession((s) => s.setNotesTab);
   const search = useSession((s) => s.clipSearch);
   const setSearch = useSession((s) => s.setClipSearch);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -192,7 +195,7 @@ export default function MainWorkbench() {
   const contentRef = useRef<HTMLElement>(null);
   // T-B3-1：选择态读写一律经 modules.ts 路由表（模块 × 维度 → session 键），
   // 取代原先按模块硬分叉的选择态三元
-  const subnavSelections = { clipView, clipGroup: group, proxySub, syncSub, fileSub, termTab, sysTab };
+  const subnavSelections = { clipView, clipGroup: group, proxySub, syncSub, fileSub, termTab, sysTab, notesTab };
   const subnavSetters: Record<SubnavStateKey, (id: string) => void> = {
     clipView: setClipView,
     clipGroup: setGroup,
@@ -201,6 +204,7 @@ export default function MainWorkbench() {
     fileSubPanel: setFileSub,
     termTab: setTermTab,
     sysTab: setSysTab,
+    notesTab: setNotesTab,
   };
   const selectSubnav = (scope: SubNavScope, id: string) => {
     // D-43 锚点形制：选择不落 session（滚动位置不配持久化），只把同屏区块滚进视界。

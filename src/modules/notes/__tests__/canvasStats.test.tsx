@@ -19,9 +19,13 @@ import {
   type NoteMetaDto,
 } from "../../../ipc/client";
 import { canvasImgSrc, deleteEdge, setNodeText } from "../canvasEdit";
+import { useSession } from "../../../stores/session";
 
 // D-29 B7/T-B7-24：画布节点双击就地改文（存回 CanvasNode.text，写盘走既有 notesCanvasSave）
 // + 单边选中删除（节点原样保留）+ 复习统计卡（notes_review_stats 四面之消费面）。
+// D-43 C7 改锚：三视图由面板内 `<Tabs>` 上移左轨（session 分键 notesTab），故本文件的"切视图"
+// 一律改走 store 派发——只换锚点位置；到期计数从标签文字迁到「今日队列（n 到期）」区块标题，
+// 判据随迁（见 statsCard 用例对标题的断言），未放松。
 
 vi.mock("../../../ipc/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../ipc/client")>();
@@ -143,6 +147,12 @@ async function flush() {
   await act(async () => {});
 }
 
+/** D-43 C7：视图切换的驱动面＝session 分键（左轨派发同一函数），不再是面板里的标签钮 */
+async function switchTab(id: string) {
+  act(() => useSession.getState().setNotesTab(id));
+  await flush();
+}
+
 async function pointerClick(el: HTMLElement) {
   // Fluent v9 下拉只在真实指针序列下展开（同 T-B7-3 configPrefill 先例）
   for (const type of ["pointerdown", "mousedown", "click"] as const) {
@@ -161,8 +171,7 @@ async function mountOnCanvas() {
     root.render(<NotesPanel />);
   });
   await flush();
-  await click(buttonByText("画布")!);
-  await flush();
+  await switchTab("canvas");
   // 目录下拉选「（库根）」触发 loadCanvas("")
   const trigger = [...document.querySelectorAll<HTMLElement>('[role="combobox"]')].find((t) =>
     t.textContent?.includes("（库根）"),
@@ -181,6 +190,8 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
+  // 视图键跨用例存活（persist store 是模块级单例）——每枚用例从笔记库档起 mount
+  act(() => useSession.getState().setNotesTab("notes"));
   vi.mocked(notesList).mockResolvedValue([META]);
   vi.mocked(notesReviewQueue).mockResolvedValue([]);
   vi.mocked(notesReviewStats).mockResolvedValue({
@@ -290,10 +301,11 @@ describe("NotesPanel 复习统计卡（T-B7-24）", () => {
       root.render(<NotesPanel />);
     });
     await flush();
-    await click(buttonByText("复习（0 到期）")!);
-    await flush();
+    await switchTab("review");
     const card = container.querySelector("[data-stats-card]");
     expect(card).toBeTruthy();
+    // 到期计数从原标签文字迁入区块标题（左轨目录不承载状态数字，判据随迁不放松）
+    expect(container.textContent).toContain("今日队列（0 到期）");
     expect(card!.textContent).toContain("总 9 张");
     expect(card!.textContent).toContain("今日到期 4");
     expect(card!.textContent).toContain("连续 7 天");
@@ -313,9 +325,9 @@ describe("NotesPanel 复习统计卡（T-B7-24）", () => {
       root.render(<NotesPanel />);
     });
     await flush();
-    await click(buttonByText("复习（1 到期）")!);
-    await flush();
+    await switchTab("review");
     expect(container.querySelector("[data-stats-card]")).toBeNull();
+    expect(container.textContent).toContain("今日队列（1 到期）");
     expect(container.textContent).toContain("正"); // 队列照常渲染
   });
 });

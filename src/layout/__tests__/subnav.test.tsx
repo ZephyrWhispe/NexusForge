@@ -17,6 +17,7 @@ const ST: SubnavSelections = {
   fileSub: "connections",
   termTab: "sessions",
   sysTab: "clean",
+  notesTab: "review",
 };
 
 let container: HTMLDivElement;
@@ -182,6 +183,29 @@ describe("SubNav 双维度（T-B3-1）", () => {
     // 跨模块 id 不串门：sessions 不是 SysTab、monitor 不是 TermTab（否则两模块选择态重新互污）
     expect(subnavSelect("sys", "view", "sessions")).toBeUndefined();
     expect(subnavSelect("term", "view", "monitor")).toBeUndefined();
+    // D-43 C7：笔记三视图同形制（面板内 <Tabs> 撤销）——view 维度落第七枚分键 notesTab
+    expect(subnavActive("notes", "view", ST)).toBe("review");
+    expect(subnavActive("notes", "filter", ST)).toBeUndefined();
+    expect(subnavSelect("notes", "view", "canvas")).toEqual({ key: "notesTab", value: "canvas" });
+    expect(subnavSelect("notes", "filter", "notes")).toBeUndefined();
+    expect(subnavSelect("notes", "view", "nope")).toBeUndefined();
+    // 笔记 id 与系统/终端 id 形近而不通用：notes 不是 SysTab、monitor 不是 NotesTab
+    expect(subnavSelect("notes", "view", "monitor")).toBeUndefined();
+    expect(subnavSelect("sys", "view", "notes")).toBeUndefined();
+  });
+
+  it("subnav_notesViews_renderOnRail_highlightFollowsNotesTab", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <SubNav moduleId="notes" active={{ view: "canvas" }} onSelect={() => {}} counts={{}} />,
+      );
+    });
+    const items = SUBNAV.notes.flatMap((s) => s.items);
+    expect(items.map((i) => i.label)).toEqual(["笔记库", "复习", "画布"]);
+    for (const item of items)
+      expect(buttonByLabel(item.label), `缺导航项 ${item.label}`).toBeInstanceOf(HTMLButtonElement);
+    expect(cls("画布")).not.toBe(cls("笔记库"));
   });
 
   it("subnav_sysViews_renderOnRail_highlightFollowsSysTab", async () => {

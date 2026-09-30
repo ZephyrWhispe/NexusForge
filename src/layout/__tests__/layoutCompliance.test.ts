@@ -30,8 +30,11 @@ type Dim = "nativeControls" | "inlineWidths" | "scrollY";
  *  C5 摘除 ForwardSection 整行（两枚原生 checkbox → Fluent Checkbox）、TerminalPanel scrollY 3→2
  *  （会话列表/SSH 表单的 maxHeight 内层视口撤除，余下第二枚是 Docker 日志输出面——
  *  面板档 08-term §7.1 的有意例外，日志随 tail 增长，无自留视口会把整页撑长）；
- *  C6 摘除 SysPanel 整行（三枚内层视口收敛为主体单滚动＋分页页脚，scrollY 3→1 不再构成违规）。
- *  余下欠债逐行随 C7–C8 下调。 */
+ *  C6 摘除 SysPanel 整行（三枚内层视口收敛为主体单滚动＋分页页脚，scrollY 3→1 不再构成违规）；
+ *  C7 摘除 NotesPanel 整行（原生 textarea→Fluent Textarea、内联宽度归零走 TIER_W、
+ *  四枚内层视口收敛为主体单滚动＋分页页脚，scrollY 4→1；Monaco 编辑器与画布的自留视口
+ *  是 00 规范的在册例外，形同 xterm，不属 overflowY 命中面）。
+ *  余下欠债逐行随 C8 下调。 */
 const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/automation/RulesPanel.tsx", counts: { nativeControls: 4, inlineWidths: 0, scrollY: 2 } },
   { file: "src/modules/clipboard/panels/HistorySection.tsx", counts: { nativeControls: 0, inlineWidths: 1, scrollY: 2 } },
@@ -42,7 +45,6 @@ const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
   { file: "src/modules/file/BatchSection.tsx", counts: { nativeControls: 1, inlineWidths: 0, scrollY: 0 } },
   { file: "src/modules/file/ConnectionsSection.tsx", counts: { nativeControls: 1, inlineWidths: 2, scrollY: 2 } },
   { file: "src/modules/file/FilePanel.tsx", counts: { nativeControls: 0, inlineWidths: 1, scrollY: 2 } },
-  { file: "src/modules/notes/NotesPanel.tsx", counts: { nativeControls: 1, inlineWidths: 0, scrollY: 4 } },
   { file: "src/modules/proxy/panels/KernelSection.tsx", counts: { nativeControls: 0, inlineWidths: 1, scrollY: 0 } },
   { file: "src/modules/proxy/panels/RulesSection.tsx", counts: { nativeControls: 3, inlineWidths: 0, scrollY: 0 } },
   { file: "src/modules/screenshot/BeautifyPopover.tsx", counts: { nativeControls: 0, inlineWidths: 4, scrollY: 0 } },
@@ -53,7 +55,7 @@ const LEDGER: { file: string; counts: Record<Dim, number> }[] = [
 ];
 
 /**
- * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 7 枚；00 规范 1 节：面板必须有二级导航槽位，
+ * 空 SUBNAV 的待拆台账（起点 10 枚，D-43 C4 起逐枚摘除，现 6 枚；00 规范 1 节：面板必须有二级导航槽位，
  * 否则一屏塞满纵向滚动＝"元素排列粗暴"的形态学根因）。until 指向各面板档，
  * 该面板批落地子导航注册后必须删掉对应条目，否则 subnav_registration_or_ledger 判红。
  */
@@ -63,7 +65,6 @@ const PENDING_SUBNAV: { id: ModuleId; until: string }[] = [
   { id: "desktop", until: "面板批·docs/panels/2026-09-19/05-desktop.md" },
   { id: "kvm", until: "面板批·docs/panels/2026-09-19/06-kvm.md" },
   { id: "editor", until: "面板批·docs/panels/2026-09-19/11-editor.md" },
-  { id: "notes", until: "面板批·docs/panels/2026-09-19/12-notes.md" },
   { id: "automation", until: "面板批·docs/panels/2026-09-19/13-automation.md" },
 ];
 
