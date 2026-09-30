@@ -59,6 +59,9 @@ const useStyles = makeStyles({
   work: {
     display: "flex",
     minWidth: "0",
+    // D-43 C1：grid item 的自动最小尺寸＝min-content（overflow 为 visible 时生效），
+    // 缺这一枚会让 work 按内容高生长、面板 overflowY 永不可滚（真机三径零位移实测）。
+    minHeight: "0",
   },
   content: {
     display: "flex",
