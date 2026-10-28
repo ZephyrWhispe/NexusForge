@@ -1,10 +1,9 @@
 # DESIGN §9.3 nightly.yml：夜间构建供尝鲜（不发布 GitHub Release，仅 artifact 保留 14 天）。
 # 与 release.yml 同配置口径（updater 产物暂关）。
+# 2026-10-28：按用户要求取消定时触发，仅保留手动 workflow_dispatch。
 name: Nightly
 
 on:
-  schedule:
-    - cron: "30 18 * * *" # UTC 18:30 ≈ 北京时间次日 02:30
   workflow_dispatch:
 
 env:
